@@ -19,6 +19,10 @@ That gives the repo two intentional rebuild modes:
 - rebuild the shared base image from scratch when the common tooling changes
 - rebuild only the thin agent images from scratch when agent binaries change frequently
 
+For this repo, the preferred split should be Compose for runtime and Bake for builds.
+
+That keeps runtime orchestration simple while giving the build path explicit named targets and a clean default-cached plus opt-in-`--no-cache` workflow.
+
 ## What Exists Today
 
 The current `claude-container/Dockerfile` and `codex-container/Dockerfile` are almost the same.
@@ -46,11 +50,13 @@ The current shared-volume story is asymmetric.
 
 Compose `no_cache` applies to all layers declared in the Dockerfile being built, not just its last stage.
 
-That means selective top-layer freshness is only realistic if the top image has its own thin Dockerfile that starts from a separately tagged shared base image, or if the repo switches to `buildx`/Bake stage filtering.
+That means selective top-layer freshness is only realistic if the top image has its own thin Dockerfile that starts from a separately tagged shared base image.
 
 Both `build.sh` scripts and both `build.ps1` scripts currently force `docker compose build --no-cache`, which defeats most of the value of layer reuse for the explicit build path.
 
 If the repo wants a "fresh but fast" rebuild mode, the build helpers should target a thin top-image Dockerfile whose `FROM` points at a prebuilt local base image tag.
+
+Bake is the better fit for those builds than Compose in this repo, because it lets the scripts expose clear targets such as `base`, `claude`, `codex`, and `all` without overloading the runtime compose files.
 
 If we keep separate compose projects and separate compose files with independent volume ownership, a shared base image alone will not remove the need for `external: true`.
 
@@ -67,6 +73,7 @@ Recommended shape:
 - `docker/base/Dockerfile` or equivalent for the common base image
 - `docker/claude/Dockerfile` for the Claude top image
 - `docker/codex/Dockerfile` for the Codex top image
+- `docker-bake.hcl` at repo root to define named build targets
 
 Recommended images:
 
@@ -79,6 +86,8 @@ This is the most practical way to get a deliberately fresh rebuild of only the t
 The root-only Codex install is not a blocker for this approach.
 
 It simply belongs in the thin Codex Dockerfile before `USER node`.
+
+`bubblewrap` should live in the shared base image.
 
 ### 2. Shared Runtime Scaffolding
 
@@ -101,6 +110,18 @@ Keep only small agent-specific overlays for:
 - Codex-only `OPENAI_API_KEY` warning
 
 The best implementation is either one parameterized shared entrypoint or a shared entrypoint plus tiny per-agent hook scripts.
+
+For this repo, prefer a shared core plus small customized hooks.
+
+Recommended shape:
+
+- `scripts/entrypoint-core.sh`
+- `scripts/entrypoint-claude.sh`
+- `scripts/entrypoint-codex.sh`
+
+The core should own firewall setup, shared Git/GitHub seeding, common env bootstrapping, and final `exec`.
+
+The hooks should own only the agent-specific config seeding, instruction-file sync, and optional warnings.
 
 ### 3. Shared Compose Base
 
@@ -133,10 +154,28 @@ Treat "refresh the shared toolchain" and "refresh just the agent binary" as two 
 
 Recommended workflows:
 
-- `base rebuild`: build `powbox-agent-base` with `--pull --no-cache`
-- `agent rebuild`: build `powbox-claude` or `powbox-codex` with `--no-cache`, using the already-built local base tag
+- `default build`: cached Bake build for `base`, `claude`, `codex`, or `all`
+- `base rebuild`: Bake build of `base` with `--pull --no-cache`
+- `agent rebuild`: Bake build of `claude` or `codex` with `--no-cache`, using the already-built local base tag
 
 This gives a fast clean rebuild path for frequent agent updates without paying the full apt/bootstrap cost every time.
+
+Recommended commands:
+
+- cached base build: `docker buildx bake base`
+- cached Claude build: `docker buildx bake claude`
+- cached Codex build: `docker buildx bake codex`
+- fresh base rebuild: `docker buildx bake --pull --no-cache base`
+- fresh Claude rebuild: `docker buildx bake --no-cache claude`
+- fresh Codex rebuild: `docker buildx bake --no-cache codex`
+
+The wrapper scripts should hide these details and expose a simpler interface such as:
+
+- `./build.sh base`
+- `./build.sh claude`
+- `./build.sh codex`
+- `./build.sh all`
+- `./build.sh codex --no-cache`
 
 ## Detailed Work Plan
 
@@ -167,6 +206,7 @@ Build the shared base image first, then split the two agent images into thin ove
 Tasks:
 
 - Create a base-image Dockerfile and two thin agent Dockerfiles.
+- Add `docker-bake.hcl` with targets for `base`, `claude`, `codex`, and `all`.
 - Move all shared apt packages into the base image.
 - Put `bubblewrap` in the shared base image unless image size testing proves it is materially harmful.
 - Move shared shell/bootstrap setup into the base image.
@@ -177,6 +217,19 @@ Tasks:
   - `CLAUDE_CODE_VERSION`
   - `CODEX_VERSION`
 - Tag the shared base image explicitly so agent builds can `FROM` it directly.
+
+Proposed target names:
+
+- `base`
+- `claude`
+- `codex`
+- `all`
+
+Proposed image tags:
+
+- `powbox-agent-base:latest`
+- `powbox-claude:latest`
+- `powbox-codex:latest`
 
 Implementation note:
 
@@ -197,7 +250,7 @@ After the image graph is unified, remove duplicated runtime scripts.
 
 Tasks:
 
-- Create a shared `entrypoint-common.sh`.
+- Create a shared `entrypoint-core.sh` plus thin Claude and Codex wrappers.
 - Parameterize config paths, host seed paths, instruction-source path, instruction-destination filename, and optional warning behavior through env vars.
 - Keep agent-specific seeding logic pluggable.
 - Preserve Codex's filtered `rsync` seed behavior for `~/.codex`.
@@ -209,6 +262,7 @@ Exit criteria:
 
 - Shared runtime behavior lives in one place.
 - Agent-specific runtime differences are explicit and small.
+- The entrypoint structure is easier to reason about than one fully generic shell script.
 
 ### Phase 3: Unify Compose Ownership Of Shared Volumes
 
@@ -244,6 +298,11 @@ Then launch with:
 - Claude: `docker compose -f compose.shared.yml -f compose.claude.yml ...`
 - Codex: `docker compose -f compose.shared.yml -f compose.codex.yml ...`
 
+Recommended project-name behavior:
+
+- set one stable shared compose project name in the wrapper scripts, for example `powbox`
+- keep container names explicit in the wrapper scripts as they are today
+
 Exit criteria:
 
 - Neither agent compose overlay needs `external: true` for the shared volumes.
@@ -259,16 +318,28 @@ Tasks:
 - Extract shared shell launcher logic into one helper used by both agent entry scripts.
 - Extract shared PowerShell launcher logic into one helper used by both Windows entry scripts.
 - Extract shared build helper logic into one helper with agent-specific parameters.
+- Switch build helpers from `docker compose build` to `docker buildx bake`.
+- Make cached builds the default behavior.
+- Add an explicit `--no-cache` flag for the build scripts.
 - Add an explicit base rebuild command that refreshes the shared base with `--pull --no-cache`.
 - Add an explicit quick agent rebuild command that rebuilds only the thin agent image with `--no-cache`.
-- Keep a normal cached rebuild command for local development when a clean build is unnecessary.
 - Deduplicate smoke tests where possible.
+
+Recommended CLI shape:
+
+- `./build.sh base`
+- `./build.sh claude`
+- `./build.sh codex`
+- `./build.sh all`
+- `./build.sh codex --no-cache`
+- `./build.sh base --no-cache --pull`
 
 Exit criteria:
 
 - The user-facing scripts remain separate and readable.
 - The implementation logic is shared.
 - Full base refreshes and quick thin-image refreshes are both first-class workflows.
+- The default build path uses cache.
 
 ### Phase 5: Documentation And Migration
 
@@ -302,7 +373,12 @@ Compose can support a split "base build" and "top-image build" approach if those
 
 Compose cannot selectively disable cache for only the final stage inside one Dockerfile build.
 
-If the repo needs stage-level cache control rather than image-level separation, switch the build helpers to `docker buildx bake` or `docker buildx build --no-cache-filter`.
+For this repo, prefer Bake for builds and Compose for runtime.
+
+That keeps the configuration understandable:
+
+- Bake owns image production
+- Compose owns running containers, volumes, and capabilities
 
 ### Over-Parameterizing The Entrypoint
 
@@ -333,6 +409,7 @@ After implementation, verify all of the following:
 - The shared base image can be rebuilt cleanly on its own.
 - A clean Claude rebuild can reuse the prebuilt shared base image.
 - A clean Codex rebuild can reuse the prebuilt shared base image.
+- Cached builds still work through the wrapper scripts without extra flags.
 - Claude launch still seeds host config correctly.
 - Codex launch still seeds host config correctly and still filters transient state.
 - GitHub CLI auth persists across both containers.
@@ -346,7 +423,7 @@ After implementation, verify all of the following:
 ## Suggested Order Of Execution
 
 1. Land Phase 1 first with a separately tagged shared base image.
-2. Add the dual rebuild workflows in Phase 4 as soon as Phase 1 is stable enough to exercise.
+2. Add the Bake targets and dual rebuild workflows in Phase 4 as soon as Phase 1 is stable enough to exercise.
 3. Measure the rebuild improvement.
 4. Land Phase 2 next.
 5. Land Phase 3 only after the image split is stable, because the compose-volume change is operationally riskier than the image-layer change.
@@ -359,5 +436,6 @@ This refactor is successful if:
 - most shared logic exists in one canonical place
 - agent version bumps only rebuild thin top images
 - the repo supports both full base refreshes and fast thin-image refreshes
+- the default build path remains cached, with `--no-cache` only when explicitly requested
 - the compose setup no longer has order-dependent shared-volume behavior
 - the user-facing launch commands remain as simple as they are today

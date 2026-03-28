@@ -1,0 +1,25 @@
+services:
+  agent:
+    stdin_open: true
+    tty: true
+    init: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      GH_CONFIG_DIR: /home/node/.config/gh
+      GH_HOST_SEED_DIR: /home/node/.config/gh-host
+      NODE_OPTIONS: --max-old-space-size=4096
+    volumes:
+      - ${WORKSPACE_PATH:-.}:/workspace:rw
+      - gh-config:/home/node/.config/gh
+      - pnpm-store:/home/node/.local/share/pnpm/store
+      - zsh-history:/home/node/.zsh_history_dir
+
+volumes:
+  gh-config:
+    name: claude-gh-config
+  pnpm-store:
+    name: claude-pnpm-store
+  zsh-history:
+    name: claude-zsh-history

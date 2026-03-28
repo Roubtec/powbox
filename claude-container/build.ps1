@@ -1,14 +1,15 @@
 param(
-    [string]$Version = "latest"
+  [string]$Version = "latest",
+  [switch]$NoCache,
+  [switch]$Pull
 )
 
 $ErrorActionPreference = "Stop"
-
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$composeFile = Join-Path $scriptDir "docker-compose.yml"
+$rootDir = Split-Path -Parent $scriptDir
 
-Write-Host "Building claude-code-dev image with Claude Code version: $Version"
-docker compose -f $composeFile build --build-arg CLAUDE_CODE_VERSION=$Version --no-cache
-
-Write-Host "Done. Image: claude-code-dev:latest"
-Write-Host "Run: .\claude-container.ps1 C:\path\to\project"
+& (Join-Path $rootDir "build.ps1") `
+  -Target "claude" `
+  -ClaudeVersion $Version `
+  -NoCache:$NoCache `
+  -Pull:$Pull

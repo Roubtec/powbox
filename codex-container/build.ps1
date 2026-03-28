@@ -1,14 +1,15 @@
 param(
-    [string]$Version = "latest"
+  [string]$Version = "latest",
+  [switch]$NoCache,
+  [switch]$Pull
 )
 
 $ErrorActionPreference = "Stop"
-
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$composeFile = Join-Path $scriptDir "docker-compose.yml"
+$rootDir = Split-Path -Parent $scriptDir
 
-Write-Host "Building codex-dev image with Codex CLI version: $Version"
-docker compose -f $composeFile build --build-arg CODEX_VERSION=$Version --no-cache
-
-Write-Host "Done. Image: codex-dev:latest"
-Write-Host "Run: .\codex-container.ps1 C:\path\to\project"
+& (Join-Path $rootDir "build.ps1") `
+  -Target "codex" `
+  -CodexVersion $Version `
+  -NoCache:$NoCache `
+  -Pull:$Pull

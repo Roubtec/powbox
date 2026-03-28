@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AGENT="${1:?usage: launch-agent.sh <claude|codex> [args...]}"
+shift
+
+case "$AGENT" in
+claude | codex) ;;
+*)
+	echo "Unknown agent: $AGENT" >&2
+	exit 1
+	;;
+esac
+
+PROJECT_PATH="."
+POSITIONAL_SET=false
+BUILD=false
+DETACH=false
+SHELL_ONLY=false
+VOLATILE=false
+PERSIST=false
+RESUME=false
+EXEC_TASK=""
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--build)
+		BUILD=true
+		;;
+	--detach)
+		DETACH=true
+		;;
+	--shell)
+		SHELL_ONLY=true
+		;;
+	--volatile)
+		VOLATILE=true
+		;;
+	--persist)
+		PERSIST=true
+		;;
+	--resume)
+		RESUME=true
+		;;
+	--exec)
+		if [ "$AGENT" != "codex" ]; then
+			echo "--exec is only supported for codex." >&2
+			exit 1
+		fi
+		shift
+		EXEC_TASK="${1:?missing task for --exec}"
+		;;
+	--*)
+		echo "Unknown option: $1" >&2
+		exit 1
+		;;
+	*)
+		if [ "$POSITIONAL_SET" = true ]; then
+			echo "Unexpected extra positional argument: $1" >&2
+			exit 1
+		fi
+		PROJECT_PATH="$1"
+		POSITIONAL_SET=true
+		;;
+	esac
+	shift
+done
+
+PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)"
+PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
+
+project_hash() {
+	local input="${1:-}"
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf '%s' "$input" | sha256sum | cut -c1-12
+	elif command -v shasum >/dev/null 2>&1; then
+		printf '%s' "$input" | shasum -a 256 | cut -c1-12
+	elif command -v openssl >/dev/null 2>&1; then
+		printf '%s' "$input" | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-12
+	else
+		printf 'nohash000000'
+	fi
+}
+
+PROJECT_HASH="$(project_hash "$PROJECT_PATH")"
+PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
+CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
+NM_VOLUME="agent-nm-${PROJECT_NAME}"
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.${AGENT}.yml")
+
+export WORKSPACE_PATH="$PROJECT_PATH"
+export PROJECT_NAME
+
+if [ "$AGENT" = "claude" ]; then
+	AGENT_HOST_CONFIG_DIR="${CLAUDE_HOST_CONFIG_DIR:-$HOME/.claude}"
+else
+	AGENT_HOST_CONFIG_DIR="${CODEX_HOST_CONFIG_DIR:-$HOME/.codex}"
+fi
+GH_HOST_CONFIG_DIR="${GH_HOST_CONFIG_DIR:-$HOME/.config/gh}"
+GIT_CONFIG_PATH="${GIT_CONFIG_PATH:-$HOME/.gitconfig}"
+
+CONTAINER_EXISTS=false
+CONTAINER_RUNNING=false
+
+if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+	CONTAINER_EXISTS=true
+	if [ "$(docker container inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" = "true" ]; then
+		CONTAINER_RUNNING=true
+	fi
+fi
+
+if [ "$BUILD" = true ]; then
+	"${ROOT_DIR}/scripts/build-image.sh" "$AGENT"
+fi
+
+if [ "$RESUME" = true ]; then
+	if [ "$CONTAINER_EXISTS" != true ]; then
+		echo "No persisted container named ${CONTAINER_NAME} was found. Start it once normally, or with --persist if you want to be explicit." >&2
+		exit 1
+	fi
+	exec docker start -ai "$CONTAINER_NAME"
+fi
+
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	if [ "$CONTAINER_RUNNING" = true ]; then
+		if [ "$DETACH" = true ]; then
+			echo "Container ${CONTAINER_NAME} is already running."
+			exit 0
+		fi
+		exec docker attach "$CONTAINER_NAME"
+	fi
+
+	if [ "$DETACH" = true ]; then
+		exec docker start "$CONTAINER_NAME"
+	fi
+
+	exec docker start -ai "$CONTAINER_NAME"
+fi
+
+if [ "$SHELL_ONLY" = true ]; then
+	CMD=(zsh)
+elif [ "$AGENT" = "codex" ] && [ -n "$EXEC_TASK" ]; then
+	CMD=(codex exec "$EXEC_TASK")
+elif [ "$AGENT" = "claude" ]; then
+	CMD=(claude --dangerously-skip-permissions)
+else
+	CMD=(codex --dangerously-bypass-approvals-and-sandbox)
+fi
+
+AGENT_SEED_ARGS=()
+if [ -d "$AGENT_HOST_CONFIG_DIR" ]; then
+	if [ "$AGENT" = "claude" ]; then
+		AGENT_SEED_ARGS=(-v "${AGENT_HOST_CONFIG_DIR}:/home/node/.claude-host:ro")
+	else
+		AGENT_SEED_ARGS=(-v "${AGENT_HOST_CONFIG_DIR}:/home/node/.codex-host:ro")
+	fi
+fi
+
+GIT_CONFIG_ARGS=()
+if [ -f "$GIT_CONFIG_PATH" ]; then
+	GIT_CONFIG_ARGS=(-v "${GIT_CONFIG_PATH}:/home/node/.gitconfig-host:ro")
+fi
+
+GH_CONFIG_ARGS=()
+if [ -d "$GH_HOST_CONFIG_DIR" ]; then
+	GH_CONFIG_ARGS=(-v "${GH_HOST_CONFIG_DIR}:/home/node/.config/gh-host:ro")
+fi
+
+docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
+	-v "${NM_VOLUME}:/mnt/node_modules" \
+	agent \
+	-lc 'mkdir -p /mnt/node_modules && chown node:node /mnt/node_modules'
+
+RUN_ARGS=()
+if [ "$DETACH" = true ]; then
+	RUN_ARGS+=(-d)
+elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
+	RUN_ARGS+=(--rm)
+fi
+
+EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME")
+if [ "$AGENT" = "codex" ]; then
+	EXTRA_ENV+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY:-}")
+fi
+
+docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
+	--name "$CONTAINER_NAME" \
+	"${EXTRA_ENV[@]}" \
+	"${AGENT_SEED_ARGS[@]}" \
+	"${GIT_CONFIG_ARGS[@]}" \
+	"${GH_CONFIG_ARGS[@]}" \
+	-v "${NM_VOLUME}:/workspace/node_modules" \
+	agent \
+	"${CMD[@]}"

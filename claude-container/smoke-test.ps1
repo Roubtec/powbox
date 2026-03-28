@@ -1,12 +1,14 @@
 param(
-    [string]$Image = "claude-code-dev:latest"
+  [string]$Image = "powbox-claude:latest"
 )
 
 $ErrorActionPreference = "Stop"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$rootDir = Split-Path -Parent $scriptDir
 
-Write-Host "Smoke testing image: $Image"
-$script = @(
-    'set -e'
+& (Join-Path $rootDir "scripts/smoke-test-image.ps1") `
+  -Image $Image `
+  -Commands @(
     'claude --version >/dev/null'
     'gh --version >/dev/null'
     'node --version >/dev/null'
@@ -39,12 +41,4 @@ $script = @(
     'zip -v >/dev/null'
     'wget --version >/dev/null'
     'htop --version >/dev/null'
-) -join "`n"
-
-docker run --rm --entrypoint /bin/sh $Image -lc $script
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Smoke test failed. See container output above."
-}
-
-Write-Host "Smoke test passed: all expected CLI tools were found."
+  )

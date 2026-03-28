@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-latest}"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-echo "Building claude-code-dev image with Claude Code version: $VERSION"
-docker compose -f "$COMPOSE_FILE" build --build-arg CLAUDE_CODE_VERSION="$VERSION" --no-cache
+VERSION="latest"
+if [ "$#" -gt 0 ] && [[ "${1:-}" != --* ]]; then
+	VERSION="$1"
+	shift
+fi
 
-echo "Done. Image: claude-code-dev:latest"
-echo "Run: ./claude-container.sh /path/to/project"
+exec "${ROOT_DIR}/build.sh" claude --claude-version "$VERSION" "$@"

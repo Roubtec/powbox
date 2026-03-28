@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Block local/private network access; allow all public internet.
-# Run at container start via entrypoint.sh
+# Run at container start via the shared entrypoint wrappers.
 set -euo pipefail
 
 # Flush existing rules

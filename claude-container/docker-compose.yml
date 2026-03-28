@@ -1,0 +1,53 @@
+services:
+  claude:
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_VERSION: latest
+    image: claude-code-dev:latest
+    stdin_open: true
+    tty: true
+    init: true
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    environment:
+      - CLAUDE_CONFIG_DIR=/home/node/.claude
+      - CLAUDE_HOST_SEED_DIR=/home/node/.claude-host
+      - GH_CONFIG_DIR=/home/node/.config/gh
+      - GH_HOST_SEED_DIR=/home/node/.config/gh-host
+      - DISABLE_AUTOUPDATER=1
+      - NODE_OPTIONS=--max-old-space-size=4096
+
+    volumes:
+      # Working directory (the project you're working on)
+      - ${WORKSPACE_PATH:-.}:/workspace:rw
+
+      # Claude Code config/credentials — persisted in a Docker volume so auth
+      # survives container recreation and image rebuilds.
+      - claude-config:/home/node/.claude
+
+      # GitHub CLI auth/config — persisted in a Docker volume so gh login and
+      # auth state survive container recreation and image rebuilds.
+      - gh-config:/home/node/.config/gh
+
+      # pnpm store (shared across all containers)
+      - pnpm-store:/home/node/.local/share/pnpm/store
+
+      # Zsh history (shared across all containers)
+      - zsh-history:/home/node/.zsh_history_dir
+
+      # Per-project node_modules overlay (set by launch script)
+      # Added dynamically via: -v agent-nm-<project>-<hash>:/workspace/node_modules
+
+volumes:
+  claude-config:
+    name: claude-config
+  gh-config:
+    name: claude-gh-config
+  pnpm-store:
+    name: claude-pnpm-store
+  zsh-history:
+    name: claude-zsh-history

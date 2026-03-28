@@ -63,7 +63,7 @@ Construct a prompt that contains:
 ### Example implementer prompt structure
 
 ```text
-You are implementing a single task on branch `refactoring/XX-task-name`.
+You are implementing a single task on branch `feature/task-slug`.
 Verify you are on this branch before starting.
 
 Read `AGENTS.md` first for project conventions.

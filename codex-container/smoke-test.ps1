@@ -8,6 +8,7 @@ Write-Host "Smoke testing image: $Image"
 $script = @(
     'set -e'
     'codex --version >/dev/null'
+    'bwrap --version >/dev/null'
     'gh --version >/dev/null'
     'node --version >/dev/null'
     'npm --version >/dev/null'

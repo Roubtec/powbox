@@ -6,6 +6,7 @@ ARG CODEX_VERSION=latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     bat \
+    bubblewrap \
     bzip2 \
     build-essential \
     git \

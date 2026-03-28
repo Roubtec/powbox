@@ -19,6 +19,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
 | Editors | `nano`, `vim` |
+| Sandbox | `bubblewrap` (`bwrap`) |
 
 ## Git and GitHub
 

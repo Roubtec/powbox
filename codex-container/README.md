@@ -16,6 +16,7 @@ Common development tooling is baked into the image; the table below shows what i
 | Data and config | `sqlcmd`, `sqlite3`, `yq`, `envsubst`, `bc`, `xxd` |
 | Network debugging | `ping`, `nc` |
 | File navigation | `fd`, `bat` |
+| Sandbox support | `bubblewrap` (`bwrap`) |
 
 ## Prerequisites
 
@@ -63,6 +64,7 @@ With a specific Codex CLI version:
 
 Codex starts in `/workspace` with `--dangerously-bypass-approvals-and-sandbox` — full autonomy inside the container.
 By default, the launcher will reuse a matching stopped container for the current project if one exists; otherwise it creates a persistent one.
+The image also installs Debian `bubblewrap` so Codex can find `/usr/bin/bwrap` for its Linux sandbox backend and avoid the startup warning about falling back to the vendored copy.
 
 ### 3. Headless mode (fire-and-forget)
 

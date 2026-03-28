@@ -21,7 +21,20 @@ mkdir -p "$GH_CONFIG_DIR"
 if [ -d "$CODEX_HOST_SEED_DIR" ] \
   && [ -n "$(find "$CODEX_HOST_SEED_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] \
   && [ ! -f "$CODEX_CONFIG_DIR/config.toml" ]; then
-  cp -an "$CODEX_HOST_SEED_DIR"/. "$CODEX_CONFIG_DIR"/
+  # Host ~/.codex can contain transient tmp/lock content that is unsafe to copy
+  # from a read-only bind mount on Windows. Seed only the durable config state.
+  rsync -a --no-owner --no-group --ignore-existing \
+    --exclude '/tmp/' \
+    --exclude '/.tmp/' \
+    --exclude '/cache/' \
+    --exclude '/log/' \
+    --exclude '/sessions/' \
+    --exclude '*.sqlite' \
+    --exclude '*.sqlite-shm' \
+    --exclude '*.sqlite-wal' \
+    --exclude 'history.jsonl' \
+    --exclude 'sandbox.log' \
+    "$CODEX_HOST_SEED_DIR"/ "$CODEX_CONFIG_DIR"/
   chmod 700 "$CODEX_CONFIG_DIR" || true
   if [ -f "$CODEX_CONFIG_DIR/config.toml" ]; then
     chmod 600 "$CODEX_CONFIG_DIR/config.toml" || true

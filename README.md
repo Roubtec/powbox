@@ -4,6 +4,8 @@ This repository contains the code for building Dockerized development containers
 
 The functionality depends on Docker being installed on the system.
 
+The Codex container image includes the Linux `bubblewrap` helper that Codex expects for its native sandbox backend.
+
 ## License
 
 This project is licensed under the MIT License.

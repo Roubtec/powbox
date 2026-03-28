@@ -7,6 +7,7 @@ echo "Smoke testing image: $IMAGE"
 docker run --rm --entrypoint /bin/sh "$IMAGE" -lc '
   set -e
   codex --version >/dev/null
+  bwrap --version >/dev/null
   gh --version >/dev/null
   node --version >/dev/null
   npm --version >/dev/null

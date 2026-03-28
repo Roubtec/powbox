@@ -99,6 +99,10 @@ RUN mkdir -p \
 COPY --chmod=755 init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# Install Codex CLI before switching away from root so npm can write to
+# /usr/local/lib/node_modules.
+RUN npm install -g @openai/codex@${CODEX_VERSION}
+
 # Switch to non-root user
 USER node
 
@@ -115,12 +119,11 @@ ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
 RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
     && pnpm config --global set package-import-method copy
 
-# Install Oh My Zsh (unattended), Codex CLI, and the custom .zshrc
+# Install Oh My Zsh (unattended) and the custom .zshrc
 # Note: this pulls the install script from ohmyzsh/master at build time (unpinned).
 # For local/dev use this is acceptable; for production consider pinning to a specific
 # commit or vendoring the script and verifying its checksum.
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-RUN npm install -g @openai/codex@${CODEX_VERSION}
 COPY --chown=node:node assets/.zshrc /home/node/.zshrc
 COPY --chown=node:node assets/container-agents.md /home/node/.codex-container/AGENTS.md
 

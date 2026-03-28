@@ -47,7 +47,10 @@ volumes:
     name: codex-config
   gh-config:
     name: claude-gh-config
+    external: true
   pnpm-store:
     name: claude-pnpm-store
+    external: true
   zsh-history:
     name: claude-zsh-history
+    external: true

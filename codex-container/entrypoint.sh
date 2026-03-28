@@ -23,7 +23,7 @@ if [ -d "$CODEX_HOST_SEED_DIR" ] \
   && [ ! -f "$CODEX_CONFIG_DIR/config.toml" ]; then
   # Host ~/.codex can contain transient tmp/lock content that is unsafe to copy
   # from a read-only bind mount on Windows. Seed only the durable config state.
-  rsync -a --ignore-existing \
+  rsync -a --no-owner --no-group --ignore-existing \
     --exclude '/tmp/' \
     --exclude '/.tmp/' \
     --exclude '/cache/' \

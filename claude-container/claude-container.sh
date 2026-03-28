@@ -12,7 +12,21 @@ PROJECT_PATH="${1:-.}"
 [[ "$PROJECT_PATH" == --* ]] && PROJECT_PATH="."
 PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)"
 PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
-PROJECT_HASH="$(printf '%s' "$PROJECT_PATH" | sha256sum | cut -c1-12)"
+# Portable SHA-256 hash: tries sha256sum (Linux/coreutils), then shasum -a 256 (macOS),
+# then openssl dgst -sha256, falling back to a fixed string if none are available.
+_project_hash() {
+  local input="${1:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$input" | sha256sum | cut -c1-12
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$input" | shasum -a 256 | cut -c1-12
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$input" | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-12
+  else
+    printf 'nohash000000'
+  fi
+}
+PROJECT_HASH="$(_project_hash "$PROJECT_PATH")"
 PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
 
 BUILD=false

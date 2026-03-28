@@ -117,6 +117,9 @@ RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
     && pnpm config --global set package-import-method copy
 
 # Install Oh My Zsh (unattended), Claude Code, and the custom .zshrc
+# Note: both install scripts are fetched from remote URLs at build time (unpinned).
+# For local/dev use this is acceptable; for production consider pinning to specific
+# commits/versions and verifying checksums or vendoring the install logic.
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}"
 RUN rm -rf /home/node/.claude/downloads

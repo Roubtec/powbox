@@ -116,6 +116,9 @@ RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
     && pnpm config --global set package-import-method copy
 
 # Install Oh My Zsh (unattended), Codex CLI, and the custom .zshrc
+# Note: this pulls the install script from ohmyzsh/master at build time (unpinned).
+# For local/dev use this is acceptable; for production consider pinning to a specific
+# commit or vendoring the script and verifying its checksum.
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 COPY --chown=node:node assets/.zshrc /home/node/.zshrc

@@ -2,7 +2,7 @@
 
 ## Documentation Practices
 
-Update @README.md if there are any changes to the project overview, tech stack, or development practices.
+Update [README.md](README.md) if there are any changes to the project overview, tech stack, or development practices.
 
 Use one line per paragraph in Markdown if possible.
 

@@ -16,12 +16,12 @@ This file is intended for AI agents working on the Codex container harness.
 
 | Path | Purpose |
 |------|---------|
-| `/workspace/<project>` | Bind-mounted project directory (working directory) |
+| `/workspace/<project-slug>` | Bind-mounted project directory (working directory; slug is `<name>-<hash>`) |
 | `/ctx` | Optional read-only context volume (`--ctx`) |
 | `/home/node/.codex` | Codex config volume (`codex-config`) |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume (`agent-gh-config`) |
 | `/home/node/.local/share/pnpm/store` | Shared pnpm store volume (`agent-pnpm-store`) |
-| `/workspace/<project>/node_modules` | Per-project package volume (`agent-nm-<project>-<hash>`) |
+| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project-slug>`) |
 
 ## Important Behavior
 

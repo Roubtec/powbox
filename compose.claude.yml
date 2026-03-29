@@ -1,0 +1,11 @@
+services:
+  agent:
+    image: powbox-claude:latest
+    environment:
+      CLAUDE_HOST_SEED_DIR: /home/node/.claude-host
+    volumes:
+      - claude-config:/home/node/.claude
+
+volumes:
+  claude-config:
+    name: claude-config

@@ -1,60 +1,35 @@
 # Codex Container — Agent Notes
 
-This file is intended for AI agents working inside the container. It describes
-the architecture and key conventions so agents can orient themselves quickly.
+This file is intended for AI agents working on the Codex container harness.
 
-## What this is
+## Current Architecture
 
-A Docker harness that runs [OpenAI Codex CLI](https://github.com/openai/codex)
-with full autonomous permissions (`--dangerously-bypass-approvals-and-sandbox`)
-inside a sandboxed container. The container provides filesystem isolation and a
-network firewall that blocks private/local networks while allowing public
-internet access.
+- shared base image at `/workspace/docker/base/Dockerfile`
+- thin Codex image at `/workspace/docker/codex/Dockerfile`
+- shared Compose runtime base at `/workspace/compose.shared.yml`
+- Codex runtime overlay at `/workspace/compose.codex.yml`
+- user-facing host commands at `/workspace/commands/`
+- shared launch and build helpers at `/workspace/scripts/`
+- shared entrypoint core and hooks at `/workspace/docker/shared/`
 
-## Key paths
+## Key Paths
 
 | Path | Purpose |
 |------|---------|
-| `/workspace` | Bind-mounted project directory (read-write) |
-| `/home/node/.codex` | Codex CLI config (Docker volume: `codex-config`) |
-| `/home/node/.config/gh` | GitHub CLI auth (Docker volume: `claude-gh-config`, shared) |
-| `/home/node/.local/share/pnpm/store` | pnpm cache (Docker volume: `claude-pnpm-store`, shared) |
-| `/workspace/node_modules` | Per-project packages (Docker volume: `agent-nm-<project>-<hash>`, shared) |
+| `/workspace` | Bind-mounted project directory |
+| `/home/node/.codex` | Codex config volume (`codex-config`) |
+| `/home/node/.config/gh` | Shared GitHub CLI auth volume (`agent-gh-config`) |
+| `/home/node/.local/share/pnpm/store` | Shared pnpm store volume (`agent-pnpm-store`) |
+| `/workspace/node_modules` | Per-project package volume (`agent-nm-<project>-<hash>`) |
 
-## Auth
+## Important Behavior
 
-Codex CLI authenticates via the `OPENAI_API_KEY` environment variable, which is
-passed through at container launch time. It is never baked into the image.
-
-Config preferences live in `~/.codex/config.toml` and are seeded from the host
-`~/.codex` directory on first run only.
-
-## Shared volumes
-
-Some Docker volumes are shared with the sibling `claude-container/` harness:
-- `claude-gh-config` — GitHub CLI auth
-- `claude-pnpm-store` — pnpm content-addressable store
-- `claude-zsh-history` — shell history and `cid` alias
-- `agent-nm-<project>-<hash>` — per-project node_modules
-
-This means switching between Claude and Codex on the same project reuses
-installed packages and credentials without reinstalling.
-
-## Firewall
-
-The init-firewall.sh script runs at container start and blocks all private
-network ranges (10.x, 172.16.x, 192.168.x, link-local) while allowing
-loopback and public internet. This is enforced via iptables and requires
-NET_ADMIN and NET_RAW capabilities.
-
-## Non-root user
-
-The container runs as `node:node`. Sudo access is restricted to
-`/usr/local/bin/init-firewall.sh` only.
+- Codex authenticates through `OPENAI_API_KEY`, passed at runtime and never baked into the image.
+- The shared base image includes `bubblewrap`.
+- `entrypoint-core.sh` owns firewall setup, shared Git/GitHub seeding, and final command dispatch.
+- `entrypoint-codex-hook.sh` owns Codex-specific config seeding, `AGENTS.md` sync, and the missing-API-key warning.
+- The runtime Compose project name must stay stable across both agent launchers so the shared volumes stay first-class rather than external.
 
 ## pnpm
 
-The pnpm store is at `/home/node/.local/share/pnpm/store` (a Docker volume,
-not under `/workspace`). The global pnpm config uses `package-import-method=copy`
-because `/workspace` (bind mount) and the pnpm store (Docker volume) are
-different filesystems, so hard links would fail.
+The pnpm store lives outside `/workspace` and uses `package-import-method=copy` because the workspace bind mount and pnpm volume are different filesystems.

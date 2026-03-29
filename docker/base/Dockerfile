@@ -1,0 +1,122 @@
+FROM node:24-slim
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bc \
+    bat \
+    bubblewrap \
+    bzip2 \
+    build-essential \
+    ca-certificates \
+    curl \
+    dnsutils \
+    fd-find \
+    file \
+    fzf \
+    gettext-base \
+    git \
+    gnupg \
+    htop \
+    iproute2 \
+    iptables \
+    iputils-ping \
+    jq \
+    less \
+    lsof \
+    make \
+    nano \
+    netcat-openbsd \
+    openssh-client \
+    patch \
+    procps \
+    python3 \
+    python3-pip \
+    rsync \
+    shellcheck \
+    shfmt \
+    sqlite3 \
+    strace \
+    sudo \
+    tree \
+    unixodbc-dev \
+    unzip \
+    vim \
+    wget \
+    xxd \
+    xz-utils \
+    zip \
+    zsh \
+    zstd \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && ln -sf /usr/bin/batcat /usr/local/bin/bat \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install sqlcmd tooling for Azure SQL workflows.
+RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+    | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+    > /etc/apt/sources.list.d/microsoft-prod.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 \
+    && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
+    && ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Install YAML tooling.
+RUN pip3 install --no-cache-dir --break-system-packages yq
+
+# Give 'node' user sudo access for firewall setup at container start.
+RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node \
+    && chmod 0440 /etc/sudoers.d/node
+
+# Set zsh as the default shell for the node user.
+RUN usermod --shell /bin/zsh node
+
+# Create writable paths before named volumes are mounted so Docker copies sane ownership.
+RUN mkdir -p \
+    /home/node/.claude \
+    /home/node/.codex \
+    /home/node/.config/gh \
+    /home/node/.config/git \
+    /home/node/.local/bin \
+    /home/node/.local/share/pnpm/store \
+    /home/node/.zsh_history_dir \
+    /workspace/node_modules \
+    && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace
+
+# Copy startup scripts while still root.
+COPY --chmod=755 docker/shared/init-firewall.sh /usr/local/bin/init-firewall.sh
+COPY --chmod=755 docker/shared/entrypoint-core.sh /usr/local/bin/entrypoint-core.sh
+COPY --chmod=755 docker/shared/entrypoint-claude.sh /usr/local/bin/entrypoint-claude.sh
+COPY --chmod=755 docker/shared/entrypoint-codex.sh /usr/local/bin/entrypoint-codex.sh
+COPY --chmod=755 docker/shared/entrypoint-claude-hook.sh /usr/local/bin/entrypoint-claude-hook.sh
+COPY --chmod=755 docker/shared/entrypoint-codex-hook.sh /usr/local/bin/entrypoint-codex-hook.sh
+
+USER node
+
+ENV PNPM_HOME="/home/node/.local/share/pnpm"
+ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}:${PATH}"
+ENV SHELL=/bin/zsh
+ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
+
+# Keep pnpm's store outside /workspace because the workspace bind mount and the
+# shared pnpm volume are different filesystems.
+RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
+    && pnpm config --global set package-import-method copy
+
+# Install Oh My Zsh and the shared zsh configuration.
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+COPY --chown=node:node docker/shared/.zshrc /home/node/.zshrc
+
+WORKDIR /workspace

@@ -9,7 +9,8 @@ param(
   [switch]$Persist,
   [switch]$Resume,
   [switch]$Volatile,
-  [string]$Exec = ""
+  [string]$Exec = "",
+  [string]$Ctx = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,12 @@ if (-not (Test-Path $ProjectPath -PathType Container)) {
   Write-Error "Error: project path does not exist: $ProjectPath"
   exit 1
 }
+
+if ($Ctx -ne "" -and -not (Test-Path $Ctx -PathType Container)) {
+  Write-Error "Error: context path does not exist: $Ctx"
+  exit 1
+}
+$resolvedCtx = if ($Ctx -ne "") { (Resolve-Path $Ctx).Path } else { "" }
 $resolvedProject = (Resolve-Path $ProjectPath).Path
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
@@ -126,6 +133,11 @@ if (Test-Path $ghHostConfigPath) {
   $ghConfigArgs = @("-v", "${ghHostConfigPath}:/home/node/.config/gh-host:ro")
 }
 
+$ctxArgs = @()
+if ($resolvedCtx -ne "") {
+  $ctxArgs = @("-v", "${resolvedCtx}:/ctx:ro")
+}
+
 docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
   -v "${nodeModulesVolume}:/mnt/node_modules" `
   agent `
@@ -154,6 +166,7 @@ docker compose @composeArgs run @runArgs `
   @agentSeedArgs `
   @gitConfigArgs `
   @ghConfigArgs `
+  @ctxArgs `
   -v "${nodeModulesVolume}:/workspace/node_modules" `
   agent `
   @command

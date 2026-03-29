@@ -92,7 +92,8 @@ RUN mkdir -p \
     /home/node/.local/share/pnpm/store \
     /home/node/.zsh_history_dir \
     /workspace/node_modules \
-    && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace
+    /ctx \
+    && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
 # Copy startup scripts while still root.
 COPY --chmod=755 docker/shared/init-firewall.sh /usr/local/bin/init-firewall.sh

@@ -105,10 +105,10 @@ else {
 $agentSeedArgs = @()
 if (Test-Path $agentHostConfigDir) {
   if ($Agent -eq "claude") {
-    $agentSeedArgs = @("-v", "$agentHostConfigDir:/home/node/.claude-host:ro")
+    $agentSeedArgs = @("-v", "${agentHostConfigDir}:/home/node/.claude-host:ro")
   }
   else {
-    $agentSeedArgs = @("-v", "$agentHostConfigDir:/home/node/.codex-host:ro")
+    $agentSeedArgs = @("-v", "${agentHostConfigDir}:/home/node/.codex-host:ro")
   }
 }
 

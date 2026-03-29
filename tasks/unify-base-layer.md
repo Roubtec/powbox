@@ -388,7 +388,7 @@ Prefer a shared core plus small agent hooks instead of turning every branch into
 
 ### Compose Refactors Can Break Existing Muscle Memory
 
-Even if the underlying compose structure changes, the current `claude-container.sh` and `codex-container.sh` UX should stay stable.
+Even if the underlying compose structure changes, the user-facing Claude and Codex launch UX should stay stable.
 
 Do not force users to learn a new raw compose invocation unless there is a strong reason.
 

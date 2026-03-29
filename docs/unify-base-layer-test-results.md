@@ -87,7 +87,7 @@ Status: pass.
 First Claude build on top of the prebuilt base:
 
 ```powershell
-.\claude-container\build.ps1 -Version latest
+.\build.ps1 -Target claude -ClaudeVersion latest
 ```
 
 Time: 43.81s.
@@ -95,7 +95,7 @@ Time: 43.81s.
 First Codex build on top of the prebuilt base:
 
 ```powershell
-.\codex-container\build.ps1 -Version latest
+.\build.ps1 -Target codex -CodexVersion latest
 ```
 
 Time: 16.00s.
@@ -103,7 +103,7 @@ Time: 16.00s.
 Fresh Claude top-image rebuild:
 
 ```powershell
-.\claude-container\build.ps1 -Version latest -NoCache
+.\build.ps1 -Target claude -ClaudeVersion latest -NoCache
 ```
 
 Time: 40.30s.
@@ -111,7 +111,7 @@ Time: 40.30s.
 Fresh Codex top-image rebuild:
 
 ```powershell
-.\codex-container\build.ps1 -Version latest -NoCache
+.\build.ps1 -Target codex -CodexVersion latest -NoCache
 ```
 
 Time: 15.24s.
@@ -131,8 +131,8 @@ Status: pass.
 Commands used:
 
 ```powershell
-.\claude-container\smoke-test.ps1
-.\codex-container\smoke-test.ps1
+.\commands\claude-smoke-test.ps1
+.\commands\codex-smoke-test.ps1
 ```
 
 Both smoke tests passed.
@@ -165,7 +165,7 @@ There were pre-existing shared volumes on this host from older compose projects,
 Codex-first clean launch:
 
 ```powershell
-@('exit') | .\codex-container\codex-container.ps1 . -Shell -Volatile
+@('exit') | .\commands\codex-container.ps1 . -Shell -Volatile
 ```
 
 Codex created `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history` itself through the shared `powbox` compose config.
@@ -173,7 +173,7 @@ Codex created `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history` its
 Claude-first clean launch:
 
 ```powershell
-@('exit') | .\claude-container\claude-container.ps1 . -Shell -Volatile
+@('exit') | .\commands\claude-container.ps1 . -Shell -Volatile
 ```
 
 Claude also created the shared volumes itself through the same shared `powbox` compose config.
@@ -262,15 +262,15 @@ Status: partially verified.
 
 Verified:
 
-- `claude-container.ps1 -Build -Shell -Volatile`
-- `codex-container.ps1 -Build -Shell -Volatile`
+- `commands\claude-container.ps1 -Build -Shell -Volatile`
+- `commands\codex-container.ps1 -Build -Shell -Volatile`
 - PowerShell wrappers call the shared logic correctly after fixing `scripts/launch-agent.ps1`
 - firewall startup banner appears on both launchers
 
 Not fully exercised in this pass:
 
 - `.sh` wrappers on this Windows host, because `bash` was unavailable
-- `codex-container.ps1 -Exec "task"`, because `OPENAI_API_KEY` was unset
+- `commands\codex-container.ps1 -Exec "task"`, because `OPENAI_API_KEY` was unset
 - `--resume`, `--detach`, and `--persist`
 - `gh auth setup-git` behavior in a guaranteed non-git workspace
 

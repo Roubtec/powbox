@@ -10,54 +10,56 @@ Bake handles image builds.
 
 ## Quick Start
 
+Run these commands from the repo root.
+
 Build the Claude image:
 
 ```bash
-./build.sh
+./build.sh claude --claude-version latest
 ```
 
 ```powershell
-.\build.ps1
+.\build.ps1 -Target claude -ClaudeVersion latest
 ```
 
 Build a specific Claude version:
 
 ```bash
-./build.sh 2.1.81
+./build.sh claude --claude-version 2.1.81
 ```
 
 ```powershell
-.\build.ps1 2.1.81
+.\build.ps1 -Target claude -ClaudeVersion 2.1.81
 ```
 
 Force a fresh top-image rebuild without rebuilding the shared base:
 
 ```bash
-./build.sh 2.1.81 --no-cache
+./build.sh claude --claude-version 2.1.81 --no-cache
 ```
 
 ```powershell
-.\build.ps1 2.1.81 -NoCache
+.\build.ps1 -Target claude -ClaudeVersion 2.1.81 -NoCache
 ```
 
 Launch Claude for a project:
 
 ```bash
-./claude-container.sh /path/to/project
+./commands/claude-container.sh /path/to/project
 ```
 
 ```powershell
-.\claude-container.ps1 C:\Projects\MyProject
+.\commands\claude-container.ps1 C:\Projects\MyProject
 ```
 
 Open `zsh` instead of Claude:
 
 ```bash
-./claude-container.sh /path/to/project --shell
+./commands/claude-container.sh /path/to/project --shell
 ```
 
 ```powershell
-.\claude-container.ps1 C:\Projects\MyProject -Shell
+.\commands\claude-container.ps1 C:\Projects\MyProject -Shell
 ```
 
 ## Build Architecture
@@ -102,18 +104,18 @@ Claude can now be the first launcher in a clean Docker environment without any m
 ## Smoke Test
 
 ```bash
-./smoke-test.sh
+./commands/claude-smoke-test.sh
 ```
 
 ```powershell
-.\smoke-test.ps1
+.\commands\claude-smoke-test.ps1
 ```
 
 The default image under test is `powbox-claude:latest`.
 
 ## Runtime Sanity Check
 
-Launch an interactive shell with `./claude-container.sh /path/to/project --shell --volatile`.
+Launch an interactive shell with `./commands/claude-container.sh /path/to/project --shell --volatile`.
 
 Inside the container, these checks should hold:
 

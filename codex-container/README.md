@@ -12,64 +12,66 @@ Set `OPENAI_API_KEY` on the host before launching Codex interactively or in head
 
 ## Quick Start
 
+Run these commands from the repo root.
+
 Build the Codex image:
 
 ```bash
-./build.sh
+./build.sh codex --codex-version latest
 ```
 
 ```powershell
-.\build.ps1
+.\build.ps1 -Target codex -CodexVersion latest
 ```
 
 Build a specific Codex version:
 
 ```bash
-./build.sh 0.1.0
+./build.sh codex --codex-version 0.1.0
 ```
 
 ```powershell
-.\build.ps1 0.1.0
+.\build.ps1 -Target codex -CodexVersion 0.1.0
 ```
 
 Force a fresh top-image rebuild without rebuilding the shared base:
 
 ```bash
-./build.sh 0.1.0 --no-cache
+./build.sh codex --codex-version 0.1.0 --no-cache
 ```
 
 ```powershell
-.\build.ps1 0.1.0 -NoCache
+.\build.ps1 -Target codex -CodexVersion 0.1.0 -NoCache
 ```
 
 Launch Codex for a project:
 
 ```bash
-./codex-container.sh /path/to/project
+./commands/codex-container.sh /path/to/project
 ```
 
 ```powershell
-.\codex-container.ps1 C:\Projects\MyProject
+.\commands\codex-container.ps1 C:\Projects\MyProject
 ```
 
 Run headless mode:
 
 ```bash
-./codex-container.sh /path/to/project --exec "fix the failing tests"
+./commands/codex-container.sh /path/to/project --exec "fix the failing tests"
 ```
 
 ```powershell
-.\codex-container.ps1 C:\Projects\MyProject -Exec "fix the failing tests"
+.\commands\codex-container.ps1 C:\Projects\MyProject -Exec "fix the failing tests"
 ```
 
 Open `zsh` instead of Codex:
 
 ```bash
-./codex-container.sh /path/to/project --shell
+./commands/codex-container.sh /path/to/project --shell
 ```
 
 ```powershell
-.\codex-container.ps1 C:\Projects\MyProject -Shell
+.\commands\codex-container.ps1 C:\Projects\MyProject -Shell
 ```
 
 ## Build Architecture
@@ -114,18 +116,18 @@ Codex can now be the first launcher in a clean Docker environment without any ma
 ## Smoke Test
 
 ```bash
-./smoke-test.sh
+./commands/codex-smoke-test.sh
 ```
 
 ```powershell
-.\smoke-test.ps1
+.\commands\codex-smoke-test.ps1
 ```
 
 The default image under test is `powbox-codex:latest`.
 
 ## Runtime Sanity Check
 
-Launch an interactive shell with `./codex-container.sh /path/to/project --shell --volatile`.
+Launch an interactive shell with `./commands/codex-container.sh /path/to/project --shell --volatile`.
 
 Inside the container, these checks should hold:
 

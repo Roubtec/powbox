@@ -3,7 +3,6 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
-# Collect containers from both Claude and Codex harnesses
 $containerNames = @(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 $expectedVolumes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -12,7 +11,6 @@ foreach ($containerName in $containerNames) {
         continue
     }
 
-    # Extract the project suffix from either prefix and map to agent-nm-*
     $projectSuffix = $null
     if ($containerName -like 'claude-*') {
         $projectSuffix = $containerName -replace '^claude-', ''

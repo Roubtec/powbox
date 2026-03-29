@@ -8,6 +8,7 @@ This file is intended for AI agents working on the Codex container harness.
 - thin Codex image at `/workspace/docker/codex/Dockerfile`
 - shared Compose runtime base at `/workspace/compose.shared.yml`
 - Codex runtime overlay at `/workspace/compose.codex.yml`
+- user-facing host commands at `/workspace/commands/`
 - shared launch and build helpers at `/workspace/scripts/`
 - shared entrypoint core and hooks at `/workspace/docker/shared/`
 

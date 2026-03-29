@@ -17,14 +17,15 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `compose.claude.yml`: Claude-specific runtime overlay
 - `compose.codex.yml`: Codex-specific runtime overlay
 - `docker-bake.hcl`: named Bake targets for `base`, `claude`, `codex`, and `all`
-- `scripts/`: shared build, launch, and smoke-test helpers
-- `claude-container/` and `codex-container/`: user-facing wrappers and agent-specific instruction assets
+- `commands/`: user-facing host commands for launch, smoke-test, and volume pruning
+- `scripts/`: shared internal build, launch, and smoke-test helpers
+- `claude-container/` and `codex-container/`: agent-specific docs and instruction assets
 
 ## Build Modes
 
 Cached builds are the default.
 
-Use the root build wrappers or the agent-specific wrappers to rebuild the images you need.
+Use the root build wrappers to rebuild the images you need.
 
 Examples:
 
@@ -57,14 +58,16 @@ Either agent can be started first in a clean Docker environment.
 
 Docker will create the shared volumes on demand through the merged `powbox` Compose configuration.
 
-## Agent Wrappers
+## Commands
 
-The existing wrapper entry points remain available:
+The user-facing command surface now lives in one place:
 
-- `claude-container/build.sh`, `claude-container/claude-container.sh`, and PowerShell equivalents
-- `codex-container/build.sh`, `codex-container/codex-container.sh`, and PowerShell equivalents
+- `build.sh` and `build.ps1` at the repo root for image builds
+- `commands/claude-container.*` and `commands/codex-container.*` for launches
+- `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
+- `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 
-Those wrappers now delegate to the shared root-level implementation.
+That keeps onboarding centered on the repo root instead of splitting host commands across agent subdirectories.
 
 ## Host Validation
 
@@ -86,8 +89,8 @@ docker compose -p powbox -f compose.shared.yml -f compose.codex.yml config
 Smoke test the built images with:
 
 ```bash
-(cd claude-container && ./smoke-test.sh)
-(cd codex-container && ./smoke-test.sh)
+./commands/claude-smoke-test.sh
+./commands/codex-smoke-test.sh
 ```
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.

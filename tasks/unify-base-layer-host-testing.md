@@ -17,6 +17,9 @@ The container used for implementation does not include Docker, so the final vali
 
 Verify these files are present:
 
+- `commands/claude-container.sh`
+- `commands/codex-container.sh`
+- `commands/prune-volumes.ps1`
 - `docker/base/Dockerfile`
 - `docker/claude/Dockerfile`
 - `docker/codex/Dockerfile`
@@ -98,8 +101,8 @@ docker image inspect powbox-codex:latest >/dev/null
 Run:
 
 ```bash
-(cd claude-container && ./smoke-test.sh)
-(cd codex-container && ./smoke-test.sh)
+./commands/claude-smoke-test.sh
+./commands/codex-smoke-test.sh
 ```
 
 Expected result:
@@ -135,7 +138,7 @@ docker volume rm agent-gh-config agent-pnpm-store agent-zsh-history 2>/dev/null 
 Then start Codex first:
 
 ```bash
-(cd codex-container && ./codex-container.sh . --shell --volatile)
+./commands/codex-container.sh . --shell --volatile
 ```
 
 Expected result:
@@ -148,7 +151,7 @@ Exit the shell.
 Then start Claude first in the same clean environment:
 
 ```bash
-(cd claude-container && ./claude-container.sh . --shell --volatile)
+./commands/claude-container.sh . --shell --volatile
 ```
 
 Expected result:
@@ -180,7 +183,7 @@ Expected result:
 Run:
 
 ```bash
-(cd claude-container && ./claude-container.sh . --volatile)
+./commands/claude-container.sh . --volatile
 ```
 
 Inside the container, verify:
@@ -207,7 +210,7 @@ Expected result:
 Run:
 
 ```bash
-(cd codex-container && ./codex-container.sh . --shell --volatile)
+./commands/codex-container.sh . --shell --volatile
 ```
 
 Inside the container, verify:
@@ -265,9 +268,9 @@ Expected result:
 
 Check these edge cases before calling the work complete:
 
-- `claude-container.sh --build` still works
-- `codex-container.sh --build` still works
-- `codex-container.sh --exec "task"` still works
+- `commands/claude-container.sh --build` still works
+- `commands/codex-container.sh --build` still works
+- `commands/codex-container.sh --exec "task"` still works
 - `--resume`, `--detach`, `--volatile`, and `--persist` still behave as expected
 - PowerShell wrappers still call the shared logic correctly on Windows
 - `gh auth setup-git` does not fail when `/workspace` is not a git repo

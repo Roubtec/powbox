@@ -76,7 +76,9 @@ The Claude top image adds only the Claude binary plus the container-scoped `CLAU
 
 The launcher creates per-project containers named `claude-<project>-<hash>`.
 
-It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
+Each project is bind-mounted at `/workspace/<project>-<hash>` so that tools which key on absolute paths (such as Claude's project memory) keep per-project state isolated.
+
+It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/<project>-<hash>/node_modules`.
 
 It seeds `~/.claude`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
 
@@ -123,7 +125,8 @@ echo "$CLAUDE_CONFIG_DIR"
 claude --version
 gh --version
 pnpm config get store-dir
-ls -ld /workspace/node_modules
+pwd
+ls -ld node_modules
 ```
 
 Expected results:
@@ -131,4 +134,5 @@ Expected results:
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
 - the pnpm store is `/home/node/.local/share/pnpm/store`
-- `/workspace/node_modules` is writable by `node`
+- working directory is `/workspace/<project>-<hash>`
+- `node_modules` is writable by `node`

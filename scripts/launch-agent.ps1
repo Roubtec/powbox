@@ -45,6 +45,7 @@ $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
 $env:WORKSPACE_PATH = $resolvedProject
 $env:PROJECT_NAME = $projectSlug
+$workspaceMount = "/workspace/$projectSlug"
 
 if ($Agent -eq "claude") {
   $agentHostConfigDir = if ($env:CLAUDE_HOST_CONFIG_DIR) { $env:CLAUDE_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
@@ -167,6 +168,7 @@ docker compose @composeArgs run @runArgs `
   @gitConfigArgs `
   @ghConfigArgs `
   @ctxArgs `
-  -v "${nodeModulesVolume}:/workspace/node_modules" `
+  -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
+  -w $workspaceMount `
   agent `
   @command

@@ -21,5 +21,5 @@ This file is intentionally kept small and only tracks possible future enhancemen
 - **Automated image rebuilds**: A scheduled task (Windows Task Scheduler or cron in WSL) to run `build.sh` daily/weekly.
 - **ANTHROPIC_API_KEY fallback**: Add to `.env` if OAuth sessions prove unreliable in the container.
 - **Custom Oh My Zsh plugins**: zsh-autosuggestions, zsh-syntax-highlighting, etc.
-- **Read-only workspace mode**: Mount `/workspace:ro` for pure analysis tasks where Claude shouldn't modify files.
+- **Read-only workspace mode**: Mount the workspace bind mount as `:ro` for pure analysis tasks where Claude shouldn't modify files.
 - **Validation automation**: Convert the manual smoke checks into an automated validation script that exercises startup, networking, auth, and volume behavior.

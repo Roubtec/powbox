@@ -91,7 +91,7 @@ RUN mkdir -p \
     /home/node/.local/bin \
     /home/node/.local/share/pnpm/store \
     /home/node/.zsh_history_dir \
-    /workspace/node_modules \
+    /workspace \
     /ctx \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
@@ -111,8 +111,8 @@ ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/zsh
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
 
-# Keep pnpm's store outside /workspace because the workspace bind mount and the
-# shared pnpm volume are different filesystems.
+# Keep pnpm's store outside the workspace because the workspace bind mount and
+# the shared pnpm volume are different filesystems.
 RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
     && pnpm config --global set package-import-method copy
 
@@ -120,4 +120,4 @@ RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 COPY --chown=node:node docker/shared/.zshrc /home/node/.zshrc
 
-WORKDIR /workspace
+WORKDIR /home/node

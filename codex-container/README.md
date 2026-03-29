@@ -88,7 +88,9 @@ The Codex top image adds only the Codex CLI package plus the container-scoped `A
 
 The launcher creates per-project containers named `codex-<project>-<hash>`.
 
-It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
+Each project is bind-mounted at `/workspace/<project>-<hash>` so that tools which key on absolute paths keep per-project state isolated.
+
+It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/<project>-<hash>/node_modules`.
 
 It seeds `~/.codex`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
 
@@ -136,7 +138,8 @@ codex --version
 bwrap --version
 gh --version
 pnpm config get store-dir
-ls -ld /workspace/node_modules
+pwd
+ls -ld node_modules
 ```
 
 Expected results:
@@ -145,4 +148,5 @@ Expected results:
 - `CODEX_CONFIG_DIR` is `/home/node/.codex`
 - `bwrap` is available
 - the pnpm store is `/home/node/.local/share/pnpm/store`
-- `/workspace/node_modules` is writable by `node`
+- working directory is `/workspace/<project>-<hash>`
+- `node_modules` is writable by `node`

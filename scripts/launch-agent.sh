@@ -200,6 +200,8 @@ if [ -n "$CTX_PATH" ]; then
 	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
 fi
 
+WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
+
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \
 	agent \
@@ -224,6 +226,7 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \
-	-v "${NM_VOLUME}:/workspace/node_modules" \
+	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
+	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

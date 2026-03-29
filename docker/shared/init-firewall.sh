@@ -10,7 +10,7 @@ iptables -F OUTPUT 2>/dev/null || true
 iptables -A OUTPUT -o lo -j ACCEPT
 
 # Allow established/related connections
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # Block private/local network ranges
 iptables -A OUTPUT -d 10.0.0.0/8 -j DROP

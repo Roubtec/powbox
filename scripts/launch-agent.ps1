@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not (Test-Path $ProjectPath -PathType Container)) {
+  Write-Error "Error: project path does not exist: $ProjectPath"
+  exit 1
+}
 $resolvedProject = (Resolve-Path $ProjectPath).Path
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
@@ -56,7 +60,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 if ($Build) {
-  & (Join-Path $rootDir "build.ps1") -Target $Agent
+  & (Join-Path $rootDir "scripts/build-image.ps1") -Target $Agent
 }
 
 if ($Resume) {

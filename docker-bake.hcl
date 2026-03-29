@@ -46,5 +46,5 @@ group "all" {
 }
 
 group "default" {
-  targets = ["all"]
+  targets = ["base", "claude", "codex"]
 }

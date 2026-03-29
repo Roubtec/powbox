@@ -2,7 +2,6 @@ services:
   agent:
     image: powbox-codex:latest
     environment:
-      CODEX_CONFIG_DIR: /home/node/.codex
       CODEX_HOST_SEED_DIR: /home/node/.codex-host
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:

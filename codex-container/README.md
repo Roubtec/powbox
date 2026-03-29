@@ -2,7 +2,7 @@
 
 Run Codex CLI in an isolated Docker container with a shared toolchain base image and a thin Codex-specific top image.
 
-The current runtime path is shared with the Claude container.
+The runtime path is shared with the Claude container.
 
 Compose handles runtime configuration.
 
@@ -86,15 +86,13 @@ The Codex top image adds only the Codex CLI package plus the container-scoped `A
 
 ## Launch Behavior
 
-The launcher keeps the existing user-facing behavior.
+The launcher creates per-project containers named `codex-<project>-<hash>`.
 
-It still creates per-project containers named `codex-<project>-<hash>`.
+It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
 
-It still mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
+It seeds `~/.codex`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
 
-It still seeds `~/.codex`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
-
-It now runs through the shared Compose files at the repo root:
+It runs through the shared Compose files at the repo root:
 
 - `compose.shared.yml`
 - `compose.codex.yml`
@@ -109,9 +107,9 @@ Persistent volumes:
 - `agent-zsh-history` for shared shell history
 - `agent-nm-<project>-<hash>` for per-project Linux `node_modules`
 
-The shared volumes are declared by the shared Compose base, so Codex no longer needs `external: true` declarations for them.
+The shared volumes are declared by `compose.shared.yml` and created on demand by Docker Compose.
 
-Codex can now be the first launcher in a clean Docker environment without any manual volume preparation.
+A clean Docker environment does not require manual volume preparation before launching Codex.
 
 ## Smoke Test
 

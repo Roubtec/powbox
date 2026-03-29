@@ -2,7 +2,7 @@
 
 Run Claude Code in an isolated Docker container with a shared toolchain base image and a thin Claude-specific top image.
 
-The current runtime path is shared with the Codex container.
+The runtime path is shared with the Codex container.
 
 Compose handles runtime configuration.
 
@@ -74,15 +74,13 @@ The Claude top image adds only the Claude binary plus the container-scoped `CLAU
 
 ## Launch Behavior
 
-The launcher keeps the existing user-facing behavior.
+The launcher creates per-project containers named `claude-<project>-<hash>`.
 
-It still creates per-project containers named `claude-<project>-<hash>`.
+It mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
 
-It still mounts a per-project `agent-nm-<project>-<hash>` volume at `/workspace/node_modules`.
+It seeds `~/.claude`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
 
-It still seeds `~/.claude`, `gh` config, and `~/.gitconfig` on first use when those host paths exist.
-
-It now runs through the shared Compose files at the repo root:
+It runs through the shared Compose files at the repo root:
 
 - `compose.shared.yml`
 - `compose.claude.yml`
@@ -97,9 +95,9 @@ Persistent volumes:
 - `agent-zsh-history` for shared shell history
 - `agent-nm-<project>-<hash>` for per-project Linux `node_modules`
 
-The shared volumes are declared by the shared Compose base, so Claude no longer owns their lifecycle on behalf of Codex.
+The shared volumes are declared by `compose.shared.yml` and created on demand by Docker Compose.
 
-Claude can now be the first launcher in a clean Docker environment without any manual volume preparation.
+A clean Docker environment does not require manual volume preparation before launching Claude.
 
 ## Smoke Test
 

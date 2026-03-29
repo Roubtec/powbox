@@ -2,7 +2,7 @@
 
 PowBox builds and launches isolated Docker environments for CLI coding agents.
 
-The repo now uses a shared Docker base image for common tooling and two thin agent images layered on top of it.
+The repo uses a shared Docker base image for common tooling and two thin agent images layered on top of it.
 
 Runtime orchestration is handled by shared Compose files at the repo root.
 
@@ -41,7 +41,7 @@ Examples:
 
 Both agent launch flows resolve through the same shared Compose base and the same Compose project name.
 
-That means the shared GitHub, pnpm, and zsh-history volumes are declared once and no longer rely on one agent creating them before the other starts.
+The shared GitHub, pnpm, and zsh-history volumes are declared once in the shared Compose configuration.
 
 Shared volume names are kept stable to preserve existing data:
 
@@ -60,14 +60,12 @@ Docker will create the shared volumes on demand through the merged `powbox` Comp
 
 ## Commands
 
-The user-facing command surface now lives in one place:
+The user-facing command surface lives at the repo root and in `commands/`:
 
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
-
-That keeps onboarding centered on the repo root instead of splitting host commands across agent subdirectories.
 
 ## Host Validation
 

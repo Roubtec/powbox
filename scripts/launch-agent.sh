@@ -78,7 +78,8 @@ project_hash() {
 	elif command -v openssl >/dev/null 2>&1; then
 		printf '%s' "$input" | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-12
 	else
-		printf 'nohash000000'
+		echo "Error: no hashing command found (need sha256sum, shasum, or openssl)." >&2
+		return 1
 	fi
 }
 

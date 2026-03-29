@@ -56,7 +56,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 if ($Build) {
-  & (Join-Path $rootDir "build.ps1") -Target $Agent
+  & (Join-Path $rootDir "scripts/build-image.ps1") -Target $Agent
 }
 
 if ($Resume) {

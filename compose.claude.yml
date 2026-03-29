@@ -2,9 +2,7 @@ services:
   agent:
     image: powbox-claude:latest
     environment:
-      CLAUDE_CONFIG_DIR: /home/node/.claude
       CLAUDE_HOST_SEED_DIR: /home/node/.claude-host
-      DISABLE_AUTOUPDATER: "1"
     volumes:
       - claude-config:/home/node/.claude
 

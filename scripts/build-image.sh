@@ -67,6 +67,12 @@ ensure_base_image() {
 		return
 	fi
 
+	# Build the base image without --no-cache/--pull. Those flags apply to the
+	# top-layer agent build only (i.e. "don't reuse cached agent layers"). When
+	# the base image is simply absent locally there is nothing to skip caching
+	# for, and rebuilding it fresh unconditionally on every no-cache top-layer
+	# build would be unnecessarily slow. Use `build.sh base --no-cache` if you
+	# explicitly want a fresh base.
 	echo "Base image powbox-agent-base:latest was not found locally. Building it first."
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \

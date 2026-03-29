@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not (Test-Path $ProjectPath -PathType Container)) {
+  Write-Error "Error: project path does not exist: $ProjectPath"
+  exit 1
+}
 $resolvedProject = (Resolve-Path $ProjectPath).Path
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(

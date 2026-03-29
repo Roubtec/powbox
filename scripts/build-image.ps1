@@ -43,6 +43,12 @@ function Ensure-BaseImage {
     return
   }
 
+  # Build the base image without -NoCache/-Pull. Those flags apply to the
+  # top-layer agent build only (i.e. "don't reuse cached agent layers"). When
+  # the base image is simply absent locally there is nothing to skip caching
+  # for, and rebuilding it fresh unconditionally on every no-cache top-layer
+  # build would be unnecessarily slow. Use `build.ps1 base -NoCache` if you
+  # explicitly want a fresh base.
   Write-Host "Base image powbox-agent-base:latest was not found locally. Building it first."
   $env:CLAUDE_CODE_VERSION = $ClaudeVersion
   $env:CODEX_VERSION = $CodexVersion

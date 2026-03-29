@@ -66,7 +66,11 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-PROJECT_PATH="$(cd "$PROJECT_PATH" 2>/dev/null && pwd)"
+if [ ! -d "$PROJECT_PATH" ]; then
+	echo "Error: project path does not exist: ${PROJECT_PATH}" >&2
+	exit 1
+fi
+PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
 PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
 
 project_hash() {
@@ -79,6 +83,15 @@ project_hash() {
 		printf '%s' "$input" | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-12
 	else
 		echo "Error: no hashing command found (need sha256sum, shasum, or openssl)." >&2
+		echo "" >&2
+		echo "A unique hash of the project path is used to generate the container name." >&2
+		echo "Without it, containers for different projects may share the same name, causing" >&2
+		echo "one project's container to be silently reused for another — which can be destructive." >&2
+		echo "" >&2
+		echo "Install one of the following and retry:" >&2
+		echo "  sha256sum  — part of GNU coreutils (Linux, Git Bash, WSL)" >&2
+		echo "  shasum     — bundled with Perl (macOS, many Linux distros)" >&2
+		echo "  openssl    — https://www.openssl.org/" >&2
 		return 1
 	fi
 }

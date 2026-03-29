@@ -4,23 +4,24 @@ This file is intended for AI agents working on the Codex container harness.
 
 ## Current Architecture
 
-- shared base image at `/workspace/docker/base/Dockerfile`
-- thin Codex image at `/workspace/docker/codex/Dockerfile`
-- shared Compose runtime base at `/workspace/compose.shared.yml`
-- Codex runtime overlay at `/workspace/compose.codex.yml`
-- user-facing host commands at `/workspace/commands/`
-- shared launch and build helpers at `/workspace/scripts/`
-- shared entrypoint core and hooks at `/workspace/docker/shared/`
+- shared base image at `docker/base/Dockerfile`
+- thin Codex image at `docker/codex/Dockerfile`
+- shared Compose runtime base at `compose.shared.yml`
+- Codex runtime overlay at `compose.codex.yml`
+- user-facing host commands at `commands/`
+- shared launch and build helpers at `scripts/`
+- shared entrypoint core and hooks at `docker/shared/`
 
 ## Key Paths
 
 | Path | Purpose |
 |------|---------|
-| `/workspace` | Bind-mounted project directory |
+| `/workspace/<project-slug>` | Bind-mounted project directory (working directory; slug is `<name>-<hash>`) |
+| `/ctx` | Optional read-only context volume (`--ctx`) |
 | `/home/node/.codex` | Codex config volume (`codex-config`) |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume (`agent-gh-config`) |
 | `/home/node/.local/share/pnpm/store` | Shared pnpm store volume (`agent-pnpm-store`) |
-| `/workspace/node_modules` | Per-project package volume (`agent-nm-<project>-<hash>`) |
+| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project-slug>`) |
 
 ## Important Behavior
 
@@ -32,4 +33,4 @@ This file is intended for AI agents working on the Codex container harness.
 
 ## pnpm
 
-The pnpm store lives outside `/workspace` and uses `package-import-method=copy` because the workspace bind mount and pnpm volume are different filesystems.
+The pnpm store lives outside the workspace and uses `package-import-method=copy` because the workspace bind mount and pnpm volume are different filesystems.

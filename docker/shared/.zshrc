@@ -21,5 +21,4 @@ source "$ZSH/oh-my-zsh.sh"
 # Container identity
 if [ -n "$CONTAINER_NAME" ]; then
   PROMPT="%{$fg[yellow]%}[$CONTAINER_NAME]%{$reset_color%} $PROMPT"
-  alias cid='echo $CONTAINER_NAME'
 fi

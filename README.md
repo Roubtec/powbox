@@ -58,6 +58,23 @@ Either agent can be started first in a clean Docker environment.
 
 Docker will create the shared volumes on demand through the merged `powbox` Compose configuration.
 
+## Per-Project Workspace Paths
+
+Each project is mounted at `/workspace/<project>-<hash>` inside the container instead of a shared `/workspace` path.
+This gives every project a unique absolute path, which prevents tools that cache by path (Claude project memory, build caches, etc.) from colliding across projects.
+The container's working directory is set to the project-specific path automatically.
+
+## Read-Only Context Volume
+
+Pass `--ctx <path>` to mount a host directory as a read-only volume at `/ctx` inside the container.
+This is useful for giving the agent access to reference code, data sources, or other content without allowing modifications.
+
+```bash
+./commands/claude-container.sh ~/projects/myapp --ctx ~/datasets/reference
+```
+
+The volume is only present when `--ctx` is specified; otherwise `/ctx` is an empty directory.
+
 ## Commands
 
 The user-facing command surface lives at the repo root and in `commands/`:

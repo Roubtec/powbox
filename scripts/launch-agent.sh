@@ -21,6 +21,7 @@ VOLATILE=false
 PERSIST=false
 RESUME=false
 EXEC_TASK=""
+CTX_PATH=""
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -41,6 +42,10 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--resume)
 		RESUME=true
+		;;
+	--ctx)
+		shift
+		CTX_PATH="${1:?missing path for --ctx}"
 		;;
 	--exec)
 		if [ "$AGENT" != "codex" ]; then
@@ -69,6 +74,14 @@ done
 if [ ! -d "$PROJECT_PATH" ]; then
 	echo "Error: project path does not exist: ${PROJECT_PATH}" >&2
 	exit 1
+fi
+
+if [ -n "$CTX_PATH" ] && [ ! -d "$CTX_PATH" ]; then
+	echo "Error: context path does not exist: ${CTX_PATH}" >&2
+	exit 1
+fi
+if [ -n "$CTX_PATH" ]; then
+	CTX_PATH="$(cd "$CTX_PATH" && pwd)"
 fi
 PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
 PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
@@ -182,6 +195,13 @@ if [ -d "$GH_HOST_CONFIG_DIR" ]; then
 	GH_CONFIG_ARGS=(-v "${GH_HOST_CONFIG_DIR}:/home/node/.config/gh-host:ro")
 fi
 
+CTX_ARGS=()
+if [ -n "$CTX_PATH" ]; then
+	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
+fi
+
+WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
+
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \
 	agent \
@@ -205,6 +225,15 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	"${AGENT_SEED_ARGS[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
-	-v "${NM_VOLUME}:/workspace/node_modules" \
+	"${CTX_ARGS[@]}" \
+	# Mount a per-project named volume over node_modules inside the bind mount.
+	# This shadows the host's node_modules with a Linux-native volume so that
+	# native binaries compiled for the container OS are never mixed with host
+	# binaries. The trade-off is that Docker may create an empty node_modules/
+	# directory on the host the first time (usually harmless since the project
+	# already has one), and the host's node_modules is inaccessible inside the
+	# container (intentional — use the volume copy for all in-container installs).
+	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
+	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

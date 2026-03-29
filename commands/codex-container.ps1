@@ -6,7 +6,8 @@ param(
   [switch]$Persist,
   [switch]$Resume,
   [switch]$Volatile,
-  [string]$Exec = ""
+  [string]$Exec = "",
+  [string]$Ctx = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,4 +23,5 @@ $rootDir = Split-Path -Parent $scriptDir
   -Persist:$Persist `
   -Resume:$Resume `
   -Volatile:$Volatile `
-  -Exec $Exec
+  -Exec $Exec `
+  -Ctx $Ctx

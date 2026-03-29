@@ -11,7 +11,7 @@ services:
       GH_HOST_SEED_DIR: /home/node/.config/gh-host
       NODE_OPTIONS: --max-old-space-size=4096
     volumes:
-      - ${WORKSPACE_PATH:-.}:/workspace:rw
+      - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh
       - pnpm-store:/home/node/.local/share/pnpm/store
       - zsh-history:/home/node/.zsh_history_dir

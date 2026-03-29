@@ -1,8 +1,8 @@
 # Container Environment
 
-You are running inside an isolated Docker container. The host filesystem is not accessible except through the `/workspace` bind mount. You have full autonomy (`--dangerously-bypass-approvals-and-sandbox`) — the container and its network firewall are your safety boundary.
+You are running inside an isolated Docker container. The host filesystem is not accessible except through the bind mount under `/workspace`. You have full autonomy (`--dangerously-bypass-approvals-and-sandbox`) — the container and its network firewall are your safety boundary.
 
-Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` alias in zsh).
+Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` command).
 
 ## Available tooling
 
@@ -41,8 +41,9 @@ Everything below is on `PATH` and ready to use — no installation needed.
 
 | Path | What it is |
 |------|------------|
-| `/workspace` | Project source (bind-mounted from host, read-write) |
-| `/workspace/node_modules` | Per-project Docker volume (Linux packages, separate from host) |
+| `/workspace/<project-slug>` | Project source (bind-mounted from host, read-write); the working directory (slug is `<name>-<hash>`) |
+| `/workspace/<project-slug>/node_modules` | Per-project Docker volume (Linux packages, separate from host) |
+| `/ctx` | Optional read-only context volume (reference code/data, mounted via `--ctx`) |
 | `/home/node/.codex` | Codex config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
 | `/home/node/.local/share/pnpm/store` | Shared pnpm cache (persistent Docker volume) |

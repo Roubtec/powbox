@@ -9,7 +9,8 @@ param(
   [switch]$Persist,
   [switch]$Resume,
   [switch]$Volatile,
-  [string]$Exec = ""
+  [string]$Exec = "",
+  [string]$Ctx = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,12 @@ if (-not (Test-Path $ProjectPath -PathType Container)) {
   Write-Error "Error: project path does not exist: $ProjectPath"
   exit 1
 }
+
+if ($Ctx -ne "" -and -not (Test-Path $Ctx -PathType Container)) {
+  Write-Error "Error: context path does not exist: $Ctx"
+  exit 1
+}
+$resolvedCtx = if ($Ctx -ne "") { (Resolve-Path $Ctx).Path } else { "" }
 $resolvedProject = (Resolve-Path $ProjectPath).Path
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
@@ -43,6 +50,7 @@ $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
 $env:WORKSPACE_PATH = $resolvedProject
 $env:PROJECT_NAME = $projectSlug
+$workspaceMount = "/workspace/$projectSlug"
 
 if ($Agent -eq "claude") {
   $agentHostConfigDir = if ($env:CLAUDE_HOST_CONFIG_DIR) { $env:CLAUDE_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
@@ -131,6 +139,11 @@ if (Test-Path $ghHostConfigPath) {
   $ghConfigArgs = @("-v", "${ghHostConfigPath}:/home/node/.config/gh-host:ro")
 }
 
+$ctxArgs = @()
+if ($resolvedCtx -ne "") {
+  $ctxArgs = @("-v", "${resolvedCtx}:/ctx:ro")
+}
+
 docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
   -v "${nodeModulesVolume}:/mnt/node_modules" `
   agent `
@@ -159,6 +172,15 @@ docker compose @composeArgs run @runArgs `
   @agentSeedArgs `
   @gitConfigArgs `
   @ghConfigArgs `
-  -v "${nodeModulesVolume}:/workspace/node_modules" `
+  @ctxArgs `
+  # Mount a per-project named volume over node_modules inside the bind mount.
+  # This shadows the host's node_modules with a Linux-native volume so that
+  # native binaries compiled for the container OS are never mixed with host
+  # binaries. The trade-off is that Docker may create an empty node_modules/
+  # directory on the host the first time (usually harmless since the project
+  # already has one), and the host's node_modules is inaccessible inside the
+  # container (intentional — use the volume copy for all in-container installs).
+  -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
+  -w $workspaceMount `
   agent `
   @command

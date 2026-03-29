@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENT="${1:?usage: launch-agent.sh <claude|codex> [args...]}"
+AGENT="${1:?usage: launch-agent.sh <claude|codex> [project-path] [--build] [--detach] [--shell] [--volatile] [--persist] [--resume] [--exec <task> (codex only)]}"
 shift
 
 case "$AGENT" in

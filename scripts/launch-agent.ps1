@@ -14,6 +14,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($Exec -ne "" -and $Agent -ne "codex") {
+  Write-Error "-Exec is only supported for codex."
+  exit 1
+}
+
 if (-not (Test-Path $ProjectPath -PathType Container)) {
   Write-Error "Error: project path does not exist: $ProjectPath"
   exit 1

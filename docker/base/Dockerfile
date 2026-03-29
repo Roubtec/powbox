@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dnsutils \
     fd-find \
     file \
+    fzf \
     gettext-base \
     git \
     gnupg \

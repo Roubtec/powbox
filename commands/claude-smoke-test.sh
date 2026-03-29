@@ -22,6 +22,7 @@ exec "${ROOT_DIR}/scripts/smoke-test-image.sh" "${1:-powbox-claude:latest}" \
 	"lsof -v >/dev/null 2>&1" \
 	"tree --version >/dev/null" \
 	"fd --version >/dev/null" \
+	"fzf --version >/dev/null" \
 	"bat --version >/dev/null" \
 	"ssh -V >/dev/null 2>&1" \
 	"rsync --version >/dev/null" \

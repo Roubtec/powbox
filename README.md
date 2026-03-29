@@ -134,6 +134,22 @@ function cx {
 function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }
+
+function cc-list {
+ docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+}
+
+function cx-list {
+ docker ps -a --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+}
+
+function agent-list {
+ docker ps -a --filter "name=claude-" --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+}
+
+function agent-volumes {
+ docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
+}
 ```
 
 Common usage:
@@ -157,6 +173,18 @@ cc -Ctx C:\Docs\specs
 # Prune orphaned node_modules volumes (dry run first)
 agent-prune-volumes -WhatIf
 agent-prune-volumes
+
+# List Claude containers
+cc-list
+
+# List Codex containers
+cx-list
+
+# List all agent containers
+agent-list
+
+# List agent volumes
+agent-volumes
 ```
 
 All flags accepted by `commands/claude-container.ps1` and `commands/codex-container.ps1` are forwarded by these functions, so `-Build`, `-Detach`, `-Persist`, `-Resume`, `-Volatile`, and `-Ctx` all work as documented.
@@ -193,6 +221,22 @@ cx() {
 agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh"
 }
+
+cc-list() {
+    docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+}
+
+cx-list() {
+    docker ps -a --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+}
+
+agent-list() {
+    docker ps -a --filter "name=claude-" --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+}
+
+agent-volumes() {
+    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format $'table {{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
+}
 ```
 
 Common usage:
@@ -215,6 +259,18 @@ cc --ctx ~/docs/specs
 
 # Prune orphaned node_modules volumes (prompts for confirmation)
 agent-prune-volumes
+
+# List Claude containers
+cc-list
+
+# List Codex containers
+cx-list
+
+# List all agent containers
+agent-list
+
+# List agent volumes
+agent-volumes
 ```
 
 All flags accepted by `commands/claude-container.sh` and `commands/codex-container.sh` are forwarded, so `--build`, `--detach`, `--persist`, `--resume`, `--volatile`, and `--ctx` all work as documented.

@@ -163,6 +163,64 @@ All flags accepted by `commands/claude-container.ps1` and `commands/codex-contai
 
 To move the repo later, update only the `$env:POWBOX_ROOT` line and reload your profile.
 
+## Bash Profile Shortcuts
+
+Add the following to `~/.bashrc` or `~/.zshrc` to get the same short commands on Linux, macOS, or WSL.
+
+Set `POWBOX_ROOT` to wherever you cloned this repo, then reload your shell (`source ~/.bashrc` or `source ~/.zshrc`).
+
+```bash
+# PowBox agent shortcuts — adjust path to your checkout
+export POWBOX_ROOT="$HOME/code/powbox"
+
+# Injects $PWD when called without a path so bare flags like --shell still work.
+cc() {
+    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+        "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
+    else
+        "$POWBOX_ROOT/commands/claude-container.sh" "$@"
+    fi
+}
+
+cx() {
+    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+        "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
+    else
+        "$POWBOX_ROOT/commands/codex-container.sh" "$@"
+    fi
+}
+
+agent-prune-volumes() {
+    "$POWBOX_ROOT/commands/prune-volumes.sh"
+}
+```
+
+Common usage:
+
+```bash
+# Launch Claude in the current folder
+cc
+
+# Launch Claude in a specific folder, opening a shell instead
+cc ~/projects/myapp --shell
+
+# Launch Codex in the current folder
+cx
+
+# Run Codex headless
+cx --exec "fix the failing tests"
+
+# Launch either agent with a read-only reference volume at /ctx
+cc --ctx ~/docs/specs
+
+# Prune orphaned node_modules volumes (prompts for confirmation)
+agent-prune-volumes
+```
+
+All flags accepted by `commands/claude-container.sh` and `commands/codex-container.sh` are forwarded, so `--build`, `--detach`, `--persist`, `--resume`, `--volatile`, and `--ctx` all work as documented.
+
+To move the repo later, update only the `POWBOX_ROOT` line and reload your shell.
+
 ## Host Validation
 
 Host-side validation requires Docker Desktop or Docker Engine with a working `docker buildx`.

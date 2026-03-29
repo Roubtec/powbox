@@ -18,8 +18,8 @@ services:
 
 volumes:
   gh-config:
-    name: claude-gh-config
+    name: agent-gh-config
   pnpm-store:
-    name: claude-pnpm-store
+    name: agent-pnpm-store
   zsh-history:
-    name: claude-zsh-history
+    name: agent-zsh-history

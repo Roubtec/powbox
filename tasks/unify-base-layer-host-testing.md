@@ -129,7 +129,7 @@ This is the most important runtime regression check.
 Remove any existing shared volumes first if you are working in a disposable environment:
 
 ```bash
-docker volume rm claude-gh-config claude-pnpm-store claude-zsh-history 2>/dev/null || true
+docker volume rm agent-gh-config agent-pnpm-store agent-zsh-history 2>/dev/null || true
 ```
 
 Then start Codex first:
@@ -167,9 +167,9 @@ docker volume ls
 Expected result:
 
 - shared volumes exist once:
-  - `claude-gh-config`
-  - `claude-pnpm-store`
-  - `claude-zsh-history`
+  - `agent-gh-config`
+  - `agent-pnpm-store`
+  - `agent-zsh-history`
 - agent-specific config volumes exist separately:
   - `claude-config`
   - `codex-config`

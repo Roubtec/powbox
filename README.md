@@ -44,9 +44,9 @@ That means the shared GitHub, pnpm, and zsh-history volumes are declared once an
 
 Shared volume names are kept stable to preserve existing data:
 
-- `claude-gh-config`
-- `claude-pnpm-store`
-- `claude-zsh-history`
+- `agent-gh-config`
+- `agent-pnpm-store`
+- `agent-zsh-history`
 
 Agent-specific config volumes remain separate:
 
@@ -90,7 +90,7 @@ Smoke test the built images with:
 (cd codex-container && ./smoke-test.sh)
 ```
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `claude-gh-config`, `claude-pnpm-store`, and `claude-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
 
 ## License
 

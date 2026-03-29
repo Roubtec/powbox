@@ -168,7 +168,7 @@ Codex-first clean launch:
 @('exit') | .\codex-container\codex-container.ps1 . -Shell -Volatile
 ```
 
-Codex created `claude-gh-config`, `claude-pnpm-store`, and `claude-zsh-history` itself through the shared `powbox` compose config.
+Codex created `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history` itself through the shared `powbox` compose config.
 
 Claude-first clean launch:
 
@@ -188,9 +188,9 @@ Status: pass with migration caveat.
 
 After launcher runs, `docker volume ls` showed one copy of the shared volumes:
 
-- `claude-gh-config`
-- `claude-pnpm-store`
-- `claude-zsh-history`
+- `agent-gh-config`
+- `agent-pnpm-store`
+- `agent-zsh-history`
 
 Agent-specific config volumes also exist separately:
 

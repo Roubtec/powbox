@@ -90,9 +90,9 @@ It now runs through the shared Compose files at the repo root:
 Persistent volumes:
 
 - `claude-config` for Claude auth and config
-- `claude-gh-config` for shared GitHub CLI auth
-- `claude-pnpm-store` for the shared pnpm store
-- `claude-zsh-history` for shared shell history
+- `agent-gh-config` for shared GitHub CLI auth
+- `agent-pnpm-store` for the shared pnpm store
+- `agent-zsh-history` for shared shell history
 - `agent-nm-<project>-<hash>` for per-project Linux `node_modules`
 
 The shared volumes are declared by the shared Compose base, so Claude no longer owns their lifecycle on behalf of Codex.

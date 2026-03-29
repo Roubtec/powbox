@@ -109,6 +109,8 @@ Persistent volumes:
 
 The shared volumes are declared by the shared Compose base, so Codex no longer needs `external: true` declarations for them.
 
+Codex can now be the first launcher in a clean Docker environment without any manual volume preparation.
+
 ## Smoke Test
 
 ```bash
@@ -121,6 +123,26 @@ The shared volumes are declared by the shared Compose base, so Codex no longer n
 
 The default image under test is `powbox-codex:latest`.
 
-## More Validation
+## Runtime Sanity Check
 
-Use [tasks/unify-base-layer-host-testing.md](/workspace/tasks/unify-base-layer-host-testing.md) for full host-side Docker validation.
+Launch an interactive shell with `./codex-container.sh /path/to/project --shell --volatile`.
+
+Inside the container, these checks should hold:
+
+```bash
+whoami
+echo "$CODEX_CONFIG_DIR"
+codex --version
+bwrap --version
+gh --version
+pnpm config get store-dir
+ls -ld /workspace/node_modules
+```
+
+Expected results:
+
+- user is `node`
+- `CODEX_CONFIG_DIR` is `/home/node/.codex`
+- `bwrap` is available
+- the pnpm store is `/home/node/.local/share/pnpm/store`
+- `/workspace/node_modules` is writable by `node`

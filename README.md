@@ -53,6 +53,10 @@ Agent-specific config volumes remain separate:
 - `claude-config`
 - `codex-config`
 
+Either agent can be started first in a clean Docker environment.
+
+Docker will create the shared volumes on demand through the merged `powbox` Compose configuration.
+
 ## Agent Wrappers
 
 The existing wrapper entry points remain available:
@@ -62,9 +66,31 @@ The existing wrapper entry points remain available:
 
 Those wrappers now delegate to the shared root-level implementation.
 
-## Validation
+## Host Validation
 
-Host-side Docker validation steps live in [tasks/unify-base-layer-host-testing.md](tasks/unify-base-layer-host-testing.md).
+Host-side validation requires Docker Desktop or Docker Engine with a working `docker buildx`.
+
+Inspect the named Bake targets and tags with:
+
+```bash
+docker buildx bake --file docker-bake.hcl --print
+```
+
+Render the merged runtime config with:
+
+```bash
+docker compose -p powbox -f compose.shared.yml -f compose.claude.yml config
+docker compose -p powbox -f compose.shared.yml -f compose.codex.yml config
+```
+
+Smoke test the built images with:
+
+```bash
+(cd claude-container && ./smoke-test.sh)
+(cd codex-container && ./smoke-test.sh)
+```
+
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `claude-gh-config`, `claude-pnpm-store`, and `claude-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
 
 ## License
 

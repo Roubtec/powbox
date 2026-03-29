@@ -101,6 +101,7 @@ COPY --chmod=755 docker/shared/entrypoint-claude.sh /usr/local/bin/entrypoint-cl
 COPY --chmod=755 docker/shared/entrypoint-codex.sh /usr/local/bin/entrypoint-codex.sh
 COPY --chmod=755 docker/shared/entrypoint-claude-hook.sh /usr/local/bin/entrypoint-claude-hook.sh
 COPY --chmod=755 docker/shared/entrypoint-codex-hook.sh /usr/local/bin/entrypoint-codex-hook.sh
+COPY --chmod=755 docker/shared/cid /usr/local/bin/cid
 
 USER node
 

@@ -2,7 +2,7 @@
 
 You are running inside an isolated Docker container. The host filesystem is not accessible except through the `/workspace` bind mount. You have full autonomy (`--dangerously-skip-permissions`) — the container and its network firewall are your safety boundary.
 
-Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` alias in zsh).
+Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` command).
 
 ## Available tooling
 

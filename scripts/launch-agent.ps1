@@ -167,19 +167,19 @@ if ($Agent -eq "codex") {
   $envArgs += @("-e", "OPENAI_API_KEY=$apiKey")
 }
 
+# Mount a per-project named volume over node_modules inside the bind mount.
+# This shadows the host's node_modules with a Linux-native volume so that
+# native binaries compiled for the container OS are never mixed with host
+# binaries. The trade-off is that Docker may create an empty node_modules/
+# directory on the host the first time (usually harmless since the project
+# already has one), and the host's node_modules is inaccessible inside the
+# container (intentional — use the volume copy for all in-container installs).
 docker compose @composeArgs run @runArgs `
   @envArgs `
   @agentSeedArgs `
   @gitConfigArgs `
   @ghConfigArgs `
   @ctxArgs `
-  # Mount a per-project named volume over node_modules inside the bind mount.
-  # This shadows the host's node_modules with a Linux-native volume so that
-  # native binaries compiled for the container OS are never mixed with host
-  # binaries. The trade-off is that Docker may create an empty node_modules/
-  # directory on the host the first time (usually harmless since the project
-  # already has one), and the host's node_modules is inaccessible inside the
-  # container (intentional — use the volume copy for all in-container installs).
   -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
   -w $workspaceMount `
   agent `

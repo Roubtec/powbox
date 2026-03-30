@@ -10,7 +10,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 
 | Category | Tools |
 |----------|-------|
-| Core runtime | `node`, `npm`, `pnpm`, `python3`, `pip3` |
+| Core runtime | `node`, `npm`, `pnpm`, `python3`, `pip3`, `php`, `composer` |
 | Git/GitHub | `git`, `gh`, `ssh` |
 | Shell | `zsh`, `jq`, `yq`, `fzf`, `less`, `tree`, `file`, `htop`, `shellcheck`, `shfmt`, `strace`, `lsof` |
 | Build | `make`, `patch`, `gcc`, `g++` |

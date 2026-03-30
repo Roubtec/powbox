@@ -35,6 +35,22 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 | `gcc` / `g++` | `build-essential` |
 | `make` | `build-essential` |
 
+### PHP
+
+| Tool | Notes |
+|---|---|
+| `php` | PHP 8.2 CLI (`php8.2-cli`) |
+| `composer` | PHP dependency manager — installed via upstream installer |
+| `php8.2-xml` | DOM, SimpleXML, XMLReader, XMLWriter |
+| `php8.2-mbstring` | Multibyte string support |
+| `php8.2-curl` | cURL bindings |
+| `php8.2-zip` | Zip archive support (required by Composer) |
+| `php8.2-intl` | Internationalization — required by many frameworks |
+| `php8.2-sqlite3` | SQLite3 bindings — useful for test suites |
+| `php8.2-bcmath` | Arbitrary precision math |
+| `php8.2-mysql` | MySQL/MariaDB bindings |
+| `php8.2-pgsql` | PostgreSQL bindings |
+
 ### Editors
 
 | Tool | Notes |
@@ -132,7 +148,7 @@ These were evaluated and omitted. Some could be added per-session inside the con
 | Docker CLI | No Docker-in-Docker use case |
 | `kubectl` | No Kubernetes deployment |
 | Terraform / Pulumi | Infrastructure managed outside this container |
-| Go, Rust, Ruby, Java, PHP | Not part of this project's stack |
+| Go, Rust, Ruby, Java | Not part of this project's stack |
 | `psql`, `mysql`, `redis-cli` | Only Azure SQL is used |
 | `cmake` | No CMake-based builds |
 | `nmap` | Not a security testing container |

@@ -47,6 +47,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     zsh \
     zstd \
+    php8.2-cli \
+    php8.2-xml \
+    php8.2-mbstring \
+    php8.2-curl \
+    php8.2-zip \
+    php8.2-intl \
+    php8.2-sqlite3 \
+    php8.2-bcmath \
+    php8.2-mysql \
+    php8.2-pgsql \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && ln -sf /usr/bin/batcat /usr/local/bin/bat \
     && rm -rf /var/lib/apt/lists/*
@@ -69,6 +79,9 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
     && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
     && ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Composer (PHP dependency manager)
+RUN curl -fsSL https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 # Install pnpm
 RUN npm install -g pnpm

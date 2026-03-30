@@ -10,7 +10,7 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image used by both agents
+- `docker/base/Dockerfile`: shared toolchain image used by both agents (Node.js, Python, PHP, Git, shell utilities, and more)
 - `docker/claude/Dockerfile`: thin Claude image on top of the shared base
 - `docker/codex/Dockerfile`: thin Codex image on top of the shared base
 - `compose.shared.yml`: common runtime service and shared volumes

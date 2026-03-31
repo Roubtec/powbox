@@ -18,6 +18,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Data | `sqlcmd`, `sqlite3`, `envsubst`, `bc`, `xxd` |
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
+| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo` |
 | Editors | `nano`, `vim` |
 
 ## Git and GitHub
@@ -50,3 +51,8 @@ Everything below is on `PATH` and ready to use — no installation needed.
 ## Network
 
 Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+
+## Installing additional packages
+
+- **System packages:** `sudo apt-get update && sudo apt-get install -y <package>` — sudo is allowed for `apt-get`.
+- **Python packages:** `pip3 install <package>` — no `--break-system-packages` flag needed.

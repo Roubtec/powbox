@@ -52,7 +52,7 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.
-- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh` only (mode `0440`).
+- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh` and `/usr/bin/apt-get` only (mode `0440`).
 - The base image includes `bubblewrap` for sandboxing.
 
 ## File Conventions

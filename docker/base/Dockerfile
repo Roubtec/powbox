@@ -47,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     zsh \
     zstd \
+    poppler-utils \
     php8.2-cli \
     php8.2-xml \
     php8.2-mbstring \
@@ -87,8 +88,12 @@ RUN npm install -g pnpm
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq
 
+# Disable PEP 668 externally-managed marker so agents can pip-install without
+# needing --break-system-packages (this is a disposable container, not a workstation).
+RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+
 # Give 'node' user sudo access for firewall setup at container start.
-RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node \
+RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node
 
 # Set zsh as the default shell for the node user.

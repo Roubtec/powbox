@@ -18,6 +18,9 @@ zstyle ':omz:update' mode disabled
 
 source "$ZSH/oh-my-zsh.sh"
 
+# Default editor (nano is friendlier than vim for most users)
+export EDITOR="nano"
+
 # Container identity
 if [ -n "$CONTAINER_NAME" ]; then
   PROMPT="%{$fg[yellow]%}[$CONTAINER_NAME]%{$reset_color%} $PROMPT"

@@ -29,8 +29,13 @@ fi
 
 AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
 if [ -f "$AGENT_TMPL" ]; then
-	envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
-		< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+	IMAGE_EPOCH=$(cat /home/node/.agent-container/build-epoch 2>/dev/null || echo 0)
+	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
+	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
+		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
+	fi
 fi
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then

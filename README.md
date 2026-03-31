@@ -160,8 +160,14 @@ function agent-prune-volumes {
 }
 
 function agent-prune-stopped {
-    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=claude-") 2>$null
-    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=codex-") 2>$null
+    $claudeNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-"
+    if ($claudeNames) {
+        docker rm $claudeNames
+    }
+    $codexNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-"
+    if ($codexNames) {
+        docker rm $codexNames
+    }
 }
 
 function agent-prune {
@@ -263,8 +269,15 @@ agent-prune-volumes() {
 }
 
 agent-prune-stopped() {
-    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=claude-") 2>/dev/null
-    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=codex-") 2>/dev/null
+    claude_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-")
+    if [ -n "$claude_names" ]; then
+        docker rm $claude_names 2>/dev/null
+    fi
+
+    codex_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-")
+    if [ -n "$codex_names" ]; then
+        docker rm $codex_names 2>/dev/null
+    fi
 }
 
 agent-prune() {

@@ -27,8 +27,17 @@ if [ -d "$AGENT_HOST_SEED_DIR" ] &&
 	fi
 fi
 
-if [ -f /home/node/.codex-container/AGENTS.md ]; then
-	cp /home/node/.codex-container/AGENTS.md "$AGENT_CONFIG_DIR/AGENTS.md"
+AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
+if [ -f "$AGENT_TMPL" ]; then
+	IMAGE_EPOCH=$(cat /home/node/.agent-container/build-epoch 2>/dev/null || echo 0)
+	[[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
+	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
+	[[ "$VOLUME_EPOCH" =~ ^[0-9]+$ ]] || VOLUME_EPOCH=0
+	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
+		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
+	fi
 fi
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then

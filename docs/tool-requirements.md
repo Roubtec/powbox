@@ -120,6 +120,14 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 | `yq` | YAML query and transform — installed via `pip3 install yq` |
 | `sqlite3` | Lightweight local database for scripting and prototyping |
 
+### Document Processing
+
+| Tool | Notes |
+|---|---|
+| `pdftotext` | Extract text from PDFs (`poppler-utils`) |
+| `pdftoppm` | Render PDF pages to images (`poppler-utils`) — used by Claude Code's `Read` tool |
+| `pdfinfo` | PDF metadata (`poppler-utils`) |
+
 ### Database
 
 | Tool | Notes |
@@ -132,7 +140,7 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 | Tool | Notes |
 |---|---|
 | `apt` / `dpkg` | Debian package management |
-| `sudo` | Scoped to `init-firewall.sh` only — see `/etc/sudoers.d/node` |
+| `sudo` | Scoped to `init-firewall.sh` and `apt-get` — see `/etc/sudoers.d/node` |
 
 ---
 

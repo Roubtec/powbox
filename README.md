@@ -19,7 +19,8 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `docker-bake.hcl`: named Bake targets for `base`, `claude`, `codex`, and `all`
 - `commands/`: user-facing host commands for launch, smoke-test, and volume pruning
 - `scripts/`: shared internal build, launch, and smoke-test helpers
-- `claude-container/` and `codex-container/`: agent-specific docs and instruction assets
+- `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
+- `claude-container/` and `codex-container/`: agent-specific docs
 
 ## Build Modes
 
@@ -36,6 +37,29 @@ Examples:
 ./build.sh codex --codex-version latest --no-cache
 ./build.sh base --no-cache --pull
 ```
+
+## Updating Agent Instructions
+
+Container instructions for both agents are generated from a single shared template (`docker/shared/container-agent.md.tmpl`).
+The template is baked into each agent image at build time and rendered with agent-specific variables at container start.
+
+After editing the template, rebuild the affected images for the changes to take effect:
+
+```bash
+./build.sh claude
+./build.sh codex
+# or rebuild everything
+./build.sh
+```
+
+Alternatively, pass `--build` (or `-Build` in PowerShell) to the launch command to rebuild before starting:
+
+```bash
+cc --build
+cx --build
+```
+
+No volume cleanup is needed — the entrypoint conditionally re-renders the template on container start when the image epoch is greater than or equal to the last-written volume epoch.
 
 ## Runtime
 

@@ -1,6 +1,6 @@
 # Container Environment
 
-You are running inside an isolated Docker container. The host filesystem is not accessible except through the bind mount under `/workspace`. You have full autonomy (`--dangerously-skip-permissions`) — the container and its network firewall are your safety boundary.
+You are running inside an isolated Docker container. The host filesystem is not accessible except through the bind mount under `/workspace`. You have full autonomy (`${AGENT_AUTONOMY_FLAG}`) — the container and its network firewall are your safety boundary.
 
 Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` command).
 
@@ -18,7 +18,9 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Data | `sqlcmd`, `sqlite3`, `envsubst`, `bc`, `xxd` |
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
+| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo` |
 | Editors | `nano`, `vim` |
+| Sandbox | `bubblewrap` (`bwrap`) |
 
 ## Git and GitHub
 
@@ -43,10 +45,15 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | `/workspace/<project-slug>` | Project source (bind-mounted from host, read-write); the working directory (slug is `<name>-<hash>`) |
 | `/workspace/<project-slug>/node_modules` | Per-project Docker volume (Linux packages, separate from host) |
 | `/ctx` | Optional read-only context volume (reference code/data, mounted via `--ctx`) |
-| `/home/node/.claude` | Claude config/state (persistent Docker volume) |
+| `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
 | `/home/node/.local/share/pnpm/store` | Shared pnpm cache (persistent Docker volume) |
 
 ## Network
 
 Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+
+## Installing additional packages
+
+- **System packages:** `sudo apt-get update && sudo apt-get install -y <package>` — sudo is allowed for `apt-get`.
+- **Python packages:** `pip3 install <package>` — no `--break-system-packages` flag needed.

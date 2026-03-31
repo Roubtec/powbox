@@ -70,7 +70,7 @@ It is built from the shared base image `powbox-agent-base:latest`.
 
 The shared base contains the common Debian packages, GitHub CLI, `sqlcmd`, `pnpm`, `yq`, Oh My Zsh, firewall logic, shared entrypoint core, and common writable directories.
 
-The Claude top image adds only the Claude binary plus the container-scoped `CLAUDE.md` asset.
+The Claude top image adds only the Claude binary plus the shared container instruction template (rendered to `CLAUDE.md` at startup).
 
 ## Launch Behavior
 

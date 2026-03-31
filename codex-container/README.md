@@ -82,7 +82,7 @@ It is built from the shared base image `powbox-agent-base:latest`.
 
 The shared base contains the common Debian packages, GitHub CLI, `sqlcmd`, `pnpm`, `yq`, Oh My Zsh, firewall logic, shared entrypoint core, common writable directories, and `bubblewrap`.
 
-The Codex top image adds only the Codex CLI package plus the container-scoped `AGENTS.md` asset.
+The Codex top image adds only the Codex CLI package plus the shared container instruction template (rendered to `AGENTS.md` at startup).
 
 ## Launch Behavior
 

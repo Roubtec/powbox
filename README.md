@@ -159,6 +159,16 @@ function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }
 
+function agent-prune-stopped {
+    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=claude-") 2>$null
+    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=codex-") 2>$null
+}
+
+function agent-prune {
+    agent-prune-stopped
+    agent-prune-volumes
+}
+
 function cc-list {
  docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
 }
@@ -197,6 +207,12 @@ cc -Ctx C:\Docs\specs
 # Prune orphaned node_modules volumes (dry run first)
 agent-prune-volumes -WhatIf
 agent-prune-volumes
+
+# Remove all stopped agent containers
+agent-prune-stopped
+
+# Full cleanup: remove stopped containers and prune orphaned volumes
+agent-prune
 
 # List Claude containers
 cc-list
@@ -246,6 +262,16 @@ agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh"
 }
 
+agent-prune-stopped() {
+    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=claude-") 2>/dev/null
+    docker rm $(docker ps -a -q --filter "status=exited" --filter "name=codex-") 2>/dev/null
+}
+
+agent-prune() {
+    agent-prune-stopped
+    agent-prune-volumes
+}
+
 cc-list() {
     docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }
@@ -283,6 +309,12 @@ cc --ctx ~/docs/specs
 
 # Prune orphaned node_modules volumes (prompts for confirmation)
 agent-prune-volumes
+
+# Remove all stopped agent containers
+agent-prune-stopped
+
+# Full cleanup: remove stopped containers and prune orphaned volumes
+agent-prune
 
 # List Claude containers
 cc-list

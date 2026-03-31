@@ -81,9 +81,10 @@ if [ -n "$CTX_PATH" ] && [ ! -d "$CTX_PATH" ]; then
 	exit 1
 fi
 if [ -n "$CTX_PATH" ]; then
-	CTX_PATH="$(cd "$CTX_PATH" && pwd)"
+	CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"
 fi
-PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
+PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
+PROJECT_PATH="${PROJECT_PATH%/}"
 PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
 
 project_hash() {
@@ -109,7 +110,7 @@ project_hash() {
 	fi
 }
 
-PROJECT_HASH="$(project_hash "$PROJECT_PATH")"
+PROJECT_HASH="$(project_hash "$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')")"
 PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 NM_VOLUME="agent-nm-${PROJECT_NAME}"

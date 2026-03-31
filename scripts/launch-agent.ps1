@@ -31,6 +31,17 @@ if ($Ctx -ne "" -and -not (Test-Path $Ctx -PathType Container)) {
 }
 $resolvedCtx = if ($Ctx -ne "") { (Resolve-Path $Ctx).Path } else { "" }
 $resolvedProject = (Resolve-Path $ProjectPath).Path
+# Resolve symlinks/junctions so the same physical directory always gets the same hash,
+# regardless of which path was used to reference it.
+try {
+  $linkTarget = [System.IO.DirectoryInfo]::new($resolvedProject).ResolveLinkTarget($true)
+  if ($linkTarget) { $resolvedProject = $linkTarget.FullName }
+} catch {
+  # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; fall back to Resolve-Path result.
+}
+# Strip trailing directory separator so that "C:\project" and "C:\project\" hash identically.
+$resolvedProject = $resolvedProject.TrimEnd([System.IO.Path]::DirectorySeparatorChar,
+                                            [System.IO.Path]::AltDirectorySeparatorChar)
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
   [System.Security.Cryptography.SHA256]::Create().ComputeHash(

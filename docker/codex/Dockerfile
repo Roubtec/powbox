@@ -9,7 +9,7 @@ USER node
 
 ENV CODEX_CONFIG_DIR=/home/node/.codex
 
-COPY --chown=node:node codex-container/assets/container-agents.md /home/node/.codex-container/AGENTS.md
+COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-codex.sh"]
 CMD ["codex", "--dangerously-bypass-approvals-and-sandbox"]

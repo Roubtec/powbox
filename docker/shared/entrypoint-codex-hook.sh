@@ -27,8 +27,10 @@ if [ -d "$AGENT_HOST_SEED_DIR" ] &&
 	fi
 fi
 
-if [ -f /home/node/.codex-container/AGENTS.md ]; then
-	cp /home/node/.codex-container/AGENTS.md "$AGENT_CONFIG_DIR/AGENTS.md"
+AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
+if [ -f "$AGENT_TMPL" ]; then
+	envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+		< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 fi
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then

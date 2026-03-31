@@ -16,6 +16,8 @@ if [ -d "$AGENT_HOST_SEED_DIR" ] &&
 	fi
 fi
 
-if [ -f /home/node/.claude-container/CLAUDE.md ]; then
-	cp /home/node/.claude-container/CLAUDE.md "$AGENT_CONFIG_DIR/CLAUDE.md"
+AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
+if [ -f "$AGENT_TMPL" ]; then
+	envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+		< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 fi

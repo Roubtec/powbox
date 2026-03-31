@@ -38,7 +38,8 @@ Teach or question the user if that is in the best interest of the final product.
 - `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal.
 - The Compose project name is `powbox` for both agents so shared volumes stay first-class.
 - Codex authenticates via `OPENAI_API_KEY` passed at runtime, never baked into the image.
-- Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file sync.
+- Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering.
+- Container instructions live in a single shared template (`docker/shared/container-agent.md.tmpl`) rendered at startup via `envsubst` with agent-specific variables set in the entrypoint scripts.
 
 ## Project Identity
 

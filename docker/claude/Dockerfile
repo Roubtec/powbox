@@ -13,7 +13,7 @@ ENV DISABLE_AUTOUPDATER=1
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}"
 RUN rm -rf /home/node/.claude/downloads
 
-COPY --chown=node:node claude-container/assets/container-claude.md /home/node/.claude-container/CLAUDE.md
+COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-claude.sh"]
 CMD ["claude", "--dangerously-skip-permissions"]

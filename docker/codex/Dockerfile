@@ -10,7 +10,7 @@ USER node
 ENV CODEX_CONFIG_DIR=/home/node/.codex
 
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
-RUN date +%s > /home/node/.agent-container/build-epoch
+RUN date +%s%N > /home/node/.agent-container/build-epoch
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-codex.sh"]
 CMD ["codex", "--dangerously-bypass-approvals-and-sandbox"]

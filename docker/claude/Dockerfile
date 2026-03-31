@@ -14,7 +14,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}
 RUN rm -rf /home/node/.claude/downloads
 
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
-RUN date +%s > /home/node/.agent-container/build-epoch
+RUN date +%s%N > /home/node/.agent-container/build-epoch
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-claude.sh"]
 CMD ["claude", "--dangerously-skip-permissions"]

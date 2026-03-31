@@ -92,7 +92,23 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 # needing --break-system-packages (this is a disposable container, not a workstation).
 RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
-# Give 'node' user sudo access for firewall setup at container start.
+# Give 'node' user sudo access for firewall setup and runtime package installs.
+#
+# Security rationale: the two allowed commands are intentionally scoped.
+#
+#   init-firewall.sh  — sets up iptables rules that restrict outbound traffic to
+#                       an allowlist; the script itself is root-owned and immutable
+#                       inside the image so agents cannot modify the firewall rules.
+#
+#   apt-get           — allows agents to install system packages at runtime for
+#                       anything not pre-installed in the base image. apt-get runs
+#                       package maintainer scripts as root, so this is a deliberate
+#                       trade-off: the goal is a productive sandbox, not a hardened
+#                       multi-tenant environment. Arbitrary root commands (iptables,
+#                       shell, etc.) are NOT in the sudoers list. The threat being
+#                       guarded against is firewall circumvention, not local
+#                       privilege escalation — these containers are single-user and
+#                       disposable, and container escape is unrelated to sudo scope.
 RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node
 

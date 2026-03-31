@@ -59,7 +59,7 @@ cc --build
 cx --build
 ```
 
-No volume cleanup is needed — the entrypoint re-renders the template on every container start.
+No volume cleanup is needed — the entrypoint conditionally re-renders the template on container start when the image epoch is greater than or equal to the last-written volume epoch.
 
 ## Runtime
 

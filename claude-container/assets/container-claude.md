@@ -20,6 +20,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | File search | `fd`, `bat` |
 | Document processing | `pdftotext`, `pdftoppm`, `pdfinfo` |
 | Editors | `nano`, `vim` |
+| Sandbox | `bubblewrap` (`bwrap`) |
 
 ## Git and GitHub
 

@@ -40,8 +40,14 @@ try {
   # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; fall back to Resolve-Path result.
 }
 # Strip trailing directory separator so that "C:\project" and "C:\project\" hash identically.
-$resolvedProject = $resolvedProject.TrimEnd([System.IO.Path]::DirectorySeparatorChar,
-                                            [System.IO.Path]::AltDirectorySeparatorChar)
+# Guard against trimming filesystem root paths (e.g. "C:\" → "C:" or "/" → ""), which would
+# break Split-Path, hashing, and Docker bind-mount paths. Only trim when the path extends
+# beyond its own root (i.e. it is not itself a root path like "C:\" or "/").
+$pathRoot = [System.IO.Path]::GetPathRoot($resolvedProject)
+if ($resolvedProject.Length -gt $pathRoot.Length) {
+  $resolvedProject = $resolvedProject.TrimEnd([System.IO.Path]::DirectorySeparatorChar,
+                                              [System.IO.Path]::AltDirectorySeparatorChar)
+}
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
   [System.Security.Cryptography.SHA256]::Create().ComputeHash(

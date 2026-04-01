@@ -81,9 +81,14 @@ if [ -n "$CTX_PATH" ] && [ ! -d "$CTX_PATH" ]; then
 	exit 1
 fi
 if [ -n "$CTX_PATH" ]; then
-	CTX_PATH="$(cd "$CTX_PATH" && pwd)"
+	CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"
 fi
-PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
+PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
+# Only strip the trailing slash when the path is not the filesystem root ("/"), since
+# stripping "/" would produce an empty string and break basename and Docker bind-mount paths.
+if [ "$PROJECT_PATH" != "/" ]; then
+	PROJECT_PATH="${PROJECT_PATH%/}"
+fi
 PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
 
 project_hash() {
@@ -109,7 +114,21 @@ project_hash() {
 	fi
 }
 
-PROJECT_HASH="$(project_hash "$PROJECT_PATH")"
+# On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
+# may report paths with inconsistent capitalisation, so we normalise to lowercase before
+# hashing — matching PowerShell's ToLowerInvariant() behaviour.
+# On Linux and macOS the filesystem is case-sensitive, so two paths differing only by case
+# are genuinely distinct directories; lowercasing would risk hash collisions between different
+# workspaces. We therefore preserve the path as-is on those platforms.
+case "$(uname -s)" in
+	MINGW* | MSYS* | CYGWIN*)
+		PROJECT_HASH_INPUT="$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')"
+		;;
+	*)
+		PROJECT_HASH_INPUT="$PROJECT_PATH"
+		;;
+esac
+PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
 PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 NM_VOLUME="agent-nm-${PROJECT_NAME}"

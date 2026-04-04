@@ -57,13 +57,13 @@ claude_latest="" codex_latest=""
 if has_image "$CLAUDE_IMAGE"; then
 	claude_baked="$(baked_claude_version "$CLAUDE_IMAGE")"
 else
-	echo "Image $CLAUDE_IMAGE not found — skipping Claude."
+	echo "Image $CLAUDE_IMAGE not found — Claude baked version will be shown as (unknown)."
 fi
 
 if has_image "$CODEX_IMAGE"; then
 	codex_baked="$(baked_codex_version "$CODEX_IMAGE")"
 else
-	echo "Image $CODEX_IMAGE not found — skipping Codex."
+	echo "Image $CODEX_IMAGE not found — Codex baked version will be shown as (unknown)."
 fi
 
 if command -v npm >/dev/null 2>&1; then

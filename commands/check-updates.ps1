@@ -62,13 +62,13 @@ $codexBaked  = $null
 if (Test-ImageExists $ClaudeImage) {
     $claudeBaked = Get-BakedClaudeVersion $ClaudeImage
 } else {
-    Write-Host "Image $ClaudeImage not found - skipping Claude."
+    Write-Host "Image $ClaudeImage not found — Claude baked version will be shown as (unknown)."
 }
 
 if (Test-ImageExists $CodexImage) {
     $codexBaked = Get-BakedCodexVersion $CodexImage
 } else {
-    Write-Host "Image $CodexImage not found - skipping Codex."
+    Write-Host "Image $CodexImage not found — Codex baked version will be shown as (unknown)."
 }
 
 $claudeLatest = $null

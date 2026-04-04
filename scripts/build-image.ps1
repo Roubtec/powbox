@@ -9,6 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+Push-Location $rootDir
+try {
 
 function Invoke-Bake {
   param(
@@ -74,4 +76,8 @@ switch ($Target) {
     Ensure-BaseImage
     Invoke-Bake -Targets @("codex")
   }
+}
+
+} finally {
+  Pop-Location
 }

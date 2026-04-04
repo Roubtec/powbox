@@ -39,6 +39,25 @@ elif [ ! -f "$GIT_CONFIG_GLOBAL" ]; then
 	: >"$GIT_CONFIG_GLOBAL"
 fi
 
+# Mark workspace bind-mounts as git safe directories. Host-owned project
+# directories under /workspace/ have a different UID than the container's
+# 'node' user, which triggers git's dubious-ownership check.
+# This step is best-effort: a warning is logged if the config is not writable.
+if ! : >>"$GIT_CONFIG_GLOBAL" 2>/dev/null; then
+	echo "Warning: unable to update global git config at $GIT_CONFIG_GLOBAL; skipping safe.directory registration." >&2
+else
+	for _dir in /workspace/*/; do
+		[ -d "$_dir" ] || continue
+		_dir="${_dir%/}"
+		if ! git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$_dir"; then
+			if ! git config --global --add safe.directory "$_dir"; then
+				echo "Warning: failed to add git safe.directory for $_dir; continuing." >&2
+			fi
+		fi
+	done
+	unset _dir
+fi
+
 # If gh is authenticated, register it as the git credential helper.
 if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	if ! (cd "$HOME" && gh auth setup-git); then

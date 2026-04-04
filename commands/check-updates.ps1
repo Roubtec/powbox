@@ -28,13 +28,21 @@ function Get-BakedCodexVersion([string]$Image) {
 
 function Get-LatestNpmVersion([string]$Package) {
     $ver = npm view $Package version 2>$null
-    if ($ver) { return $ver.Trim() }
-    return $null
+    if ($LASTEXITCODE -ne 0 -or -not $ver) {
+        Write-Warning "Could not fetch latest version for ${Package} (registry unreachable?)."
+        return $null
+    }
+    return $ver.Trim()
 }
 
 function Write-Comparison([string]$Agent, [string]$Baked, [string]$Latest) {
     if (-not $Baked) {
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f $Agent, '(unknown)', $Latest)
+        $latestStr = if ($Latest) { $Latest } else { '(unknown)' }
+        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f $Agent, '(unknown)', $latestStr)
+        return
+    }
+    if (-not $Latest) {
+        Write-Host ("  {0,-8}  {1}  latest: (unknown)" -f $Agent, $Baked)
         return
     }
     if ($Baked -eq $Latest) {
@@ -63,8 +71,15 @@ if (Test-ImageExists $CodexImage) {
     Write-Host "Image $CodexImage not found - skipping Codex."
 }
 
-$claudeLatest = Get-LatestNpmVersion '@anthropic-ai/claude-code'
-$codexLatest  = Get-LatestNpmVersion '@openai/codex'
+$claudeLatest = $null
+$codexLatest  = $null
+
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    $claudeLatest = Get-LatestNpmVersion '@anthropic-ai/claude-code'
+    $codexLatest  = Get-LatestNpmVersion '@openai/codex'
+} else {
+    Write-Warning 'npm not found — latest versions will be shown as (unknown).'
+}
 
 # -------------------------------------------------------------------
 # Report

@@ -25,13 +25,19 @@ baked_codex_version() {
 }
 
 latest_npm_version() {
-	npm view "$1" version 2>/dev/null
+	local ver
+	ver="$(npm view "$1" version 2>/dev/null)" || true
+	echo "$ver"
 }
 
 compare() {
 	local agent="$1" baked="$2" latest="$3"
 	if [ -z "$baked" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s\n' "$agent" "(unknown)" "$latest"
+		printf '  %-8s  baked: %-14s  latest: %s\n' "$agent" "(unknown)" "${latest:-(unknown)}"
+		return
+	fi
+	if [ -z "$latest" ]; then
+		printf '  %-8s  %s  latest: (unknown)\n' "$agent" "$baked"
 		return
 	fi
 	if [ "$baked" = "$latest" ]; then
@@ -60,8 +66,12 @@ else
 	echo "Image $CODEX_IMAGE not found — skipping Codex."
 fi
 
-claude_latest="$(latest_npm_version '@anthropic-ai/claude-code')"
-codex_latest="$(latest_npm_version '@openai/codex')"
+if command -v npm >/dev/null 2>&1; then
+	claude_latest="$(latest_npm_version '@anthropic-ai/claude-code')"
+	codex_latest="$(latest_npm_version '@openai/codex')"
+else
+	echo "npm not found — latest versions will be shown as (unknown)."
+fi
 
 # -------------------------------------------------------------------
 # Report

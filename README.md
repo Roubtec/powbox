@@ -107,6 +107,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
+- `commands/check-updates.*` for checking whether newer agent releases are available
 
 ## PowerShell Profile Shortcuts
 
@@ -175,6 +176,10 @@ function agent-prune {
     agent-prune-volumes
 }
 
+function agent-check-updates {
+    & "$env:POWBOX_ROOT\commands\check-updates.ps1" @args
+}
+
 function cc-list {
  docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
 }
@@ -219,6 +224,9 @@ agent-prune-stopped
 
 # Full cleanup: remove stopped containers and prune orphaned volumes
 agent-prune
+
+# Check for newer agent releases
+agent-check-updates
 
 # List Claude containers
 cc-list
@@ -285,6 +293,10 @@ agent-prune() {
     agent-prune-volumes
 }
 
+agent-check-updates() {
+    "$POWBOX_ROOT/commands/check-updates.sh" "$@"
+}
+
 cc-list() {
     docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }
@@ -328,6 +340,9 @@ agent-prune-stopped
 
 # Full cleanup: remove stopped containers and prune orphaned volumes
 agent-prune
+
+# Check for newer agent releases
+agent-check-updates
 
 # List Claude containers
 cc-list

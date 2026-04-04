@@ -180,6 +180,14 @@ function agent-check-updates {
     & "$env:POWBOX_ROOT\commands\check-updates.ps1" @args
 }
 
+function agent-update-claude {
+    & "$env:POWBOX_ROOT\build.ps1" -Target claude -NoCache
+}
+
+function agent-update-codex {
+    & "$env:POWBOX_ROOT\build.ps1" -Target codex -NoCache
+}
+
 function cc-list {
  docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
 }
@@ -227,6 +235,12 @@ agent-prune
 
 # Check for newer agent releases
 agent-check-updates
+
+# Rebuild the Claude image with the latest release
+agent-update-claude
+
+# Rebuild the Codex image with the latest release
+agent-update-codex
 
 # List Claude containers
 cc-list
@@ -297,6 +311,14 @@ agent-check-updates() {
     "$POWBOX_ROOT/commands/check-updates.sh" "$@"
 }
 
+agent-update-claude() {
+    "$POWBOX_ROOT/build.sh" claude --no-cache
+}
+
+agent-update-codex() {
+    "$POWBOX_ROOT/build.sh" codex --no-cache
+}
+
 cc-list() {
     docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }
@@ -343,6 +365,12 @@ agent-prune
 
 # Check for newer agent releases
 agent-check-updates
+
+# Rebuild the Claude image with the latest release
+agent-update-claude
+
+# Rebuild the Codex image with the latest release
+agent-update-codex
 
 # List Claude containers
 cc-list

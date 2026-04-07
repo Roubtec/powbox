@@ -117,7 +117,9 @@ if ($Resume) {
 if (-not $Volatile -and $containerExists) {
   # Detect whether the requested /ctx mount differs from the existing container.
   # If it does, remove the stopped container so it gets recreated with the correct mounts.
-  if (-not $containerRunning) {
+  # When -Ctx is omitted, keep whatever is already mounted (or not) — the user can add
+  # -Volatile to force a clean slate.
+  if (-not $containerRunning -and $Ctx -ne "") {
     $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
     if ($LASTEXITCODE -eq 0) {
       $wantCtx = $resolvedCtx

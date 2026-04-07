@@ -2,6 +2,29 @@
 set -euo pipefail
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
+
+# Merge two JSON files (jq deep merge: base * overlay) into dst.
+# Best-effort: logs a warning and leaves dst untouched on any failure.
+merge_json_files() {
+	local base="$1" overlay="$2" dst="$3"
+	local tmp="${dst}.tmp"
+	rm -f "$tmp"
+	if ! jq -e . "$base" >/dev/null 2>&1; then
+		echo "Warning: invalid JSON in $base; leaving $dst untouched." >&2
+		return
+	fi
+	if ! jq -e . "$overlay" >/dev/null 2>&1; then
+		echo "Warning: invalid JSON in $overlay; leaving $dst untouched." >&2
+		return
+	fi
+	if jq -s '.[0] * .[1]' "$base" "$overlay" > "$tmp"; then
+		mv "$tmp" "$dst"
+	else
+		echo "Warning: failed to merge $overlay into $dst; leaving existing settings untouched." >&2
+		rm -f "$tmp"
+	fi
+}
+
 AGENT_HOST_SEED_DIR="${AGENT_HOST_SEED_DIR:-/home/node/.claude-host}"
 
 # Seed the persistent Claude config volume from a host config directory on the
@@ -39,9 +62,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		SETTINGS_FILE="$AGENT_CONFIG_DIR/settings.json"
 		if [ -f "$STATUSLINE_JSON" ]; then
 			if [ -f "$SETTINGS_FILE" ]; then
-				jq -s '.[0] * .[1]' "$SETTINGS_FILE" "$STATUSLINE_JSON" \
-					> "$SETTINGS_FILE.tmp" \
-					&& mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+				merge_json_files "$SETTINGS_FILE" "$STATUSLINE_JSON" "$SETTINGS_FILE"
 			else
 				cp "$STATUSLINE_JSON" "$SETTINGS_FILE"
 			fi

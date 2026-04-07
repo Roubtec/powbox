@@ -98,11 +98,11 @@ if [ -n "$used_pct" ]; then
     used_int=$(printf '%.0f' "$used_pct")
     rem_int=0
     [ -n "$rem_pct" ] && rem_int=$(printf '%.0f' "$rem_pct")
-    printf "%b    ${BLU}ctx${RST} " "$model_seg"
+    printf "%s    ${BLU}ctx${RST} " "$model_seg"
     bar "$used_int"
     printf "  ${DIM}%d%% used / %d%% left${RST}\n" "$used_int" "$rem_int"
 else
-    printf "%b    ${BLU}ctx${RST} ${DIM}no data yet${RST}\n" "$model_seg"
+    printf "%s    ${BLU}ctx${RST} ${DIM}no data yet${RST}\n" "$model_seg"
 fi
 
 # ── line 3: rate limits ───────────────────────────────────────────────────────
@@ -130,5 +130,5 @@ if [ -n "$seven_pct" ]; then
 fi
 
 if [ -n "$rate_line" ]; then
-    printf "%b\n" "$rate_line"
+    printf "%s\n" "$rate_line"
 fi

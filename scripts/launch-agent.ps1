@@ -74,6 +74,10 @@ foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {
     docker volume create $vol *> $null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Error "Failed to create required Docker volume '$vol'. Ensure Docker is running and you have permission to access the Docker daemon."
+      exit 1
+    }
   }
 }
 

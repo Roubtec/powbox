@@ -125,14 +125,16 @@ normalize_ctx_path() {
 	p="$(printf '%s' "$1" | sed 's|\\|/|g')"
 	case "$(uname -s)" in
 		MINGW* | MSYS* | CYGWIN*)
+			# Lowercase first so that the prefix patterns below only need to match [a-z].
+			# This must stay above the sed substitutions — moving it after them would
+			# leave prefixes intact when Docker reports an uppercase drive letter.
+			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
 			# /run/desktop/mnt/host/c/... → c:/...
 			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)/|\1:/|')"
 			# /host_mnt/c/... → c:/...
 			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)/|\1:/|')"
 			# MSYS/Git Bash native form: /c/... → c:/...
 			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)/|\1:/|')"
-			# Lowercase for case-insensitive comparison.
-			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
 			;;
 	esac
 	# Strip trailing slash.

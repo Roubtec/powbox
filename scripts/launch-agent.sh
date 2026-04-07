@@ -136,6 +136,19 @@ NM_VOLUME="agent-nm-${PROJECT_NAME}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.${AGENT}.yml")
 
+# Ensure shared named volumes exist (compose won't auto-create external volumes).
+SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history)
+if [ "$AGENT" = "claude" ]; then
+	SHARED_VOLUMES+=(claude-config)
+else
+	SHARED_VOLUMES+=(codex-config)
+fi
+for vol in "${SHARED_VOLUMES[@]}"; do
+	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+		docker volume create "$vol" >/dev/null
+	fi
+done
+
 export WORKSPACE_PATH="$PROJECT_PATH"
 export PROJECT_NAME
 
@@ -167,6 +180,31 @@ if [ "$RESUME" = true ]; then
 		exit 1
 	fi
 	exec docker start -ai "$CONTAINER_NAME"
+fi
+
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	# Detect whether the requested /ctx mount differs from the existing container.
+	# If it does, remove the stopped container so it gets recreated with the correct mounts.
+	if [ "$CONTAINER_RUNNING" != true ]; then
+		EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+		WANT_CTX="$CTX_PATH"
+		# Normalise: strip trailing slashes; lowercase only on case-insensitive platforms.
+		case "$(uname -s)" in
+			MINGW* | MSYS* | CYGWIN*)
+				EXISTING_NORM="$(printf '%s' "$EXISTING_CTX" | sed 's|\\|/|g; s|/$||' | tr '[:upper:]' '[:lower:]')"
+				WANT_NORM="$(printf '%s' "$WANT_CTX" | sed 's|\\|/|g; s|/$||' | tr '[:upper:]' '[:lower:]')"
+				;;
+			*)
+				EXISTING_NORM="$(printf '%s' "$EXISTING_CTX" | sed 's|/$||')"
+				WANT_NORM="$(printf '%s' "$WANT_CTX" | sed 's|/$||')"
+				;;
+		esac
+		if [ "$EXISTING_NORM" != "$WANT_NORM" ]; then
+			echo "Context mount changed (was '${EXISTING_CTX}', now '${CTX_PATH}'); recreating container."
+			docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+			CONTAINER_EXISTS=false
+		fi
+	fi
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then

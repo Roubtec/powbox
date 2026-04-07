@@ -65,6 +65,17 @@ $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.$Agent.yml"
 $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
+# Ensure shared named volumes exist (compose won't auto-create external volumes).
+$sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history")
+if ($Agent -eq "claude") { $sharedVolumes += "claude-config" }
+else { $sharedVolumes += "codex-config" }
+foreach ($vol in $sharedVolumes) {
+  docker volume inspect $vol *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker volume create $vol *> $null
+  }
+}
+
 $env:WORKSPACE_PATH = $resolvedProject
 $env:PROJECT_NAME = $projectSlug
 $workspaceMount = "/workspace/$projectSlug"
@@ -101,6 +112,25 @@ if ($Resume) {
 
   docker start -ai $containerName
   exit $LASTEXITCODE
+}
+
+if (-not $Volatile -and $containerExists) {
+  # Detect whether the requested /ctx mount differs from the existing container.
+  # If it does, remove the stopped container so it gets recreated with the correct mounts.
+  if (-not $containerRunning) {
+    $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
+    if ($LASTEXITCODE -eq 0) {
+      $wantCtx = $resolvedCtx
+      # Normalise for comparison: docker may return a WSL path for Windows host paths.
+      $existingNorm = ($existingCtx -replace '\\', '/').TrimEnd('/').ToLowerInvariant()
+      $wantNorm = ($wantCtx -replace '\\', '/').TrimEnd('/').ToLowerInvariant()
+      if ($existingNorm -ne $wantNorm) {
+        Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
+        docker rm $containerName *> $null
+        $containerExists = $false
+      }
+    }
+  }
 }
 
 if (-not $Volatile -and $containerExists) {

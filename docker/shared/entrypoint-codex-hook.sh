@@ -34,6 +34,7 @@ if [ -f "$AGENT_TMPL" ]; then
 	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
 	[[ "$VOLUME_EPOCH" =~ ^[0-9]+$ ]] || VOLUME_EPOCH=0
 	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
+		# shellcheck disable=SC2016 -- envsubst needs literal ${VAR} names
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
 			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"

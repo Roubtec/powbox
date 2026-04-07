@@ -101,12 +101,15 @@ The volume is only present when `--ctx` is specified; otherwise `/ctx` is an emp
 
 ### Context Changes on Resume
 
-When resuming a stopped container, the launch script compares the requested `--ctx` mount against what the container was originally created with.
+When reusing a stopped container (the default, or with `--persist`), the launch script compares the requested `--ctx` mount against what the container was originally created with.
 If the value differs (including going from no context to a new path, or switching between paths), the stopped container is removed and recreated with the updated mount.
 Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) is unaffected by this recreation.
 
-Omitting `--ctx` on resume is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
+Omitting `--ctx` is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
 To explicitly clear a previously mounted context, use `--volatile` to force a fresh container.
+
+Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value passed alongside is ignored (a warning is printed).
+To apply a ctx change, omit `--resume` and let the script auto-detect and recreate as needed.
 
 ## Commands
 

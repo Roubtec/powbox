@@ -110,6 +110,9 @@ if ($Resume) {
     Write-Error "No persisted container named $containerName was found. Start it once normally, or with -Persist if you want to be explicit."
     exit 1
   }
+  if ($Ctx -ne "") {
+    Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
+  }
 
   docker start -ai $containerName
   exit $LASTEXITCODE
@@ -145,6 +148,13 @@ if (-not $Volatile -and $containerExists) {
       }
       Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
       docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting a /ctx mount change."
+          exit 1
+        }
+      }
       $containerExists = $false
     }
   }

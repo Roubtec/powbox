@@ -114,6 +114,31 @@ project_hash() {
 	fi
 }
 
+# Normalise a path for /ctx comparison.
+# On Windows (MSYS/Cygwin), Docker Desktop may report bind-mount sources using
+# Linux-style prefixes rather than the native drive:/... form that the shell sees.
+# Convert all known representations to a canonical drive:/... form so an unchanged
+# mount compares equal regardless of which format Docker happens to report.
+# On Linux/macOS paths are returned as-is (case-sensitive, trailing slash stripped).
+normalize_ctx_path() {
+	local p
+	p="$(printf '%s' "$1" | sed 's|\\|/|g')"
+	case "$(uname -s)" in
+		MINGW* | MSYS* | CYGWIN*)
+			# /run/desktop/mnt/host/c/... → c:/...
+			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)/|\1:/|')"
+			# /host_mnt/c/... → c:/...
+			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)/|\1:/|')"
+			# MSYS/Git Bash native form: /c/... → c:/...
+			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)/|\1:/|')"
+			# Lowercase for case-insensitive comparison.
+			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+			;;
+	esac
+	# Strip trailing slash.
+	printf '%s' "${p%/}"
+}
+
 # On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
 # may report paths with inconsistent capitalisation, so we normalise to lowercase before
 # hashing — matching PowerShell's ToLowerInvariant() behaviour.
@@ -179,6 +204,9 @@ if [ "$RESUME" = true ]; then
 		echo "No persisted container named ${CONTAINER_NAME} was found. Start it once normally, or with --persist if you want to be explicit." >&2
 		exit 1
 	fi
+	if [ -n "$CTX_PATH" ]; then
+		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
 fi
 
@@ -190,25 +218,20 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 
 	if [ -n "$CTX_PATH" ]; then
-		WANT_CTX="$CTX_PATH"
-		# Normalise: strip trailing slashes; lowercase only on case-insensitive platforms.
-		case "$(uname -s)" in
-			MINGW* | MSYS* | CYGWIN*)
-				EXISTING_NORM="$(printf '%s' "$EXISTING_CTX" | sed 's|\\|/|g; s|/$||' | tr '[:upper:]' '[:lower:]')"
-				WANT_NORM="$(printf '%s' "$WANT_CTX" | sed 's|\\|/|g; s|/$||' | tr '[:upper:]' '[:lower:]')"
-				;;
-			*)
-				EXISTING_NORM="$(printf '%s' "$EXISTING_CTX" | sed 's|/$||')"
-				WANT_NORM="$(printf '%s' "$WANT_CTX" | sed 's|/$||')"
-				;;
-		esac
+		EXISTING_NORM="$(normalize_ctx_path "$EXISTING_CTX")"
+		WANT_NORM="$(normalize_ctx_path "$CTX_PATH")"
 		if [ "$EXISTING_NORM" != "$WANT_NORM" ]; then
 			if [ "$CONTAINER_RUNNING" = true ]; then
 				echo "Container ${CONTAINER_NAME} is running with a different /ctx mount. Stop the container first, then relaunch with the new --ctx path." >&2
 				exit 1
 			fi
 			echo "Context mount changed (was '${EXISTING_CTX}', now '${CTX_PATH}'); recreating container."
-			docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
 			CONTAINER_EXISTS=false
 		fi
 	elif [ -n "$EXISTING_CTX" ]; then

@@ -14,6 +14,8 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}
 RUN rm -rf /home/node/.claude/downloads
 
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
+COPY --chown=node:node docker/claude/statusline-command.sh /home/node/.agent-container/statusline-command.sh
+COPY --chown=node:node docker/claude/statusline-settings.json /home/node/.agent-container/statusline-settings.json
 RUN date +%s%N > /home/node/.agent-container/build-epoch
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-claude.sh"]

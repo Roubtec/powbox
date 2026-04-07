@@ -80,7 +80,7 @@ Agent-specific config volumes remain separate:
 
 Either agent can be started first in a clean Docker environment.
 
-Docker will create the shared volumes on demand through the merged `powbox` Compose configuration.
+All shared volumes are marked `external` in the Compose files and pre-created by the launch scripts on first use.
 
 ## Per-Project Workspace Paths
 
@@ -98,6 +98,15 @@ This is useful for giving the agent access to reference code, data sources, or o
 ```
 
 The volume is only present when `--ctx` is specified; otherwise `/ctx` is an empty directory.
+
+### Context Changes on Resume
+
+When resuming a stopped container, the launch script compares the requested `--ctx` mount against what the container was originally created with.
+If the value differs (including going from no context to a new path, or switching between paths), the stopped container is removed and recreated with the updated mount.
+Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) is unaffected by this recreation.
+
+Omitting `--ctx` on resume is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
+To explicitly clear a previously mounted context, use `--volatile` to force a fresh container.
 
 ## Commands
 

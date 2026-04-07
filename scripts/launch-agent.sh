@@ -187,8 +187,9 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	# If it does, remove the stopped container so it gets recreated with the correct mounts.
 	# When --ctx is omitted, keep whatever is already mounted (or not) — the user can add
 	# --volatile to force a clean slate.
-	if [ "$CONTAINER_RUNNING" != true ] && [ -n "$CTX_PATH" ]; then
-		EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+
+	if [ -n "$CTX_PATH" ]; then
 		WANT_CTX="$CTX_PATH"
 		# Normalise: strip trailing slashes; lowercase only on case-insensitive platforms.
 		case "$(uname -s)" in
@@ -202,10 +203,16 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 				;;
 		esac
 		if [ "$EXISTING_NORM" != "$WANT_NORM" ]; then
+			if [ "$CONTAINER_RUNNING" = true ]; then
+				echo "Container ${CONTAINER_NAME} is running with a different /ctx mount. Stop the container first, then relaunch with the new --ctx path." >&2
+				exit 1
+			fi
 			echo "Context mount changed (was '${EXISTING_CTX}', now '${CTX_PATH}'); recreating container."
 			docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
 			CONTAINER_EXISTS=false
 		fi
+	elif [ -n "$EXISTING_CTX" ]; then
+		echo "Note: container has /ctx mounted from a previous session (${EXISTING_CTX}). Use --volatile to start fresh or --ctx to change it."
 	fi
 fi
 

@@ -36,7 +36,8 @@ $resolvedProject = (Resolve-Path $ProjectPath).Path
 try {
   $linkTarget = [System.IO.DirectoryInfo]::new($resolvedProject).ResolveLinkTarget($true)
   if ($linkTarget) { $resolvedProject = $linkTarget.FullName }
-} catch {
+}
+catch {
   # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; fall back to Resolve-Path result.
 }
 # Strip trailing directory separator so that "C:\project" and "C:\project\" hash identically.
@@ -46,7 +47,7 @@ try {
 $pathRoot = [System.IO.Path]::GetPathRoot($resolvedProject)
 if ($resolvedProject.Length -gt $pathRoot.Length) {
   $resolvedProject = $resolvedProject.TrimEnd([System.IO.Path]::DirectorySeparatorChar,
-                                              [System.IO.Path]::AltDirectorySeparatorChar)
+    [System.IO.Path]::AltDirectorySeparatorChar)
 }
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
@@ -119,29 +120,36 @@ if (-not $Volatile -and $containerExists) {
   # If it does, remove the stopped container so it gets recreated with the correct mounts.
   # When -Ctx is omitted, keep whatever is already mounted (or not) — the user can add
   # -Volatile to force a clean slate.
-  if (-not $containerRunning -and $Ctx -ne "") {
-    $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
-    if ($LASTEXITCODE -eq 0) {
-      $wantCtx = $resolvedCtx
-      # Normalise for comparison: Docker Desktop may report Windows bind-mount sources
-      # using Linux-style paths (e.g. /run/desktop/mnt/host/c/..., /host_mnt/c/...,
-      # /mnt/c/...).  Convert those known prefixes to drive:/... form so both sides
-      # use the same representation before comparing.
-      function ConvertFrom-DockerDesktopPath ([string]$p) {
-        $p = $p -replace '\\', '/'
-        if ($p -match '^/run/desktop/mnt/host/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
-        if ($p -match '^/host_mnt/([a-z])/(.+)$')             { return "$($Matches[1]):/$($Matches[2])" }
-        if ($p -match '^/mnt/([a-z])/(.+)$')                  { return "$($Matches[1]):/$($Matches[2])" }
-        return $p
-      }
-      $existingNorm = (ConvertFrom-DockerDesktopPath $existingCtx).TrimEnd('/').ToLowerInvariant()
-      $wantNorm     = (ConvertFrom-DockerDesktopPath $wantCtx).TrimEnd('/').ToLowerInvariant()
-      if ($existingNorm -ne $wantNorm) {
-        Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
-        docker rm $containerName *> $null
-        $containerExists = $false
-      }
+  $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $existingCtx = "" }
+
+  if ($Ctx -ne "") {
+    $wantCtx = $resolvedCtx
+    # Normalise for comparison: Docker Desktop may report Windows bind-mount sources
+    # using Linux-style paths (e.g. /run/desktop/mnt/host/c/..., /host_mnt/c/...,
+    # /mnt/c/...).  Convert those known prefixes to drive:/... form so both sides
+    # use the same representation before comparing.
+    function ConvertFrom-DockerDesktopPath ([string]$p) {
+      $p = $p -replace '\\', '/'
+      if ($p -match '^/run/desktop/mnt/host/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      if ($p -match '^/host_mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      if ($p -match '^/mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      return $p
     }
+    $existingNorm = (ConvertFrom-DockerDesktopPath $existingCtx).TrimEnd('/').ToLowerInvariant()
+    $wantNorm = (ConvertFrom-DockerDesktopPath $wantCtx).TrimEnd('/').ToLowerInvariant()
+    if ($existingNorm -ne $wantNorm) {
+      if ($containerRunning) {
+        Write-Error "Container $containerName is running with a different /ctx mount. Stop the container first, then relaunch with the new -Ctx path."
+        exit 1
+      }
+      Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
+      docker rm $containerName *> $null
+      $containerExists = $false
+    }
+  }
+  elseif ($existingCtx -ne "") {
+    Write-Host "Note: container has /ctx mounted from a previous session ($existingCtx). Use -Volatile to start fresh or -Ctx to change it."
   }
 }
 

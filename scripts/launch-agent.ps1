@@ -123,9 +123,19 @@ if (-not $Volatile -and $containerExists) {
     $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
     if ($LASTEXITCODE -eq 0) {
       $wantCtx = $resolvedCtx
-      # Normalise for comparison: docker may return a WSL path for Windows host paths.
-      $existingNorm = ($existingCtx -replace '\\', '/').TrimEnd('/').ToLowerInvariant()
-      $wantNorm = ($wantCtx -replace '\\', '/').TrimEnd('/').ToLowerInvariant()
+      # Normalise for comparison: Docker Desktop may report Windows bind-mount sources
+      # using Linux-style paths (e.g. /run/desktop/mnt/host/c/..., /host_mnt/c/...,
+      # /mnt/c/...).  Convert those known prefixes to drive:/... form so both sides
+      # use the same representation before comparing.
+      function ConvertFrom-DockerDesktopPath ([string]$p) {
+        $p = $p -replace '\\', '/'
+        if ($p -match '^/run/desktop/mnt/host/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+        if ($p -match '^/host_mnt/([a-z])/(.+)$')             { return "$($Matches[1]):/$($Matches[2])" }
+        if ($p -match '^/mnt/([a-z])/(.+)$')                  { return "$($Matches[1]):/$($Matches[2])" }
+        return $p
+      }
+      $existingNorm = (ConvertFrom-DockerDesktopPath $existingCtx).TrimEnd('/').ToLowerInvariant()
+      $wantNorm     = (ConvertFrom-DockerDesktopPath $wantCtx).TrimEnd('/').ToLowerInvariant()
       if ($existingNorm -ne $wantNorm) {
         Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
         docker rm $containerName *> $null

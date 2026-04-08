@@ -36,7 +36,8 @@ $resolvedProject = (Resolve-Path $ProjectPath).Path
 try {
   $linkTarget = [System.IO.DirectoryInfo]::new($resolvedProject).ResolveLinkTarget($true)
   if ($linkTarget) { $resolvedProject = $linkTarget.FullName }
-} catch {
+}
+catch {
   # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; fall back to Resolve-Path result.
 }
 # Strip trailing directory separator so that "C:\project" and "C:\project\" hash identically.
@@ -46,7 +47,7 @@ try {
 $pathRoot = [System.IO.Path]::GetPathRoot($resolvedProject)
 if ($resolvedProject.Length -gt $pathRoot.Length) {
   $resolvedProject = $resolvedProject.TrimEnd([System.IO.Path]::DirectorySeparatorChar,
-                                              [System.IO.Path]::AltDirectorySeparatorChar)
+    [System.IO.Path]::AltDirectorySeparatorChar)
 }
 $projectName = Split-Path $resolvedProject -Leaf
 $projectHash = [System.BitConverter]::ToString(
@@ -64,6 +65,21 @@ $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.$Agent.yml"
 $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
+
+# Ensure shared named volumes exist (compose won't auto-create external volumes).
+$sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history")
+if ($Agent -eq "claude") { $sharedVolumes += "claude-config" }
+else { $sharedVolumes += "codex-config" }
+foreach ($vol in $sharedVolumes) {
+  docker volume inspect $vol *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker volume create $vol *> $null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Error "Failed to create required Docker volume '$vol'. Ensure Docker is running and you have permission to access the Docker daemon."
+      exit 1
+    }
+  }
+}
 
 $env:WORKSPACE_PATH = $resolvedProject
 $env:PROJECT_NAME = $projectSlug
@@ -98,9 +114,57 @@ if ($Resume) {
     Write-Error "No persisted container named $containerName was found. Start it once normally, or with -Persist if you want to be explicit."
     exit 1
   }
+  if ($Ctx -ne "") {
+    Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
+  }
 
   docker start -ai $containerName
   exit $LASTEXITCODE
+}
+
+if (-not $Volatile -and $containerExists) {
+  # Detect whether the requested /ctx mount differs from the existing container.
+  # If it does, remove the stopped container so it gets recreated with the correct mounts.
+  # When -Ctx is omitted, keep whatever is already mounted (or not) — the user can add
+  # -Volatile to force a clean slate.
+  $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $existingCtx = "" }
+
+  if ($Ctx -ne "") {
+    $wantCtx = $resolvedCtx
+    # Normalise for comparison: Docker Desktop may report Windows bind-mount sources
+    # using Linux-style paths (e.g. /run/desktop/mnt/host/c/..., /host_mnt/c/...,
+    # /mnt/c/...).  Convert those known prefixes to drive:/... form so both sides
+    # use the same representation before comparing.
+    function ConvertFrom-DockerDesktopPath ([string]$p) {
+      $p = $p -replace '\\', '/'
+      if ($p -match '^/run/desktop/mnt/host/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      if ($p -match '^/host_mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      if ($p -match '^/mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
+      return $p
+    }
+    $existingNorm = (ConvertFrom-DockerDesktopPath $existingCtx).TrimEnd('/').ToLowerInvariant()
+    $wantNorm = (ConvertFrom-DockerDesktopPath $wantCtx).TrimEnd('/').ToLowerInvariant()
+    if ($existingNorm -ne $wantNorm) {
+      if ($containerRunning) {
+        Write-Error "Container $containerName is running with a different /ctx mount. Stop the container first, then relaunch with the new -Ctx path."
+        exit 1
+      }
+      Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting a /ctx mount change."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+  elseif ($existingCtx -ne "") {
+    Write-Host "Note: container has /ctx mounted from a previous session ($existingCtx). Use -Volatile to start fresh or -Ctx to change it."
+  }
 }
 
 if (-not $Volatile -and $containerExists) {

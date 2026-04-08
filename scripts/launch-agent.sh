@@ -114,6 +114,39 @@ project_hash() {
 	fi
 }
 
+# Normalise a path for /ctx comparison.
+# On Windows (MSYS/Cygwin), Docker Desktop may report bind-mount sources using
+# Linux-style prefixes rather than the native drive:/... form that the shell sees.
+# Convert all known representations to a canonical drive:/... form so an unchanged
+# mount compares equal regardless of which format Docker happens to report.
+# On Linux/macOS paths are returned as-is (case-sensitive, trailing slash stripped).
+# Backslash-to-slash conversion is Windows-only; on POSIX systems a backslash is
+# a valid path character and must not be silently altered.
+normalize_ctx_path() {
+	local p
+	p="$1"
+	case "$(uname -s)" in
+		MINGW* | MSYS* | CYGWIN*)
+			# Normalize backslashes to forward slashes (Windows paths only).
+			p="$(printf '%s' "$p" | sed 's|\\|/|g')"
+			# Lowercase first so that the prefix patterns below only need to match [a-z].
+			# This must stay above the sed substitutions — moving it after them would
+			# leave prefixes intact when Docker reports an uppercase drive letter.
+			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+			# /run/desktop/mnt/host/c and /run/desktop/mnt/host/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# /host_mnt/c and /host_mnt/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# /mnt/c and /mnt/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# MSYS/Git Bash native form: /c and /c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			;;
+	esac
+	# Strip trailing slash.
+	printf '%s' "${p%/}"
+}
+
 # On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
 # may report paths with inconsistent capitalisation, so we normalise to lowercase before
 # hashing — matching PowerShell's ToLowerInvariant() behaviour.
@@ -135,6 +168,19 @@ NM_VOLUME="agent-nm-${PROJECT_NAME}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.${AGENT}.yml")
+
+# Ensure shared named volumes exist (compose won't auto-create external volumes).
+SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history)
+if [ "$AGENT" = "claude" ]; then
+	SHARED_VOLUMES+=(claude-config)
+else
+	SHARED_VOLUMES+=(codex-config)
+fi
+for vol in "${SHARED_VOLUMES[@]}"; do
+	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+		docker volume create "$vol" >/dev/null
+	fi
+done
 
 export WORKSPACE_PATH="$PROJECT_PATH"
 export PROJECT_NAME
@@ -166,7 +212,39 @@ if [ "$RESUME" = true ]; then
 		echo "No persisted container named ${CONTAINER_NAME} was found. Start it once normally, or with --persist if you want to be explicit." >&2
 		exit 1
 	fi
+	if [ -n "$CTX_PATH" ]; then
+		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
+fi
+
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	# Detect whether the requested /ctx mount differs from the existing container.
+	# If it does, remove the stopped container so it gets recreated with the correct mounts.
+	# When --ctx is omitted, keep whatever is already mounted (or not) — the user can add
+	# --volatile to force a clean slate.
+	EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+
+	if [ -n "$CTX_PATH" ]; then
+		EXISTING_NORM="$(normalize_ctx_path "$EXISTING_CTX")"
+		WANT_NORM="$(normalize_ctx_path "$CTX_PATH")"
+		if [ "$EXISTING_NORM" != "$WANT_NORM" ]; then
+			if [ "$CONTAINER_RUNNING" = true ]; then
+				echo "Container ${CONTAINER_NAME} is running with a different /ctx mount. Stop the container first, then relaunch with the new --ctx path." >&2
+				exit 1
+			fi
+			echo "Context mount changed (was '${EXISTING_CTX}', now '${CTX_PATH}'); recreating container."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	elif [ -n "$EXISTING_CTX" ]; then
+		echo "Note: container has /ctx mounted from a previous session (${EXISTING_CTX}). Use --volatile to start fresh or --ctx to change it."
+	fi
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then

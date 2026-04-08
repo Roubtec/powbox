@@ -19,7 +19,10 @@ services:
 volumes:
   gh-config:
     name: agent-gh-config
+    external: true
   pnpm-store:
     name: agent-pnpm-store
+    external: true
   zsh-history:
     name: agent-zsh-history
+    external: true

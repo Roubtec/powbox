@@ -120,23 +120,27 @@ project_hash() {
 # Convert all known representations to a canonical drive:/... form so an unchanged
 # mount compares equal regardless of which format Docker happens to report.
 # On Linux/macOS paths are returned as-is (case-sensitive, trailing slash stripped).
+# Backslash-to-slash conversion is Windows-only; on POSIX systems a backslash is
+# a valid path character and must not be silently altered.
 normalize_ctx_path() {
 	local p
-	p="$(printf '%s' "$1" | sed 's|\\|/|g')"
+	p="$1"
 	case "$(uname -s)" in
 		MINGW* | MSYS* | CYGWIN*)
+			# Normalize backslashes to forward slashes (Windows paths only).
+			p="$(printf '%s' "$p" | sed 's|\\|/|g')"
 			# Lowercase first so that the prefix patterns below only need to match [a-z].
 			# This must stay above the sed substitutions — moving it after them would
 			# leave prefixes intact when Docker reports an uppercase drive letter.
 			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
-			# /run/desktop/mnt/host/c/... → c:/...
-			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)/|\1:/|')"
-			# /host_mnt/c/... → c:/...
-			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)/|\1:/|')"
-			# /mnt/c/... → c:/...
-			p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)/|\1:/|')"
-			# MSYS/Git Bash native form: /c/... → c:/...
-			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)/|\1:/|')"
+			# /run/desktop/mnt/host/c and /run/desktop/mnt/host/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# /host_mnt/c and /host_mnt/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# /mnt/c and /mnt/c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+			# MSYS/Git Bash native form: /c and /c/... → c: and c:/...
+			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
 			;;
 	esac
 	# Strip trailing slash.

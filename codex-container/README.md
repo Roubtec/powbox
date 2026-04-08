@@ -109,9 +109,9 @@ Persistent volumes:
 - `agent-zsh-history` for shared shell history
 - `agent-nm-<project>-<hash>` for per-project Linux `node_modules`
 
-The shared volumes are declared by `compose.shared.yml` and created on demand by Docker Compose.
+The shared volumes are declared as `external` in `compose.shared.yml` and pre-created automatically by the launch scripts (`cx` / `codex-container.sh` / `codex-container.ps1`) when they do not yet exist.
 
-A clean Docker environment does not require manual volume preparation before launching Codex.
+If you run `docker compose` directly (without the launch scripts), Docker Compose will **not** create external volumes for you — the shared volumes must already exist. Use `docker volume create <name>` for each shared volume before running Compose directly.
 
 ## Smoke Test
 

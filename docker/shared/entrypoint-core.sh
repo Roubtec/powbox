@@ -56,6 +56,12 @@ else
 		fi
 	done
 	unset _dir
+
+	# Ignore file-mode (chmod) differences between the container and the
+	# host filesystem.  Windows hosts in particular report every file as
+	# executable, which causes noisy diffs and accidental mode-change
+	# commits when working from inside the container.
+	git config --global core.filemode false || true
 fi
 
 # If gh is authenticated, register it as the git credential helper.

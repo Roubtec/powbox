@@ -243,7 +243,11 @@ elseif ($Volatile -and -not $Persist) {
 }
 
 $envArgs = @("--name", $containerName, "-e", "CONTAINER_NAME=$containerName")
-if ($Agent -eq "codex") {
+if ($Agent -eq "claude") {
+  $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else { "" }
+  $envArgs += @("-e", "ANTHROPIC_API_KEY=$apiKey")
+}
+elseif ($Agent -eq "codex") {
   $apiKey = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { "" }
   $envArgs += @("-e", "OPENAI_API_KEY=$apiKey")
 }

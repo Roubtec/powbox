@@ -58,6 +58,26 @@ else
 	unset _dir
 fi
 
+# On Windows hosts (detected via the WSL2 kernel's "microsoft" release
+# string), every file mounted from the host appears executable to the
+# Linux container, which produces spurious mode-change diffs.  Disable
+# file-mode tracking locally in each workspace repository so that the
+# host/container mismatch does not pollute diffs or commits.
+# Set CORE_FILEMODE=false to force this behaviour on Windows hosts that
+# use the older Hyper-V backend (where the kernel check does not fire).
+if uname -r 2>/dev/null | grep -qi microsoft || [ "${CORE_FILEMODE:-}" = "false" ]; then
+	for _dir in /workspace/*/; do
+		[ -d "$_dir" ] || continue
+		_dir="${_dir%/}"
+		if git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+			if ! git -C "$_dir" config --local core.filemode false; then
+				echo "Warning: failed to set git core.filemode=false for $_dir; continuing." >&2
+			fi
+		fi
+	done
+	unset _dir
+fi
+
 # If gh is authenticated, register it as the git credential helper.
 if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	if ! (cd "$HOME" && gh auth setup-git); then

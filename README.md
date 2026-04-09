@@ -20,7 +20,6 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `commands/`: user-facing host commands for launch, smoke-test, and volume pruning
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
-- `claude-container/` and `codex-container/`: agent-specific docs
 
 ## Build Modes
 
@@ -77,6 +76,9 @@ Agent-specific config volumes remain separate:
 
 - `claude-config`
 - `codex-config`
+
+Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless).
+Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
 
 Either agent can be started first in a clean Docker environment.
 
@@ -426,6 +428,64 @@ Smoke test the built images with:
 ```
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
+
+## Runtime Sanity Check
+
+Launch an interactive shell with `--shell --volatile` to verify the container environment.
+
+### Claude
+
+```bash
+./commands/claude-container.sh /path/to/project --shell --volatile
+```
+
+Inside the container:
+
+```bash
+whoami
+echo "$CLAUDE_CONFIG_DIR"
+claude --version
+gh --version
+pnpm config get store-dir
+pwd
+ls -ld node_modules
+```
+
+Expected results:
+
+- user is `node`
+- `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
+- the pnpm store is `/home/node/.local/share/pnpm/store`
+- working directory is `/workspace/<project>-<hash>`
+- `node_modules` is writable by `node`
+
+### Codex
+
+```bash
+./commands/codex-container.sh /path/to/project --shell --volatile
+```
+
+Inside the container:
+
+```bash
+whoami
+echo "$CODEX_CONFIG_DIR"
+codex --version
+bwrap --version
+gh --version
+pnpm config get store-dir
+pwd
+ls -ld node_modules
+```
+
+Expected results:
+
+- user is `node`
+- `CODEX_CONFIG_DIR` is `/home/node/.codex`
+- `bwrap` is available
+- the pnpm store is `/home/node/.local/share/pnpm/store`
+- working directory is `/workspace/<project>-<hash>`
+- `node_modules` is writable by `node`
 
 ## License
 

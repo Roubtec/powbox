@@ -312,7 +312,9 @@ elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 fi
 
 EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME")
-if [ "$AGENT" = "codex" ]; then
+if [ "$AGENT" = "claude" ]; then
+	EXTRA_ENV+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
+elif [ "$AGENT" = "codex" ]; then
 	EXTRA_ENV+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY:-}")
 fi
 

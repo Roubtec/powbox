@@ -3,6 +3,7 @@ services:
     image: powbox-claude:latest
     environment:
       CLAUDE_HOST_SEED_DIR: /home/node/.claude-host
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - claude-config:/home/node/.claude
 

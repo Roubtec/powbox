@@ -85,6 +85,24 @@ if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	fi
 fi
 
+# Shadow nested node_modules in monorepo workspaces with tmpfs so that
+# container-native (Linux) binaries never mix with host-native binaries.
+# The root node_modules is already shadowed by a Docker volume mount;
+# this covers subpackage directories detected from pnpm-workspace.yaml,
+# package.json workspaces, or .powbox.yml.  See README.md for details.
+for _dir in /workspace/*/; do
+	[ -d "$_dir" ] || continue
+	_dir="${_dir%/}"
+	_targets=$(detect-shadows.sh "$_dir" 2>/dev/null || true)
+	if [ -n "$_targets" ]; then
+		# shellcheck disable=SC2086
+		if ! sudo /usr/local/bin/shadow-mounts.sh $_targets; then
+			echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
+		fi
+	fi
+done
+unset _dir _targets
+
 if [ "$#" -eq 0 ]; then
 	exec zsh
 fi

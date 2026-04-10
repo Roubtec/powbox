@@ -19,6 +19,7 @@ Teach or question the user if that is in the best interest of the final product.
 - User-facing host commands: `commands/`
 - Internal build/launch helpers: `scripts/`
 - Entrypoint core and hooks: `docker/shared/`
+- Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh`
 
 ## Key Paths
 
@@ -40,6 +41,7 @@ Teach or question the user if that is in the best interest of the final product.
 - Codex authenticates via `OPENAI_API_KEY` passed at runtime, never baked into the image.
 - Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering.
 - Container instructions live in a single shared template (`docker/shared/container-agent.md.tmpl`) rendered at startup via `envsubst` with agent-specific variables set in the entrypoint scripts.
+- Workspace shadow mounts run after git setup: `detect-shadows.sh` finds subpackage `node_modules` directories, then `shadow-mounts.sh` overlays them with tmpfs.  The `shadow-refresh` command re-runs detection for packages added mid-session.
 
 ## Project Identity
 
@@ -48,12 +50,14 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 ## Volumes and Stores
 
 - `node_modules` is overlaid with a per-project Docker volume at `/workspace/<project-slug>/node_modules`.
+- Subpackage `node_modules` directories in monorepo workspaces are shadowed with tmpfs at container start (auto-detected from `pnpm-workspace.yaml`, `package.json` workspaces, or `.powbox.yml`).  These are ephemeral — lost on container stop, repopulated from the pnpm store on next `pnpm install`.
 - pnpm's store is pinned outside the workspace with `package-import-method=copy` (workspace bind mount and pnpm volume are different filesystems).
 
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.
-- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh` and `/usr/bin/apt-get` only (mode `0440`).
+- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh`, `/usr/local/bin/shadow-mounts.sh`, and `/usr/bin/apt-get` only (mode `0440`).
+- `shadow-mounts.sh` refuses to mount outside `/workspace/`; tmpfs mounts are container-namespace-scoped and invisible to the host.
 - The base image includes `bubblewrap` for sandboxing.
 
 ## File Conventions

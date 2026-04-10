@@ -92,13 +92,21 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 # needing --break-system-packages (this is a disposable container, not a workstation).
 RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
-# Give 'node' user sudo access for firewall setup and runtime package installs.
+# Give 'node' user sudo access for firewall setup, workspace shadow mounts,
+# and runtime package installs.
 #
-# Security rationale: the two allowed commands are intentionally scoped.
+# Security rationale: the three allowed commands are intentionally scoped.
 #
 #   init-firewall.sh  — sets up iptables rules that restrict outbound traffic to
 #                       an allowlist; the script itself is root-owned and immutable
 #                       inside the image so agents cannot modify the firewall rules.
+#
+#   shadow-mounts.sh  — mounts tmpfs over workspace subdirectories (e.g. nested
+#                       node_modules in monorepos) to separate container-native
+#                       binaries from host-native binaries.  The script is root-
+#                       owned and immutable; it refuses to mount outside /workspace/.
+#                       tmpfs mounts are container-namespace-scoped and invisible
+#                       to the host — not an escape vector.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs
@@ -109,7 +117,7 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 #                       guarded against is firewall circumvention, not local
 #                       privilege escalation — these containers are single-user and
 #                       disposable, and container escape is unrelated to sudo scope.
-RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
+RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node
 
 # Set zsh as the default shell for the node user.
@@ -130,6 +138,9 @@ RUN mkdir -p \
 
 # Copy startup scripts while still root.
 COPY --chmod=755 docker/shared/init-firewall.sh /usr/local/bin/init-firewall.sh
+COPY --chmod=755 docker/shared/shadow-mounts.sh /usr/local/bin/shadow-mounts.sh
+COPY --chmod=755 docker/shared/detect-shadows.sh /usr/local/bin/detect-shadows.sh
+COPY --chmod=755 docker/shared/shadow-refresh /usr/local/bin/shadow-refresh
 COPY --chmod=755 docker/shared/entrypoint-core.sh /usr/local/bin/entrypoint-core.sh
 COPY --chmod=755 docker/shared/entrypoint-claude.sh /usr/local/bin/entrypoint-claude.sh
 COPY --chmod=755 docker/shared/entrypoint-codex.sh /usr/local/bin/entrypoint-codex.sh

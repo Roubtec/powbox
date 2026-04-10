@@ -57,7 +57,7 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.
 - `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh`, `/usr/local/bin/shadow-mounts.sh`, and `/usr/bin/apt-get` only (mode `0440`).
-- `shadow-mounts.sh` refuses to mount outside `/workspace/`; tmpfs mounts are container-namespace-scoped and invisible to the host.
+- `shadow-mounts.sh` refuses to mount outside `/workspace/`; tmpfs mounts are container-namespace-scoped and invisible to the host.  Requires `CAP_SYS_ADMIN` at runtime (Docker's seccomp profile blocks the `mount` syscall without it).
 - The base image includes `bubblewrap` for sandboxing.
 
 ## File Conventions

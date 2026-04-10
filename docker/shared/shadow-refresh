@@ -37,4 +37,9 @@ if [ ${#all_targets[@]} -eq 0 ]; then
 	exit 0
 fi
 
-sudo /usr/local/bin/shadow-mounts.sh "${all_targets[@]}"
+if ! sudo /usr/local/bin/shadow-mounts.sh "${all_targets[@]}"; then
+	status=$?
+	echo "shadow-refresh: failed to mount shadow directories." >&2
+	echo "Hint: ensure the container has mount permissions (CAP_SYS_ADMIN in compose.shared.yml)." >&2
+	exit "$status"
+fi

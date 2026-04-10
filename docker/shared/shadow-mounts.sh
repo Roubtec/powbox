@@ -16,6 +16,11 @@ NODE_GID="$(id -g node)"
 workspace_root="$(realpath /workspace)"
 mounted=0
 
+# Per-mount tmpfs size cap.  Prevents unbounded memory consumption from large
+# node_modules trees — when the limit is hit, pnpm install gets a clear ENOSPC
+# error rather than silently eating RAM.  Override via SHADOW_TMPFS_SIZE.
+TMPFS_SIZE="${SHADOW_TMPFS_SIZE:-512m}"
+
 for target in "$@"; do
 	if ! resolved_target="$(realpath -m -- "$target")"; then
 		echo "shadow-mounts: refusing to shadow '$target' (unable to resolve path)." >&2
@@ -38,7 +43,7 @@ for target in "$@"; do
 	fi
 
 	mkdir -p "$resolved_target"
-	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755" tmpfs "$resolved_target"
+	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755,size=$TMPFS_SIZE" tmpfs "$resolved_target"
 	mounted=$((mounted + 1))
 done
 

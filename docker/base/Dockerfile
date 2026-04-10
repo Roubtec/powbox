@@ -106,7 +106,9 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 #                       binaries from host-native binaries.  The script is root-
 #                       owned and immutable; it refuses to mount outside /workspace/.
 #                       tmpfs mounts are container-namespace-scoped and invisible
-#                       to the host — not an escape vector.
+#                       to the host — not an escape vector.  Requires CAP_SYS_ADMIN
+#                       at runtime (Docker's seccomp profile blocks the mount syscall
+#                       without it); granted in compose.shared.yml.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs

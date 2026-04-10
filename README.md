@@ -166,11 +166,20 @@ With a warm store this typically takes only a few seconds.
 
 The root `node_modules` Docker volume is unaffected and persists across restarts as before.
 
+### Configuration
+
+Each tmpfs mount is capped at **512 MB** by default.
+Override the per-mount limit with the `SHADOW_TMPFS_SIZE` environment variable (any value accepted by `mount -o size=`, e.g. `1g`, `256m`).
+If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
+
 ### Security
 
 `shadow-mounts.sh` is a root-owned, immutable script invoked via scoped sudo.
 It refuses to mount outside `/workspace/`.
 tmpfs mounts are container-namespace-scoped and invisible to the host — not an escape vector.
+
+The container requires **`CAP_SYS_ADMIN`** (granted in `compose.shared.yml`) because Docker's default seccomp profile blocks the `mount` syscall without it.
+This capability is scoped to the sudoers-allowed `shadow-mounts.sh` script — the `node` user cannot invoke arbitrary mount commands.
 
 ## Commands
 

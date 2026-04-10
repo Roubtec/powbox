@@ -95,7 +95,7 @@ for _dir in /workspace/*/; do
 	_dir="${_dir%/}"
 	mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
 	if [ "${#_targets[@]}" -gt 0 ]; then
-		if ! sudo /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+		if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
 			echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
 		fi
 	fi

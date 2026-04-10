@@ -59,6 +59,7 @@ fi
 # --- .powbox.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"
 if [ -f "$POWBOX_YML" ]; then
+	workspace_resolved="$(realpath -- "$WORKSPACE_DIR")"
 	while IFS= read -r pattern; do
 		[ -z "$pattern" ] && continue
 		case "$pattern" in
@@ -69,7 +70,16 @@ if [ -f "$POWBOX_YML" ]; then
 		# shellcheck disable=SC2086
 		for shadow_dir in $WORKSPACE_DIR/$pattern; do
 			[ -d "$shadow_dir" ] || continue
-			shadows+=("$shadow_dir")
+			# Resolve symlinks / ".." and validate the path stays under WORKSPACE_DIR.
+			resolved="$(realpath -- "$shadow_dir")" || continue
+			case "$resolved" in
+				"$workspace_resolved"/*)
+					shadows+=("$resolved")
+					;;
+				*)
+					echo "detect-shadows: skipping '$shadow_dir' — resolves outside workspace root." >&2
+					;;
+			esac
 		done
 	done < <(yq -r '.shadow[]? // empty' "$POWBOX_YML" 2>/dev/null || true)
 fi

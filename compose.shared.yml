@@ -6,6 +6,7 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+      - SYS_ADMIN
     environment:
       GH_CONFIG_DIR: /home/node/.config/gh
       GH_HOST_SEED_DIR: /home/node/.config/gh-host

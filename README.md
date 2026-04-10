@@ -113,6 +113,77 @@ To explicitly clear a previously mounted context, use `--volatile` to force a fr
 Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value passed alongside is ignored (a warning is printed).
 To apply a ctx change, omit `--resume` and let the script auto-detect and recreate as needed.
 
+## Workspace Shadow Mounts
+
+When the host OS differs from the container OS (e.g. Windows host, Linux container), Node.js native binaries compiled for one platform break on the other.
+The root `node_modules` is already handled by a per-project Docker volume, but monorepo subpackages each have their own `node_modules` that would otherwise be shared through the bind mount.
+
+At container start, the entrypoint auto-detects workspace subpackages and mounts tmpfs over each nested `node_modules` directory.
+This shadows the host content inside the container so that `pnpm install` (or `npm install`) writes Linux-native binaries into an ephemeral filesystem that never touches the host.
+
+### Auto-Detection
+
+The entrypoint scans for workspace declarations in this order:
+
+1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs
+2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`)
+3. **`.powbox.yml`** — reads custom `shadow` glob patterns (see below)
+
+All matched directories get a tmpfs overlay.
+If none of these files exist, the feature is a no-op.
+
+### Custom Shadow Paths (`.powbox.yml`)
+
+For paths that auto-detection does not cover, add a `.powbox.yml` to the project root:
+
+```yaml
+shadow:
+  - packages/*/node_modules       # same as what auto-detect would find
+  - tools/legacy-build/vendor     # non-standard path
+```
+
+Patterns are resolved as globs relative to the project root.
+Only directories that exist at container start are shadowed.
+
+Auto-detection and `.powbox.yml` patterns are merged and deduplicated.
+
+### Mid-Session Refresh
+
+If you add a new workspace package after the container has started, its `node_modules` will not be shadowed until you run:
+
+```bash
+shadow-refresh
+```
+
+This re-runs detection and mounts tmpfs over any new directories that were not previously shadowed.
+Already-mounted paths are skipped.
+
+### Lifecycle
+
+Shadow mounts are **ephemeral** — they use tmpfs (memory-backed) and are lost when the container stops.
+After restarting (or resuming) a container, run `pnpm install` to repopulate subpackage `node_modules` from the shared pnpm store.
+With a warm store this typically takes only a few seconds.
+
+The root `node_modules` Docker volume is unaffected and persists across restarts as before.
+
+### Configuration
+
+Each tmpfs mount is capped at **512 MB** by default.
+Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `1g`, `256m`) before launching the container.
+Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
+If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
+
+### Security
+
+`shadow-mounts.sh` is a root-owned, immutable script invoked via scoped sudo.
+It refuses to mount outside `/workspace/`.
+tmpfs mounts are container-namespace-scoped and invisible to the host — not an escape vector.
+
+The container requires **`CAP_SYS_ADMIN`** (granted in `compose.shared.yml`) because Docker's default seccomp profile blocks the `mount` syscall without it.
+Note that `CAP_SYS_ADMIN` is granted to the container as a whole by Docker — sudoers restricts which commands may be run via `sudo`, but does not scope a Linux capability to a single script.
+The `node` user cannot invoke arbitrary commands as root (sudo is scoped), but any process in the container holds `CAP_SYS_ADMIN` for its lifetime.
+`shadow-refresh` requires this capability mid-session, so it cannot be dropped after startup.
+
 ## Commands
 
 The user-facing command surface lives at the repo root and in `commands/`:

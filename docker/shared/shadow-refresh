@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Re-run workspace shadow detection and mount any new subpackage
+# node_modules that appeared since the container started.
+#
+# Safe to call at any time — already-mounted paths are skipped.
+# Useful after adding a new workspace package mid-session.
+#
+# Usage: shadow-refresh [workspace-dir]
+#        Defaults to scanning all directories under /workspace/.
+set -euo pipefail
+
+if [ $# -gt 0 ]; then
+	dirs=("$1")
+else
+	dirs=()
+	for d in /workspace/*/; do
+		[ -d "$d" ] || continue
+		dirs+=("${d%/}")
+	done
+fi
+
+if [ ${#dirs[@]} -eq 0 ]; then
+	echo "No workspace directories found under /workspace/."
+	exit 0
+fi
+
+all_targets=()
+for ws_dir in "${dirs[@]}"; do
+	while IFS= read -r target; do
+		[ -z "$target" ] && continue
+		all_targets+=("$target")
+	done < <(detect-shadows.sh "$ws_dir")
+done
+
+if [ ${#all_targets[@]} -eq 0 ]; then
+	echo "No directories to shadow."
+	exit 0
+fi
+
+sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${all_targets[@]}" || {
+	status=$?
+	echo "shadow-refresh: failed to mount shadow directories." >&2
+	echo "Hint: ensure the container has mount permissions (CAP_SYS_ADMIN in compose.shared.yml)." >&2
+	exit "$status"
+}

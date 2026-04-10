@@ -1,15 +1,16 @@
 #!/bin/sh
 
 # ── helpers ────────────────────────────────────────────────────────────────────
-# ANSI color codes (dim-friendly: no bold, just regular colors)
-RED='\033[0;31m'
-YEL='\033[0;33m'
-GRN='\033[0;32m'
-CYN='\033[0;36m'
-BLU='\033[0;34m'
-MAG='\033[0;35m'
-DIM='\033[2m'
-RST='\033[0m'
+# ANSI color codes — use printf so variables hold actual escape bytes.
+# (Single-quoted '\033' stays literal; printf interprets it into a real ESC char.)
+RED=$(printf '\033[0;31m')
+YEL=$(printf '\033[0;33m')
+GRN=$(printf '\033[0;32m')
+CYN=$(printf '\033[0;36m')
+BLU=$(printf '\033[0;34m')
+MAG=$(printf '\033[0;35m')
+DIM=$(printf '\033[2m')
+RST=$(printf '\033[0m')
 
 # Build a 10-char block progress bar: ████████░░  (filled/empty)
 bar() {

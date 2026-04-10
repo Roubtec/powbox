@@ -8,7 +8,7 @@
 #
 # Usage: detect-shadows.sh <workspace-dir>
 set -euo pipefail
-shopt -s nullglob
+shopt -s nullglob globstar
 
 WORKSPACE_DIR="${1:?usage: detect-shadows.sh <workspace-dir>}"
 

@@ -11,28 +11,34 @@
 # mounts are container-namespace-scoped and invisible to the host.
 set -euo pipefail
 
-NODE_UID=1000
-NODE_GID=1000
+NODE_UID="$(id -u node)"
+NODE_GID="$(id -g node)"
+workspace_root="$(realpath /workspace)"
 mounted=0
 
 for target in "$@"; do
-	# Validate: must be an absolute path under /workspace/.
-	case "$target" in
-		/workspace/*)
+	if ! resolved_target="$(realpath -m -- "$target")"; then
+		echo "shadow-mounts: refusing to shadow '$target' (unable to resolve path)." >&2
+		continue
+	fi
+
+	# Validate: must resolve to a path under /workspace/.
+	case "$resolved_target" in
+		"$workspace_root"/*)
 			;;
 		*)
-			echo "shadow-mounts: refusing to shadow '$target' (must be under /workspace/)." >&2
+			echo "shadow-mounts: refusing to shadow '$target' (must resolve under /workspace/)." >&2
 			continue
 			;;
 	esac
 
 	# Skip if already a mountpoint (handles re-runs and shadow-refresh).
-	if mountpoint -q "$target" 2>/dev/null; then
+	if mountpoint -q "$resolved_target" 2>/dev/null; then
 		continue
 	fi
 
-	mkdir -p "$target"
-	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755" tmpfs "$target"
+	mkdir -p "$resolved_target"
+	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755" tmpfs "$resolved_target"
 	mounted=$((mounted + 1))
 done
 

@@ -220,6 +220,8 @@ function cc {
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Ctx $Ctx
+    # Comment out the next line to stay in the original directory when control returns to this terminal.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function cx {
@@ -239,6 +241,8 @@ function cx {
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Exec $Exec -Ctx $Ctx
+    # Comment out the next line to stay in the original directory when control returns to this terminal.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function agent-prune-volumes {
@@ -359,7 +363,10 @@ cc() {
     if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     else
-        "$POWBOX_ROOT/commands/claude-container.sh" "$@"
+        local target="$1"; shift
+        "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
+        # Comment out the next line to stay in the original directory when control returns to this terminal.
+        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
     fi
 }
 
@@ -367,7 +374,10 @@ cx() {
     if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     else
-        "$POWBOX_ROOT/commands/codex-container.sh" "$@"
+        local target="$1"; shift
+        "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
+        # Comment out the next line to stay in the original directory when control returns to this terminal.
+        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
     fi
 }
 

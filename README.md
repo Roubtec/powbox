@@ -215,13 +215,13 @@ function cc {
         [switch]$Volatile,
         [string]$Ctx = ""
     )
-    # Comment out the next line to stay in the original directory after the container exits.
-    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Ctx $Ctx
+    # Comment out the next line to stay in the original directory after the container exits.
+    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function cx {
@@ -236,13 +236,13 @@ function cx {
         [string]$Exec = "",
         [string]$Ctx = ""
     )
-    # Comment out the next line to stay in the original directory after the container exits.
-    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Exec $Exec -Ctx $Ctx
+    # Comment out the next line to stay in the original directory after the container exits.
+    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function agent-prune-volumes {
@@ -364,9 +364,9 @@ cc() {
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift
+        "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
         # Comment out the next line to stay in the original directory after the container exits.
-        cd "$target" || return
-        "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
+        cd "$target" || true
     fi
 }
 
@@ -375,9 +375,9 @@ cx() {
         "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift
+        "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
         # Comment out the next line to stay in the original directory after the container exits.
-        cd "$target" || return
-        "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
+        cd "$target" || true
     fi
 }
 

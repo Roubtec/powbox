@@ -215,6 +215,8 @@ function cc {
         [switch]$Volatile,
         [string]$Ctx = ""
     )
+    # Comment out the next line to stay in the original directory after the container exits.
+    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
@@ -234,6 +236,8 @@ function cx {
         [string]$Exec = "",
         [string]$Ctx = ""
     )
+    # Comment out the next line to stay in the original directory after the container exits.
+    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
@@ -359,7 +363,10 @@ cc() {
     if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     else
-        "$POWBOX_ROOT/commands/claude-container.sh" "$@"
+        local target="$1"; shift
+        # Comment out the next line to stay in the original directory after the container exits.
+        cd "$target" || return
+        "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     fi
 }
 
@@ -367,7 +374,10 @@ cx() {
     if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     else
-        "$POWBOX_ROOT/commands/codex-container.sh" "$@"
+        local target="$1"; shift
+        # Comment out the next line to stay in the original directory after the container exits.
+        cd "$target" || return
+        "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     fi
 }
 

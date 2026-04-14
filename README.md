@@ -220,8 +220,8 @@ function cc {
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Ctx $Ctx
-    # Comment out the next line to stay in the original directory after the container exits.
-    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
+    # Comment out the next line to stay in the original directory when control returns to this terminal.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function cx {
@@ -241,8 +241,8 @@ function cx {
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
         -Exec $Exec -Ctx $Ctx
-    # Comment out the next line to stay in the original directory after the container exits.
-    if ($PSBoundParameters.ContainsKey('ProjectPath')) { Set-Location -LiteralPath $ProjectPath }
+    # Comment out the next line to stay in the original directory when control returns to this terminal.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
 }
 
 function agent-prune-volumes {
@@ -365,8 +365,8 @@ cc() {
     else
         local target="$1"; shift
         "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
-        # Comment out the next line to stay in the original directory after the container exits.
-        cd "$target" || true
+        # Comment out the next line to stay in the original directory when control returns to this terminal.
+        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
     fi
 }
 
@@ -376,8 +376,8 @@ cx() {
     else
         local target="$1"; shift
         "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
-        # Comment out the next line to stay in the original directory after the container exits.
-        cd "$target" || true
+        # Comment out the next line to stay in the original directory when control returns to this terminal.
+        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
     fi
 }
 

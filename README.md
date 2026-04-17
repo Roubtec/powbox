@@ -18,6 +18,7 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `compose.codex.yml`: Codex-specific runtime overlay
 - `docker-bake.hcl`: named Bake targets for `base`, `claude`, `codex`, and `all`
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, and session history reset
+- `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
 
@@ -227,104 +228,39 @@ On PowerShell, use `-WhatIf` for a preview and `-Force` to skip the confirmation
 .\commands\reset-claude-history.ps1 -Force
 ```
 
-## PowerShell Profile Shortcuts
+## Profile Shortcuts
 
-Add the following to your `$PROFILE` (`notepad $PROFILE`) to get short commands that default to the current working directory.
+The repo ships a pair of shell libraries — `shell/powbox.sh` (bash/zsh) and `shell/powbox.ps1` (PowerShell) — that define all the short commands (`cc`, `cx`, `agent-prune`, `agent-list`, etc.). Dot-source or `source` the appropriate file from your shell profile and pull updates with `git pull`; there is nothing to copy-paste per release.
 
-Set `$env:POWBOX_ROOT` to wherever you cloned this repo, then reload your profile (`& $PROFILE`).
+Functions exposed by both libraries:
+
+- `cc`, `cx` — launch Claude or Codex in the current directory (or a given path), forwarding every flag to the underlying `commands/*-container.*` script
+- `cc-list`, `cx-list`, `agent-list` — list agent containers
+- `agent-volumes` — list agent-related Docker volumes
+- `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
+- `agent-check-updates` — compare baked agent versions against the latest npm releases
+- `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
+
+### Environment Variables
+
+Both libraries honour the same variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `POWBOX_ROOT` | auto-detected from the script's location | Path to your PowBox checkout. Only needed if auto-detection fails. |
+| `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
+
+Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.
+
+### PowerShell
+
+Add one line to your `$PROFILE` (`notepad $PROFILE`) and reload with `& $PROFILE`:
 
 ```powershell
-# PowBox agent shortcuts — adjust path to your checkout
-$env:POWBOX_ROOT = "C:\Code\powbox"
+# Optional: only needed if auto-detection fails.
+# $env:POWBOX_ROOT = "C:\path\to\powbox"
 
-function cc {
-    param(
-        [string]$ProjectPath = (Get-Location).Path,
-        [switch]$Build,
-        [switch]$Detach,
-        [switch]$Shell,
-        [switch]$Persist,
-        [switch]$Resume,
-        [switch]$Volatile,
-        [string]$Ctx = ""
-    )
-    & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
-        -ProjectPath $ProjectPath `
-        -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
-        -Ctx $Ctx
-    # Comment out the next line to stay in the original directory when control returns to this terminal.
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
-}
-
-function cx {
-    param(
-        [string]$ProjectPath = (Get-Location).Path,
-        [switch]$Build,
-        [switch]$Detach,
-        [switch]$Shell,
-        [switch]$Persist,
-        [switch]$Resume,
-        [switch]$Volatile,
-        [string]$Exec = "",
-        [string]$Ctx = ""
-    )
-    & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
-        -ProjectPath $ProjectPath `
-        -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
-        -Exec $Exec -Ctx $Ctx
-    # Comment out the next line to stay in the original directory when control returns to this terminal.
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $?) { Set-Location -LiteralPath $ProjectPath }
-}
-
-function agent-prune-volumes {
-    & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
-}
-
-function agent-prune-stopped {
-    $claudeNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-"
-    if ($claudeNames) {
-        docker rm $claudeNames
-    }
-    $codexNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-"
-    if ($codexNames) {
-        docker rm $codexNames
-    }
-}
-
-function agent-prune {
-    agent-prune-stopped
-    agent-prune-volumes
-}
-
-function agent-check-updates {
-    & "$env:POWBOX_ROOT\commands\check-updates.ps1" @args
-}
-
-function agent-update-claude {
-    & "$env:POWBOX_ROOT\build.ps1" -Target claude -NoCache
-}
-
-function agent-update-codex {
-    & "$env:POWBOX_ROOT\build.ps1" -Target codex -NoCache
-}
-
-function cc-list {
- docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
-}
-
-function cx-list {
- docker ps -a --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
-}
-
-function agent-list {
- docker ps -a --filter "name=claude-" --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
-}
-
-function agent-volumes {
- docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
-}
+. "C:\path\to\powbox\shell\powbox.ps1"
 ```
 
 Common usage:
@@ -379,89 +315,15 @@ agent-volumes
 
 All flags accepted by `commands/claude-container.ps1` and `commands/codex-container.ps1` are forwarded by these functions, so `-Build`, `-Detach`, `-Persist`, `-Resume`, `-Volatile`, and `-Ctx` all work as documented.
 
-To move the repo later, update only the `$env:POWBOX_ROOT` line and reload your profile.
+### Bash / zsh
 
-## Bash Profile Shortcuts
-
-Add the following to `~/.bashrc` or `~/.zshrc` to get the same short commands on Linux, macOS, or WSL.
-
-Set `POWBOX_ROOT` to wherever you cloned this repo, then reload your shell (`source ~/.bashrc` or `source ~/.zshrc`).
+Add one line to `~/.bashrc` or `~/.zshrc` and reload with `source ~/.bashrc` (or `source ~/.zshrc`):
 
 ```bash
-# PowBox agent shortcuts — adjust path to your checkout
-export POWBOX_ROOT="$HOME/code/powbox"
+# Optional: only needed if auto-detection fails.
+# export POWBOX_ROOT="$HOME/path/to/powbox"
 
-# Injects $PWD when called without a path so bare flags like --shell still work.
-cc() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
-        "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
-    else
-        local target="$1"; shift
-        "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
-        # Comment out the next line to stay in the original directory when control returns to this terminal.
-        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
-    fi
-}
-
-cx() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
-        "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
-    else
-        local target="$1"; shift
-        "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
-        # Comment out the next line to stay in the original directory when control returns to this terminal.
-        [ $? -eq 0 ] && { cd "$target" || echo "powbox: warning: could not cd into '$target'"; }
-    fi
-}
-
-agent-prune-volumes() {
-    "$POWBOX_ROOT/commands/prune-volumes.sh"
-}
-
-agent-prune-stopped() {
-    claude_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-")
-    if [ -n "$claude_names" ]; then
-        docker rm $claude_names 2>/dev/null
-    fi
-
-    codex_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-")
-    if [ -n "$codex_names" ]; then
-        docker rm $codex_names 2>/dev/null
-    fi
-}
-
-agent-prune() {
-    agent-prune-stopped
-    agent-prune-volumes
-}
-
-agent-check-updates() {
-    "$POWBOX_ROOT/commands/check-updates.sh" "$@"
-}
-
-agent-update-claude() {
-    "$POWBOX_ROOT/build.sh" claude --no-cache
-}
-
-agent-update-codex() {
-    "$POWBOX_ROOT/build.sh" codex --no-cache
-}
-
-cc-list() {
-    docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
-}
-
-cx-list() {
-    docker ps -a --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
-}
-
-agent-list() {
-    docker ps -a --filter "name=claude-" --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
-}
-
-agent-volumes() {
-    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format $'table {{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
-}
+source "$HOME/path/to/powbox/shell/powbox.sh"
 ```
 
 Common usage:
@@ -515,7 +377,7 @@ agent-volumes
 
 All flags accepted by `commands/claude-container.sh` and `commands/codex-container.sh` are forwarded, so `--build`, `--detach`, `--persist`, `--resume`, `--volatile`, and `--ctx` all work as documented.
 
-To move the repo later, update only the `POWBOX_ROOT` line and reload your shell.
+To move the repo later, either rely on auto-detection (update the `source` / dot-source path) or update `POWBOX_ROOT` to the new path and reload your profile.
 
 ## Host Validation
 

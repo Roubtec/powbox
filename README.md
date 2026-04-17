@@ -17,7 +17,7 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `compose.claude.yml`: Claude-specific runtime overlay
 - `compose.codex.yml`: Codex-specific runtime overlay
 - `docker-bake.hcl`: named Bake targets for `base`, `claude`, `codex`, and `all`
-- `commands/`: user-facing host commands for launch, smoke-test, and volume pruning
+- `commands/`: user-facing host commands for launch, smoke-test, volume pruning, and session history reset
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
 
@@ -192,7 +192,40 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
+- `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/check-updates.*` for checking whether newer agent releases are available
+
+## Resuming Claude Sessions
+
+Claude containers launch with `--continue` by default, which auto-resumes the most recent conversation for the project's working directory.
+Never-before-touched projects simply start a fresh session — `--continue` is a no-op in that case.
+Use `/clear` inside Claude to discard the resumed context without touching other projects, or run the reset script below for a full wipe across all projects.
+
+### Wiping Session History
+
+`commands/reset-claude-history.*` prunes per-project conversation history, todo state, and shell snapshots from the shared `claude-config` volume.
+Credentials (`.credentials.json`) and user settings (`settings.json`) are preserved, so no re-auth is required after a reset.
+
+The script refuses to run if any container currently has the `claude-config` volume mounted — stop running Claude containers first (`agent-list` / `cc-list` help identify them).
+
+```bash
+# Preview what would be deleted
+./commands/reset-claude-history.sh --dry-run
+
+# Prune with a confirmation prompt
+./commands/reset-claude-history.sh
+
+# Prune without prompting (for scripted use)
+./commands/reset-claude-history.sh --force
+```
+
+On PowerShell, use `-WhatIf` for a preview and `-Force` to skip the confirmation prompt:
+
+```powershell
+.\commands\reset-claude-history.ps1 -WhatIf
+.\commands\reset-claude-history.ps1
+.\commands\reset-claude-history.ps1 -Force
+```
 
 ## PowerShell Profile Shortcuts
 

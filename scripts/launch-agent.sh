@@ -268,7 +268,10 @@ if [ "$SHELL_ONLY" = true ]; then
 elif [ "$AGENT" = "codex" ] && [ -n "$EXEC_TASK" ]; then
 	CMD=(codex exec "$EXEC_TASK")
 elif [ "$AGENT" = "claude" ]; then
-	CMD=(claude --dangerously-skip-permissions)
+	# --continue auto-resumes the most recent conversation for the working
+	# directory. For never-before-touched workspaces it falls back to a fresh
+	# session. Use /clear inside claude for a clean slate.
+	CMD=(claude --dangerously-skip-permissions --continue)
 else
 	CMD=(codex --dangerously-bypass-approvals-and-sandbox)
 fi

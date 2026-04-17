@@ -194,7 +194,10 @@ elseif ($Agent -eq "codex" -and $Exec -ne "") {
   $command = @("codex", "exec", $Exec)
 }
 elseif ($Agent -eq "claude") {
-  $command = @("claude", "--dangerously-skip-permissions")
+  # --continue auto-resumes the most recent conversation for the working
+  # directory. For never-before-touched workspaces it falls back to a fresh
+  # session. Use /clear inside claude for a clean slate.
+  $command = @("claude", "--dangerously-skip-permissions", "--continue")
 }
 else {
   $command = @("codex", "--dangerously-bypass-approvals-and-sandbox")

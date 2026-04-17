@@ -228,6 +228,8 @@ On PowerShell, use `-WhatIf` for a preview and `-Force` to skip the confirmation
 .\commands\reset-claude-history.ps1 -Force
 ```
 
+If you are using the profile shortcuts described below, the same script is exposed as `agent-reset-claude-history` — all flags (`--dry-run`/`--force` on bash, `-WhatIf`/`-Force` in PowerShell) are forwarded.
+
 ## Profile Shortcuts
 
 The repo ships a pair of shell libraries — `shell/powbox.sh` (bash/zsh) and `shell/powbox.ps1` (PowerShell) — that define all the short commands (`cc`, `cx`, `agent-prune`, `agent-list`, etc.). Dot-source or `source` the appropriate file from your shell profile and pull updates with `git pull`; there is nothing to copy-paste per release.
@@ -240,6 +242,7 @@ Functions exposed by both libraries:
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases
 - `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
+- `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 
 ### Environment Variables
 

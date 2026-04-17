@@ -109,6 +109,10 @@ function agent-check-updates {
     & "$env:POWBOX_ROOT\commands\check-updates.ps1" @args
 }
 
+function agent-reset-claude-history {
+    & "$env:POWBOX_ROOT\commands\reset-claude-history.ps1" @args
+}
+
 function agent-update-claude {
     & "$env:POWBOX_ROOT\build.ps1" -Target claude -NoCache @args
 }

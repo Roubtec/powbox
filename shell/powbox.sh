@@ -100,6 +100,10 @@ agent-check-updates() {
     "$POWBOX_ROOT/commands/check-updates.sh" "$@"
 }
 
+agent-reset-claude-history() {
+    "$POWBOX_ROOT/commands/reset-claude-history.sh" "$@"
+}
+
 agent-update-claude() {
     "$POWBOX_ROOT/build.sh" claude --no-cache "$@"
 }

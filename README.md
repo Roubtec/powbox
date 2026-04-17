@@ -206,7 +206,7 @@ Use `/clear` inside Claude to discard the resumed context without touching other
 `commands/reset-claude-history.*` prunes per-project conversation history, todo state, and shell snapshots from the shared `claude-config` volume.
 Credentials (`.credentials.json`) and user settings (`settings.json`) are preserved, so no re-auth is required after a reset.
 
-The script refuses to run if any container currently has the `claude-config` volume mounted — stop running Claude containers first (`agent-list` / `cc-list` helps identify them).
+The script refuses to run if any container currently has the `claude-config` volume mounted — stop running Claude containers first (`agent-list` / `cc-list` help identify them).
 
 ```bash
 # Preview what would be deleted

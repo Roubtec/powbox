@@ -1,7 +1,5 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-param(
-  [switch]$Force
-)
+param()
 
 $ErrorActionPreference = "Stop"
 
@@ -32,7 +30,7 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 if ($runningContainers) {
-  Write-Error "Refusing to prune: the following running container(s) have '$volumeName' mounted. Stop them first.`n$runningContainers"
+  Write-Error "Refusing to prune: the following running container(s) have '$volumeName' mounted. Stop them first.`n$($runningContainers -join "`n")"
   exit 1
 }
 
@@ -56,14 +54,6 @@ $action = "Delete per-project history, todos, and shell snapshots (credentials a
 
 if (-not $PSCmdlet.ShouldProcess($target, $action)) {
   exit 0
-}
-
-if (-not $Force) {
-  $confirm = Read-Host "`nDelete all project histories, todos, and shell snapshots from '$volumeName'? Credentials and settings will be preserved. [y/N]"
-  if ($confirm -notmatch '^[yY]') {
-    Write-Host "Aborted." -ForegroundColor Yellow
-    exit 0
-  }
 }
 
 docker run --rm -v "${volumeName}:/data" $helperImage sh -c 'rm -rf /data/projects /data/todos /data/shell-snapshots'

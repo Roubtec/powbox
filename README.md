@@ -194,6 +194,12 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/check-updates.*` for checking whether newer agent releases are available
 
+## Resuming Claude Sessions
+
+Claude containers launch with `--continue` by default, which auto-resumes the most recent conversation for the project's working directory.
+Never-before-touched projects simply start a fresh session — `--continue` is a no-op in that case.
+Use `/clear` inside Claude to discard the resumed context without touching other projects.
+
 ## PowerShell Profile Shortcuts
 
 Add the following to your `$PROFILE` (`notepad $PROFILE`) to get short commands that default to the current working directory.

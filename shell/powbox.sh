@@ -54,7 +54,7 @@ cc() {
         "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
         local rc=$?
         if [ $rc -eq 0 ] && _powbox_should_cd; then
-            cd "$target" || echo "powbox: warning: could not cd into '$target'"
+            cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc
     fi
@@ -68,7 +68,7 @@ cx() {
         "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
         local rc=$?
         if [ $rc -eq 0 ] && _powbox_should_cd; then
-            cd "$target" || echo "powbox: warning: could not cd into '$target'"
+            cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc
     fi

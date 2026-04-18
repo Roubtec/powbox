@@ -198,8 +198,8 @@ The user-facing command surface lives at the repo root and in `commands/`:
 
 ## Resuming Claude Sessions
 
-Claude containers launch with `--continue` by default, which auto-resumes the most recent conversation for the project's working directory.
-Never-before-touched projects simply start a fresh session — `--continue` is a no-op in that case.
+Claude containers launch with `--continue` when a prior session exists for the project's working directory, auto-resuming the most recent conversation.
+Never-before-touched projects start a fresh session — the launcher checks `~/.claude/projects/<slug>/` inside the container and omits `--continue` when no history is present (passing it with no matching session would make `claude` exit with "No conversation found").
 Use `/clear` inside Claude to discard the resumed context without touching other projects, or run the reset script below for a full wipe across all projects.
 
 ### Wiping Session History

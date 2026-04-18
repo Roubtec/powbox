@@ -470,6 +470,12 @@ Expected results:
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 
+Codex preserves any existing `config.toml` settings in the `codex-config` volume, but the container now auto-seeds a missing `[tui].status_line` plus a missing top-level `terminal_title` default.
+The seeded status line uses Codex-native items for model, current directory, remaining context, 5-hour usage, weekly usage, and used tokens.
+`terminal_title` is a separate Codex setting for the terminal window or tab title, not the bottom status line.
+The seeded title surfaces current directory, git branch, model, and thread title when the terminal supports title updates.
+That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched.
+
 ## License
 
 This project is licensed under the MIT License.

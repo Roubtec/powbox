@@ -278,7 +278,9 @@ elif [ "$AGENT" = "claude" ]; then
 	# The check runs inside the container where claude-config is mounted.
 	CMD=(sh -c 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi')
 else
-	CMD=(codex --dangerously-bypass-approvals-and-sandbox)
+	# Codex resume --last already filters to the current cwd and falls through to
+	# a fresh interactive session when nothing resumable exists there.
+	CMD=(codex resume --last --dangerously-bypass-approvals-and-sandbox)
 fi
 
 AGENT_SEED_ARGS=()

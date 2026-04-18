@@ -206,7 +206,9 @@ elseif ($Agent -eq "claude") {
   $command = @("sh", "-c", $continueCheck)
 }
 else {
-  $command = @("codex", "--dangerously-bypass-approvals-and-sandbox")
+  # Codex resume --last already filters to the current cwd and falls through to
+  # a fresh interactive session when nothing resumable exists there.
+  $command = @("codex", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox")
 }
 
 $agentSeedArgs = @()

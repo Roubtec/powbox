@@ -196,11 +196,15 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/check-updates.*` for checking whether newer agent releases are available
 
-## Resuming Claude Sessions
+## Resuming Sessions
 
 Claude containers launch with `--continue` when a prior session exists for the project's working directory, auto-resuming the most recent conversation.
 Never-before-touched projects start a fresh session — the launcher checks `~/.claude/projects/<slug>/` inside the container and omits `--continue` when no history is present (passing it with no matching session would make `claude` exit with "No conversation found").
 Use `/clear` inside Claude to discard the resumed context without touching other projects, or run the reset script below for a full wipe across all projects.
+
+Codex containers launch with `resume --last` for the default interactive path.
+Codex filters `resume --last` to the current working directory and, when no resumable session exists there, falls through to a fresh interactive session instead of exiting with an error.
+The `codex exec ...` path stays non-resuming, so one-shot tasks do not unexpectedly attach to prior interactive history.
 
 ### Wiping Session History
 

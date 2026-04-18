@@ -11,7 +11,11 @@ ensure_top_level_array_setting() {
 		: >"$file"
 	fi
 
-	if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
+	if awk -v key="$key" '
+		/^[[:space:]]*\[/ { exit }
+		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found = 1; exit }
+		END { exit (!found) }
+	' "$file"; then
 		return
 	fi
 

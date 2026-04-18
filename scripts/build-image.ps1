@@ -14,16 +14,18 @@ try {
   function Invoke-Bake {
     param(
       [Parameter(Mandatory = $true)]
-      [string[]]$Targets
+      [string[]]$Targets,
+      [switch]$WithPull,
+      [switch]$WithNoCache
     )
 
     $docker_args = @("buildx", "bake", "--file", (Join-Path $rootDir "docker-bake.hcl"))
 
-    if ($Pull) {
+    if ($WithPull) {
       $docker_args += "--pull"
     }
 
-    if ($NoCache) {
+    if ($WithNoCache) {
       $docker_args += "--no-cache"
     }
 
@@ -44,11 +46,11 @@ try {
       return
     }
 
-    # Build the base image without -NoCache/-Pull. Those flags apply to the
-    # top-layer agent build only (i.e. "don't reuse cached agent layers"). When
-    # the base image is simply absent locally there is nothing to skip caching
-    # for, and rebuilding it fresh unconditionally on every no-cache top-layer
-    # build would be unnecessarily slow. Use `build.ps1 base -NoCache` if you
+    # Build the base image without -NoCache. That flag applies to the top-layer
+    # agent build only (i.e. "don't reuse cached agent layers"). When the base
+    # image is simply absent locally there is nothing to skip caching for, and
+    # rebuilding it fresh unconditionally on every no-cache top-layer build
+    # would be unnecessarily slow. Use `build.ps1 base -NoCache` if you
     # explicitly want a fresh base.
     Write-Host "Base image powbox-agent-base:latest was not found locally. Building it first."
     $env:CLAUDE_CODE_VERSION = $ClaudeVersion
@@ -59,21 +61,36 @@ try {
     }
   }
 
+  # -Pull only makes sense for the base image (whose FROM is an upstream
+  # registry image). The agent images' only FROM is the locally-built
+  # powbox-agent-base, so passing --pull to their bake invocation would make
+  # buildx try to resolve it from a registry and fail. When the user requests
+  # -Pull on an agent target, refresh the base first (cascading any digest
+  # change into the agent layers automatically) and then build the agent
+  # without --pull.
   switch ($Target) {
     "all" {
-      Invoke-Bake -Targets @("base")
-      Invoke-Bake -Targets @("claude", "codex")
+      Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
+      Invoke-Bake -Targets @("claude", "codex") -WithNoCache:$NoCache
     }
     "base" {
-      Invoke-Bake -Targets @("base")
+      Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
     }
     "claude" {
-      Assert-BaseImage
-      Invoke-Bake -Targets @("claude")
+      if ($Pull) {
+        Invoke-Bake -Targets @("base") -WithPull
+      } else {
+        Assert-BaseImage
+      }
+      Invoke-Bake -Targets @("claude") -WithNoCache:$NoCache
     }
     "codex" {
-      Assert-BaseImage
-      Invoke-Bake -Targets @("codex")
+      if ($Pull) {
+        Invoke-Bake -Targets @("base") -WithPull
+      } else {
+        Assert-BaseImage
+      }
+      Invoke-Bake -Targets @("codex") -WithNoCache:$NoCache
     }
   }
 }

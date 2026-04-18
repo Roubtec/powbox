@@ -45,14 +45,19 @@ base | claude | codex | all) ;;
 esac
 
 run_bake() {
+	# Usage: run_bake <with_pull> <with_no_cache> <targets...>
+	local with_pull="$1"
+	shift
+	local with_no_cache="$1"
+	shift
 	local target_args=("$@")
 	local cmd=(docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl")
 
-	if [ "$PULL" = true ]; then
+	if [ "$with_pull" = true ]; then
 		cmd+=(--pull)
 	fi
 
-	if [ "$NO_CACHE" = true ]; then
+	if [ "$with_no_cache" = true ]; then
 		cmd+=(--no-cache)
 	fi
 
@@ -69,7 +74,7 @@ ensure_base_image() {
 		return
 	fi
 
-	# Build the base image without --no-cache/--pull. Those flags apply to the
+	# Build the base image without --no-cache. That flag applies to the
 	# top-layer agent build only (i.e. "don't reuse cached agent layers"). When
 	# the base image is simply absent locally there is nothing to skip caching
 	# for, and rebuilding it fresh unconditionally on every no-cache top-layer
@@ -81,16 +86,27 @@ ensure_base_image() {
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
 }
 
+# --pull only makes sense for the base image (whose FROM is an upstream
+# registry image). The agent images' only FROM is the locally-built
+# powbox-agent-base, so passing --pull to their bake invocation would make
+# buildx try to resolve it from a registry and fail. When the user requests
+# --pull on an agent target, refresh the base first (cascading any digest
+# change into the agent layers automatically) and then build the agent
+# without --pull.
 case "$TARGET" in
 all)
-	run_bake base
-	run_bake claude codex
+	run_bake "$PULL" "$NO_CACHE" base
+	run_bake false "$NO_CACHE" claude codex
 	;;
 claude | codex)
-	ensure_base_image
-	run_bake "$TARGET"
+	if [ "$PULL" = true ]; then
+		run_bake true false base
+	else
+		ensure_base_image
+	fi
+	run_bake false "$NO_CACHE" "$TARGET"
 	;;
 base)
-	run_bake base
+	run_bake "$PULL" "$NO_CACHE" base
 	;;
 esac

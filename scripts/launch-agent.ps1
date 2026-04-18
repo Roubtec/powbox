@@ -194,13 +194,21 @@ elseif ($Agent -eq "codex" -and $Exec -ne "") {
   $command = @("codex", "exec", $Exec)
 }
 elseif ($Agent -eq "claude") {
-  # --continue auto-resumes the most recent conversation for the working
-  # directory. For never-before-touched workspaces it falls back to a fresh
-  # session. Use /clear inside claude for a clean slate.
-  $command = @("claude", "--dangerously-skip-permissions", "--continue")
+  # Pre-flight check: only pass --continue if a session history exists for this
+  # working directory. Claude stores sessions in ~/.claude/projects/<slug>/,
+  # where <slug> is the cwd with every non-alphanumeric, non-dash character
+  # replaced by '-' (verified empirically against '/', '.', '_', spaces, '+',
+  # and uppercase; case is preserved and adjacent dashes are not collapsed).
+  # Passing --continue when no session exists makes claude print "No
+  # conversation found" and exit instead of falling back to a fresh session.
+  # The check runs inside the container where claude-config is mounted.
+  $continueCheck = 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi'
+  $command = @("sh", "-c", $continueCheck)
 }
 else {
-  $command = @("codex", "--dangerously-bypass-approvals-and-sandbox")
+  # Codex resume --last already filters to the current cwd and falls through to
+  # a fresh interactive session when nothing resumable exists there.
+  $command = @("codex", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox")
 }
 
 $agentSeedArgs = @()

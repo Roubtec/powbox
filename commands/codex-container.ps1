@@ -5,6 +5,7 @@ param(
   [switch]$Shell,
   [switch]$Persist,
   [switch]$Resume,
+  [switch]$Continue,
   [switch]$Volatile,
   [string]$Exec = "",
   [string]$Ctx = ""
@@ -22,6 +23,7 @@ $rootDir = Split-Path -Parent $scriptDir
   -Shell:$Shell `
   -Persist:$Persist `
   -Resume:$Resume `
+  -Continue:$Continue `
   -Volatile:$Volatile `
   -Exec $Exec `
   -Ctx $Ctx

@@ -50,13 +50,14 @@ function cc {
         [switch]$Shell,
         [switch]$Persist,
         [switch]$Resume,
+        [switch]$Continue,
         [switch]$Volatile,
         [string]$Ctx = ""
     )
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
+        -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
         -Ctx $Ctx
     if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath
@@ -71,6 +72,7 @@ function cx {
         [switch]$Shell,
         [switch]$Persist,
         [switch]$Resume,
+        [switch]$Continue,
         [switch]$Volatile,
         [string]$Exec = "",
         [string]$Ctx = ""
@@ -78,7 +80,7 @@ function cx {
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Volatile:$Volatile `
+        -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
         -Exec $Exec -Ctx $Ctx
     if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath

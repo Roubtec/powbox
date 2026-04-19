@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENT="${1:?usage: launch-agent.sh <claude|codex> [project-path] [--build] [--detach] [--shell] [--volatile] [--persist] [--resume] [--exec <task> (codex only)]}"
+AGENT="${1:?usage: launch-agent.sh <claude|codex> [project-path] [--build] [--detach] [--shell] [--volatile] [--persist] [--resume] [--continue] [--exec <task> (codex only)]}"
 shift
 
 case "$AGENT" in
@@ -20,6 +20,7 @@ SHELL_ONLY=false
 VOLATILE=false
 PERSIST=false
 RESUME=false
+CONTINUE=false
 EXEC_TASK=""
 CTX_PATH=""
 
@@ -42,6 +43,9 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--resume)
 		RESUME=true
+		;;
+	--continue)
+		CONTINUE=true
 		;;
 	--ctx)
 		shift
@@ -215,6 +219,9 @@ if [ "$RESUME" = true ]; then
 	if [ -n "$CTX_PATH" ]; then
 		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
 	fi
+	if [ "$CONTINUE" = true ]; then
+		echo "Note: --continue is ignored with --resume; container will restart with the CMD it was originally created with. Omit --resume to apply a continue-flag change." >&2
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
 fi
 
@@ -247,6 +254,36 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Detect whether the --continue flag state differs from what the container was created with.
+# The CMD is frozen at container creation, so a flag change only takes effect after recreation.
+# Missing label on an existing container predates this flag — treat it as "true" so the old
+# auto-resume default remains in effect for reused containers until the user explicitly opts out,
+# at which point this branch recycles the container to honour the new intent.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	EXISTING_CONTINUE="$(docker inspect --format '{{with .Config.Labels}}{{index . "powbox.continue"}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -z "$EXISTING_CONTINUE" ]; then
+		EXISTING_CONTINUE="true"
+	fi
+	WANT_CONTINUE="false"
+	if [ "$CONTINUE" = true ]; then
+		WANT_CONTINUE="true"
+	fi
+	if [ "$EXISTING_CONTINUE" != "$WANT_CONTINUE" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} is running; --continue=${WANT_CONTINUE} is ignored because the existing process was started with --continue=${EXISTING_CONTINUE}. Attaching to the running process. Stop it and relaunch to apply the flag change." >&2
+		else
+			echo "Continue flag changed (was '${EXISTING_CONTINUE}', now '${WANT_CONTINUE}'); recreating container."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		if [ "$DETACH" = true ]; then
@@ -265,22 +302,36 @@ fi
 
 if [ "$SHELL_ONLY" = true ]; then
 	CMD=(zsh)
+	if [ "$CONTINUE" = true ]; then
+		echo "Note: --continue has no effect with --shell; this launch opens a plain zsh." >&2
+	fi
 elif [ "$AGENT" = "codex" ] && [ -n "$EXEC_TASK" ]; then
 	CMD=(codex exec "$EXEC_TASK")
+	if [ "$CONTINUE" = true ]; then
+		echo "Note: --continue has no effect with --exec; codex exec always starts a fresh non-interactive session." >&2
+	fi
 elif [ "$AGENT" = "claude" ]; then
-	# Pre-flight check: only pass --continue if a session history exists for this
-	# working directory. Claude stores sessions in ~/.claude/projects/<slug>/,
-	# where <slug> is the cwd with every non-alphanumeric, non-dash character
-	# replaced by '-' (verified empirically against '/', '.', '_', spaces, '+',
-	# and uppercase; case is preserved and adjacent dashes are not collapsed).
-	# Passing --continue when no session exists makes claude print "No
-	# conversation found" and exit instead of falling back to a fresh session.
-	# The check runs inside the container where claude-config is mounted.
-	CMD=(sh -c 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi')
+	if [ "$CONTINUE" = true ]; then
+		# Pre-flight check: only pass --continue if a session history exists for this
+		# working directory. Claude stores sessions in ~/.claude/projects/<slug>/,
+		# where <slug> is the cwd with every non-alphanumeric, non-dash character
+		# replaced by '-' (verified empirically against '/', '.', '_', spaces, '+',
+		# and uppercase; case is preserved and adjacent dashes are not collapsed).
+		# Passing --continue when no session exists makes claude print "No
+		# conversation found" and exit instead of falling back to a fresh session.
+		# The check runs inside the container where claude-config is mounted.
+		CMD=(sh -c 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi')
+	else
+		CMD=(claude --dangerously-skip-permissions)
+	fi
 else
-	# Codex resume --last already filters to the current cwd and falls through to
-	# a fresh interactive session when nothing resumable exists there.
-	CMD=(codex resume --last --dangerously-bypass-approvals-and-sandbox)
+	if [ "$CONTINUE" = true ]; then
+		# Codex resume --last already filters to the current cwd and falls through to
+		# a fresh interactive session when nothing resumable exists there.
+		CMD=(codex resume --last --dangerously-bypass-approvals-and-sandbox)
+	else
+		CMD=(codex --dangerously-bypass-approvals-and-sandbox)
+	fi
 fi
 
 AGENT_SEED_ARGS=()
@@ -335,8 +386,14 @@ fi
 # directory on the host the first time (usually harmless since the project
 # already has one), and the host's node_modules is inaccessible inside the
 # container (intentional — use the volume copy for all in-container installs).
+CONTINUE_LABEL="false"
+if [ "$CONTINUE" = true ]; then
+	CONTINUE_LABEL="true"
+fi
+
 docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
+	--label "powbox.continue=${CONTINUE_LABEL}" \
 	"${EXTRA_ENV[@]}" \
 	"${AGENT_SEED_ARGS[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \

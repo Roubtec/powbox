@@ -8,6 +8,7 @@ param(
   [switch]$Shell,
   [switch]$Persist,
   [switch]$Resume,
+  [switch]$Continue,
   [switch]$Volatile,
   [string]$Exec = "",
   [string]$Ctx = ""
@@ -117,6 +118,9 @@ if ($Resume) {
   if ($Ctx -ne "") {
     Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
   }
+  if ($Continue) {
+    Write-Host "Note: -Continue is ignored with -Resume; container will restart with the CMD it was originally created with. Omit -Resume to apply a continue-flag change." -ForegroundColor Yellow
+  }
 
   docker start -ai $containerName
   exit $LASTEXITCODE
@@ -167,6 +171,37 @@ if (-not $Volatile -and $containerExists) {
   }
 }
 
+# Detect whether the -Continue flag state differs from what the container was created with.
+# The CMD is frozen at container creation, so a flag change only takes effect after recreation.
+# Missing label on an existing container predates this flag — treat it as "true" so the old
+# auto-resume default remains in effect for reused containers until the user explicitly opts out,
+# at which point this branch recycles the container to honour the new intent.
+if (-not $Volatile -and $containerExists) {
+  $existingContinue = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.continue")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingContinue)) {
+    $existingContinue = "true"
+  }
+  $existingContinue = $existingContinue.Trim()
+  $wantContinue = if ($Continue) { "true" } else { "false" }
+  if ($existingContinue -ne $wantContinue) {
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName is running; -Continue=$wantContinue is ignored because the existing process was started with -Continue=$existingContinue. Attaching to the running process. Stop it and relaunch to apply the flag change." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "Continue flag changed (was '$existingContinue', now '$wantContinue'); recreating container."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting a -Continue flag change."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+}
+
 if (-not $Volatile -and $containerExists) {
   if ($containerRunning) {
     if ($Detach) {
@@ -189,26 +224,42 @@ if (-not $Volatile -and $containerExists) {
 
 if ($Shell) {
   $command = @("zsh")
+  if ($Continue) {
+    Write-Host "Note: -Continue has no effect with -Shell; this launch opens a plain zsh." -ForegroundColor Yellow
+  }
 }
 elseif ($Agent -eq "codex" -and $Exec -ne "") {
   $command = @("codex", "exec", $Exec)
+  if ($Continue) {
+    Write-Host "Note: -Continue has no effect with -Exec; codex exec always starts a fresh non-interactive session." -ForegroundColor Yellow
+  }
 }
 elseif ($Agent -eq "claude") {
-  # Pre-flight check: only pass --continue if a session history exists for this
-  # working directory. Claude stores sessions in ~/.claude/projects/<slug>/,
-  # where <slug> is the cwd with every non-alphanumeric, non-dash character
-  # replaced by '-' (verified empirically against '/', '.', '_', spaces, '+',
-  # and uppercase; case is preserved and adjacent dashes are not collapsed).
-  # Passing --continue when no session exists makes claude print "No
-  # conversation found" and exit instead of falling back to a fresh session.
-  # The check runs inside the container where claude-config is mounted.
-  $continueCheck = 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi'
-  $command = @("sh", "-c", $continueCheck)
+  if ($Continue) {
+    # Pre-flight check: only pass --continue if a session history exists for this
+    # working directory. Claude stores sessions in ~/.claude/projects/<slug>/,
+    # where <slug> is the cwd with every non-alphanumeric, non-dash character
+    # replaced by '-' (verified empirically against '/', '.', '_', spaces, '+',
+    # and uppercase; case is preserved and adjacent dashes are not collapsed).
+    # Passing --continue when no session exists makes claude print "No
+    # conversation found" and exit instead of falling back to a fresh session.
+    # The check runs inside the container where claude-config is mounted.
+    $continueCheck = 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi'
+    $command = @("sh", "-c", $continueCheck)
+  }
+  else {
+    $command = @("claude", "--dangerously-skip-permissions")
+  }
 }
 else {
-  # Codex resume --last already filters to the current cwd and falls through to
-  # a fresh interactive session when nothing resumable exists there.
-  $command = @("codex", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox")
+  if ($Continue) {
+    # Codex resume --last already filters to the current cwd and falls through to
+    # a fresh interactive session when nothing resumable exists there.
+    $command = @("codex", "resume", "--last", "--dangerously-bypass-approvals-and-sandbox")
+  }
+  else {
+    $command = @("codex", "--dangerously-bypass-approvals-and-sandbox")
+  }
 }
 
 $agentSeedArgs = @()
@@ -253,7 +304,8 @@ elseif ($Volatile -and -not $Persist) {
   $runArgs += "--rm"
 }
 
-$envArgs = @("--name", $containerName, "-e", "CONTAINER_NAME=$containerName")
+$continueLabel = if ($Continue) { "true" } else { "false" }
+$envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "-e", "CONTAINER_NAME=$containerName")
 if ($Agent -eq "claude") {
   $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else { "" }
   $envArgs += @("-e", "ANTHROPIC_API_KEY=$apiKey")

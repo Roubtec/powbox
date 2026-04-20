@@ -198,13 +198,26 @@ The user-facing command surface lives at the repo root and in `commands/`:
 
 ## Resuming Sessions
 
-Claude containers launch with `--continue` when a prior session exists for the project's working directory, auto-resuming the most recent conversation.
-Never-before-touched projects start a fresh session — the launcher checks `~/.claude/projects/<slug>/` inside the container and omits `--continue` when no history is present (passing it with no matching session would make `claude` exit with "No conversation found").
+Session resumption is opt-in via `--continue` / `-Continue` on `cc` and `cx` (and on the underlying `commands/*-container.*` scripts).
+Without the flag, both agents start a fresh session — useful because resumed sessions inherit the prior run's inference-duration stats and other counters that `/clear` does not reset.
+Pass the flag when you want to pick up an interrupted session (for example after a forced reboot or crash).
+
+The flag decision is baked into the container's CMD at creation time.
+When the requested flag value differs from what the stopped container was created with, the launcher recreates the container — the same recycling mechanism used for `--ctx` / `-Ctx` changes.
+Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) is unaffected by this recreation.
+If the container is already running with a different flag value, the launcher attaches to the existing process and warns that the flag is ignored; stop and relaunch to apply the change.
+
+Per-agent behavior when `--continue` is set:
+
+- **Claude** — the launcher checks `~/.claude/projects/<slug>/` inside the container and passes `--continue` when history is present; when no history exists it falls back to a plain `claude` launch (bare `claude --continue` would otherwise exit with "No conversation found").
+- **Codex** — the launcher passes `resume --last`. Codex filters that to the current working directory and falls through to a fresh interactive session when no resumable session exists there.
+
+The `codex exec ...` path (`--exec` / `-Exec`) stays non-resuming regardless of `--continue`, so one-shot tasks do not unexpectedly attach to prior interactive history.
+`--shell` / `-Shell` likewise ignores `--continue` — the container opens a plain zsh.
+
 Use `/clear` inside Claude to discard the resumed context without touching other projects, or run the reset script below for a full wipe across all projects.
 
-Codex containers launch with `resume --last` for the default interactive path.
-Codex filters `resume --last` to the current working directory and, when no resumable session exists there, falls through to a fresh interactive session instead of exiting with an error.
-The `codex exec ...` path stays non-resuming, so one-shot tasks do not unexpectedly attach to prior interactive history.
+Using the explicit `--resume` / `-Resume` flag always restarts the container exactly as originally created — any `--continue` value passed alongside is ignored (a warning is printed), same as `--ctx`.
 
 ### Wiping Session History
 
@@ -320,7 +333,7 @@ agent-list
 agent-volumes
 ```
 
-All flags accepted by `commands/claude-container.ps1` and `commands/codex-container.ps1` are forwarded by these functions, so `-Build`, `-Detach`, `-Persist`, `-Resume`, `-Volatile`, and `-Ctx` all work as documented.
+All flags accepted by `commands/claude-container.ps1` and `commands/codex-container.ps1` are forwarded by these functions, so `-Build`, `-Detach`, `-Persist`, `-Resume`, `-Continue`, `-Volatile`, and `-Ctx` all work as documented.
 
 ### Bash / zsh
 
@@ -382,7 +395,7 @@ agent-list
 agent-volumes
 ```
 
-All flags accepted by `commands/claude-container.sh` and `commands/codex-container.sh` are forwarded, so `--build`, `--detach`, `--persist`, `--resume`, `--volatile`, and `--ctx` all work as documented.
+All flags accepted by `commands/claude-container.sh` and `commands/codex-container.sh` are forwarded, so `--build`, `--detach`, `--persist`, `--resume`, `--continue`, `--volatile`, and `--ctx` all work as documented.
 
 To move the repo later, either rely on auto-detection (update the `source` / dot-source path) or update `POWBOX_ROOT` to the new path and reload your profile.
 

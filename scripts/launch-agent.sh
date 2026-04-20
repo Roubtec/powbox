@@ -260,7 +260,7 @@ fi
 # auto-resume default remains in effect for reused containers until the user explicitly opts out,
 # at which point this branch recycles the container to honour the new intent.
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
-	EXISTING_CONTINUE="$(docker inspect --format '{{with .Config.Labels}}{{index . "powbox.continue"}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	EXISTING_CONTINUE="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.continue"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$EXISTING_CONTINUE" ]; then
 		EXISTING_CONTINUE="true"
 	fi

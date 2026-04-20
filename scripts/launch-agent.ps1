@@ -177,7 +177,7 @@ if (-not $Volatile -and $containerExists) {
 # auto-resume default remains in effect for reused containers until the user explicitly opts out,
 # at which point this branch recycles the container to honour the new intent.
 if (-not $Volatile -and $containerExists) {
-  $existingContinue = (docker inspect --format '{{with .Config.Labels}}{{index . "powbox.continue"}}{{end}}' $containerName 2>$null)
+  $existingContinue = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.continue")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingContinue)) {
     $existingContinue = "true"
   }

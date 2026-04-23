@@ -143,7 +143,7 @@ RUN mkdir -p \
 COPY --chmod=755 docker/shared/init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY --chmod=755 docker/shared/shadow-mounts.sh /usr/local/bin/shadow-mounts.sh
 COPY --chmod=755 docker/shared/detect-shadows.sh /usr/local/bin/detect-shadows.sh
-COPY --chmod=755 docker/shared/shadow-refresh /usr/local/bin/shadow-refresh
+COPY --chmod=755 docker/shared/shadow-refresh.sh /usr/local/bin/shadow-refresh.sh
 COPY --chmod=755 docker/shared/entrypoint-core.sh /usr/local/bin/entrypoint-core.sh
 COPY --chmod=755 docker/shared/entrypoint-claude.sh /usr/local/bin/entrypoint-claude.sh
 COPY --chmod=755 docker/shared/entrypoint-codex.sh /usr/local/bin/entrypoint-codex.sh

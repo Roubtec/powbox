@@ -153,7 +153,7 @@ Auto-detection and `.powbox.yml` patterns are merged and deduplicated.
 If you add a new workspace package after the container has started, its `node_modules` will not be shadowed until you run:
 
 ```bash
-shadow-refresh
+shadow-refresh.sh
 ```
 
 This re-runs detection and mounts tmpfs over any new directories that were not previously shadowed.
@@ -171,7 +171,7 @@ The root `node_modules` Docker volume is unaffected and persists across restarts
 
 Each tmpfs mount is capped at **512 MB** by default.
 Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `1g`, `256m`) before launching the container.
-Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
+Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh.sh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
 If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
 
 ### Security
@@ -183,7 +183,7 @@ tmpfs mounts are container-namespace-scoped and invisible to the host — not an
 The container requires **`CAP_SYS_ADMIN`** (granted in `compose.shared.yml`) because Docker's default seccomp profile blocks the `mount` syscall without it.
 Note that `CAP_SYS_ADMIN` is granted to the container as a whole by Docker — sudoers restricts which commands may be run via `sudo`, but does not scope a Linux capability to a single script.
 The `node` user cannot invoke arbitrary commands as root (sudo is scoped), but any process in the container holds `CAP_SYS_ADMIN` for its lifetime.
-`shadow-refresh` requires this capability mid-session, so it cannot be dropped after startup.
+`shadow-refresh.sh` requires this capability mid-session, so it cannot be dropped after startup.
 
 ## Commands
 

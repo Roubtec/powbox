@@ -189,11 +189,6 @@ done
 export WORKSPACE_PATH="$PROJECT_PATH"
 export PROJECT_NAME
 
-if [ "$AGENT" = "claude" ]; then
-	AGENT_HOST_CONFIG_DIR="${CLAUDE_HOST_CONFIG_DIR:-$HOME/.claude}"
-else
-	AGENT_HOST_CONFIG_DIR="${CODEX_HOST_CONFIG_DIR:-$HOME/.codex}"
-fi
 GH_HOST_CONFIG_DIR="${GH_HOST_CONFIG_DIR:-$HOME/.config/gh}"
 GIT_CONFIG_PATH="${GIT_CONFIG_PATH:-$HOME/.gitconfig}"
 
@@ -334,15 +329,6 @@ else
 	fi
 fi
 
-AGENT_SEED_ARGS=()
-if [ -d "$AGENT_HOST_CONFIG_DIR" ]; then
-	if [ "$AGENT" = "claude" ]; then
-		AGENT_SEED_ARGS=(-v "${AGENT_HOST_CONFIG_DIR}:/home/node/.claude-host:ro")
-	else
-		AGENT_SEED_ARGS=(-v "${AGENT_HOST_CONFIG_DIR}:/home/node/.codex-host:ro")
-	fi
-fi
-
 GIT_CONFIG_ARGS=()
 if [ -f "$GIT_CONFIG_PATH" ]; then
 	GIT_CONFIG_ARGS=(-v "${GIT_CONFIG_PATH}:/home/node/.gitconfig-host:ro")
@@ -395,7 +381,6 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
 	"${EXTRA_ENV[@]}" \
-	"${AGENT_SEED_ARGS[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \

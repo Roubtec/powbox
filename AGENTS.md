@@ -19,7 +19,7 @@ Teach or question the user if that is in the best interest of the final product.
 - User-facing host commands: `commands/`
 - Internal build/launch helpers: `scripts/`
 - Entrypoint core and hooks: `docker/shared/`
-- Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh`
+- Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh.sh`
 
 ## Key Paths
 
@@ -41,7 +41,7 @@ Teach or question the user if that is in the best interest of the final product.
 - Codex authenticates via `OPENAI_API_KEY` passed at runtime, never baked into the image.
 - Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering.
 - Container instructions live in a single shared template (`docker/shared/container-agent.md.tmpl`) rendered at startup via `envsubst` with agent-specific variables set in the entrypoint scripts.
-- Workspace shadow mounts run after git setup: `detect-shadows.sh` finds subpackage `node_modules` directories, then `shadow-mounts.sh` overlays them with tmpfs.  The `shadow-refresh` command re-runs detection for packages added mid-session.
+- Workspace shadow mounts run after git setup: `detect-shadows.sh` finds subpackage `node_modules` directories, then `shadow-mounts.sh` overlays them with tmpfs.  The `shadow-refresh.sh` command re-runs detection for packages added mid-session.
 
 ## Project Identity
 

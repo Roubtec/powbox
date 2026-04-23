@@ -5,7 +5,7 @@
 # Safe to call at any time — already-mounted paths are skipped.
 # Useful after adding a new workspace package mid-session.
 #
-# Usage: shadow-refresh [workspace-dir]
+# Usage: shadow-refresh.sh [workspace-dir]
 #        Defaults to scanning all directories under /workspace/.
 set -euo pipefail
 
@@ -39,7 +39,7 @@ fi
 
 sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${all_targets[@]}" || {
 	status=$?
-	echo "shadow-refresh: failed to mount shadow directories." >&2
+	echo "shadow-refresh.sh: failed to mount shadow directories." >&2
 	echo "Hint: ensure the container has mount permissions (CAP_SYS_ADMIN in compose.shared.yml)." >&2
 	exit "$status"
 }

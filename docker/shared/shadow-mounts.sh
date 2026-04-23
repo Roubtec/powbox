@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mount tmpfs over directories to shadow host-mounted content.
 #
-# Called via sudo from the entrypoint or shadow-refresh.  Each argument
+# Called via sudo from the entrypoint or shadow-refresh.sh.  Each argument
 # is an absolute path that must reside under /workspace/.  Paths that
 # are already mountpoints are silently skipped (idempotent).
 #
@@ -37,7 +37,7 @@ for target in "$@"; do
 			;;
 	esac
 
-	# Skip if already a mountpoint (handles re-runs and shadow-refresh).
+	# Skip if already a mountpoint (handles re-runs and shadow-refresh.sh).
 	if mountpoint -q "$resolved_target" 2>/dev/null; then
 		continue
 	fi

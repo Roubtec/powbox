@@ -86,13 +86,6 @@ $env:WORKSPACE_PATH = $resolvedProject
 $env:PROJECT_NAME = $projectSlug
 $workspaceMount = "/workspace/$projectSlug"
 
-if ($Agent -eq "claude") {
-  $agentHostConfigDir = if ($env:CLAUDE_HOST_CONFIG_DIR) { $env:CLAUDE_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
-}
-else {
-  $agentHostConfigDir = if ($env:CODEX_HOST_CONFIG_DIR) { $env:CODEX_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".codex" }
-}
-
 $ghHostConfigPath = if ($env:GH_HOST_CONFIG_DIR) { $env:GH_HOST_CONFIG_DIR } else { "$env:APPDATA\GitHub CLI" }
 $gitConfigPath = if ($env:GIT_CONFIG_PATH) { $env:GIT_CONFIG_PATH } else { Join-Path $env:USERPROFILE ".gitconfig" }
 
@@ -262,16 +255,6 @@ else {
   }
 }
 
-$agentSeedArgs = @()
-if (Test-Path $agentHostConfigDir) {
-  if ($Agent -eq "claude") {
-    $agentSeedArgs = @("-v", "${agentHostConfigDir}:/home/node/.claude-host:ro")
-  }
-  else {
-    $agentSeedArgs = @("-v", "${agentHostConfigDir}:/home/node/.codex-host:ro")
-  }
-}
-
 $gitConfigArgs = @()
 if (Test-Path $gitConfigPath) {
   $gitConfigArgs = @("-v", "${gitConfigPath}:/home/node/.gitconfig-host:ro")
@@ -324,7 +307,6 @@ elseif ($Agent -eq "codex") {
 # container (intentional — use the volume copy for all in-container installs).
 docker compose @composeArgs run @runArgs `
   @envArgs `
-  @agentSeedArgs `
   @gitConfigArgs `
   @ghConfigArgs `
   @ctxArgs `

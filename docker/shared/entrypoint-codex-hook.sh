@@ -2,7 +2,6 @@
 set -euo pipefail
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
-AGENT_HOST_SEED_DIR="${AGENT_HOST_SEED_DIR:-/home/node/.codex-host}"
 
 ensure_top_level_array_setting() {
 	local file="$1" key="$2" values="$3"
@@ -106,28 +105,11 @@ ${values}
 	mv "$tmp" "$file"
 }
 
-# Seed the persistent Codex config volume from a host config directory on the
-# first run only. Subsequent runs keep the Docker-managed state untouched.
-if [ -d "$AGENT_HOST_SEED_DIR" ] &&
-	[ -n "$(find "$AGENT_HOST_SEED_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] &&
-	[ ! -f "$AGENT_CONFIG_DIR/config.toml" ]; then
-	rsync -a --no-owner --no-group --ignore-existing \
-		--exclude '/tmp/' \
-		--exclude '/.tmp/' \
-		--exclude '/cache/' \
-		--exclude '/log/' \
-		--exclude '/sessions/' \
-		--exclude '*.sqlite' \
-		--exclude '*.sqlite-shm' \
-		--exclude '*.sqlite-wal' \
-		--exclude 'history.jsonl' \
-		--exclude 'sandbox.log' \
-		"$AGENT_HOST_SEED_DIR"/ "$AGENT_CONFIG_DIR"/
-	chmod 700 "$AGENT_CONFIG_DIR" || true
-	if [ -f "$AGENT_CONFIG_DIR/config.toml" ]; then
-		chmod 600 "$AGENT_CONFIG_DIR/config.toml" || true
-	fi
-fi
+# Host config is intentionally not seeded; the container grows its own Codex ecosystem
+# (config.toml, sessions, history) independent of the host. The ensure_* helpers below
+# write the image-baked statusline/terminal-title defaults straight into config.toml
+# when the keys are missing, which covers the only state we care to seed.
+chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
 # Seed a richer native Codex status line/title, but only when the user has not
 # already chosen their own values.

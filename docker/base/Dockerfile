@@ -125,10 +125,10 @@ RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/b
 # Set zsh as the default shell for the node user.
 RUN usermod --shell /bin/zsh node
 
-# Create writable paths before named volumes are mounted so Docker copies sane ownership.
+# Create writable paths before named volumes are mounted so Docker copies sane
+# ownership and permissions onto the volumes. Agent config dirs are 700 since
+# they will hold auth tokens (.credentials.json, config.toml).
 RUN mkdir -p \
-    /home/node/.claude \
-    /home/node/.codex \
     /home/node/.config/gh \
     /home/node/.config/git \
     /home/node/.local/bin \
@@ -136,6 +136,7 @@ RUN mkdir -p \
     /home/node/.zsh_history_dir \
     /workspace \
     /ctx \
+    && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
 # Copy startup scripts while still root.

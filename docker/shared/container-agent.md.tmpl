@@ -18,7 +18,8 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Data | `sqlcmd`, `sqlite3`, `envsubst`, `bc`, `xxd` |
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
-| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo` |
+| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo`, `pandoc`, `marp` (Markdown → slide decks), `mmdc` (Mermaid diagram source → SVG/PNG/PDF) |
+| Headless browser | `chromium` — used by `marp` and `mmdc`, but also available for web automation: E2E/visual tests, smoke-testing a local dev server, screenshots, Lighthouse audits, HTML→PDF/PNG. Puppeteer-based tools work out of the box (`PUPPETEER_EXECUTABLE_PATH` and `CHROME_NO_SANDBOX` are pre-set); for Playwright either run `npx playwright install chromium` or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium`. |
 | Editors | `nano`, `vim` |
 | Sandbox | `bubblewrap` (`bwrap`) |
 

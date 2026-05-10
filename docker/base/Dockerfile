@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bzip2 \
     build-essential \
     ca-certificates \
+    chromium \
     curl \
     dnsutils \
     fd-find \
@@ -27,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     netcat-openbsd \
     openssh-client \
+    pandoc \
     patch \
     procps \
     python3 \
@@ -85,17 +87,27 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
 # Install pnpm
 RUN npm install -g pnpm
 
+# Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram
+# source -> SVG/PNG/PDF). Both drive Chromium via puppeteer; skip Puppeteer's
+# bundled-Chromium download since the apt-installed system chromium is used at
+# runtime (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
+    @marp-team/marp-cli \
+    @mermaid-js/mermaid-cli
+
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq
 
-# Disable PEP 668 externally-managed marker so agents can pip-install without
-# needing --break-system-packages (this is a disposable container, not a workstation).
-RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
-
-# Give 'node' user sudo access for firewall setup, workspace shadow mounts,
-# and runtime package installs.
+# Root-side image setup: drop the PEP 668 externally-managed marker (so agents
+# can pip-install without --break-system-packages on this disposable container),
+# install scoped sudoers for the node user, set zsh as the default shell, and
+# create writable paths before named volumes mount so Docker copies sane
+# ownership/permissions onto the volumes. Agent config dirs (.claude, .codex)
+# are mode 700 because they will hold auth tokens (.credentials.json,
+# config.toml).
 #
-# Security rationale: the three allowed commands are intentionally scoped.
+# Sudoers security rationale — the three allowed commands are intentionally
+# scoped:
 #
 #   init-firewall.sh  — sets up iptables rules that restrict outbound traffic to
 #                       an allowlist; the script itself is root-owned and immutable
@@ -119,44 +131,52 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 #                       guarded against is firewall circumvention, not local
 #                       privilege escalation — these containers are single-user and
 #                       disposable, and container escape is unrelated to sudo scope.
-RUN echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
-    && chmod 0440 /etc/sudoers.d/node
-
-# Set zsh as the default shell for the node user.
-RUN usermod --shell /bin/zsh node
-
-# Create writable paths before named volumes are mounted so Docker copies sane
-# ownership and permissions onto the volumes. Agent config dirs are 700 since
-# they will hold auth tokens (.credentials.json, config.toml).
-RUN mkdir -p \
-    /home/node/.config/gh \
-    /home/node/.config/git \
-    /home/node/.local/bin \
-    /home/node/.local/share/pnpm/store \
-    /home/node/.zsh_history_dir \
-    /workspace \
-    /ctx \
+RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
+    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
+    && chmod 0440 /etc/sudoers.d/node \
+    && usermod --shell /bin/zsh node \
+    && mkdir -p \
+        /home/node/.config/gh \
+        /home/node/.config/git \
+        /home/node/.local/bin \
+        /home/node/.local/share/pnpm/store \
+        /home/node/.zsh_history_dir \
+        /workspace \
+        /ctx \
     && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
-# Copy startup scripts while still root.
-COPY --chmod=755 docker/shared/init-firewall.sh /usr/local/bin/init-firewall.sh
-COPY --chmod=755 docker/shared/shadow-mounts.sh /usr/local/bin/shadow-mounts.sh
-COPY --chmod=755 docker/shared/detect-shadows.sh /usr/local/bin/detect-shadows.sh
-COPY --chmod=755 docker/shared/shadow-refresh.sh /usr/local/bin/shadow-refresh.sh
-COPY --chmod=755 docker/shared/entrypoint-core.sh /usr/local/bin/entrypoint-core.sh
-COPY --chmod=755 docker/shared/entrypoint-claude.sh /usr/local/bin/entrypoint-claude.sh
-COPY --chmod=755 docker/shared/entrypoint-codex.sh /usr/local/bin/entrypoint-codex.sh
-COPY --chmod=755 docker/shared/entrypoint-claude-hook.sh /usr/local/bin/entrypoint-claude-hook.sh
-COPY --chmod=755 docker/shared/entrypoint-codex-hook.sh /usr/local/bin/entrypoint-codex-hook.sh
-COPY --chmod=755 docker/shared/cid /usr/local/bin/cid
+# Copy startup scripts while still root. Single multi-source COPY to keep them
+# in one layer — they all change at the same cadence, so per-file caching gains
+# nothing.
+COPY --chmod=755 \
+    docker/shared/cid \
+    docker/shared/init-firewall.sh \
+    docker/shared/shadow-mounts.sh \
+    docker/shared/detect-shadows.sh \
+    docker/shared/shadow-refresh.sh \
+    docker/shared/entrypoint-core.sh \
+    docker/shared/entrypoint-claude.sh \
+    docker/shared/entrypoint-codex.sh \
+    docker/shared/entrypoint-claude-hook.sh \
+    docker/shared/entrypoint-codex-hook.sh \
+    /usr/local/bin/
 
 USER node
 
 ENV PNPM_HOME="/home/node/.local/share/pnpm"
-ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}:${PATH}"
+ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/zsh
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
+
+# Point Marp / Puppeteer at the system Chromium (PDF, PPTX, PNG output).
+# CHROME_NO_SANDBOX=true is appropriate here: the container itself is the
+# isolation boundary, and Chromium's user-namespace sandbox is unreliable
+# under our default Docker seccomp/AppArmor profile.
+ENV CHROME_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV CHROME_NO_SANDBOX=true
 
 # Keep pnpm's store outside the workspace because the workspace bind mount and
 # the shared pnpm volume are different filesystems.

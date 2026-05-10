@@ -127,6 +127,10 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 | `pdftotext` | Extract text from PDFs (`poppler-utils`) |
 | `pdftoppm` | Render PDF pages to images (`poppler-utils`) — used by Claude Code's `Read` tool |
 | `pdfinfo` | PDF metadata (`poppler-utils`) |
+| `pandoc` | Universal document converter — Markdown ↔ HTML, DOCX, PDF, EPUB, etc. (`pandoc`) |
+| `marp` | Markdown → slide decks (HTML/PDF/PPTX/PNG) — `@marp-team/marp-cli` installed globally via npm |
+| `mmdc` | Mermaid diagram source → SVG/PNG/PDF — `@mermaid-js/mermaid-cli` installed globally via npm; uses the same system Chromium as Marp |
+| `chromium` | Headless browser used by `marp` and `mmdc` for PDF/PPTX/PNG output, and available for general web automation (Puppeteer-based tools, Playwright with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium`, Lighthouse, screenshots). `CHROME_PATH`, `PUPPETEER_EXECUTABLE_PATH`, and `CHROME_NO_SANDBOX=true` are pre-set since the container is already the isolation boundary |
 
 ### Database
 

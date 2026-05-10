@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bzip2 \
     build-essential \
     ca-certificates \
+    chromium \
     curl \
     dnsutils \
     fd-find \
@@ -27,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     netcat-openbsd \
     openssh-client \
+    pandoc \
     patch \
     procps \
     python3 \
@@ -84,6 +86,11 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
 
 # Install pnpm
 RUN npm install -g pnpm
+
+# Install Marp CLI for Markdown -> slide deck rendering. Skip Puppeteer's bundled
+# Chromium download since the apt-installed system chromium is used at runtime
+# (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g @marp-team/marp-cli
 
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq
@@ -157,6 +164,15 @@ ENV PNPM_HOME="/home/node/.local/share/pnpm"
 ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/zsh
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
+
+# Point Marp / Puppeteer at the system Chromium (PDF, PPTX, PNG output).
+# CHROME_NO_SANDBOX=true is appropriate here: the container itself is the
+# isolation boundary, and Chromium's user-namespace sandbox is unreliable
+# under our default Docker seccomp/AppArmor profile.
+ENV CHROME_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV CHROME_NO_SANDBOX=true
 
 # Keep pnpm's store outside the workspace because the workspace bind mount and
 # the shared pnpm volume are different filesystems.

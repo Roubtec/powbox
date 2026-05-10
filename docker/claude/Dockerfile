@@ -16,6 +16,7 @@ RUN rm -rf /home/node/.claude/downloads
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
 COPY --chown=node:node docker/claude/statusline-command.sh /home/node/.agent-container/statusline-command.sh
 COPY --chown=node:node docker/claude/statusline-settings.json /home/node/.agent-container/statusline-settings.json
+COPY --chown=node:node docker/claude/commands/ /home/node/.agent-container/commands/
 RUN date +%s%N > /home/node/.agent-container/build-epoch
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-claude.sh"]

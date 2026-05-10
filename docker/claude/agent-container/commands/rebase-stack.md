@@ -1,5 +1,6 @@
 ---
 description: Rebase a chain of stacked local branches onto a target branch, one at a time, replaying only each branch's unique commits and using agent intelligence to resolve conflicts.
+disable-model-invocation: true
 argument-hint: [<source-branch>] [onto <target-branch>]
 ---
 

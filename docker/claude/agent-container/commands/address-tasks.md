@@ -1,5 +1,6 @@
 ---
 description: Kick off work on a task or set of tasks in turn. Create a branch for each task, implement the work, and open a PR for review. Use when the user is ready to start executing on the implementation of pre-planned work items.
+disable-model-invocation: true
 argument-hint: <glob-or-file-list of task files to implement>
 ---
 

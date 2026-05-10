@@ -1,5 +1,6 @@
 ---
 description: Review completed task files against the actual codebase, close satisfied tasks, and create follow-up tasks for any gaps. Use after a batch of tasks has been implemented.
+disable-model-invocation: true
 argument-hint: <glob-or-file-list of task files to review>
 ---
 

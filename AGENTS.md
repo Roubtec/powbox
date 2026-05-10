@@ -17,7 +17,7 @@ Teach or question the user if that is in the best interest of the final product.
 - Thin agent images: `docker/claude/Dockerfile`, `docker/codex/Dockerfile`
 - Shared Compose runtime: `compose.shared.yml`; agent overlays: `compose.claude.yml`, `compose.codex.yml`
 - User-facing host commands: `commands/`
-- Image-baked Claude slash commands: `docker/claude/commands/` (seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; per-repo `.claude/commands/` overrides on name collision)
+- Image-baked Claude slash commands: `docker/claude/agent-container/commands/` (seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; per-repo `.claude/commands/` overrides on name collision)
 - Internal build/launch helpers: `scripts/`
 - Entrypoint core and hooks: `docker/shared/`
 - Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh.sh`

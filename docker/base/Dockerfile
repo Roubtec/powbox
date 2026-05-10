@@ -165,7 +165,7 @@ COPY --chmod=755 \
 USER node
 
 ENV PNPM_HOME="/home/node/.local/share/pnpm"
-ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}:${PATH}"
+ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/zsh
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
 

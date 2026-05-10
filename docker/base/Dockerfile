@@ -87,10 +87,13 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
 # Install pnpm
 RUN npm install -g pnpm
 
-# Install Marp CLI for Markdown -> slide deck rendering. Skip Puppeteer's bundled
-# Chromium download since the apt-installed system chromium is used at runtime
-# (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
-RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g @marp-team/marp-cli
+# Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram
+# source -> SVG/PNG/PDF). Both drive Chromium via puppeteer; skip Puppeteer's
+# bundled-Chromium download since the apt-installed system chromium is used at
+# runtime (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
+    @marp-team/marp-cli \
+    @mermaid-js/mermaid-cli
 
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq

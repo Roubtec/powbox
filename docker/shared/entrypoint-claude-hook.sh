@@ -60,12 +60,20 @@ if [ -f "$AGENT_TMPL" ]; then
 			fi
 		fi
 
-		# Seed image-baked slash commands. User-added files in the same dir are
-		# preserved; per-repo .claude/commands/ still takes precedence at invoke time.
+		# Seed image-baked slash commands (no-clobber: preserves user-modified versions;
+		# delete the file to pick up the latest image version on next container start).
+		# Per-repo .claude/commands/ still takes precedence at invoke time.
 		COMMANDS_SRC="/home/node/.agent-container/commands"
 		if [ -d "$COMMANDS_SRC" ]; then
 			mkdir -p "$AGENT_CONFIG_DIR/commands"
-			cp -f "$COMMANDS_SRC"/*.md "$AGENT_CONFIG_DIR/commands/" 2>/dev/null || true
+			for cmd in "$COMMANDS_SRC"/*.md; do
+				[ -e "$cmd" ] || continue
+				dest="$AGENT_CONFIG_DIR/commands/$(basename "$cmd")"
+				[ -f "$dest" ] && continue
+				if ! cp "$cmd" "$dest"; then
+					echo "Warning: failed to seed $(basename "$cmd") into commands dir" >&2
+				fi
+			done
 		fi
 
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"

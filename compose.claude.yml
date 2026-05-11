@@ -3,6 +3,7 @@ services:
     image: powbox-claude:latest
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENT_SETTINGS_EPHEMERAL: ${AGENT_SETTINGS_EPHEMERAL:-1}
     volumes:
       - claude-config:/home/node/.claude
 

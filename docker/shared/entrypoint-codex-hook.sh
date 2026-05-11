@@ -155,3 +155,20 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
 	echo "Warning: OPENAI_API_KEY is not set. Codex CLI will not be able to authenticate with OpenAI." >&2
 	echo "Pass it via: -e OPENAI_API_KEY=\$OPENAI_API_KEY when launching the container." >&2
 fi
+
+# Per-container ephemeral overlay: when AGENT_SETTINGS_EPHEMERAL=1, shadow
+# config.toml with a /dev/shm copy so interactive /model and reasoning-effort
+# edits do not leak into other containers sharing the codex-config volume.
+# The underlying volume file keeps its pre-shadow baseline; the bind mount
+# is torn down when the container stops.
+if [ "${AGENT_SETTINGS_EPHEMERAL:-0}" = "1" ]; then
+	SHADOW_DIR="/dev/shm/agent-shadow"
+	SHADOW_FILE="$SHADOW_DIR/codex-config.toml"
+	mkdir -p "$SHADOW_DIR"
+	chmod 700 "$SHADOW_DIR"
+	[ -f "$CONFIG_FILE" ] || : > "$CONFIG_FILE"
+	cp -p "$CONFIG_FILE" "$SHADOW_FILE"
+	if ! sudo /usr/local/bin/shadow-agent-config.sh "$SHADOW_FILE" "$CONFIG_FILE"; then
+		echo "Warning: failed to shadow $CONFIG_FILE; per-container settings will leak across containers." >&2
+	fi
+fi

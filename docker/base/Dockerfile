@@ -122,6 +122,16 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       at runtime (Docker's seccomp profile blocks the mount syscall
 #                       without it); granted in compose.shared.yml.
 #
+#   shadow-agent-config.sh
+#                     — bind-mounts a /dev/shm-backed copy of a Claude/Codex
+#                       config file over the persistent volume original so per-
+#                       container TUI edits (e.g. /model, /effort) do not leak
+#                       across containers sharing the same config volume.  Root-
+#                       owned and immutable; allowlisted dst (settings.json /
+#                       config.toml only) and src (must live under /dev/shm/
+#                       agent-shadow/).  Same CAP_SYS_ADMIN requirement as
+#                       shadow-mounts.sh.
+#
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs
 #                       package maintainer scripts as root, so this is a deliberate
@@ -132,7 +142,7 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       privilege escalation — these containers are single-user and
 #                       disposable, and container escape is unrelated to sudo scope.
 RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
+    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/local/bin/shadow-agent-config.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node \
     && usermod --shell /bin/zsh node \
     && mkdir -p \
@@ -153,6 +163,7 @@ COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \
     docker/shared/shadow-mounts.sh \
+    docker/shared/shadow-agent-config.sh \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
     docker/shared/entrypoint-core.sh \

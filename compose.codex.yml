@@ -3,6 +3,7 @@ services:
     image: powbox-codex:latest
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_SETTINGS_EPHEMERAL: ${AGENT_SETTINGS_EPHEMERAL:-1}
     volumes:
       - codex-config:/home/node/.codex
 

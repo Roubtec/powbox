@@ -199,6 +199,42 @@ Note that `CAP_SYS_ADMIN` is granted to the container as a whole by Docker — s
 The `node` user cannot invoke arbitrary commands as root (sudo is scoped), but any process in the container holds `CAP_SYS_ADMIN` for its lifetime.
 `shadow-refresh.sh` requires this capability mid-session, so it cannot be dropped after startup.
 
+## Per-Container Ephemeral Agent Settings
+
+The Claude and Codex config volumes (`claude-config`, `codex-config`) are shared across every container of the same flavor, so interactive TUI edits like `/model` or `/effort` would otherwise propagate to the next container that starts.
+To keep those edits scoped to the container that made them, the entrypoint hook optionally shadows the agent settings file with a `/dev/shm` copy.
+
+### How it works
+
+When `AGENT_SETTINGS_EPHEMERAL=1` (the default in `compose.claude.yml` and `compose.codex.yml`):
+
+1. The hook seeds `settings.json` / `config.toml` on the volume as before.
+2. It copies the seeded file to `/dev/shm/agent-shadow/<name>` (tmpfs).
+3. It calls `shadow-agent-config.sh` via scoped sudo to `mount --bind` the tmpfs copy over the volume original.
+
+The agent now reads and writes the tmpfs copy.
+The underlying volume file keeps its pre-shadow baseline.
+When the container stops, the bind mount is torn down and the tmpfs is gone, leaving the persistent volume untouched.
+
+Set `AGENT_SETTINGS_EPHEMERAL=0` to disable and restore the shared-settings behaviour.
+
+### Trade-off
+
+The shadow covers the entire settings file, not just the model/effort keys, so other persistent edits in that file (e.g. `enabledPlugins` toggled via `/plugins`) also become ephemeral.
+Re-seeded keys like `statusLine` and image-baked marketplaces are unaffected because the hook re-applies them on every start.
+
+### Caveat
+
+Bind-mounting a file makes `rename(2)` over it return `EBUSY`.
+This assumes the agent CLI persists settings via in-place `writeFileSync`, not write-temp-then-rename.
+If a future Claude / Codex release switches to atomic-rename writes, edits will silently fail to persist — disable the feature in that case.
+
+### Security
+
+`shadow-agent-config.sh` is a root-owned, immutable script invoked via scoped sudo.
+It refuses to shadow any path outside the allowlist (`/home/node/.claude/settings.json`, `/home/node/.codex/config.toml`) and refuses sources outside `/dev/shm/agent-shadow/`.
+It uses the same `CAP_SYS_ADMIN` that `shadow-mounts.sh` requires — no extra privileges are granted.
+
 ## Commands
 
 The user-facing command surface lives at the repo root and in `commands/`:

@@ -79,3 +79,21 @@ if [ -f "$AGENT_TMPL" ]; then
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
+
+# Per-container ephemeral overlay: when AGENT_SETTINGS_EPHEMERAL=1, shadow
+# settings.json with a /dev/shm copy so interactive /model and /effort edits
+# do not leak into other containers sharing the claude-config volume.  The
+# underlying volume file keeps its pre-shadow baseline; the bind mount is
+# torn down when the container stops.
+if [ "${AGENT_SETTINGS_EPHEMERAL:-0}" = "1" ]; then
+	SETTINGS_FILE="$AGENT_CONFIG_DIR/settings.json"
+	SHADOW_DIR="/dev/shm/agent-shadow"
+	SHADOW_FILE="$SHADOW_DIR/claude-settings.json"
+	mkdir -p "$SHADOW_DIR"
+	chmod 700 "$SHADOW_DIR"
+	[ -f "$SETTINGS_FILE" ] || echo "{}" > "$SETTINGS_FILE"
+	cp -p "$SETTINGS_FILE" "$SHADOW_FILE"
+	if ! sudo /usr/local/bin/shadow-agent-config.sh "$SHADOW_FILE" "$SETTINGS_FILE"; then
+		echo "Warning: failed to shadow $SETTINGS_FILE; per-container settings will leak across containers." >&2
+	fi
+fi

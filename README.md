@@ -21,6 +21,7 @@ Image builds are handled by `docker buildx bake` through wrapper scripts so cach
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
+- `docker/claude/agent-container/`: Claude-specific files baked into the image at `/home/node/.agent-container/` (statusline script, statusline settings overlay, `commands/` for slash commands)
 
 ## Build Modes
 
@@ -60,6 +61,19 @@ cx --build
 ```
 
 No volume cleanup is needed — the entrypoint conditionally re-renders the template on container start when the image epoch is greater than or equal to the last-written volume epoch.
+
+## Image-Baked Claude Slash Commands
+
+Repo-agnostic Claude slash commands live in `docker/claude/agent-container/commands/` and are baked into the Claude image.
+
+At container start, the entrypoint seeds them into `$CLAUDE_CONFIG_DIR/commands/` from the same epoch-gated block that re-renders the agent instruction template.
+Seeding is no-clobber: existing files are never overwritten, so user-modified copies are always preserved.
+To pick up an updated version of an image-shipped command after a rebuild, delete the file from `$CLAUDE_CONFIG_DIR/commands/` and restart the container — the fresh copy will be seeded on next start.
+
+Per-repo `.claude/commands/<name>.md` still takes precedence on bare slash invocations, so any repo can override individual files without losing the rest.
+User-added files in the same volume directory are unaffected by image rebuilds.
+
+These do not pre-load into agent context; like all slash commands they are only read when invoked.
 
 ## Runtime
 

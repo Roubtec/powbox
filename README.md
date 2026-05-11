@@ -66,10 +66,12 @@ No volume cleanup is needed — the entrypoint conditionally re-renders the temp
 
 Repo-agnostic Claude slash commands live in `docker/claude/agent-container/commands/` and are baked into the Claude image.
 
-At container start, the entrypoint seeds them into `$CLAUDE_CONFIG_DIR/commands/` from the same epoch-gated block that re-renders the agent instruction template, so updates flow through on image rebuild without manual volume cleanup.
+At container start, the entrypoint seeds them into `$CLAUDE_CONFIG_DIR/commands/` from the same epoch-gated block that re-renders the agent instruction template.
+Seeding is no-clobber: existing files are never overwritten, so user-modified copies are always preserved.
+To pick up an updated version of an image-shipped command after a rebuild, delete the file from `$CLAUDE_CONFIG_DIR/commands/` and restart the container — the fresh copy will be seeded on next start.
 
 Per-repo `.claude/commands/<name>.md` still takes precedence on bare slash invocations, so any repo can override individual files without losing the rest.
-User-added files in the same volume directory are preserved across rebuilds — only the image-shipped filenames are refreshed.
+User-added files in the same volume directory are unaffected by image rebuilds.
 
 These do not pre-load into agent context; like all slash commands they are only read when invoked.
 

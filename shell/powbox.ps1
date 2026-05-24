@@ -104,7 +104,8 @@ function agent-prune-stopped {
 
 function agent-prune {
     agent-prune-stopped
-    agent-prune-volumes
+    # Forward any flags (e.g. -WhatIf/-Force) on to prune-volumes.ps1.
+    agent-prune-volumes @args
 }
 
 function agent-check-updates {

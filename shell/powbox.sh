@@ -1,3 +1,8 @@
+# shellcheck shell=bash
+# This file is sourced, not executed, so it has no shebang. The directive above
+# tells shellcheck to analyze it as bash (its closest supported dialect); the
+# file is also sourced into zsh at runtime.
+#
 # PowBox shell helpers (bash / zsh).
 #
 # Source this file from your ~/.bashrc or ~/.zshrc:
@@ -36,6 +41,11 @@ fi
 if [ -z "${POWBOX_ROOT:-}" ]; then
     echo "powbox: POWBOX_ROOT is not set and could not be auto-detected." >&2
     echo "powbox: export POWBOX_ROOT to your checkout before sourcing shell/powbox.sh." >&2
+    # `return` succeeds when sourced (the intended use) and fails when the file
+    # is run directly, in which case `exit 1` takes over. shellcheck only models
+    # the sourced path and so flags `exit 1` as unreachable; the fallback is
+    # deliberate.
+    # shellcheck disable=SC2317
     return 1 2>/dev/null || exit 1
 fi
 
@@ -82,18 +92,23 @@ agent-prune-stopped() {
     local claude_names codex_names
     claude_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-")
     if [ -n "$claude_names" ]; then
+        # Intentionally unquoted: the names are newline-separated and must reach
+        # `docker rm` as separate arguments, not one combined string.
+        # shellcheck disable=SC2086
         docker rm $claude_names 2>/dev/null
     fi
 
     codex_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-")
     if [ -n "$codex_names" ]; then
+        # shellcheck disable=SC2086
         docker rm $codex_names 2>/dev/null
     fi
 }
 
 agent-prune() {
     agent-prune-stopped
-    agent-prune-volumes
+    # Forward any flags (e.g. --dry-run/--force) on to prune-volumes.sh.
+    agent-prune-volumes "$@"
 }
 
 agent-check-updates() {

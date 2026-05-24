@@ -123,6 +123,10 @@ function agent-update-codex {
     & "$env:POWBOX_ROOT\build.ps1" -Target codex -NoCache @args
 }
 
+function agent-update-base {
+    & "$env:POWBOX_ROOT\build.ps1" -Target base -Pull -NoCache @args
+}
+
 function cc-list {
     docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
 }

@@ -112,6 +112,10 @@ agent-update-codex() {
     "$POWBOX_ROOT/build.sh" codex --no-cache "$@"
 }
 
+agent-update-base() {
+    "$POWBOX_ROOT/build.sh" base --pull --no-cache "$@"
+}
+
 cc-list() {
     docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }

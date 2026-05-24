@@ -88,21 +88,23 @@ agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh" "$@"
 }
 
-agent-prune-stopped() {
-    local claude_names codex_names
-    claude_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-")
-    if [ -n "$claude_names" ]; then
-        # Intentionally unquoted: the names are newline-separated and must reach
-        # `docker rm` as separate arguments, not one combined string.
-        # shellcheck disable=SC2086
-        docker rm $claude_names 2>/dev/null
-    fi
+# Remove all exited containers whose name matches the given prefix filter.
+# Names are read line-by-line into an array so this behaves identically under
+# bash and zsh. zsh does not word-split unquoted expansions, so the older
+# `docker rm $names` form silently passed every name as a single argument and
+# failed when more than one container matched. Process substitution (rather
+# than a pipe) keeps the loop in the current shell so the array survives.
+_powbox_prune_exited() {
+    local name names=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$1")
+    [ "${#names[@]}" -gt 0 ] && docker rm "${names[@]}" 2>/dev/null
+}
 
-    codex_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-")
-    if [ -n "$codex_names" ]; then
-        # shellcheck disable=SC2086
-        docker rm $codex_names 2>/dev/null
-    fi
+agent-prune-stopped() {
+    _powbox_prune_exited "claude-"
+    _powbox_prune_exited "codex-"
 }
 
 agent-prune() {

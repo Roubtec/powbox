@@ -271,8 +271,9 @@ Functions exposed by both libraries:
 - `cc-list`, `cx-list`, `agent-list` — list agent containers
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
-- `agent-check-updates` — compare baked agent versions against the latest npm releases
+- `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
 - `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
+- `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions (`--pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 
 ### Environment Variables
@@ -333,6 +334,9 @@ agent-update-claude
 
 # Rebuild the Codex image with the latest release
 agent-update-codex
+
+# Re-pull the base image and rebuild the shared substrate with latest packages
+agent-update-base
 
 # List Claude containers
 cc-list
@@ -395,6 +399,9 @@ agent-update-claude
 
 # Rebuild the Codex image with the latest release
 agent-update-codex
+
+# Re-pull the base image and rebuild the shared substrate with latest packages
+agent-update-base
 
 # List Claude containers
 cc-list

@@ -10,6 +10,14 @@ variable "CODEX_VERSION" {
   default = "latest"
 }
 
+variable "BASE_SOURCE_IMAGE" {
+  default = "node:24-slim"
+}
+
+variable "BASE_SOURCE_DIGEST" {
+  default = ""
+}
+
 target "_common" {
   context = "."
   output = ["type=docker"]
@@ -19,6 +27,10 @@ target "base" {
   inherits = ["_common"]
   dockerfile = "docker/base/Dockerfile"
   tags = ["powbox-agent-base:latest"]
+  args = {
+    BASE_SOURCE_IMAGE = BASE_SOURCE_IMAGE
+    BASE_SOURCE_DIGEST = BASE_SOURCE_DIGEST
+  }
 }
 
 target "claude" {

@@ -188,3 +188,14 @@ RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master
 COPY --chown=node:node docker/shared/.zshrc /home/node/.zshrc
 
 WORKDIR /home/node
+
+# Record the upstream base image and the exact digest this image was built FROM
+# so `agent-check-updates` can compare it against the current registry digest
+# and report whether a newer base is available. Both are supplied by
+# scripts/build-image.{sh,ps1}; the defaults are sane fallbacks when the image
+# is built outside that script. Declared last so changing the digest only
+# rebuilds this trivial metadata layer, never the substrate layers above.
+ARG BASE_SOURCE_IMAGE="node:24-slim"
+ARG BASE_SOURCE_DIGEST=""
+LABEL powbox.base.source="${BASE_SOURCE_IMAGE}" \
+      powbox.base.source.digest="${BASE_SOURCE_DIGEST}"

@@ -1,10 +1,25 @@
 param(
     [string]$ClaudeImage = 'powbox-claude:latest',
     [string]$CodexImage  = 'powbox-codex:latest',
-    [string]$BaseImage   = 'powbox-agent-base:latest'
+    [string]$BaseImage   = 'powbox-agent-base:latest',
+    # Suppress human-readable output and instead emit just the names of the
+    # stale build targets (base|claude|codex), one per line, for agent-update
+    # to consume. A target is stale when a latest version is known and differs
+    # from what is baked in (a missing image counts as stale).
+    [switch]$Porcelain
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Emit informational text only in human mode so -Porcelain output stays clean.
+function Write-Note([string]$Message) {
+    if (-not $Porcelain) { Write-Host $Message }
+}
+
+function Test-Stale([string]$Baked, [string]$Latest) {
+    if (-not $Latest) { return $false }
+    return $Baked -ne $Latest
+}
 
 # -------------------------------------------------------------------
 # Helpers
@@ -102,20 +117,20 @@ $baseLatest  = $null
 if (Test-ImageExists $ClaudeImage) {
     $claudeBaked = Get-BakedClaudeVersion $ClaudeImage
 } else {
-    Write-Host "Image $ClaudeImage not found — Claude baked version will be shown as (unknown)."
+    Write-Note "Image $ClaudeImage not found — Claude baked version will be shown as (unknown)."
 }
 
 if (Test-ImageExists $CodexImage) {
     $codexBaked = Get-BakedCodexVersion $CodexImage
 } else {
-    Write-Host "Image $CodexImage not found — Codex baked version will be shown as (unknown)."
+    Write-Note "Image $CodexImage not found — Codex baked version will be shown as (unknown)."
 }
 
 if (Test-ImageExists $BaseImage) {
     $baseSource = Get-ImageLabel $BaseImage 'powbox.base.source'
     $baseBaked  = Get-ImageLabel $BaseImage 'powbox.base.source.digest'
 } else {
-    Write-Host "Image $BaseImage not found — base will be shown as (unknown)."
+    Write-Note "Image $BaseImage not found — base will be shown as (unknown)."
 }
 
 $claudeLatest = $null
@@ -130,6 +145,17 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 
 if ($baseSource) {
     $baseLatest = Get-RegistryDigest $baseSource
+}
+
+# -------------------------------------------------------------------
+# Porcelain: emit stale target names only, in build order (base first).
+# -------------------------------------------------------------------
+
+if ($Porcelain) {
+    if (Test-Stale $baseBaked   $baseLatest)   { 'base' }
+    if (Test-Stale $claudeBaked $claudeLatest) { 'claude' }
+    if (Test-Stale $codexBaked  $codexLatest)  { 'codex' }
+    return
 }
 
 # -------------------------------------------------------------------

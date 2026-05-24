@@ -116,6 +116,39 @@ agent-update-base() {
     "$POWBOX_ROOT/build.sh" base --pull --no-cache "$@"
 }
 
+# Check for updates and rebuild only the images that are stale, in the correct
+# order. A stale base image is upstream of the agents, so it triggers a full
+# --pull --no-cache rebuild of base + both agents; otherwise each stale agent
+# image is rebuilt on its own. Extra args are forwarded to build.sh.
+agent-update() {
+    local stale
+    if ! stale="$("$POWBOX_ROOT/commands/check-updates.sh" --porcelain)"; then
+        echo "agent-update: update check failed" >&2
+        return 1
+    fi
+
+    if [ -z "$stale" ]; then
+        echo "All agent images are up to date."
+        return 0
+    fi
+
+    if printf '%s\n' "$stale" | grep -qx base; then
+        echo "Base image is stale — rebuilding base (with --pull) and both agent images on top."
+        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        return $?
+    fi
+
+    local rc=0 target
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        echo "Rebuilding $target image..."
+        "$POWBOX_ROOT/build.sh" "$target" --no-cache "$@" || rc=$?
+    done <<EOF
+$stale
+EOF
+    return $rc
+}
+
 cc-list() {
     docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
 }

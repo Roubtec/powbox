@@ -272,6 +272,7 @@ Functions exposed by both libraries:
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
+- `agent-update` — run the check and rebuild only the stale images in the correct order (a stale base rebuilds base + both agents; otherwise each stale agent rebuilds on its own)
 - `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions (`--pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
@@ -328,6 +329,9 @@ agent-prune
 
 # Check for newer agent releases
 agent-check-updates
+
+# Update only the images that are stale (in the correct order)
+agent-update
 
 # Rebuild the Claude image with the latest release
 agent-update-claude
@@ -393,6 +397,9 @@ agent-prune
 
 # Check for newer agent releases
 agent-check-updates
+
+# Update only the images that are stale (in the correct order)
+agent-update
 
 # Rebuild the Claude image with the latest release
 agent-update-claude

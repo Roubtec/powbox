@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
 # Compare the agent versions baked into the local Docker images against the
 # latest releases on npm and report any available updates.
+#
+# With --porcelain, suppress all human-readable output and instead print just
+# the names of the stale build targets (base|claude|codex), one per line, for
+# `agent-update` to consume. A target is stale when a latest version is known
+# and differs from what is baked in (a missing image counts as stale).
 set -euo pipefail
 
-CLAUDE_IMAGE="${1:-powbox-claude:latest}"
-CODEX_IMAGE="${2:-powbox-codex:latest}"
-BASE_IMAGE="${3:-powbox-agent-base:latest}"
+PORCELAIN=false
+positional=()
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--porcelain) PORCELAIN=true ;;
+	*) positional+=("$1") ;;
+	esac
+	shift
+done
+
+CLAUDE_IMAGE="${positional[0]:-powbox-claude:latest}"
+CODEX_IMAGE="${positional[1]:-powbox-codex:latest}"
+BASE_IMAGE="${positional[2]:-powbox-agent-base:latest}"
+
+# Emit informational text only in human mode so --porcelain stdout stays clean.
+note() {
+	$PORCELAIN || echo "$@"
+}
 
 # -------------------------------------------------------------------
 # Helpers
@@ -43,6 +63,15 @@ registry_digest() {
 
 short_digest() {
 	echo "$1" | sed -n 's/^sha256:\([0-9a-f]\{12\}\).*/\1/p'
+}
+
+# Stale when a latest value is known and differs from the baked value. An
+# empty baked value (missing/unknown image) with a known latest counts as
+# stale so agent-update will build it.
+is_stale() {
+	local baked="$1" latest="$2"
+	[ -n "$latest" ] || return 1
+	[ "$baked" != "$latest" ]
 }
 
 compare_base() {
@@ -89,31 +118,42 @@ base_source="" base_baked="" base_latest=""
 if has_image "$CLAUDE_IMAGE"; then
 	claude_baked="$(baked_claude_version "$CLAUDE_IMAGE")"
 else
-	echo "Image $CLAUDE_IMAGE not found — Claude baked version will be shown as (unknown)."
+	note "Image $CLAUDE_IMAGE not found — Claude baked version will be shown as (unknown)."
 fi
 
 if has_image "$CODEX_IMAGE"; then
 	codex_baked="$(baked_codex_version "$CODEX_IMAGE")"
 else
-	echo "Image $CODEX_IMAGE not found — Codex baked version will be shown as (unknown)."
+	note "Image $CODEX_IMAGE not found — Codex baked version will be shown as (unknown)."
 fi
 
 if has_image "$BASE_IMAGE"; then
 	base_source="$(image_label "$BASE_IMAGE" 'powbox.base.source')"
 	base_baked="$(image_label "$BASE_IMAGE" 'powbox.base.source.digest')"
 else
-	echo "Image $BASE_IMAGE not found — base will be shown as (unknown)."
+	note "Image $BASE_IMAGE not found — base will be shown as (unknown)."
 fi
 
 if command -v npm >/dev/null 2>&1; then
 	claude_latest="$(latest_npm_version '@anthropic-ai/claude-code')"
 	codex_latest="$(latest_npm_version '@openai/codex')"
 else
-	echo "npm not found — latest agent versions will be shown as (unknown)."
+	note "npm not found — latest agent versions will be shown as (unknown)."
 fi
 
 if [ -n "$base_source" ]; then
 	base_latest="$(registry_digest "$base_source")"
+fi
+
+# -------------------------------------------------------------------
+# Porcelain: emit stale target names only, in build order (base first).
+# -------------------------------------------------------------------
+
+if $PORCELAIN; then
+	if is_stale "$base_baked" "$base_latest"; then echo base; fi
+	if is_stale "$claude_baked" "$claude_latest"; then echo claude; fi
+	if is_stale "$codex_baked" "$codex_latest"; then echo codex; fi
+	exit 0
 fi
 
 # -------------------------------------------------------------------

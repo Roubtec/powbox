@@ -8,6 +8,8 @@
 # and differs from what is baked in (a missing image counts as stale).
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 PORCELAIN=false
 positional=()
 while [ "$#" -gt 0 ]; do
@@ -59,6 +61,17 @@ image_label() {
 # Current digest of an upstream tag in its registry, without pulling it.
 registry_digest() {
 	docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null || true
+}
+
+# Upstream image the base is built FROM, parsed from the base Dockerfile (the
+# same source the build scripts use, so it never drifts). Used as a fallback
+# when the local base image is absent or unlabeled, so a missing base can still
+# be compared against the registry and reported stale. Emits nothing if the
+# Dockerfile can't be read — an undeterminable upstream must not force a rebuild.
+default_base_source() {
+	local dockerfile="${ROOT_DIR}/docker/base/Dockerfile"
+	[ -f "$dockerfile" ] || return 0
+	sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "$dockerfile" | head -1
 }
 
 short_digest() {
@@ -141,6 +154,13 @@ else
 	note "npm not found — latest agent versions will be shown as (unknown)."
 fi
 
+# When the local base image is absent (or carries no source label) we can't
+# read the upstream it was built from, but a missing base should still count as
+# stale. Fall back to the Dockerfile's upstream so base_latest can be resolved.
+# If the registry is then unreachable, base_latest stays empty and is_stale
+# treats the base as not-stale — an unreachable registry must not force a rebuild.
+[ -n "$base_source" ] || base_source="$(default_base_source)"
+
 if [ -n "$base_source" ]; then
 	base_latest="$(registry_digest "$base_source")"
 fi
@@ -162,7 +182,7 @@ fi
 
 echo ""
 echo "Agent update check:"
-[ -n "$base_baked" ] || [ -n "$base_latest" ] && compare_base "$base_baked" "$base_latest"
-[ -n "$claude_baked" ] || [ -n "$claude_latest" ] && compare "Claude" "$claude_baked" "$claude_latest"
-[ -n "$codex_baked" ] || [ -n "$codex_latest" ] && compare "Codex" "$codex_baked" "$codex_latest"
+if [ -n "$base_baked" ] || [ -n "$base_latest" ]; then compare_base "$base_baked" "$base_latest"; fi
+if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
+if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi
 echo ""

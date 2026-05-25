@@ -11,6 +11,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Porcelain output must stay machine-clean, so silence the human-facing warnings
+# (npm/registry unreachable, etc.) the helpers emit alongside their return value.
+if ($Porcelain) { $WarningPreference = 'SilentlyContinue' }
+
 # Emit informational text only in human mode so -Porcelain output stays clean.
 function Write-Note([string]$Message) {
     if (-not $Porcelain) { Write-Host $Message }
@@ -64,6 +68,18 @@ function Get-RegistryDigest([string]$Image) {
         return $null
     }
     return $digest.Trim()
+}
+
+# Upstream image the base is built FROM, parsed from the base Dockerfile (the
+# same source the build scripts use). Used as a fallback when the local base
+# image is absent or unlabeled, so a missing base can still be compared against
+# the registry and reported stale. Returns $null if the Dockerfile can't be read.
+function Get-DefaultBaseSource() {
+    $dockerfile = Join-Path (Split-Path $PSScriptRoot -Parent) 'docker/base/Dockerfile'
+    if (-not (Test-Path $dockerfile)) { return $null }
+    $from = Select-String -Path $dockerfile -Pattern '^FROM\s+(\S+)' | Select-Object -First 1
+    if ($from) { return $from.Matches[0].Groups[1].Value }
+    return $null
 }
 
 function Format-ShortDigest([string]$Digest) {
@@ -142,6 +158,13 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 } else {
     Write-Warning 'npm not found — latest agent versions will be shown as (unknown).'
 }
+
+# When the local base image is absent (or carries no source label) we can't read
+# the upstream it was built from, but a missing base should still count as stale.
+# Fall back to the Dockerfile's upstream so $baseLatest can be resolved. If the
+# registry is then unreachable, $baseLatest stays $null and Test-Stale treats the
+# base as not-stale — an unreachable registry must not force a rebuild.
+if (-not $baseSource) { $baseSource = Get-DefaultBaseSource }
 
 if ($baseSource) {
     $baseLatest = Get-RegistryDigest $baseSource

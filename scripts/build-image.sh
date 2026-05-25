@@ -44,6 +44,35 @@ base | claude | codex | all) ;;
 	;;
 esac
 
+# Upstream base image, parsed from the base Dockerfile's FROM so it never drifts
+# from what is actually built. BASE_SOURCE_DIGEST is resolved lazily just before
+# the base target is built and stamped onto the image as a label (see
+# docker/base/Dockerfile) so agent-check-updates can detect a newer base.
+BASE_SOURCE_IMAGE="$(sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "${ROOT_DIR}/docker/base/Dockerfile" | head -1)"
+BASE_SOURCE_DIGEST=""
+
+registry_base_digest() {
+	docker buildx imagetools inspect "$BASE_SOURCE_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null || true
+}
+
+local_base_digest() {
+	docker image inspect "$BASE_SOURCE_IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
+		| sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1
+}
+
+resolve_base_source_digest() {
+	# Usage: resolve_base_source_digest <with_pull>. With --pull the build uses
+	# the registry-latest base, so stamp the registry digest. Otherwise the build
+	# reuses whatever base is cached locally; stamp that, falling back to the
+	# registry digest when the base is not present locally (buildx will pull it).
+	if [ "$1" = true ]; then
+		BASE_SOURCE_DIGEST="$(registry_base_digest)"
+	else
+		BASE_SOURCE_DIGEST="$(local_base_digest)"
+		[ -n "$BASE_SOURCE_DIGEST" ] || BASE_SOURCE_DIGEST="$(registry_base_digest)"
+	fi
+}
+
 run_bake() {
 	# Usage: run_bake <with_pull> <with_no_cache> <targets...>
 	local with_pull="$1"
@@ -51,6 +80,11 @@ run_bake() {
 	local with_no_cache="$1"
 	shift
 	local target_args=("$@")
+
+	case " ${target_args[*]} " in
+	*" base "*) resolve_base_source_digest "$with_pull" ;;
+	esac
+
 	local cmd=(docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl")
 
 	if [ "$with_pull" = true ]; then
@@ -66,6 +100,8 @@ run_bake() {
 	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} ${cmd[*]}"
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
+		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
+		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		"${cmd[@]}"
 }
 
@@ -81,8 +117,11 @@ ensure_base_image() {
 	# build would be unnecessarily slow. Use `build.sh base --no-cache` if you
 	# explicitly want a fresh base.
 	echo "Base image powbox-agent-base:latest was not found locally. Building it first."
+	resolve_base_source_digest false
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
+		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
+		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
 }
 

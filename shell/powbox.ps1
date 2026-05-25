@@ -104,7 +104,8 @@ function agent-prune-stopped {
 
 function agent-prune {
     agent-prune-stopped
-    agent-prune-volumes
+    # Forward any flags (e.g. -WhatIf/-Force) on to prune-volumes.ps1.
+    agent-prune-volumes @args
 }
 
 function agent-check-updates {
@@ -121,6 +122,35 @@ function agent-update-claude {
 
 function agent-update-codex {
     & "$env:POWBOX_ROOT\build.ps1" -Target codex -NoCache @args
+}
+
+function agent-update-base {
+    & "$env:POWBOX_ROOT\build.ps1" -Target base -Pull -NoCache @args
+}
+
+# Check for updates and rebuild only the images that are stale, in the correct
+# order. A stale base image is upstream of the agents, so it triggers a full
+# -Pull -NoCache rebuild of base + both agents; otherwise each stale agent
+# image is rebuilt on its own. Extra args are forwarded to build.ps1.
+function agent-update {
+    $stale = & "$env:POWBOX_ROOT\commands\check-updates.ps1" -Porcelain
+    $stale = @($stale | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+
+    if ($stale.Count -eq 0) {
+        Write-Host "All agent images are up to date."
+        return
+    }
+
+    if ($stale -contains 'base') {
+        Write-Host "Base image is stale — rebuilding base (with -Pull) and both agent images on top."
+        & "$env:POWBOX_ROOT\build.ps1" -Target all -Pull -NoCache @args
+        return
+    }
+
+    foreach ($target in $stale) {
+        Write-Host "Rebuilding $target image..."
+        & "$env:POWBOX_ROOT\build.ps1" -Target $target -NoCache @args
+    }
 }
 
 function cc-list {

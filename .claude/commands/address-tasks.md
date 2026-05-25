@@ -87,32 +87,51 @@ Read `AGENTS.md` first for project conventions.
 ## Reviewer Agent
 
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
-It evaluates the current codebase state against the task's acceptance criteria.
+It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
 It must be a **new** `Agent` invocation — never a `SendMessage` continuation of the implementer.
 It should be launched in the **foreground** (not background) since the feedback loop must complete before the orchestrator can advance branches or start the next task.
 
 ### What to include in the reviewer prompt
 
 - **The full task file content** — same source of truth the implementer received.
+- **The PR base branch name** (the branch this task will be merged into). The reviewer uses this to scope its review by listing files touched on the task branch versus the base. If the orchestrator omits this, the reviewer should fall back to `main` and note the fallback in its report.
 - **Instruction to read the relevant areas of the codebase** and check each acceptance criterion against the actual code.
+- **Instruction to perform a code quality pass** (see dimensions below) orthogonal to the criteria check.
+- **Scoping guidance** — the reviewer may run `git diff --name-only <base>...HEAD` to identify the set of touched files and prioritize quality review there. It must still read each touched file in full (not just the diff) and may follow references into untouched files when needed to evaluate consistency or call sites.
 - **Reporting format:**
-  - **Pass** — all acceptance criteria are met, validation passes. State this clearly.
-  - **Issues** — a numbered list of specific, actionable findings. Each finding must include: what criterion is unmet, where in the code the gap is, and what needs to change.
+  - **Pass** — all acceptance criteria are met, build passes, and no material quality issues found. State this clearly.
+  - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
 - **Instruction NOT to edit any files** — the reviewer only reads and reports.
 
+#### Code quality dimensions to check
+
+These are checked **in addition to** the acceptance criteria, not instead of them.
+
+- **Logic correctness** — control flow, conditionals, and branching produce the right outcomes. Look for off-by-one errors, inverted conditions, incorrect operator precedence, or logic that silently produces wrong results.
+- **Error handling** — errors are caught where they can occur, propagated with meaningful context, and never silently swallowed. Return types and thrown types are accurate.
+- **Edge cases** — null/undefined inputs, empty collections, zero/negative numbers, and boundary values are handled gracefully or explicitly rejected with a clear error.
+- **Dead code and unreachable paths** — branches, parameters, or exported symbols that can never be reached or used should be flagged. Defensive code for conditions that cannot occur should be questioned.
+- **Code consistency** — naming, patterns, and idioms are consistent with the surrounding codebase. New abstractions follow the same conventions as existing ones.
+- **Avoid code duplication** — Reused patterns should ideally be implemented once and shared rather than duplicated (if practical) to reduce maintenance overhead and improve readability.
+- **Type safety** — types are precise and not widened unnecessarily. Casts, `any`, or `as unknown` that could hide real type errors should be flagged.
+
 ### What the reviewer should NOT receive
 
-- The implementer's summary, reasoning, or commit messages.
-- Instruction to look at diffs or git history — it should evaluate the codebase as-is.
+- The implementer's summary, reasoning, or notes.
+- Instruction to read commit messages or diffs. The reviewer may use git to list touched files (for scoping), but it should not read commit messages or `git diff` output, since both anchor the reviewer to the implementer's intent and to a line-by-line view that hides issues spanning the boundary between changed and unchanged code. Read whole files instead.
 
 ### Example reviewer prompt structure
 
 ```text
 You are reviewing a task implementation. You have no prior knowledge of how it was built.
-Your job is to check the current codebase against the task's acceptance criteria.
+Your job is to evaluate the current codebase on two orthogonal dimensions:
+1. Acceptance criteria compliance — does the code do what was specified?
+2. Implementation quality — is the code correct, robust, and consistent?
 
 DO NOT edit any files. Only read, search, and run validation commands.
+
+The PR base branch for this task is `<base-branch>`. The current branch is `<task-branch>`.
 
 ## Task
 
@@ -121,11 +140,22 @@ DO NOT edit any files. Only read, search, and run validation commands.
 ## Instructions
 
 - Run a full build and verify there are no type errors before checking anything else. A build failure is an automatic blocker.
+- Identify the touched files with `git diff --name-only <base-branch>...HEAD`. Use this list to scope your code quality review. If no base branch was provided above, fall back to `main` and mention the fallback in your report.
+- Do NOT read commit messages (`git log`) and do NOT read diffs (`git diff` with content). Read each touched file in full instead — diff-only review hides issues that span the boundary between changed and unchanged code, and commit messages anchor you to the implementer's intent.
+- You may follow references from touched files into untouched files when needed to evaluate consistency, call sites, or downstream effects.
 - Read the relevant areas of the codebase and check each acceptance criterion.
+- Perform a code quality pass on the touched files using the following checklist:
+  - **Logic**: are conditionals, branching, and control flow correct? Any off-by-one, inverted conditions, or silent wrong-result paths?
+  - **Error handling**: are errors caught and propagated with context? Anything silently swallowed?
+  - **Edge cases**: are null/undefined, empty collections, and boundary values handled or explicitly rejected?
+  - **Dead code**: any unreachable branches, unused parameters, or defensive guards for impossible conditions?
+  - **Consistency**: do naming, patterns, and idioms match the surrounding codebase?
+  - **Duplication**: any non-trivial patterns duplicated that could be shared instead?
+  - **Type safety**: are types precise? Flag unnecessary widening, `any`, or unsafe casts.
 - Report either:
-  - **Pass**: all criteria met, build passes, validation passes.
-  - **Issues**: numbered list of specific findings (what criterion, where in code, what's wrong).
-- Be strict but fair. Flag real gaps, not style preferences.
+  - **Pass**: all criteria met, build passes, no material quality issues.
+  - **Issues**: numbered list. For each: category (criteria gap / logic / error-handling / edge-case / dead-code / consistency / duplication / types), file and line, what is wrong, and what should change instead.
+- Be strict but fair. Flag real gaps and functional problems. Do not flag style preferences or superficial nitpicks.
 ```
 
 ## Execution Model

@@ -1,3 +1,8 @@
+# shellcheck shell=bash
+# This file is sourced, not executed, so it has no shebang. The directive above
+# tells shellcheck to analyze it as bash (its closest supported dialect); the
+# file is also sourced into zsh at runtime.
+#
 # PowBox shell helpers (bash / zsh).
 #
 # Source this file from your ~/.bashrc or ~/.zshrc:
@@ -36,6 +41,11 @@ fi
 if [ -z "${POWBOX_ROOT:-}" ]; then
     echo "powbox: POWBOX_ROOT is not set and could not be auto-detected." >&2
     echo "powbox: export POWBOX_ROOT to your checkout before sourcing shell/powbox.sh." >&2
+    # `return` succeeds when sourced (the intended use) and fails when the file
+    # is run directly, in which case `exit 1` takes over. shellcheck only models
+    # the sourced path and so flags `exit 1` as unreachable; the fallback is
+    # deliberate.
+    # shellcheck disable=SC2317
     return 1 2>/dev/null || exit 1
 fi
 
@@ -78,22 +88,29 @@ agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh" "$@"
 }
 
-agent-prune-stopped() {
-    local claude_names codex_names
-    claude_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-")
-    if [ -n "$claude_names" ]; then
-        docker rm $claude_names 2>/dev/null
-    fi
+# Remove all exited containers whose name matches the given prefix filter.
+# Names are read line-by-line into an array so this behaves identically under
+# bash and zsh. zsh does not word-split unquoted expansions, so the older
+# `docker rm $names` form silently passed every name as a single argument and
+# failed when more than one container matched. Process substitution (rather
+# than a pipe) keeps the loop in the current shell so the array survives.
+_powbox_prune_exited() {
+    local name names=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$1")
+    [ "${#names[@]}" -gt 0 ] && docker rm "${names[@]}" 2>/dev/null
+}
 
-    codex_names=$(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-")
-    if [ -n "$codex_names" ]; then
-        docker rm $codex_names 2>/dev/null
-    fi
+agent-prune-stopped() {
+    _powbox_prune_exited "claude-"
+    _powbox_prune_exited "codex-"
 }
 
 agent-prune() {
     agent-prune-stopped
-    agent-prune-volumes
+    # Forward any flags (e.g. --dry-run/--force) on to prune-volumes.sh.
+    agent-prune-volumes "$@"
 }
 
 agent-check-updates() {
@@ -110,6 +127,43 @@ agent-update-claude() {
 
 agent-update-codex() {
     "$POWBOX_ROOT/build.sh" codex --no-cache "$@"
+}
+
+agent-update-base() {
+    "$POWBOX_ROOT/build.sh" base --pull --no-cache "$@"
+}
+
+# Check for updates and rebuild only the images that are stale, in the correct
+# order. A stale base image is upstream of the agents, so it triggers a full
+# --pull --no-cache rebuild of base + both agents; otherwise each stale agent
+# image is rebuilt on its own. Extra args are forwarded to build.sh.
+agent-update() {
+    local stale
+    if ! stale="$("$POWBOX_ROOT/commands/check-updates.sh" --porcelain)"; then
+        echo "agent-update: update check failed" >&2
+        return 1
+    fi
+
+    if [ -z "$stale" ]; then
+        echo "All agent images are up to date."
+        return 0
+    fi
+
+    if printf '%s\n' "$stale" | grep -qx base; then
+        echo "Base image is stale — rebuilding base (with --pull) and both agent images on top."
+        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        return $?
+    fi
+
+    local rc=0 target
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        echo "Rebuilding $target image..."
+        "$POWBOX_ROOT/build.sh" "$target" --no-cache "$@" || rc=$?
+    done <<EOF
+$stale
+EOF
+    return $rc
 }
 
 cc-list() {

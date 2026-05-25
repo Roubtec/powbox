@@ -33,8 +33,9 @@ For every task file:
 
 ### For satisfied tasks
 
-Delete the task file outright.
-The work is done; the task file no longer serves a purpose.
+Move the task file, unchanged, into a `done` subfolder alongside it.
+Create the `done` folder if it does not already exist.
+The work is done, but the file is preserved for future reference and lookback (git history alone is not always convenient).
 
 ### For tasks that need follow-up
 
@@ -46,8 +47,8 @@ Instead, create one or more new follow-up task files in the same task folder usi
 - If the remaining items are small and span multiple original tasks, prefer a single consolidated follow-up task (e.g. "Phase 01 minor fixes and gaps") over one file per original task.
   Group by theme or proximity, not by origin.
 - If a gap is substantial enough to warrant its own task, give it its own file with a descriptive name.
-- Follow-up tasks must stand on their own: include enough context, references, and acceptance criteria that an implementer can pick them up without re-reading the deleted original tasks.
-- Then delete the original task file, since the follow-up replaces it.
+- Follow-up tasks must stand on their own: include enough context, references, and acceptance criteria that an implementer can pick them up without re-reading the archived original tasks. Past tasks can be referenced for background, but the follow-up should be actionable independently.
+- Then move the original task file, unchanged, into the `done` subfolder alongside it (creating the folder if needed). The follow-up replaces it going forward, but the original is preserved for reference.
 
 ### Consolidated follow-up format
 
@@ -59,6 +60,12 @@ When grouping small items into a single follow-up task, structure it as:
    - why it matters (reference the original acceptance criterion or spec)
    - what done looks like for that item
 3. Standard acceptance criteria and validation sections covering the full set.
+
+### Committing the result
+
+Once every reviewed task has been resolved (moved into `done/` and/or replaced by a follow-up file), commit the changes locally with a single descriptive commit message that summarises what was archived and what follow-ups were created.
+Do **not** push — leave that to the user.
+Skip this step only if the user has explicitly asked not to commit.
 
 ## Review standards
 
@@ -73,7 +80,7 @@ When grouping small items into a single follow-up task, structure it as:
 
 After reviewing all tasks, provide a clear summary to the user:
 
-- Which tasks were closed (satisfied and deleted).
+- Which tasks were closed (satisfied and moved into `done/`).
 - Which tasks produced follow-up work, with a brief description of what remains.
 - Any observations that fall outside the reviewed tasks but are worth flagging.
 

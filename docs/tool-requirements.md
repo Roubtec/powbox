@@ -72,8 +72,10 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 
 | Tool | Notes |
 |---|---|
-| `shellcheck` | Static analysis for shell scripts |
+| `shellcheck` | Static analysis for shell scripts (POSIX/bash — does *not* lint PowerShell) |
 | `shfmt` | Shell script formatter |
+| `pwsh` | PowerShell 7 — run and test `.ps1` scripts (`powershell` package, Microsoft repo) |
+| `Invoke-ScriptAnalyzer` | PowerShell linter — PSScriptAnalyzer module, installed `AllUsers` scope via `Install-Module` |
 
 ### Networking & DNS
 

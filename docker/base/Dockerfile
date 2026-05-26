@@ -73,16 +73,24 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install sqlcmd tooling for Azure SQL workflows.
+# Install Microsoft-repo tooling: sqlcmd/bcp (mssql-tools18, for Azure SQL
+# workflows) and PowerShell (pwsh, so agents can run and lint .ps1 scripts).
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
     | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
     > /etc/apt/sources.list.d/microsoft-prod.list \
     && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 powershell \
     && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
     && ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp \
     && rm -rf /var/lib/apt/lists/*
+
+# Install PSScriptAnalyzer (the PowerShell linter — shellcheck cannot lint
+# .ps1) into the AllUsers module scope so every account can use it. Runs as
+# root, before the USER node switch below.
+RUN pwsh -NoProfile -NonInteractive -Command \
+      "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+       Install-Module -Name PSScriptAnalyzer -Scope AllUsers -Force -ErrorAction Stop"
 
 # Install pnpm
 RUN npm install -g pnpm

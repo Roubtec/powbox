@@ -75,7 +75,7 @@ Derived from `Dockerfile` using `node:24-slim` (Debian 12 / bookworm) as the bas
 | `shellcheck` | Static analysis for shell scripts (POSIX/bash — does *not* lint PowerShell) |
 | `shfmt` | Shell script formatter |
 | `pwsh` | PowerShell 7 — run and test `.ps1` scripts (`powershell` package, Microsoft repo) |
-| `Invoke-ScriptAnalyzer` | PowerShell linter — PSScriptAnalyzer module, installed `AllUsers` scope via `Install-Module` |
+| `Invoke-ScriptAnalyzer` | PowerShell linter (PSScriptAnalyzer module, `AllUsers` scope) — a `pwsh` cmdlet, run as `pwsh -Command "Invoke-ScriptAnalyzer -Path ."`, not directly from the shell |
 | `PSScriptAnalyzerSettings.psd1` | House analyzer config — auto-applied from a project's root by `Invoke-ScriptAnalyzer -Path .`; image default at `/usr/local/share/powershell/PSScriptAnalyzerSettings.psd1` (apply via `-Settings` where a project ships none) |
 
 ### Networking & DNS

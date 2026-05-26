@@ -13,7 +13,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Core runtime | `node`, `npm`, `pnpm`, `python3`, `pip3`, `php`, `composer` |
 | Git/GitHub | `git`, `gh`, `ssh` |
 | Shell | `zsh`, `jq`, `yq`, `fzf`, `less`, `tree`, `file`, `htop`, `shellcheck`, `shfmt`, `strace`, `lsof` |
-| PowerShell | `pwsh` (run `.ps1` scripts), `Invoke-ScriptAnalyzer` (PSScriptAnalyzer linter — note `shellcheck` does *not* lint PowerShell) |
+| PowerShell | `pwsh` runs `.ps1` scripts; lint them with `pwsh -Command "Invoke-ScriptAnalyzer -Path ."` (PSScriptAnalyzer is a `pwsh` module/cmdlet, not a shell command — and `shellcheck` does *not* lint PowerShell) |
 | Build | `make`, `patch`, `gcc`, `g++` |
 | Archives/transfer | `wget`, `curl`, `zip`, `unzip`, `rsync`, `bzip2`, `xz`, `zstd` |
 | Data | `sqlcmd`, `sqlite3`, `envsubst`, `bc`, `xxd` |

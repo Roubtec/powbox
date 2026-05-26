@@ -89,8 +89,9 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
 # .ps1) into the AllUsers module scope so every account can use it. Runs as
 # root, before the USER node switch below.
 RUN pwsh -NoProfile -NonInteractive -Command \
-      "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
-       Install-Module -Name PSScriptAnalyzer -Scope AllUsers -Force -ErrorAction Stop"
+      "\$ErrorActionPreference = 'Stop'; \
+       Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+       Install-Module -Name PSScriptAnalyzer -Scope AllUsers -Force"
 
 # Ship the repo's PSScriptAnalyzer config as the image-wide house default.
 # PSScriptAnalyzer auto-discovers a PSScriptAnalyzerSettings.psd1 in the

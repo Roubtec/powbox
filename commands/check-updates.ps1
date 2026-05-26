@@ -55,10 +55,16 @@ function Get-LatestNpmVersion([string]$Package) {
     return $ver.Trim()
 }
 
+# Docker renders a missing label as the literal "<no value>" when the image
+# carries no labels map at all; normalize that to $null so unlabeled images fall
+# through to the default-source fallback and staleness logic instead of looking
+# like a set-but-bogus value.
 function Get-ImageLabel([string]$Image, [string]$Label) {
     $val = docker image inspect $Image --format "{{index .Config.Labels `"$Label`"}}" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $val) { return $null }
-    return $val.Trim()
+    $val = $val.Trim()
+    if ($val -eq '<no value>') { return $null }
+    return $val
 }
 
 function Get-RegistryDigest([string]$Image) {

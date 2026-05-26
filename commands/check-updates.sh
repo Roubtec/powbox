@@ -54,8 +54,15 @@ latest_npm_version() {
 }
 
 # Digest (label) the base image records for the upstream image it was built from.
+# Docker renders a missing label as the literal "<no value>" when the image
+# carries no labels map at all; normalize that to empty so unlabeled images fall
+# through to the default-source fallback and staleness logic instead of looking
+# like a set-but-bogus value.
 image_label() {
-	docker image inspect "$1" --format "{{index .Config.Labels \"$2\"}}" 2>/dev/null || true
+	local val
+	val="$(docker image inspect "$1" --format "{{index .Config.Labels \"$2\"}}" 2>/dev/null)" || true
+	[ "$val" = "<no value>" ] && val=""
+	echo "$val"
 }
 
 # Current digest of an upstream tag in its registry, without pulling it.

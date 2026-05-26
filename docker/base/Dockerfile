@@ -92,6 +92,12 @@ RUN pwsh -NoProfile -NonInteractive -Command \
       "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Install-Module -Name PSScriptAnalyzer -Scope AllUsers -Force -ErrorAction Stop"
 
+# Ship the repo's PSScriptAnalyzer config as the image-wide house default.
+# PSScriptAnalyzer auto-discovers a PSScriptAnalyzerSettings.psd1 in the
+# directory it analyzes, so a project with its own root file overrides this;
+# otherwise agents can apply it with `-Settings <path>`.
+COPY PSScriptAnalyzerSettings.psd1 /usr/local/share/powershell/PSScriptAnalyzerSettings.psd1
+
 # Install pnpm
 RUN npm install -g pnpm
 

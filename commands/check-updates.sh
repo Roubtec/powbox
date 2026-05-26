@@ -178,6 +178,9 @@ fi
 
 # -------------------------------------------------------------------
 # Report
+#
+# The "** update available **" marker emitted below is parsed by agent-update
+# (shell/powbox.*) to decide whether to prompt — keep that phrase stable.
 # -------------------------------------------------------------------
 
 echo ""

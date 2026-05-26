@@ -90,19 +90,22 @@ function Format-ShortDigest([string]$Digest) {
 # The marker emitted here must mirror Test-Stale: a known latest with a missing
 # or unlabeled (empty) baked value is stale and needs a build, so it is flagged
 # just like a version mismatch. This keeps the human report consistent with the
-# porcelain output that agent-update consumes.
+# porcelain output that agent-update consumes. An unknown latest (registry/npm
+# unreachable) is undeterminable and is never flagged.
 function Write-BaseComparison([string]$Baked, [string]$Latest) {
     $b = Format-ShortDigest $Baked
     $l = Format-ShortDigest $Latest
-    # Latest unknown (registry unreachable): can't determine staleness, never flag.
-    if (-not $Latest) {
-        $bStr = if ($b) { $b } else { '(unknown)' }
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', $bStr, '(unknown)')
+    if (-not $Baked) {
+        # Image missing or unlabeled: a build is needed when the upstream is known.
+        if ($Latest) {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f 'Base', '(unknown)', $l)
+        } else {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', '(unknown)', '(unknown)')
+        }
         return
     }
-    # Image missing or unlabeled but upstream known: a build is needed.
-    if (-not $Baked) {
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f 'Base', '(unknown)', $l)
+    if (-not $Latest) {
+        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', $b, '(unknown)')
         return
     }
     if ($Baked -eq $Latest) {
@@ -113,15 +116,17 @@ function Write-BaseComparison([string]$Baked, [string]$Latest) {
 }
 
 function Write-Comparison([string]$Agent, [string]$Baked, [string]$Latest) {
-    # Latest unknown (npm unreachable): can't determine staleness, never flag.
-    if (-not $Latest) {
-        $bakedStr = if ($Baked) { $Baked } else { '(unknown)' }
-        Write-Host ("  {0,-8}  {1}  latest: (unknown)" -f $Agent, $bakedStr)
+    if (-not $Baked) {
+        # Image missing: a build is needed when the upstream is known.
+        if ($Latest) {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f $Agent, '(unknown)', $Latest)
+        } else {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f $Agent, '(unknown)', '(unknown)')
+        }
         return
     }
-    # Image missing but latest known: a build is needed.
-    if (-not $Baked) {
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f $Agent, '(unknown)', $Latest)
+    if (-not $Latest) {
+        Write-Host ("  {0,-8}  {1}  latest: (unknown)" -f $Agent, $Baked)
         return
     }
     if ($Baked -eq $Latest) {

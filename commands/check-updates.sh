@@ -90,20 +90,24 @@ is_stale() {
 # The marker emitted here must mirror is_stale: a known latest with a missing or
 # unlabeled (empty) baked value is stale and needs a build, so it is flagged just
 # like a version mismatch. This keeps the human report consistent with the
-# porcelain output that agent-update consumes.
+# porcelain output that agent-update consumes. An unknown latest (registry/npm
+# unreachable) is undeterminable and is never flagged.
 compare_base() {
 	local baked="$1" latest="$2"
 	local b l
 	b="$(short_digest "$baked")"
 	l="$(short_digest "$latest")"
-	# Latest unknown (registry unreachable): can't determine staleness, never flag.
-	if [ -z "$latest" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "${b:-(unknown)}" "(unknown)"
+	if [ -z "$baked" ]; then
+		# Image missing or unlabeled: a build is needed when the upstream is known.
+		if [ -n "$latest" ]; then
+			printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "Base" "(unknown)" "$l"
+		else
+			printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "(unknown)" "(unknown)"
+		fi
 		return
 	fi
-	# Image missing or unlabeled but upstream known: a build is needed.
-	if [ -z "$baked" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "Base" "(unknown)" "$l"
+	if [ -z "$latest" ]; then
+		printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "$b" "(unknown)"
 		return
 	fi
 	if [ "$baked" = "$latest" ]; then
@@ -115,14 +119,17 @@ compare_base() {
 
 compare() {
 	local agent="$1" baked="$2" latest="$3"
-	# Latest unknown (npm unreachable): can't determine staleness, never flag.
-	if [ -z "$latest" ]; then
-		printf '  %-8s  %s  latest: (unknown)\n' "$agent" "${baked:-(unknown)}"
+	if [ -z "$baked" ]; then
+		# Image missing: a build is needed when the upstream is known.
+		if [ -n "$latest" ]; then
+			printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "$agent" "(unknown)" "$latest"
+		else
+			printf '  %-8s  baked: %-14s  latest: %s\n' "$agent" "(unknown)" "(unknown)"
+		fi
 		return
 	fi
-	# Image missing but latest known: a build is needed.
-	if [ -z "$baked" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "$agent" "(unknown)" "$latest"
+	if [ -z "$latest" ]; then
+		printf '  %-8s  %s  latest: (unknown)\n' "$agent" "$baked"
 		return
 	fi
 	if [ "$baked" = "$latest" ]; then

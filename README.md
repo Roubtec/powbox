@@ -8,6 +8,49 @@ Runtime orchestration is handled by shared Compose files at the repo root.
 
 Image builds are handled by `docker buildx bake` through wrapper scripts so cached builds are the default and clean rebuilds are explicit.
 
+## Quick Start
+
+Get from a fresh clone to a working PowBox in three steps.
+
+**Prerequisites:** Docker Desktop or Docker Engine with a working `docker buildx`. `npm` on the host `PATH` is recommended — it is used to check for newer agent releases (without it the agent images still build, but version-staleness checks report `(unknown)`). Codex also needs `OPENAI_API_KEY` exported before launching; Claude can optionally use `ANTHROPIC_API_KEY`.
+
+1. **Clone the repo** somewhere stable — your shell profile will point at this path:
+
+   ```bash
+   git clone https://github.com/Roubtec/powbox.git ~/code/powbox
+   ```
+
+2. **Load the shell helpers** by adding one line to your shell profile, then reloading it. `POWBOX_ROOT` is auto-detected from the file's own location, so no extra configuration is needed.
+
+   Bash / zsh — add to `~/.bashrc` or `~/.zshrc`, then `source` it:
+
+   ```bash
+   source "$HOME/code/powbox/shell/powbox.sh"
+   ```
+
+   PowerShell — add to `$PROFILE` (`notepad $PROFILE`), then reload with `& $PROFILE`:
+
+   ```powershell
+   . "C:\path\to\powbox\shell\powbox.ps1"
+   ```
+
+   This exposes the `cc`, `cx`, and `agent-*` helpers in your shell.
+
+3. **Build the images** with `agent-update`. It prints an update report and then prompts before doing anything. On a machine with no images yet, every image shows as stale, so confirming performs the first full build (base + both agents):
+
+   ```bash
+   agent-update
+   ```
+
+That's it — you now have a functioning PowBox. Launch an agent in any project directory:
+
+```bash
+cc ~/projects/myapp      # Claude
+cx ~/projects/myapp      # Codex
+```
+
+Re-run `agent-update` any time to pick up newer agent releases or a refreshed base image; it only rebuilds what is actually stale. See [Profile Shortcuts](#profile-shortcuts) for the full helper reference and [Build Modes](#build-modes) for invoking builds directly.
+
 ## Layout
 
 - `docker/base/Dockerfile`: shared toolchain image used by both agents (Node.js, Python, PHP, Git, shell utilities, and more)
@@ -272,7 +315,7 @@ Functions exposed by both libraries:
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
-- `agent-update` — run the check and rebuild only the stale images in the correct order (a stale base rebuilds base + both agents; otherwise each stale agent rebuilds on its own)
+- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding the stale images in the correct order (a stale base rebuilds base + both agents; otherwise each stale agent rebuilds on its own). On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet.
 - `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions (`--pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
@@ -330,7 +373,7 @@ agent-prune
 # Check for newer agent releases
 agent-check-updates
 
-# Update only the images that are stale (in the correct order)
+# Review the update report and confirm before rebuilding stale images
 agent-update
 
 # Rebuild the Claude image with the latest release
@@ -398,7 +441,7 @@ agent-prune
 # Check for newer agent releases
 agent-check-updates
 
-# Update only the images that are stale (in the correct order)
+# Review the update report and confirm before rebuilding stale images
 agent-update
 
 # Rebuild the Claude image with the latest release

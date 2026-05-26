@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ClaudeImage = 'powbox-claude:latest',
     [string]$CodexImage  = 'powbox-codex:latest',
     [string]$BaseImage   = 'powbox-agent-base:latest',

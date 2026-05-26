@@ -1,4 +1,4 @@
-# PowBox shell helpers (PowerShell).
+﻿# PowBox shell helpers (PowerShell).
 #
 # Dot-source this file from your $PROFILE:
 #

@@ -54,8 +54,15 @@ latest_npm_version() {
 }
 
 # Digest (label) the base image records for the upstream image it was built from.
+# Docker renders a missing label as the literal "<no value>" when the image
+# carries no labels map at all; normalize that to empty so unlabeled images fall
+# through to the default-source fallback and staleness logic instead of looking
+# like a set-but-bogus value.
 image_label() {
-	docker image inspect "$1" --format "{{index .Config.Labels \"$2\"}}" 2>/dev/null || true
+	local val
+	val="$(docker image inspect "$1" --format "{{index .Config.Labels \"$2\"}}" 2>/dev/null)" || true
+	[ "$val" = "<no value>" ] && val=""
+	echo "$val"
 }
 
 # Current digest of an upstream tag in its registry, without pulling it.
@@ -87,13 +94,27 @@ is_stale() {
 	[ "$baked" != "$latest" ]
 }
 
+# The marker emitted here must mirror is_stale: a known latest with a missing or
+# unlabeled (empty) baked value is stale and needs a build, so it is flagged just
+# like a version mismatch. This keeps the human report consistent with the
+# porcelain output that agent-update consumes. An unknown latest (registry/npm
+# unreachable) is undeterminable and is never flagged.
 compare_base() {
 	local baked="$1" latest="$2"
 	local b l
 	b="$(short_digest "$baked")"
 	l="$(short_digest "$latest")"
-	if [ -z "$baked" ] || [ -z "$latest" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "${b:-(unknown)}" "${l:-(unknown)}"
+	if [ -z "$baked" ]; then
+		# Image missing or unlabeled: a build is needed when the upstream is known.
+		if [ -n "$latest" ]; then
+			printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "Base" "(unknown)" "$l"
+		else
+			printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "(unknown)" "(unknown)"
+		fi
+		return
+	fi
+	if [ -z "$latest" ]; then
+		printf '  %-8s  baked: %-14s  latest: %s\n' "Base" "$b" "(unknown)"
 		return
 	fi
 	if [ "$baked" = "$latest" ]; then
@@ -106,7 +127,12 @@ compare_base() {
 compare() {
 	local agent="$1" baked="$2" latest="$3"
 	if [ -z "$baked" ]; then
-		printf '  %-8s  baked: %-14s  latest: %s\n' "$agent" "(unknown)" "${latest:-(unknown)}"
+		# Image missing: a build is needed when the upstream is known.
+		if [ -n "$latest" ]; then
+			printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "$agent" "(unknown)" "$latest"
+		else
+			printf '  %-8s  baked: %-14s  latest: %s\n' "$agent" "(unknown)" "(unknown)"
+		fi
 		return
 	fi
 	if [ -z "$latest" ]; then
@@ -178,6 +204,9 @@ fi
 
 # -------------------------------------------------------------------
 # Report
+#
+# The "** update available **" marker emitted below is parsed by agent-update
+# (shell/powbox.*) to decide whether to prompt — keep that phrase stable.
 # -------------------------------------------------------------------
 
 echo ""

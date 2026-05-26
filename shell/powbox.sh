@@ -133,11 +133,37 @@ agent-update-base() {
     "$POWBOX_ROOT/build.sh" base --pull --no-cache "$@"
 }
 
-# Check for updates and rebuild only the images that are stale, in the correct
-# order. A stale base image is upstream of the agents, so it triggers a full
-# --pull --no-cache rebuild of base + both agents; otherwise each stale agent
-# image is rebuilt on its own. Extra args are forwarded to build.sh.
+# Show the full update report, then (if anything is stale) ask for confirmation
+# before rebuilding. On confirmation we re-check rather than reusing the first
+# result, so an update approved in another terminal while this prompt was waiting
+# is still picked up. A stale base image is upstream of the agents, so it triggers
+# a full --pull --no-cache rebuild of base + both agents; otherwise each stale
+# agent image is rebuilt on its own. Extra args are forwarded to build.sh.
 agent-update() {
+    local report
+    if ! report="$("$POWBOX_ROOT/commands/check-updates.sh")"; then
+        [ -n "$report" ] && printf '%s\n' "$report"
+        echo "agent-update: update check failed" >&2
+        return 1
+    fi
+    printf '%s\n' "$report"
+
+    # The report prints the literal "update available" marker for each stale
+    # image, so grepping it lets us decide whether to prompt without a second
+    # network round-trip. Keep this in sync with commands/check-updates.sh.
+    if ! printf '%s\n' "$report" | grep -q 'update available'; then
+        echo "All agent images are up to date."
+        return 0
+    fi
+
+    local reply
+    printf 'Proceed with the update? [y/N] '
+    read -r reply
+    case "$reply" in
+        [yY]|[yY][eE][sS]) ;;
+        *) echo "Update cancelled."; return 0 ;;
+    esac
+
     local stale
     if ! stale="$("$POWBOX_ROOT/commands/check-updates.sh" --porcelain)"; then
         echo "agent-update: update check failed" >&2
@@ -145,7 +171,7 @@ agent-update() {
     fi
 
     if [ -z "$stale" ]; then
-        echo "All agent images are up to date."
+        echo "Nothing to update — already up to date."
         return 0
     fi
 

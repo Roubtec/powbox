@@ -128,16 +128,36 @@ function agent-update-base {
     & "$env:POWBOX_ROOT\build.ps1" -Target base -Pull -NoCache @args
 }
 
-# Check for updates and rebuild only the images that are stale, in the correct
-# order. A stale base image is upstream of the agents, so it triggers a full
-# -Pull -NoCache rebuild of base + both agents; otherwise each stale agent
+# Show the full update report, then (if anything is stale) ask for confirmation
+# before rebuilding. On confirmation we re-check rather than reusing the first
+# result, so an update approved in another terminal while this prompt was waiting
+# is still picked up. A stale base image is upstream of the agents, so it triggers
+# a full -Pull -NoCache rebuild of base + both agents; otherwise each stale agent
 # image is rebuilt on its own. Extra args are forwarded to build.ps1.
 function agent-update {
+    # check-updates.ps1 writes its report via Write-Host (the information
+    # stream); 6>&1 captures it so we can both display it and scan it for the
+    # "update available" marker without a second network round-trip. Keep this
+    # marker in sync with commands/check-updates.ps1.
+    $report = & "$env:POWBOX_ROOT\commands\check-updates.ps1" 6>&1 | ForEach-Object { $_.ToString() }
+    $report | ForEach-Object { Write-Host $_ }
+
+    if (-not ($report -match 'update available')) {
+        Write-Host "All agent images are up to date."
+        return
+    }
+
+    $reply = Read-Host 'Proceed with the update? [y/N]'
+    if ($reply -notmatch '^(y|yes)$') {
+        Write-Host "Update cancelled."
+        return
+    }
+
     $stale = & "$env:POWBOX_ROOT\commands\check-updates.ps1" -Porcelain
     $stale = @($stale | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
 
     if ($stale.Count -eq 0) {
-        Write-Host "All agent images are up to date."
+        Write-Host "Nothing to update — already up to date."
         return
     }
 

@@ -55,10 +55,16 @@ function Get-LatestNpmVersion([string]$Package) {
     return $ver.Trim()
 }
 
+# Docker renders a missing label as the literal "<no value>" when the image
+# carries no labels map at all; normalize that to $null so unlabeled images fall
+# through to the default-source fallback and staleness logic instead of looking
+# like a set-but-bogus value.
 function Get-ImageLabel([string]$Image, [string]$Label) {
     $val = docker image inspect $Image --format "{{index .Config.Labels `"$Label`"}}" 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $val) { return $null }
-    return $val.Trim()
+    $val = $val.Trim()
+    if ($val -eq '<no value>') { return $null }
+    return $val
 }
 
 function Get-RegistryDigest([string]$Image) {
@@ -87,13 +93,25 @@ function Format-ShortDigest([string]$Digest) {
     return $null
 }
 
+# The marker emitted here must mirror Test-Stale: a known latest with a missing
+# or unlabeled (empty) baked value is stale and needs a build, so it is flagged
+# just like a version mismatch. This keeps the human report consistent with the
+# porcelain output that agent-update consumes. An unknown latest (registry/npm
+# unreachable) is undeterminable and is never flagged.
 function Write-BaseComparison([string]$Baked, [string]$Latest) {
     $b = Format-ShortDigest $Baked
     $l = Format-ShortDigest $Latest
-    if (-not $Baked -or -not $Latest) {
-        $bStr = if ($b) { $b } else { '(unknown)' }
-        $lStr = if ($l) { $l } else { '(unknown)' }
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', $bStr, $lStr)
+    if (-not $Baked) {
+        # Image missing or unlabeled: a build is needed when the upstream is known.
+        if ($Latest) {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f 'Base', '(unknown)', $l)
+        } else {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', '(unknown)', '(unknown)')
+        }
+        return
+    }
+    if (-not $Latest) {
+        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f 'Base', $b, '(unknown)')
         return
     }
     if ($Baked -eq $Latest) {
@@ -105,8 +123,12 @@ function Write-BaseComparison([string]$Baked, [string]$Latest) {
 
 function Write-Comparison([string]$Agent, [string]$Baked, [string]$Latest) {
     if (-not $Baked) {
-        $latestStr = if ($Latest) { $Latest } else { '(unknown)' }
-        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f $Agent, '(unknown)', $latestStr)
+        # Image missing: a build is needed when the upstream is known.
+        if ($Latest) {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f $Agent, '(unknown)', $Latest)
+        } else {
+            Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}" -f $Agent, '(unknown)', '(unknown)')
+        }
         return
     }
     if (-not $Latest) {
@@ -183,6 +205,9 @@ if ($Porcelain) {
 
 # -------------------------------------------------------------------
 # Report
+#
+# The "** update available **" marker emitted below is parsed by agent-update
+# (shell/powbox.*) to decide whether to prompt — keep that phrase stable.
 # -------------------------------------------------------------------
 
 Write-Host ''

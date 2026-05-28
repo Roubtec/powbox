@@ -1,6 +1,6 @@
 ---
 name: rebase-stack
-description: Rebase a chain of stacked local branches onto a target branch, one at a time, replaying only each branch's unique commits and using agent intelligence to resolve conflicts.
+description: Replay a chain of dependent local branches onto a target (typically main) after some predecessors have been merged, one branch at a time, dropping commits already present on the target and resolving conflicts with awareness of the chain's history. Trigger when the user asks to rebase a stack of stacked-PR branches, move a chain forward onto main after merges, or restack feature branches. Do not trigger for single-branch rebases.
 ---
 
 Rebase a chain of stacked local branches onto a target branch.
@@ -14,7 +14,7 @@ It works one branch at a time, with explicit user confirmation up front and inte
 
 ## When to use this
 
-Typical scenario: you implemented tasks via `/address-tasks`, producing branches `feature/01 → feature/02 → ... → feature/N` each PR'd into the previous.
+Typical scenario: you produced a chain of branches `feature/01 → feature/02 → ... → feature/N`, each PR'd into the previous.
 After PR review, branches accumulate "fixes" commits.
 After `feature/01` and `feature/02` are merged into `main`, the remaining branches still share an old common ancestor with `main` and contain commits that are now duplicated in `main` (with different hashes but identical patches).
 Run this command from the topmost branch (or pass it explicitly) to bring the entire remaining stack forward, branch by branch, onto the new `main` tip.

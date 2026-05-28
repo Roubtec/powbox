@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Tasks"
+  short_description: "Write sequenced task files"
+  default_prompt: "Use $write-tasks to turn this plan into numbered task files."

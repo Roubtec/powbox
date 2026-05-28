@@ -10,6 +10,7 @@ USER node
 ENV CODEX_CONFIG_DIR=/home/node/.codex
 
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/agent.md.tmpl
+COPY --chown=node:node docker/codex/agent-container/ /home/node/.agent-container/
 RUN date +%s%N > /home/node/.agent-container/build-epoch
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-codex.sh"]

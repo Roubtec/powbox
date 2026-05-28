@@ -1,9 +1,11 @@
 ---
-description: Write actionable task files from a plan or description. Use when the user wants to break work into sequenced, committable task files.
-argument-hint: <plan-reference-or-description> [target-folder]
+name: write-tasks
+description: Turn a plan, design doc, or free-form description into a sequence of concrete, numbered task files an implementer can execute one at a time. Trigger when the user asks to decompose work into committable task files, write tasks from a plan, or produce a phased task list. Do not trigger for one-off implementation requests or general planning advice.
 ---
 
 Write one or more actionable task files based on the input.
+
+**Arguments:** `<plan-reference-or-description> [target-folder]`
 
 ## Primary objective
 
@@ -129,5 +131,3 @@ The resulting task files should read like strong engineering briefs, not reminde
 An implementer should be able to begin meaningful work after reading one task file and the documents it directly references.
 
 Any new code should pass build.
-
-$ARGUMENTS

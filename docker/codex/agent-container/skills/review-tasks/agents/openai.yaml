@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Tasks"
+  short_description: "Audit completed task files"
+  default_prompt: "Use $review-tasks to review the completed task files in <folder-or-glob>."

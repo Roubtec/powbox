@@ -64,7 +64,8 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
-- `docker/claude/agent-container/`: Claude-specific files baked into the image at `/home/node/.agent-container/` (statusline script, statusline settings overlay, `commands/` for slash commands)
+- `docker/claude/agent-container/`: Claude-specific files baked into the image at `/home/node/.agent-container/` (statusline script, statusline settings overlay, `skills/` for reusable Claude skills)
+- `docker/codex/agent-container/`: Codex-specific files baked into the image at `/home/node/.agent-container/` (`skills/` for reusable Codex skills)
 
 ## Build Modes
 
@@ -105,18 +106,27 @@ cx --build
 
 No volume cleanup is needed — the entrypoint conditionally re-renders the template on container start when the image epoch is greater than or equal to the last-written volume epoch.
 
-## Image-Baked Claude Slash Commands
+## Image-Baked Agent Skills
 
-Repo-agnostic Claude slash commands live in `docker/claude/agent-container/commands/` and are baked into the Claude image.
+Repo-agnostic skills are baked into each agent's image. They are designed to provide the same functionality across both agents, even though the per-agent SKILL.md files differ where the underlying mechanics differ (e.g. Claude uses its `Agent` tool with `subagent_type: "general-purpose"`; Codex uses its built-in `worker` / `explorer` subagent types).
 
-At container start, the entrypoint seeds them into `$CLAUDE_CONFIG_DIR/commands/` from the same epoch-gated block that re-renders the agent instruction template.
-Seeding is no-clobber: existing files are never overwritten, so user-modified copies are always preserved.
-To pick up an updated version of an image-shipped command after a rebuild, delete the file from `$CLAUDE_CONFIG_DIR/commands/` and restart the container — the fresh copy will be seeded on next start.
+Per-agent sources:
 
-Per-repo `.claude/commands/<name>.md` still takes precedence on bare slash invocations, so any repo can override individual files without losing the rest.
-User-added files in the same volume directory are unaffected by image rebuilds.
+- Claude — `docker/claude/agent-container/skills/`
+- Codex — `docker/codex/agent-container/skills/` (each skill additionally ships an `agents/openai.yaml` for UI labels and default prompts)
 
-These do not pre-load into agent context; like all slash commands they are only read when invoked.
+At container start, the entrypoint seeds the baked skills into the agent's user-level skills directory from the same epoch-gated block that re-renders the agent instruction template:
+
+- Claude — `$CLAUDE_CONFIG_DIR/skills/` (backed by the `claude-config` volume)
+- Codex — `$HOME/.agents/skills/` (backed by the `codex-config` volume via a `~/.agents → ~/.codex/agents` symlink seeded by the entrypoint)
+
+Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
+To pick up an updated version of an image-shipped skill after a rebuild, delete that skill folder from the destination above and restart the container.
+
+Per-repo skills (e.g. `.claude/skills/<name>/` or `.agents/skills/<name>/`) still take precedence at invoke time, so any repo can override an individual skill without losing the rest.
+User-added skills in the same volume directory are unaffected by image rebuilds.
+
+Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`).
 
 ## Runtime
 
@@ -130,7 +140,7 @@ Shared volume names are kept stable to preserve existing data:
 - `agent-pnpm-store`
 - `agent-zsh-history`
 
-Agent-specific config volumes remain separate:
+Agent-specific state volumes remain separate:
 
 - `claude-config`
 - `codex-config`

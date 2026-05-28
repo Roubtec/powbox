@@ -111,6 +111,18 @@ ${values}
 # when the keys are missing, which covers the only state we care to seed.
 chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
+# Codex's user-level skill search path is $HOME/.agents/skills. Point ~/.agents at a
+# subdirectory of $AGENT_CONFIG_DIR so skill customisations persist in the codex-config
+# volume without requiring a separate volume. Only create the symlink when the path does
+# not already exist or is already a symlink (guards against an older codex-agents volume
+# mount left over from a stale container).
+AGENTS_LINK="$HOME/.agents"
+AGENTS_TARGET="$AGENT_CONFIG_DIR/agents"
+mkdir -p "$AGENTS_TARGET"
+if [ ! -e "$AGENTS_LINK" ] || [ -L "$AGENTS_LINK" ]; then
+	ln -sfn "$AGENTS_TARGET" "$AGENTS_LINK"
+fi
+
 # Seed a richer native Codex status line/title, but only when the user has not
 # already chosen their own values.
 CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
@@ -147,6 +159,37 @@ if [ -f "$AGENT_TMPL" ]; then
 		# envsubst needs literal ${VAR} names.
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
 			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+
+		# Seed image-baked skills (no-clobber: preserves user-modified versions;
+		# delete the skill directory to pick up the latest image version on next
+		# container start). Per-repo .agents/skills/ still takes precedence at
+		# invoke time.
+		SKILLS_SRC="/home/node/.agent-container/skills"
+		SKILLS_DEST="$AGENT_CONFIG_DIR/agents/skills"
+		if [ -d "$SKILLS_SRC" ]; then
+			mkdir -p "$SKILLS_DEST"
+			for skill_dir in "$SKILLS_SRC"/*/; do
+				[ -d "$skill_dir" ] || continue
+				skill_name="$(basename "$skill_dir")"
+				dest_dir="$SKILLS_DEST/$skill_name"
+				[ -d "$dest_dir" ] && continue
+				tmp_dir="$(mktemp -d "$SKILLS_DEST/.${skill_name}.tmp.XXXXXX")"
+				if cp -a "$skill_dir"/. "$tmp_dir"/; then
+					if [ -d "$dest_dir" ]; then
+						rm -rf "$tmp_dir"
+						continue
+					fi
+					if mv "$tmp_dir" "$dest_dir"; then
+						continue
+					fi
+				fi
+				rm -rf "$tmp_dir"
+				if [ ! -d "$dest_dir" ]; then
+					echo "Warning: failed to seed skill $skill_name" >&2
+				fi
+			done
+		fi
+
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi

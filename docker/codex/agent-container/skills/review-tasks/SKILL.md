@@ -1,9 +1,11 @@
 ---
-description: Review completed task files against the actual codebase, close satisfied tasks, and create follow-up tasks for any gaps. Use after a batch of tasks has been implemented.
-argument-hint: <glob-or-file-list of task files to review>
+name: review-tasks
+description: Verify completed task files against the actual codebase, archive satisfied tasks into a done/ folder, and write follow-up task files for any concrete gaps. Trigger when the user asks to review delivered tasks, close out a batch, sweep finished work, or audit task acceptance after implementation. Do not trigger for unfinished work or for code review of an in-flight PR.
 ---
 
 Review the specified task files against the current state of the codebase and determine whether each task has been delivered satisfactorily.
+
+**Arguments:** `<glob-or-file-list of task files to review>`
 
 ## Primary objective
 
@@ -40,7 +42,7 @@ The work is done, but the file is preserved for future reference and lookback (g
 ### For tasks that need follow-up
 
 Do **not** modify the original task file.
-Instead, create one or more new follow-up task files in the same task folder using the `/write-tasks` command conventions:
+Instead, create one or more new follow-up task files in the same task folder using the `$write-tasks` skill conventions:
 
 - Continue the numbering sequence within the same phase.
   For example, if reviewing six `01-*` tasks, a follow-up file might be `01-07-phase-01-follow-ups.md`.
@@ -83,5 +85,3 @@ After reviewing all tasks, provide a clear summary to the user:
 - Which tasks were closed (satisfied and moved into `done/`).
 - Which tasks produced follow-up work, with a brief description of what remains.
 - Any observations that fall outside the reviewed tasks but are worth flagging.
-
-$ARGUMENTS

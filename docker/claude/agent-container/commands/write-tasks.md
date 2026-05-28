@@ -1,6 +1,5 @@
 ---
 description: Write actionable task files from a plan or description. Use when the user wants to break work into sequenced, committable task files.
-disable-model-invocation: true
 argument-hint: <plan-reference-or-description> [target-folder]
 ---
 

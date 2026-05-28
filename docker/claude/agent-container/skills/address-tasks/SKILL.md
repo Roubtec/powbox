@@ -1,9 +1,11 @@
 ---
-description: Kick off work on a task or set of tasks in turn. Create a branch for each task, implement the work, and open a PR for review. Use when the user is ready to start executing on the implementation of pre-planned work items.
-argument-hint: <glob-or-file-list of task files to implement>
+name: address-tasks
+description: Execute a batch of pre-planned task files end to end — one branch per task, delegate implementation and review to fresh subagents, and open PRs against the resolved base. Trigger when the user asks to address tasks, work through a task batch, kick off implementation of planned work, or process a folder of task files. Do not trigger for one-off coding requests or for planning new tasks.
 ---
 
 Implement the given task or a set of tasks using a delegated subagent workflow.
+
+**Arguments:** `<glob-or-file-list of task files to implement>`
 
 ## Architecture
 
@@ -50,6 +52,7 @@ Construct a prompt that contains:
 - **Relevant upstream context** — if this task depends on a previous task in the batch, briefly describe what the previous task introduced so the implementer can build on it.
 - **Commit and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
+- **Coordination instructions** — remind the implementer that it is not alone in the codebase, must not revert unrelated edits made by others, and should accommodate concurrent changes.
 - **Reporting instructions** — when done, report back with:
   - A concise summary of what was implemented.
   - Any decisions, tradeoffs, or deviations from the task description.
@@ -80,6 +83,7 @@ Read `AGENTS.md` first for project conventions.
 
 - Implement the task according to its description and acceptance criteria.
 - Commit at logical milestones. Aim for one commit per logical unit of work.
+- Do not revert unrelated or concurrent edits. Accommodate changes made by others.
 - Run the project's build and lint commands periodically. Run a full build check before reporting completion.
 - When done, report: what you did, any decisions/tradeoffs, any uncertainties.
 ```
@@ -102,7 +106,7 @@ It should be launched in the **foreground** (not background) since the feedback 
   - **Pass** — all acceptance criteria are met, build passes, and no material quality issues found. State this clearly.
   - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
-- **Instruction NOT to edit any files** — the reviewer only reads and reports.
+- **Instruction NOT to edit any files** — the reviewer only reads and reports. It must not create, update, or delete follow-up task files; any suggested follow-up work belongs in the review report only.
 
 #### Code quality dimensions to check
 
@@ -129,7 +133,8 @@ Your job is to evaluate the current codebase on two orthogonal dimensions:
 1. Acceptance criteria compliance — does the code do what was specified?
 2. Implementation quality — is the code correct, robust, and consistent?
 
-DO NOT edit any files. Only read, search, and run validation commands.
+DO NOT edit, create, or delete any files. Only read, search, and run validation commands.
+Do not write follow-up task files; put any suggested follow-up work in your review report only.
 
 The PR base branch for this task is `<base-branch>`. The current branch is `<task-branch>`.
 
@@ -224,5 +229,3 @@ After completing the batch, provide a concise summary:
 - How many review iterations each task required (and whether any hit the cap).
 - Any observations outside the task descriptions worth flagging.
 - Any blockers or uncertainties that remain.
-
-$ARGUMENTS

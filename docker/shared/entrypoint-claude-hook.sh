@@ -60,18 +60,32 @@ if [ -f "$AGENT_TMPL" ]; then
 			fi
 		fi
 
-		# Seed image-baked slash commands (no-clobber: preserves user-modified versions;
-		# delete the file to pick up the latest image version on next container start).
-		# Per-repo .claude/commands/ still takes precedence at invoke time.
-		COMMANDS_SRC="/home/node/.agent-container/commands"
-		if [ -d "$COMMANDS_SRC" ]; then
-			mkdir -p "$AGENT_CONFIG_DIR/commands"
-			for cmd in "$COMMANDS_SRC"/*.md; do
-				[ -e "$cmd" ] || continue
-				dest="$AGENT_CONFIG_DIR/commands/$(basename "$cmd")"
-				[ -f "$dest" ] && continue
-				if ! cp "$cmd" "$dest"; then
-					echo "Warning: failed to seed $(basename "$cmd") into commands dir" >&2
+		# Seed image-baked skills (no-clobber at the skill-directory level:
+		# preserves user-modified versions; delete the skill folder to pick up the
+		# latest image version on next container start). Per-repo .claude/skills/
+		# still takes precedence at invoke time.
+		SKILLS_SRC="/home/node/.agent-container/skills"
+		SKILLS_DEST="$AGENT_CONFIG_DIR/skills"
+		if [ -d "$SKILLS_SRC" ]; then
+			mkdir -p "$SKILLS_DEST"
+			for skill_dir in "$SKILLS_SRC"/*/; do
+				[ -d "$skill_dir" ] || continue
+				skill_name="$(basename "$skill_dir")"
+				dest_dir="$SKILLS_DEST/$skill_name"
+				[ -d "$dest_dir" ] && continue
+				tmp_dir="$(mktemp -d "$SKILLS_DEST/.${skill_name}.tmp.XXXXXX")"
+				if cp -a "$skill_dir"/. "$tmp_dir"/; then
+					if [ -d "$dest_dir" ]; then
+						rm -rf "$tmp_dir"
+						continue
+					fi
+					if mv "$tmp_dir" "$dest_dir"; then
+						continue
+					fi
+				fi
+				rm -rf "$tmp_dir"
+				if [ ! -d "$dest_dir" ]; then
+					echo "Warning: failed to seed skill $skill_name" >&2
 				fi
 			done
 		fi

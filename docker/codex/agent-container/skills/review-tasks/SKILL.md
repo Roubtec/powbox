@@ -1,6 +1,6 @@
 ---
 name: review-tasks
-description: Review completed task files against the actual codebase, close satisfied tasks, and create follow-up tasks for any gaps. Use after a batch of tasks has been implemented.
+description: Verify completed task files against the actual codebase, archive satisfied tasks into a done/ folder, and write follow-up task files for any concrete gaps. Trigger when the user asks to review delivered tasks, close out a batch, sweep finished work, or audit task acceptance after implementation. Do not trigger for unfinished work or for code review of an in-flight PR.
 ---
 
 Review the specified task files against the current state of the codebase and determine whether each task has been delivered satisfactorily.

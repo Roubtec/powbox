@@ -1,6 +1,6 @@
 ---
 name: address-tasks
-description: Kick off work on a task or set of tasks in turn. Create a branch for each task, implement the work, and open a PR for review. Use when the user is ready to start executing on the implementation of pre-planned work items.
+description: Execute a batch of pre-planned task files end to end — one branch per task, delegate implementation and review to fresh subagents, and open PRs against the resolved base. Trigger when the user asks to address tasks, work through a task batch, kick off implementation of planned work, or process a folder of task files. Do not trigger for one-off coding requests or for planning new tasks.
 ---
 
 Implement the given task or a set of tasks using a delegated subagent workflow.
@@ -13,10 +13,14 @@ You are the **orchestrator**.
 Your job is to sequence tasks, manage branches and PRs, and coordinate two specialized subagent roles per task:
 
 - **Orchestrator** (you) — sequencing, branching, PR creation, progress tracking. Runs as the top-level agent.
-- **Implementer** — deep implementation work for a single task. Spawned via the `Agent` tool with `subagent_type: "general-purpose"`.
-- **Reviewer** — fresh-eyes acceptance check against the task definition. Spawned via the `Agent` tool with `subagent_type: "general-purpose"`.
+- **Implementer** — deep implementation work for a single task. Spawned as a fresh `worker` subagent with a focused prompt.
+- **Reviewer** — fresh-eyes acceptance check against the task definition. Spawned as a fresh `worker` subagent with a focused prompt; the reviewer prompt forbids edits, so the worker's write capability stays unused.
 
 This separation keeps your context window clean across long batches and ensures the reviewer evaluates the work without implementation bias.
+
+### How to spawn a subagent in Codex
+
+Codex does not expose a single tool call for subagent creation. Instead, you (the orchestrator) ask the Codex runtime in natural language to spawn a `worker` subagent and hand it the focused prompt described in the relevant section below. The runtime creates a new agent thread, runs it to completion in the foreground, and surfaces its final report back to you. Use `/agent` if you need to inspect, switch to, or steer the running subagent. No custom agent personas (`~/.codex/agents/*.toml`) are required — the built-in `worker` plus the prompt is enough.
 
 **Trivial-task escape hatch:** for genuinely trivial tasks (a single obvious change with unambiguous criteria), you may implement directly without delegating.
 Default to delegation for anything requiring exploration or judgment.
@@ -90,7 +94,7 @@ Read `AGENTS.md` first for project conventions.
 
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
 It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
-It must be a **new** `Agent` invocation — never a `SendMessage` continuation of the implementer.
+It must be a **fresh** subagent spawn — never a continuation of the implementer's thread.
 It should be launched in the **foreground** (not background) since the feedback loop must complete before the orchestrator can advance branches or start the next task.
 
 ### What to include in the reviewer prompt

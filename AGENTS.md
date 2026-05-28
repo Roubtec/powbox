@@ -13,14 +13,10 @@ Teach or question the user if that is in the best interest of the final product.
 
 ## Architecture
 
-- Shared base image: `docker/base/Dockerfile`
-- Thin agent images: `docker/claude/Dockerfile`, `docker/codex/Dockerfile`
-- Shared Compose runtime: `compose.shared.yml`; agent overlays: `compose.claude.yml`, `compose.codex.yml`
-- User-facing host commands: `commands/`
-- Image-baked Claude slash commands: `docker/claude/agent-container/commands/` (seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; per-repo `.claude/commands/` overrides on name collision)
-- Internal build/launch helpers: `scripts/`
-- Entrypoint core and hooks: `docker/shared/`
-- Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh.sh`
+See README "Layout" for the repo file map. Rules that map does not state:
+
+- Image-baked Claude slash commands in `docker/claude/agent-container/commands/` are seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; a per-repo `.claude/commands/` overrides on name collision.
+- Entrypoint scripts all live in `docker/shared/`, but only `entrypoint-core.sh` is baked by the base image. The agent-specific shims and hooks (`entrypoint-{claude,codex}.sh`, `entrypoint-{claude,codex}-hook.sh`) are baked by their respective agent images, so editing a hook only requires rebuilding that agent — not the base.
 
 ## Key Paths
 
@@ -38,11 +34,8 @@ Teach or question the user if that is in the best interest of the final product.
 
 - `entrypoint-core.sh` is a wrapper-style entrypoint that must end with `exec "$@"`.
 - `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal.
-- The Compose project name is `powbox` for both agents so shared volumes stay first-class.
-- Codex authenticates via `OPENAI_API_KEY` passed at runtime, never baked into the image.
-- Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering.
-- Container instructions live in a single shared template (`docker/shared/container-agent.md.tmpl`) rendered at startup via `envsubst` with agent-specific variables set in the entrypoint scripts.
-- Workspace shadow mounts run after git setup: `detect-shadows.sh` finds subpackage `node_modules` directories, then `shadow-mounts.sh` overlays them with tmpfs.  The `shadow-refresh.sh` command re-runs detection for packages added mid-session.
+- Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering; the shared instruction template is rendered via `envsubst` with agent-specific variables set in the entrypoint shims.
+- Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering.
 
 ## Project Identity
 
@@ -50,16 +43,15 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 
 ## Volumes and Stores
 
-- `node_modules` is overlaid with a per-project Docker volume at `/workspace/<project-slug>/node_modules`.
-- Subpackage `node_modules` directories in monorepo workspaces are shadowed with tmpfs at container start (auto-detected from `pnpm-workspace.yaml`, `package.json` workspaces, or `.powbox.yml`).  These are ephemeral — lost on container stop, repopulated from the pnpm store on next `pnpm install`.
-- pnpm's store is pinned outside the workspace with `package-import-method=copy` (workspace bind mount and pnpm volume are different filesystems).
+See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm's store is pinned outside the workspace with `package-import-method=copy` because the workspace bind mount and the pnpm volume are different filesystems.
 
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.
 - `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh`, `/usr/local/bin/shadow-mounts.sh`, and `/usr/bin/apt-get` only (mode `0440`).
-- `shadow-mounts.sh` refuses to mount outside `/workspace/`; tmpfs mounts are container-namespace-scoped and invisible to the host.  Requires `CAP_SYS_ADMIN` at runtime (Docker's seccomp profile blocks the `mount` syscall without it).  Sudoers limits which commands may be run via `sudo`, but `CAP_SYS_ADMIN` is granted to the container broadly by Docker — not scoped to `shadow-mounts.sh`.
 - The base image includes `bubblewrap` for sandboxing.
+
+See README "Workspace Shadow Mounts → Security" for the `shadow-mounts.sh` / `CAP_SYS_ADMIN` rationale.
 
 ## File Conventions
 

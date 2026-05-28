@@ -14,13 +14,21 @@ Your job is to sequence tasks, manage branches and PRs, and coordinate two speci
 
 - **Orchestrator** (you) — sequencing, branching, PR creation, progress tracking. Runs as the top-level agent.
 - **Implementer** — deep implementation work for a single task. Spawned as a fresh `worker` subagent with a focused prompt.
-- **Reviewer** — fresh-eyes acceptance check against the task definition. Spawned as a fresh `worker` subagent with a focused prompt; the reviewer prompt forbids edits, so the worker's write capability stays unused.
+- **Reviewer** — fresh-eyes acceptance check against the task definition. Spawned as a fresh `explorer` subagent with a focused prompt that forbids edits.
 
 This separation keeps your context window clean across long batches and ensures the reviewer evaluates the work without implementation bias.
 
 ### How to spawn a subagent in Codex
 
-Codex does not expose a single tool call for subagent creation. Instead, you (the orchestrator) ask the Codex runtime in natural language to spawn a `worker` subagent and hand it the focused prompt described in the relevant section below. The runtime creates a new agent thread, runs it to completion in the foreground, and surfaces its final report back to you. Use `/agent` if you need to inspect, switch to, or steer the running subagent. No custom agent personas (`~/.codex/agents/*.toml`) are required — the built-in `worker` plus the prompt is enough.
+Use the Codex multi-agent tool exposed in the current session, normally `multi_agent_v1.spawn_agent`.
+Spawn implementers with `agent_type: "worker"` and reviewers with `agent_type: "explorer"`.
+Do not fork context; instead, pass a self-contained prompt as `message`.
+Omit model overrides unless the user explicitly asks for a different model.
+Because each task step depends on the subagent result, wait for completion with `multi_agent_v1.wait_agent`, then close the agent when it is no longer needed.
+No custom agent personas (`~/.codex/agents/*.toml`) are required.
+
+If no subagent tool is available, tell the user this skill requires Codex multi-agent support.
+Only fall back to doing the implementation locally if the user explicitly approves that change in workflow.
 
 **Trivial-task escape hatch:** for genuinely trivial tasks (a single obvious change with unambiguous criteria), you may implement directly without delegating.
 Default to delegation for anything requiring exploration or judgment.
@@ -44,7 +52,7 @@ Your responsibilities are:
 ## Implementer Agent
 
 The implementer receives a focused, self-contained prompt and works autonomously on a single task.
-It should be launched in the **foreground** (not background) since the orchestrator needs its result before proceeding.
+Spawn it, then wait for completion before proceeding.
 
 ### What to include in the implementer prompt
 
@@ -56,6 +64,7 @@ Construct a prompt that contains:
 - **Relevant upstream context** — if this task depends on a previous task in the batch, briefly describe what the previous task introduced so the implementer can build on it.
 - **Commit and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
+- **Coordination instructions** — remind the implementer that it is not alone in the codebase, must not revert unrelated edits made by others, and should accommodate concurrent changes.
 - **Reporting instructions** — when done, report back with:
   - A concise summary of what was implemented.
   - Any decisions, tradeoffs, or deviations from the task description.
@@ -86,6 +95,7 @@ Read `AGENTS.md` first for project conventions.
 
 - Implement the task according to its description and acceptance criteria.
 - Commit at logical milestones. Aim for one commit per logical unit of work.
+- Do not revert unrelated or concurrent edits. Accommodate changes made by others.
 - Run the project's build and lint commands periodically. Run a full build check before reporting completion.
 - When done, report: what you did, any decisions/tradeoffs, any uncertainties.
 ```
@@ -95,7 +105,7 @@ Read `AGENTS.md` first for project conventions.
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
 It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
 It must be a **fresh** subagent spawn — never a continuation of the implementer's thread.
-It should be launched in the **foreground** (not background) since the feedback loop must complete before the orchestrator can advance branches or start the next task.
+Spawn it, then wait for completion before the orchestrator advances branches or starts the next task.
 
 ### What to include in the reviewer prompt
 

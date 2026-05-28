@@ -42,7 +42,7 @@ The work is done, but the file is preserved for future reference and lookback (g
 ### For tasks that need follow-up
 
 Do **not** modify the original task file.
-Instead, create one or more new follow-up task files in the same task folder using the `/write-tasks` command conventions:
+Instead, create one or more new follow-up task files in the same task folder using the `$write-tasks` skill conventions:
 
 - Continue the numbering sequence within the same phase.
   For example, if reviewing six `01-*` tasks, a follow-up file might be `01-07-phase-01-follow-ups.md`.

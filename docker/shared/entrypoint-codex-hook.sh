@@ -161,7 +161,18 @@ if [ -f "$AGENT_TMPL" ]; then
 				skill_name="$(basename "$skill_dir")"
 				dest_dir="$SKILLS_DEST/$skill_name"
 				[ -d "$dest_dir" ] && continue
-				if ! cp -R "$skill_dir" "$dest_dir"; then
+				tmp_dir="$(mktemp -d "$SKILLS_DEST/.${skill_name}.tmp.XXXXXX")"
+				if cp -a "$skill_dir"/. "$tmp_dir"/; then
+					if [ -d "$dest_dir" ]; then
+						rm -rf "$tmp_dir"
+						continue
+					fi
+					if mv "$tmp_dir" "$dest_dir"; then
+						continue
+					fi
+				fi
+				rm -rf "$tmp_dir"
+				if [ ! -d "$dest_dir" ]; then
 					echo "Warning: failed to seed skill $skill_name" >&2
 				fi
 			done

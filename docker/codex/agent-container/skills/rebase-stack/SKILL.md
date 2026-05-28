@@ -7,7 +7,7 @@ Rebase a chain of stacked local branches onto a target branch.
 
 **Arguments:** `[<source-branch>] [onto <target-branch>]`
 
-This command is built for the "stacked PRs" workflow where each feature branch was originally based on its predecessor.
+This skill is built for the "stacked PRs" workflow where each feature branch was originally based on its predecessor.
 After predecessors get merged into the target branch (typically `main`), the remaining branches need to be rebased so their unique commits land on top of the new target tip — and so each subsequent branch in the chain ends up cleanly stacked on the freshly rebased one above it.
 
 It works one branch at a time, with explicit user confirmation up front and intelligent conflict resolution along the way.
@@ -17,7 +17,7 @@ It works one branch at a time, with explicit user confirmation up front and inte
 Typical scenario: you produced a chain of branches `feature/01 → feature/02 → ... → feature/N`, each PR'd into the previous.
 After PR review, branches accumulate "fixes" commits.
 After `feature/01` and `feature/02` are merged into `main`, the remaining branches still share an old common ancestor with `main` and contain commits that are now duplicated in `main` (with different hashes but identical patches).
-Run this command from the topmost branch (or pass it explicitly) to bring the entire remaining stack forward, branch by branch, onto the new `main` tip.
+Use this skill from the topmost branch (or pass it explicitly) to bring the entire remaining stack forward, branch by branch, onto the new `main` tip.
 
 It also handles "leafy" stacks — branches in the middle that have grown their own fix commits not yet present in their descendants.
 The per-branch rebase naturally re-stacks them flatly: each rebased branch becomes the base for the next.
@@ -26,36 +26,37 @@ The per-branch rebase naturally re-stacks them flatly: each rebased branch becom
 
 - The team **rebases-and-merges** PRs rather than squashing.
   Git's default patch-id detection during rebase will drop commits already present in the new base, which is exactly what we rely on.
-  This command does not implement squash-aware heuristics.
+  This skill does not implement squash-aware heuristics.
 - Branches in the chain were created sequentially, each from the tip of its predecessor at branch-creation time.
 - The user is responsible for fetch/pull hygiene.
-  This command **does not run `git fetch`** and **does not pull**.
+  This skill **does not run `git fetch`** and **does not pull**.
   It uses local refs only, so the user has complete control over which commits come into play.
 
 ## Invocation forms
 
+Explicit Codex invocation uses `$rebase-stack`; natural-language equivalents are fine.
 All forms route through the same logic.
 Be lenient about parsing: trust the agent to extract source, target, and (optionally) explicit chain, then rely on the confirmation listing as the safety net.
 
 | Form | Meaning |
 |---|---|
-| `/rebase-stack` | Current branch onto `main`; chain auto-detected |
-| `/rebase-stack onto <target>` | Current branch onto `<target>`; chain auto-detected |
-| `/rebase-stack <source>` | `<source>` onto `main`; chain auto-detected |
-| `/rebase-stack <source> onto <target>` | `<source>` onto `<target>`; chain auto-detected |
-| `/rebase-stack <source> -> <target>` | Same; arrow tolerated |
-| `/rebase-stack <source> → <target>` | Same; unicode arrow tolerated |
-| `/rebase-stack chain <b1> <b2> ... <bN> onto <target>` | Explicit chain in stacking order; the last branch is the source; auto-detection is skipped entirely |
-| `/rebase-stack chain <b1> -> <b2> -> ... -> <bN>` | Same with arrows; `onto <target>` defaults to `main` if omitted |
+| `$rebase-stack` | Current branch onto `main`; chain auto-detected |
+| `$rebase-stack onto <target>` | Current branch onto `<target>`; chain auto-detected |
+| `$rebase-stack <source>` | `<source>` onto `main`; chain auto-detected |
+| `$rebase-stack <source> onto <target>` | `<source>` onto `<target>`; chain auto-detected |
+| `$rebase-stack <source> -> <target>` | Same; arrow tolerated |
+| `$rebase-stack <source> → <target>` | Same; unicode arrow tolerated |
+| `$rebase-stack chain <b1> <b2> ... <bN> onto <target>` | Explicit chain in stacking order; the last branch is the source; auto-detection is skipped entirely |
+| `$rebase-stack chain <b1> -> <b2> -> ... -> <bN>` | Same with arrows; `onto <target>` defaults to `main` if omitted |
 
 Quoting is optional; branch names with spaces should use quotes.
 If `main` doesn't exist, fall back to `master`.
 If neither exists, ask the user for the target branch.
 
 **When to use the explicit `chain` form**: if auto-detection comes back empty or wrong (most often after a chain branch was merged via rebase-and-merge — see "Detection corner cases" below), the explicit form is the simple, robust answer.
-You list the branches in stacking order, the command rebases each onto the previous one's new tip, and the patch-id-aware first step still drops commits already on the target.
+You list the branches in stacking order, the skill rebases each onto the previous one's new tip, and the patch-id-aware first step still drops commits already on the target.
 
-## What the command does NOT do
+## What the skill does NOT do
 
 - It does not push to origin. Pushing remains a manual step the user controls.
 - It does not fetch from origin. Local refs are the source of truth.
@@ -76,7 +77,7 @@ You list the branches in stacking order, the command rebases each onto the previ
    Verify the local target ref exists.
 3. **Resolve source.**
    Default source is the currently checked-out branch.
-   If the user specified a source, locate it; the source need not be checked out yet — the command will check out branches as it goes.
+   If the user specified a source, locate it; the source need not be checked out yet — the skill will check out branches as it goes.
 4. **Check no rebase is already in progress.**
    If `.git/rebase-merge` or `.git/rebase-apply` exists, abort with a message asking the user to finish or abort the in-progress rebase first.
 
@@ -153,7 +154,7 @@ Also report **target divergence info** as a non-blocking courtesy:
 - Whether they differ.
 
 Do **not** block on divergence.
-The user may pull manually while the confirmation prompt is open; on "go" the command re-reads the local target ref.
+The user may pull manually while the confirmation prompt is open; on "go" the skill re-reads the local target ref.
 
 Example listing:
 
@@ -232,15 +233,15 @@ When `git rebase` halts on a conflict:
 4. **Non-trivial → propose and confirm.**
    Present the conflict, the proposed resolution (with reasoning, including any traceable precedent), and ask the user to confirm before applying.
    On user "go": apply, `git add`, `git rebase --continue` (or `git rebase --skip` if the proposed resolution is "skip this commit").
-   On user "no": stop the command (see step 7 below).
-5. **If the agent cannot determine a confident resolution at all** — e.g., the conflict involves intent that isn't apparent from the code or history — **stop the command without aborting the rebase**.
+   On user "no": stop the skill (see step 7 below).
+5. **If the agent cannot determine a confident resolution at all** — e.g., the conflict involves intent that isn't apparent from the code or history — **stop the skill without aborting the rebase**.
    Leave the rebase in progress (working tree contains conflict markers, `.git/rebase-merge` exists).
    Tell the user clearly:
    - Which branch is mid-rebase (`<X>`).
    - Where the pre-rebase ref is saved.
    - That the user can finish the rebase manually with `git rebase --continue` after resolving, or `git rebase --abort` to roll back to the pre-rebase ref.
    - That subsequent branches in the chain have not been touched.
-   - That re-invoking the command from the source branch (or any later branch) will produce a fresh, smaller chain detection on top of whatever state the user leaves things in.
+   - That re-invoking the skill from the source branch (or any later branch) will produce a fresh, smaller chain detection on top of whatever state the user leaves things in.
 
    Do **not** run `git rebase --abort` automatically.
    The user may want to inspect the in-progress state.
@@ -265,7 +266,7 @@ When validation is required:
 3. **On failure, attempt to fix.**
    The conflict resolution may have introduced a real issue (e.g., dropped a dependency, misnamed a symbol).
    Read the failure, attempt a focused fix, commit it as a follow-on commit on `<X>` (do not amend the rebased commits), re-run validation.
-4. **If the fix is ambiguous or attempts fail** — stop the command at this branch.
+4. **If the fix is ambiguous or attempts fail** — stop the skill at this branch.
    Tell the user:
    - The rebase succeeded but validation is failing.
    - The exact failure output.
@@ -276,7 +277,7 @@ If no validation commands can be discovered, mention that fact and continue with
 
 ### Step 7 — Stopping cleanly
 
-The command can stop at three points:
+The skill can stop at three points:
 - During confirmation (user declines).
 - On non-trivial conflict the user rejects, or one the agent cannot resolve.
 - On validation failure that cannot be auto-fixed.
@@ -291,9 +292,9 @@ In all cases:
 
 The user can resume by:
 - Manually completing or aborting the in-progress rebase.
-- Re-invoking `/rebase-stack` from the source (or any descendant of where things stopped). The new invocation will re-detect a fresh, smaller chain starting from the current state of the world.
+- Re-invoking `$rebase-stack` from the source (or any descendant of where things stopped). The new invocation will re-detect a fresh, smaller chain starting from the current state of the world.
 
-The command itself is **not re-entrant** in the formal sense — it does not persist state across invocations. Each run is a fresh detection-and-execution cycle. Git is the only persistent state.
+The skill itself is **not re-entrant** in the formal sense — it does not persist state across invocations. Each run is a fresh detection-and-execution cycle. Git is the only persistent state.
 
 ### Step 8 — Final summary
 
@@ -321,7 +322,7 @@ Output:
 Git 2.38+ supports `git rebase --update-refs <new-base> <tip-branch>`, which rebases an entire stack in one operation and automatically advances every intermediate local branch ref it encounters along the way.
 That's a great fast-path for clean stacks where you trust the rebase to produce sensible results without per-step inspection.
 
-This command does **not** use `--update-refs` because:
+This skill does **not** use `--update-refs` because:
 - Conflict resolution benefits from fresh shell state and per-branch reasoning.
 - Validation is per-branch — easier to gate behind "did this branch have a conflict?".
 - Stopping cleanly mid-chain is simpler when each branch is its own atomic step.
@@ -331,7 +332,7 @@ If you have a stack that you're confident will rebase without conflicts and you 
 ### Why no fetch
 
 Fetching is a side effect that influences which commits the rebase will see.
-Doing it implicitly inside this command would surprise users who deliberately keep their local refs at a particular state.
+Doing it implicitly inside this skill would surprise users who deliberately keep their local refs at a particular state.
 Keep ref hygiene in the user's hands.
 
 ### Why keep pre-rebase refs

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Address Tasks"
+  short_description: "Implement task batches with subagents"
+  default_prompt: "Use $address-tasks to implement the task files in <folder-or-glob>."

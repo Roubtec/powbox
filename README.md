@@ -65,6 +65,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
 - `docker/claude/agent-container/`: Claude-specific files baked into the image at `/home/node/.agent-container/` (statusline script, statusline settings overlay, `commands/` for slash commands)
+- `docker/codex/agent-container/`: Codex-specific files baked into the image at `/home/node/.agent-container/` (`skills/` for reusable Codex skills)
 
 ## Build Modes
 
@@ -118,6 +119,17 @@ User-added files in the same volume directory are unaffected by image rebuilds.
 
 These do not pre-load into agent context; like all slash commands they are only read when invoked.
 
+## Image-Baked Codex Skills
+
+Repo-agnostic Codex skills live in `docker/codex/agent-container/skills/` and are baked into the Codex image.
+
+At container start, the entrypoint seeds them into `$HOME/.agents/skills/`, which is backed by the persistent `codex-agents` volume.
+Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
+To pick up an updated version of an image-shipped skill after a rebuild, delete that skill folder from `$HOME/.agents/skills/` and restart the container.
+
+Codex discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list.
+Each baked skill also includes `agents/openai.yaml` metadata for UI labels and default prompts.
+
 ## Runtime
 
 Both agent launch flows resolve through the same shared Compose base and the same Compose project name.
@@ -130,10 +142,11 @@ Shared volume names are kept stable to preserve existing data:
 - `agent-pnpm-store`
 - `agent-zsh-history`
 
-Agent-specific config volumes remain separate:
+Agent-specific state volumes remain separate:
 
 - `claude-config`
 - `codex-config`
+- `codex-agents`
 
 Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless).
 Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
@@ -494,7 +507,7 @@ Smoke test the built images with:
 ./commands/codex-smoke-test.sh
 ```
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config`, `codex-config`, and `codex-agents` volumes.
 
 ## Runtime Sanity Check
 

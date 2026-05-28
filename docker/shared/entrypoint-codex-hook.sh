@@ -147,6 +147,26 @@ if [ -f "$AGENT_TMPL" ]; then
 		# envsubst needs literal ${VAR} names.
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
 			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+
+		# Seed image-baked skills (no-clobber: preserves user-modified versions;
+		# delete the skill directory to pick up the latest image version on next
+		# container start). Per-repo .agents/skills/ still takes precedence at
+		# invoke time. Codex's user-level skill search path is $HOME/.agents/skills.
+		SKILLS_SRC="/home/node/.agent-container/skills"
+		SKILLS_DEST="$HOME/.agents/skills"
+		if [ -d "$SKILLS_SRC" ]; then
+			mkdir -p "$SKILLS_DEST"
+			for skill_dir in "$SKILLS_SRC"/*/; do
+				[ -d "$skill_dir" ] || continue
+				skill_name="$(basename "$skill_dir")"
+				dest_dir="$SKILLS_DEST/$skill_name"
+				[ -d "$dest_dir" ] && continue
+				if ! cp -R "$skill_dir" "$dest_dir"; then
+					echo "Warning: failed to seed skill $skill_name" >&2
+				fi
+			done
+		fi
+
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi

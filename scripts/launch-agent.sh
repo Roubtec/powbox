@@ -178,7 +178,7 @@ SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history)
 if [ "$AGENT" = "claude" ]; then
 	SHARED_VOLUMES+=(claude-config)
 else
-	SHARED_VOLUMES+=(codex-config)
+	SHARED_VOLUMES+=(codex-config codex-agents)
 fi
 for vol in "${SHARED_VOLUMES[@]}"; do
 	if ! docker volume inspect "$vol" >/dev/null 2>&1; then

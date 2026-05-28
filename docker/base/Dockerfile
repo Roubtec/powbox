@@ -161,9 +161,10 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
     && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
-# Copy startup scripts while still root. Single multi-source COPY to keep them
-# in one layer — they all change at the same cadence, so per-file caching gains
-# nothing.
+# Copy the substrate startup scripts shared by every agent while still root.
+# Agent-specific entrypoint shims and hooks are intentionally NOT baked here;
+# each agent image (docker/{claude,codex}/Dockerfile) copies its own so that
+# editing a hook rebuilds only that agent's layer — see those Dockerfiles.
 COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \
@@ -171,10 +172,6 @@ COPY --chmod=755 \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
     docker/shared/entrypoint-core.sh \
-    docker/shared/entrypoint-claude.sh \
-    docker/shared/entrypoint-codex.sh \
-    docker/shared/entrypoint-claude-hook.sh \
-    docker/shared/entrypoint-codex-hook.sh \
     /usr/local/bin/
 
 USER node

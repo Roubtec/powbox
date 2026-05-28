@@ -19,7 +19,7 @@ Teach or question the user if that is in the best interest of the final product.
 - User-facing host commands: `commands/`
 - Image-baked Claude slash commands: `docker/claude/agent-container/commands/` (seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; per-repo `.claude/commands/` overrides on name collision)
 - Internal build/launch helpers: `scripts/`
-- Entrypoint core and hooks: `docker/shared/`
+- Entrypoint scripts: all live in `docker/shared/`, but only `entrypoint-core.sh` is baked by the base image. The agent-specific shims and hooks (`entrypoint-{claude,codex}.sh`, `entrypoint-{claude,codex}-hook.sh`) are baked by their respective agent images, so editing a hook only requires rebuilding that agent — not the base.
 - Workspace shadow mount scripts: `docker/shared/detect-shadows.sh`, `docker/shared/shadow-mounts.sh`, `docker/shared/shadow-refresh.sh`
 
 ## Key Paths

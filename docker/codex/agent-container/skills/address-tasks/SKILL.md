@@ -20,14 +20,16 @@ This separation keeps your context window clean across long batches and ensures 
 
 ### How to spawn a subagent in Codex
 
-Use the Codex multi-agent tool exposed in the current session, normally `multi_agent_v1.spawn_agent`.
-Spawn implementers with `agent_type: "worker"` and reviewers with `agent_type: "explorer"`.
-Do not fork context; instead, pass a self-contained prompt as `message`.
+Use the subagent interface Codex exposes in the current session.
+In interactive Codex sessions, ask Codex in natural language to spawn the appropriate built-in subagent and wait for its result.
+In tool-enabled sessions, this capability is typically exposed through tools such as `multi_agent_v1.spawn_agent`, `multi_agent_v1.wait_agent`, and `multi_agent_v1.close_agent`; use those names only when they are present in the current tool listing.
+Spawn implementers as `worker` agents and reviewers as `explorer` agents.
+Do not fork context; instead, pass a self-contained prompt.
 Omit model overrides unless the user explicitly asks for a different model.
-Because each task step depends on the subagent result, wait for completion with `multi_agent_v1.wait_agent`, then close the agent when it is no longer needed.
+Because each task step depends on the subagent result, wait for completion, then close the agent thread when it is no longer needed.
 No custom agent personas (`~/.codex/agents/*.toml`) are required.
 
-If no subagent tool is available, tell the user this skill requires Codex multi-agent support.
+If the current session exposes no subagent capability, tell the user this skill requires Codex multi-agent support.
 Only fall back to doing the implementation locally if the user explicitly approves that change in workflow.
 
 **Trivial-task escape hatch:** for genuinely trivial tasks (a single obvious change with unambiguous criteria), you may implement directly without delegating.
@@ -118,7 +120,7 @@ Spawn it, then wait for completion before the orchestrator advances branches or 
   - **Pass** — all acceptance criteria are met, build passes, and no material quality issues found. State this clearly.
   - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
-- **Instruction NOT to edit any files** — the reviewer only reads and reports.
+- **Instruction NOT to edit any files** — the reviewer only reads and reports. It must not create, update, or delete follow-up task files; any suggested follow-up work belongs in the review report only.
 
 #### Code quality dimensions to check
 
@@ -145,7 +147,8 @@ Your job is to evaluate the current codebase on two orthogonal dimensions:
 1. Acceptance criteria compliance — does the code do what was specified?
 2. Implementation quality — is the code correct, robust, and consistent?
 
-DO NOT edit any files. Only read, search, and run validation commands.
+DO NOT edit, create, or delete any files. Only read, search, and run validation commands.
+Do not write follow-up task files; put any suggested follow-up work in your review report only.
 
 The PR base branch for this task is `<base-branch>`. The current branch is `<task-branch>`.
 

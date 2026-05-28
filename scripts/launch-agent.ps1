@@ -70,7 +70,7 @@ $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 # Ensure shared named volumes exist (compose won't auto-create external volumes).
 $sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history")
 if ($Agent -eq "claude") { $sharedVolumes += "claude-config" }
-else { $sharedVolumes += @("codex-config", "codex-agents") }
+else { $sharedVolumes += "codex-config" }
 foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {

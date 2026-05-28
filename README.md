@@ -118,7 +118,7 @@ Per-agent sources:
 At container start, the entrypoint seeds the baked skills into the agent's user-level skills directory from the same epoch-gated block that re-renders the agent instruction template:
 
 - Claude — `$CLAUDE_CONFIG_DIR/skills/` (backed by the `claude-config` volume)
-- Codex — `$HOME/.agents/skills/` (backed by the `codex-agents` volume)
+- Codex — `$HOME/.agents/skills/` (backed by the `codex-config` volume via a `~/.agents → ~/.codex/agents` symlink seeded by the entrypoint)
 
 Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
 To pick up an updated version of an image-shipped skill after a rebuild, delete that skill folder from the destination above and restart the container.
@@ -144,7 +144,6 @@ Agent-specific state volumes remain separate:
 
 - `claude-config`
 - `codex-config`
-- `codex-agents`
 
 Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless).
 Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
@@ -505,7 +504,7 @@ Smoke test the built images with:
 ./commands/codex-smoke-test.sh
 ```
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config`, `codex-config`, and `codex-agents` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check
 

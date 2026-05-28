@@ -5,12 +5,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - codex-config:/home/node/.codex
-      - codex-agents:/home/node/.agents
 
 volumes:
   codex-config:
     name: codex-config
-    external: true
-  codex-agents:
-    name: codex-agents
     external: true

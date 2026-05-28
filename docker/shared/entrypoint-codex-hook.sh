@@ -111,6 +111,18 @@ ${values}
 # when the keys are missing, which covers the only state we care to seed.
 chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
+# Codex's user-level skill search path is $HOME/.agents/skills. Point ~/.agents at a
+# subdirectory of $AGENT_CONFIG_DIR so skill customisations persist in the codex-config
+# volume without requiring a separate volume. Only create the symlink when the path does
+# not already exist or is already a symlink (guards against an older codex-agents volume
+# mount left over from a stale container).
+AGENTS_LINK="$HOME/.agents"
+AGENTS_TARGET="$AGENT_CONFIG_DIR/agents"
+mkdir -p "$AGENTS_TARGET"
+if [ ! -e "$AGENTS_LINK" ] || [ -L "$AGENTS_LINK" ]; then
+	ln -sfn "$AGENTS_TARGET" "$AGENTS_LINK"
+fi
+
 # Seed a richer native Codex status line/title, but only when the user has not
 # already chosen their own values.
 CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
@@ -151,9 +163,9 @@ if [ -f "$AGENT_TMPL" ]; then
 		# Seed image-baked skills (no-clobber: preserves user-modified versions;
 		# delete the skill directory to pick up the latest image version on next
 		# container start). Per-repo .agents/skills/ still takes precedence at
-		# invoke time. Codex's user-level skill search path is $HOME/.agents/skills.
+		# invoke time.
 		SKILLS_SRC="/home/node/.agent-container/skills"
-		SKILLS_DEST="$HOME/.agents/skills"
+		SKILLS_DEST="$AGENT_CONFIG_DIR/agents/skills"
 		if [ -d "$SKILLS_SRC" ]; then
 			mkdir -p "$SKILLS_DEST"
 			for skill_dir in "$SKILLS_SRC"/*/; do

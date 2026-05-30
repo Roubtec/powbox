@@ -105,6 +105,19 @@ ${values}
 	mv "$tmp" "$file"
 }
 
+replace_config_string() {
+	local file="$1" old="$2" new="$3"
+
+	if [ ! -f "$file" ] || ! grep -qF "$old" "$file"; then
+		return
+	fi
+
+	local tmp
+	tmp="$(mktemp)"
+	sed "s/${old}/${new}/g" "$file" >"$tmp"
+	mv "$tmp" "$file"
+}
+
 # Host config is intentionally not seeded; the container grows its own Codex ecosystem
 # (config.toml, sessions, history) independent of the host. The ensure_* helpers below
 # write the image-baked statusline/terminal-title defaults straight into config.toml
@@ -126,6 +139,9 @@ fi
 # Seed a richer native Codex status line/title, but only when the user has not
 # already chosen their own values.
 CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
+# Codex 0.135 removed context-remaining-percent; keep older persisted volumes
+# warning-free while preserving the user's status line ordering.
+replace_config_string "$CONFIG_FILE" '"context-remaining-percent"' '"context-remaining"'
 STATUS_LINE_DEFAULTS=$(cat <<'EOF'
   "model-with-reasoning",
   "current-dir",

@@ -108,7 +108,10 @@ ${values}
 replace_config_string() {
 	local file="$1" old="$2" new="$3"
 
-	if [ ! -f "$file" ] || ! grep -qF "$old" "$file"; then
+	# An empty $old would match every position and spin the awk index() loop
+	# below forever; it is never a meaningful migration, so bail out. The grep
+	# `--` guards a $old that begins with `-` from being parsed as an option.
+	if [ -z "$old" ] || [ ! -f "$file" ] || ! grep -qF -- "$old" "$file"; then
 		return
 	fi
 

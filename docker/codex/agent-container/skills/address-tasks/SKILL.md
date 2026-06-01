@@ -18,6 +18,10 @@ Your job is to sequence tasks, manage branches and PRs, and coordinate two speci
 
 This separation keeps your context window clean across long batches and ensures the reviewer evaluates the work without implementation bias.
 
+> **Critical — one agent at a time; Codex subagents share your working tree.**
+> Unless you explicitly configured per-agent git worktrees, each subagent operates on the same checked-out branch and working tree as the orchestrator. Two checkout-dependent subagents running at once can race or corrupt each other's view of the repo. The most common failure: a reviewer spawned alongside its implementer scopes `git diff <base>...HEAD` before the implementer has finished committing, sees nothing, and falsely reports "no implementation" — so the work ships **unreviewed**.
+> Therefore: **never spawn or request two checkout-dependent subagents in the same natural-language turn, same tool block, or before the previous subagent has been waited on and closed.** Start one subagent, wait for its result, close it, then start the next. The general guidance to batch independent tool calls does not apply here: implementers and reviewers are not independent because they contend for one working tree.
+
 ### How to spawn a subagent in Codex
 
 Use the subagent interface Codex exposes in the current session.
@@ -26,7 +30,7 @@ In tool-enabled sessions, this capability is typically exposed through tools suc
 Spawn implementers as `worker` agents and reviewers as `explorer` agents.
 Do not fork context; instead, pass a self-contained prompt.
 Omit model overrides unless the user explicitly asks for a different model.
-Because each task step depends on the subagent result, wait for completion, then close the agent thread when it is no longer needed.
+Because each task step depends on the subagent result, spawn exactly one checkout-dependent subagent at a time: spawn it, wait for completion, then close the agent thread when it is no longer needed before spawning the next one.
 No custom agent personas (`~/.codex/agents/*.toml`) are required.
 
 If the current session exposes no subagent capability, tell the user this skill requires Codex multi-agent support.
@@ -45,7 +49,7 @@ Your responsibilities are:
 1. Resolve the input arguments to a list of task files.
 2. Read each task file enough to understand dependencies and sequencing — do not deeply analyze implementation details.
 3. Manage branch creation and PR base determination.
-4. Construct focused prompts and spawn subagents (implementer, then reviewer) for each task.
+4. Construct focused prompts and spawn subagents **one at a time** — implementer, await and close it, then a fresh reviewer — for each task. Never batch the implementer and reviewer into one natural-language request or tool block (see the shared-working-tree rule above).
 5. Handle the review feedback loop.
 6. Open PRs once a task passes review.
 7. Advance to the next task or stop on blockers.
@@ -54,7 +58,7 @@ Your responsibilities are:
 ## Implementer Agent
 
 The implementer receives a focused, self-contained prompt and works autonomously on a single task.
-Spawn it, then wait for completion before proceeding.
+Spawn it **on its own**, then wait for completion and close the agent thread before proceeding. The orchestrator needs both the implementer's result and its committed work on disk before spawning a reviewer, so do not start any other checkout-dependent subagent in the same turn or tool block.
 
 ### What to include in the implementer prompt
 
@@ -107,13 +111,15 @@ Read `AGENTS.md` first for project conventions.
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
 It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
 It must be a **fresh** subagent spawn — never a continuation of the implementer's thread.
-Spawn it, then wait for completion before the orchestrator advances branches or starts the next task.
+Spawn it only **after** the implementer has fully completed and its commits have landed — never concurrently with the implementer, and never in the same natural-language turn or tool block. You share one working tree, so a concurrent reviewer can scan an empty or half-finished branch and wrongly report "no implementation" (see the shared-working-tree rule in Architecture).
+Wait for completion and close the reviewer before the orchestrator advances branches or starts the next task.
 
 ### What to include in the reviewer prompt
 
 - **The full task file content** — same source of truth the implementer received.
 - **The PR base branch name** (the branch this task will be merged into). The reviewer uses this to scope its review by listing files touched on the task branch versus the base. If the orchestrator omits this, the reviewer should fall back to `main` and note the fallback in its report.
 - **Instruction to read the relevant areas of the codebase** and check each acceptance criterion against the actual code.
+- **A note that the implementation is already committed on the current branch** — the reviewer must read the actual files, and must NOT conclude "no implementation" without first confirming the diff is genuinely empty (an empty diff at this stage is far more likely an orchestration error than real absence; the reviewer should say so rather than spend its budget reviewing nothing).
 - **Instruction to perform a code quality pass** (see dimensions below) orthogonal to the criteria check.
 - **Scoping guidance** — the reviewer may run `git diff --name-only <base>...HEAD` to identify the set of touched files and prioritize quality review there. It must still read each touched file in full (not just the diff) and may follow references into untouched files when needed to evaluate consistency or call sites.
 - **Reporting format:**
@@ -147,6 +153,10 @@ Your job is to evaluate the current codebase on two orthogonal dimensions:
 1. Acceptance criteria compliance — does the code do what was specified?
 2. Implementation quality — is the code correct, robust, and consistent?
 
+The implementation is already committed on the current branch — read the actual files. Do not
+report "no implementation": if `git diff --name-only <base-branch>...HEAD` looks empty, say so as a
+flag to the orchestrator (it signals a likely race or wrong branch) rather than reviewing nothing.
+
 DO NOT edit, create, or delete any files. Only read, search, and run validation commands.
 Do not write follow-up task files; put any suggested follow-up work in your review report only.
 
@@ -179,7 +189,7 @@ The PR base branch for this task is `<base-branch>`. The current branch is `<tas
 
 ## Execution Model
 
-Process the batch **sequentially**, not in parallel.
+Process the batch **sequentially**, not in parallel — and within each task, run the implementer and its reviewer one at a time, never concurrently (they share your single working tree; see the rule in Architecture).
 Each task is its own delivery unit, but stack later task branches on top of earlier ones when needed so dependent work can continue without waiting for review.
 
 ### Determining the PR base
@@ -197,10 +207,11 @@ For each task file in the input set:
 1. **Record the PR base branch** for this task (see precedence rules above).
 2. **Create a dedicated implementation branch** for the task.
 3. **Read the task file** enough to construct a good implementer prompt. Identify the acceptance criteria so you can later evaluate the reviewer's report.
-4. **Spawn the implementer agent** with a well-structured prompt (see Implementer Agent section). Wait for completion.
+4. **Spawn the implementer agent** with a well-structured prompt (see Implementer Agent section). Wait for completion and close the agent. Spawn nothing else in the same natural-language turn or tool block — the reviewer comes only after the implementer's commits exist on disk.
 5. **Evaluate the implementer's report.** If the implementer hit a blocker it could not resolve, stop and surface it to the user before spawning a reviewer.
-6. **Spawn the reviewer agent** with a fresh prompt (see Reviewer Agent section). Wait for completion.
+6. **Only after step 5, spawn the reviewer agent** with a fresh prompt (see Reviewer Agent section), wait for completion, and close the agent. Do not spawn it in the same natural-language turn or tool block as the implementer — you share one working tree, so a concurrent reviewer reviews an unfinished branch.
 7. **Evaluate the reviewer's report:**
+   - If the report says the branch is **empty / has no implementation / shows an empty diff**, do not trust it at face value — that is the signature of a race (reviewer started before the implementer committed) or a wrong-branch checkout, not a real gap. Verify with `git diff --name-only <base>...HEAD`; if the work is actually present, spawn a fresh reviewer and use that verdict instead.
    - If **pass**: proceed to step 8.
    - If **issues found**: enter the feedback loop (see below).
 8. **Open a PR** against the recorded base branch.
@@ -214,13 +225,13 @@ For each task file in the input set:
 
 When the reviewer reports material issues:
 
-1. **Spawn a new implementer agent** with:
+1. **Spawn a new implementer agent** (on its own, as in step 4) with:
    - The original task file content.
    - The reviewer's numbered findings, verbatim.
    - The branch name (same as before).
    - Instruction to address each finding specifically and report what was fixed.
    - The same project context and validation instructions as the original implementer prompt.
-2. After the fix-up implementer completes, **spawn a new reviewer agent** to re-check (same fresh prompt structure as before).
+2. After the fix-up implementer completes — and only then, in a later turn — **spawn a new reviewer agent** to re-check (same fresh prompt structure as before; never concurrent with the fix-up implementer).
 3. Repeat until the reviewer passes or you judge that remaining findings are minor enough to note in the PR description rather than block on.
 4. **Cap the feedback loop at 3 iterations.** If issues persist after 3 rounds, stop iterating and do not open a PR for this task. Surface the outstanding findings clearly to the user in the final summary and ask for guidance on how to proceed.
 

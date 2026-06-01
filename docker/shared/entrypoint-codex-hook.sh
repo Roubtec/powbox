@@ -105,6 +105,37 @@ ${values}
 	mv "$tmp" "$file"
 }
 
+replace_config_string() {
+	local file="$1" old="$2" new="$3"
+
+	# An empty $old would match every position and spin the awk index() loop
+	# below forever; it is never a meaningful migration, so bail out. The grep
+	# `--` guards a $old that begins with `-` from being parsed as an option.
+	if [ -z "$old" ] || [ ! -f "$file" ] || ! grep -qF -- "$old" "$file"; then
+		return
+	fi
+
+	local tmp
+	tmp="$(mktemp)"
+	# Literal (non-regex) replacement: awk index/substr avoids sed treating
+	# metacharacters in $old/$new (. * [ ] / & \ ...) as regex or replacement
+	# syntax. Values are passed via the environment so awk does not interpret
+	# backslash escapes the way it would with -v.
+	old="$old" new="$new" awk '
+		BEGIN { old = ENVIRON["old"]; new = ENVIRON["new"] }
+		{
+			line = $0
+			result = ""
+			while ((pos = index(line, old)) > 0) {
+				result = result substr(line, 1, pos - 1) new
+				line = substr(line, pos + length(old))
+			}
+			print result line
+		}
+	' "$file" >"$tmp"
+	mv "$tmp" "$file"
+}
+
 # Host config is intentionally not seeded; the container grows its own Codex ecosystem
 # (config.toml, sessions, history) independent of the host. The ensure_* helpers below
 # write the image-baked statusline/terminal-title defaults straight into config.toml
@@ -126,6 +157,9 @@ fi
 # Seed a richer native Codex status line/title, but only when the user has not
 # already chosen their own values.
 CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
+# Codex 0.135 removed context-remaining-percent; keep older persisted volumes
+# warning-free while preserving the user's status line ordering.
+replace_config_string "$CONFIG_FILE" '"context-remaining-percent"' '"context-remaining"'
 STATUS_LINE_DEFAULTS=$(cat <<'EOF'
   "model-with-reasoning",
   "current-dir",

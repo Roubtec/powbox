@@ -568,7 +568,7 @@ Codex preserves any existing `config.toml` settings in the `codex-config` volume
 The seeded status line uses Codex-native items for model, current directory, remaining context, 5-hour usage, weekly usage, and used tokens.
 `terminal_title` is a separate Codex setting for the terminal window or tab title, not the bottom status line.
 The seeded title surfaces current directory, git branch, model, and thread title when the terminal supports title updates.
-That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched.
+That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
 
 ## License
 

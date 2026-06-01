@@ -114,7 +114,22 @@ replace_config_string() {
 
 	local tmp
 	tmp="$(mktemp)"
-	sed "s/${old}/${new}/g" "$file" >"$tmp"
+	# Literal (non-regex) replacement: awk index/substr avoids sed treating
+	# metacharacters in $old/$new (. * [ ] / & \ ...) as regex or replacement
+	# syntax. Values are passed via the environment so awk does not interpret
+	# backslash escapes the way it would with -v.
+	old="$old" new="$new" awk '
+		BEGIN { old = ENVIRON["old"]; new = ENVIRON["new"] }
+		{
+			line = $0
+			result = ""
+			while ((pos = index(line, old)) > 0) {
+				result = result substr(line, 1, pos - 1) new
+				line = substr(line, pos + length(old))
+			}
+			print result line
+		}
+	' "$file" >"$tmp"
 	mv "$tmp" "$file"
 }
 

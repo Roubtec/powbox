@@ -20,7 +20,7 @@ This separation keeps your context window clean across long batches and ensures 
 
 > **Critical — one agent at a time; Codex subagents share your working tree.**
 > Unless you explicitly configured per-agent git worktrees, each subagent operates on the same checked-out branch and working tree as the orchestrator. Two checkout-dependent subagents running at once can race or corrupt each other's view of the repo. The most common failure: a reviewer spawned alongside its implementer scopes `git diff <base>...HEAD` before the implementer has finished committing, sees nothing, and falsely reports "no implementation" — so the work ships **unreviewed**.
-> Therefore: **never spawn or request two checkout-dependent subagents in the same natural-language turn, same tool block, or before the previous subagent has been waited on and closed.** Start one subagent, wait for its result, close it, then start the next. The general guidance to batch independent tool calls does not apply here: implementers and reviewers are not independent because they contend for one working tree. The only safe way to parallelize is to explicitly give each agent its own git worktree (for example, a supported `isolation: "worktree"` option when available); do not assume that by default.
+> Therefore: **never spawn or request two checkout-dependent subagents in the same natural-language turn, same tool block, or before the previous subagent has been waited on and closed.** Start one subagent, wait for its result, close it, then start the next. The general guidance to batch independent tool calls does not apply here: implementers and reviewers are not independent because they contend for one working tree.
 
 ### How to spawn a subagent in Codex
 

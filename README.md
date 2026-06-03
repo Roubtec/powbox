@@ -246,7 +246,7 @@ These directories are gitignored and absent on a fresh checkout, but because the
 
 **Discipline.** Commit and push often. Since only the common `.git` persists, push committed work to the remote, then `git pull` on the host to sync — anything left only in a worktree's working tree is lost on container stop.
 
-**tmpfs sizing.** All worktrees under `.worktrees` share that single tmpfs mount's `SHADOW_TMPFS_SIZE` cap (default 512m). Worktree-heavy work — especially several parallel `pnpm install`s — can exhaust it and fail with `ENOSPC`. Relaunch the container with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration) below) when that happens.
+**tmpfs sizing.** All worktrees under `.worktrees` share that single tmpfs mount's `SHADOW_TMPFS_SIZE` cap (default 2g, sized to hold a few parallel worktrees each with their own `node_modules`). tmpfs allocates lazily, so the cap bounds the worst case rather than reserving memory up front. Worktree-heavy work — many parallel `pnpm install`s, or large `node_modules` — can still exhaust it and fail with `ENOSPC`. Relaunch the container with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration) below) when that happens.
 
 ### Mid-Session Refresh
 
@@ -269,8 +269,9 @@ The root `node_modules` Docker volume is unaffected and persists across restarts
 
 ### Configuration
 
-Each tmpfs mount is capped at **512 MB** by default.
-Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `1g`, `256m`) before launching the container.
+Each tmpfs mount is capped at **2 GB** by default.
+Because tmpfs allocates lazily, this ceiling bounds the worst case and does not reserve memory up front — an empty or lightly used mount costs almost nothing.
+Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `4g`, `512m`) before launching the container.
 Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh.sh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
 If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
 

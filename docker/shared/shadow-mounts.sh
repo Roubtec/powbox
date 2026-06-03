@@ -16,10 +16,13 @@ NODE_GID="$(id -g node)"
 workspace_root="$(realpath /workspace)"
 mounted=0
 
-# Per-mount tmpfs size cap.  Prevents unbounded memory consumption from large
-# node_modules trees — when the limit is hit, pnpm install gets a clear ENOSPC
-# error rather than silently eating RAM.  Override via SHADOW_TMPFS_SIZE.
-TMPFS_SIZE="${SHADOW_TMPFS_SIZE:-512m}"
+# Per-mount tmpfs size cap.  Each shadowed directory gets its own tmpfs with
+# this ceiling; tmpfs allocates lazily, so the cap bounds the worst case rather
+# than reserving memory up front.  When the limit is hit, pnpm install gets a
+# clear ENOSPC error rather than silently eating RAM.  The default is sized to
+# hold several git worktrees sharing one .worktrees mount (each with its own
+# node_modules).  Override via SHADOW_TMPFS_SIZE (any value mount -o size= takes).
+TMPFS_SIZE="${SHADOW_TMPFS_SIZE:-2g}"
 
 for target in "$@"; do
 	if ! resolved_target="$(realpath -m -- "$target")"; then

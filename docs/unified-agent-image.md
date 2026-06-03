@@ -1,6 +1,6 @@
 # Unified Multi-Agent Image — Specification
 
-Status: approved design, pending implementation.
+Status: implemented. This document is the as-built reference.
 
 This document specifies merging the per-agent images (`powbox-claude`, `powbox-codex`) into a single `powbox-agent` image that ships both agent binaries, so the chosen agent is selected at runtime rather than baked into the image. It is the reference for the implementation commits that follow.
 
@@ -55,17 +55,16 @@ Each binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VE
 
 The entrypoint must seed both agents unconditionally, then exec the primary agent's CMD. This is required — without it, a delegated invocation of the non-primary agent would hit an unseeded config (no instruction render, no `config.toml` migration, no `~/.agents` symlink, no seeded skills).
 
-Plan:
+Plan (as built):
 
 - Replace the two shims (`entrypoint-claude.sh`, `entrypoint-codex.sh`) with a single `entrypoint-agent.sh` that:
-  1. Reads `PRIMARY_AGENT` (`claude` | `codex`) from the environment.
-  2. Runs **every** registered agent's setup hook. The hooks are already idempotent, no-clobber, and `build-epoch`-gated, so re-running both is cheap and safe.
-  3. Exports the primary agent's `AGENT_*` variables (`AGENT_CONFIG_DIR`, `AGENT_NAME`, `AGENT_AUTONOMY_FLAG`, `AGENT_INSTRUCTION_FILE`).
-  4. `exec /usr/local/bin/entrypoint-core.sh "$@"`.
-- `entrypoint-core.sh` is unchanged (still ends with `exec "$@"`).
-- The per-agent hooks (`entrypoint-{claude,codex}-hook.sh`) are retained as-is but invoked from the unified shim against each agent's `AGENT_CONFIG_DIR`. Each hook must remain runnable for a non-primary agent (it must not assume it owns the rendered top-level instruction file).
-
-The instruction-file render (`CLAUDE.md` vs `AGENTS.md`) and statusline settings belong to the **primary** agent only; peer seeding is limited to config dir, skills, symlink, and `config.toml` migration.
+  1. Reads `PRIMARY_AGENT` (`claude` | `codex`) from the environment, falling back to `claude` for an unknown value.
+  2. Holds a small **agent registry** (`agent_env`) mapping each agent to its `AGENT_CONFIG_DIR`, hook, seed dir, name, binary, autonomy flag, instruction file, and label. Adding a harness = one case arm here plus listing it in `ALL_AGENTS`.
+  3. Seeds every **non-primary** agent directly by exporting its `AGENT_*` vars and running its hook.
+  4. Exports the **primary** agent's `AGENT_*` vars and `exec`s `entrypoint-core.sh`, which runs the primary's hook (so it is not run twice) alongside firewall/git/shadow setup before execing the CMD.
+- `entrypoint-core.sh` is unchanged (still runs the single `AGENT_SETUP_HOOK` and ends with `exec "$@"`).
+- The per-agent hooks (`entrypoint-{claude,codex}-hook.sh`) are run in **full** for every agent, not split. Because each hook writes only into its own config dir (`~/.claude` vs `~/.codex`/`~/.agents`), there is no conflict and no need to separate "primary-only" steps — running both fully is simpler and means a delegated peer finds its instruction file, skills, statusline, and `config.toml` already rendered. Each hook is idempotent, no-clobber, and `build-epoch`-gated.
+- Each agent reads its image-baked seed assets from a per-agent directory `/home/node/.agent-container/<agent>` via a new `AGENT_SEED_DIR` variable (defaulting to the legacy shared path so a hook still works standalone). This keeps the two agents' templates, skills, statusline, and build epoch from colliding in one image.
 
 ### Volumes: both mounted from day 1
 
@@ -84,6 +83,14 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 - `docker-bake.hcl`: replace the `claude` and `codex` targets with a single `agent` target (dockerfile `docker/agent/Dockerfile`, tag `powbox-agent:latest`, args `CLAUDE_CODE_VERSION` + `CODEX_VERSION`). Keep the `base` target. Update the `all`/`default` groups.
 - `scripts/build-image.sh`: targets become `base | agent | all`. Keep `--claude-version` / `--codex-version` (both feed the one image). `--pull` still applies only to the upstream base.
+
+### Minimal-layer updates
+
+`agent-update` must rebuild the fewest layers for any single update. The mechanism is **per-binary version pinning**, because with `latest` tags Docker can't see that an upstream release advanced (the `RUN` text is unchanged) and would either never update or, with `--no-cache`, rebuild both binaries.
+
+- `check-updates.sh` reads both baked versions in **one** container start (`docker run … sh -c 'claude --version; codex --version'`) — the win the single image unlocks — and resolves both npm latests. Its `--porcelain` mode emits a machine-readable table: `name<TAB>status<TAB>baked<TAB>latest`.
+- `agent-update` reads that table once and rebuilds `agent` pinning each binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
+- Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
 
 ### Launcher and macros
 

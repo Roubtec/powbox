@@ -112,10 +112,26 @@ assert_stderr() {
 
 echo "Test: literal non-existent paths are emitted (created at startup)"
 ws="$(new_ws literal-absent)"
+# Mirror real usage: this script runs inside a git repo, so .git exists; it is
+# the declared .git/worktrees *subdir* that is absent on a fresh checkout.
+mkdir "$ws/.git"
 write_powbox "$ws" .worktrees .git/worktrees .claude/worktrees
 assert_emits "$ws" "$ws/.worktrees" "literal .worktrees emitted though absent"
 assert_emits "$ws" "$ws/.git/worktrees" "literal .git/worktrees emitted though absent"
 assert_emits "$ws" "$ws/.claude/worktrees" "literal .claude/worktrees emitted though absent"
+
+echo "Test: .git/* literal skipped when .git is absent (non-git folder)"
+ws="$(new_ws git-absent)"
+write_powbox "$ws" .git/worktrees
+assert_absent "$ws" "$ws/.git/worktrees" ".git/worktrees not emitted when .git absent"
+assert_stderr "$ws" ".git is not a directory" "diagnostic explains the .git-absent skip"
+
+echo "Test: .git/* literal skipped when .git is a file (linked worktree)"
+ws="$(new_ws git-file)"
+printf 'gitdir: /elsewhere/.git/worktrees/wt\n' >"$ws/.git"
+write_powbox "$ws" .git/worktrees
+assert_absent "$ws" "$ws/.git/worktrees" ".git/worktrees not emitted when .git is a file"
+assert_stderr "$ws" ".git is not a directory" "diagnostic explains the linked-worktree skip"
 
 echo "Test: non-matching glob produces no output (existence-gated)"
 ws="$(new_ws glob-nomatch)"
@@ -155,10 +171,11 @@ ws="$(new_ws negation)"
 write_powbox "$ws" '!secret'
 assert_no_output "$ws" "negation '!secret' skipped"
 
-echo "Test: the workspace root itself is rejected"
+echo "Test: the workspace root itself is rejected with an accurate message"
 ws="$(new_ws root-self)"
 write_powbox "$ws" '.'
 assert_no_output "$ws" "'.' (resolves to workspace root) not shadowed"
+assert_stderr "$ws" "workspace root itself" "'.' rejected with a workspace-root diagnostic, not 'outside'"
 
 echo "Test: pnpm workspace globs remain existence-gated on the package dir"
 ws="$(new_ws pnpm-ws)"

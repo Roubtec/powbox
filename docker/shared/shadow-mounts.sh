@@ -45,7 +45,13 @@ for target in "$@"; do
 		continue
 	fi
 
-	mkdir -p "$resolved_target"
+	# Non-fatal under set -e: a path whose parent is a file (e.g. a literal
+	# under a .git that is itself a file in a linked worktree) must not abort
+	# the whole loop and leave the remaining directories unshadowed.
+	if ! mkdir -p "$resolved_target" 2>/dev/null; then
+		echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
+		continue
+	fi
 	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755,size=$TMPFS_SIZE" tmpfs "$resolved_target"
 	mounted=$((mounted + 1))
 done

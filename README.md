@@ -240,7 +240,7 @@ shadow:
   - .git/worktrees      # per-worktree git metadata
 ```
 
-These directories are gitignored and absent on a fresh checkout, but because they are literal paths they are auto-created and shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed.
+These directories are gitignored and absent on a fresh checkout, but because they are literal paths they are auto-created and shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
 
 **Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The worktree working files under `.worktrees/` and the per-worktree `.git/worktrees/<name>` metadata are ephemeral tmpfs and vanish when the container stops. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa.
 

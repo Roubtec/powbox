@@ -1,11 +1,18 @@
 ﻿param(
-    [string]$ClaudeImage = 'powbox-claude:latest',
-    [string]$CodexImage  = 'powbox-codex:latest',
-    [string]$BaseImage   = 'powbox-agent-base:latest',
-    # Suppress human-readable output and instead emit just the names of the
-    # stale build targets (base|claude|codex), one per line, for agent-update
-    # to consume. A target is stale when a latest version is known and differs
-    # from what is baked in (a missing image counts as stale).
+    [string]$AgentImage = 'powbox-agent:latest',
+    [string]$BaseImage  = 'powbox-agent-base:latest',
+    # Suppress human-readable output and instead print one tab-separated row per
+    # component for agent-update to consume:
+    #
+    #     base    <ok|stale|unknown>  <baked-digest|->   <latest-digest|->
+    #     claude  <ok|stale|unknown>  <baked-version|->  <latest-version|->
+    #     codex   <ok|stale|unknown>  <baked-version|->  <latest-version|->
+    #
+    # A component is stale when a latest value is known and differs from what is
+    # baked in (a missing image counts as stale); unknown means the latest could
+    # not be determined (npm/registry unreachable) and must never force a
+    # rebuild. The baked/latest versions let agent-update pin each binary so
+    # Docker rebuilds only the layers that actually changed.
     [switch]$Porcelain
 )
 
@@ -20,9 +27,14 @@ function Write-Note([string]$Message) {
     if (-not $Porcelain) { Write-Host $Message }
 }
 
-function Test-Stale([string]$Baked, [string]$Latest) {
-    if (-not $Latest) { return $false }
-    return $Baked -ne $Latest
+# Classify a baked/latest pair as ok | stale | unknown. A latest value that
+# could not be determined (npm/registry unreachable) is "unknown" and must never
+# force a rebuild; an empty baked value (missing/unknown image) with a known
+# latest counts as "stale" so agent-update will build it.
+function Get-ComponentStatus([string]$Baked, [string]$Latest) {
+    if (-not $Latest) { return 'unknown' }
+    if ($Baked -ne $Latest) { return 'stale' }
+    return 'ok'
 }
 
 # -------------------------------------------------------------------
@@ -34,16 +46,30 @@ function Test-ImageExists([string]$Image) {
     return $LASTEXITCODE -eq 0
 }
 
-function Get-BakedClaudeVersion([string]$Image) {
-    $raw = docker run --rm --entrypoint claude $Image --version 2>$null | Select-Object -First 1
-    if ($raw -match '^([\d.]+)') { return $Matches[1] }
-    return $null
-}
-
-function Get-BakedCodexVersion([string]$Image) {
-    $raw = docker run --rm --entrypoint codex $Image --version 2>$null | Select-Object -First 1
-    if ($raw -match '([\d.]+)') { return $Matches[1] }
-    return $null
+# Read both agents' baked versions in a SINGLE container start (the unified
+# image carries both binaries). The container prints two tagged lines so each
+# can be parsed back regardless of either command's own output quirks:
+#   CLAUDE:<raw claude --version line>
+#   CODEX:<raw codex --version line>
+# The claude line strips a trailing " (...)" suffix; the codex line strips a
+# leading "codex-cli " prefix — matching the baked_versions_raw parsing in
+# commands/check-updates.sh.
+function Get-BakedAgentVersions([string]$Image) {
+    $script = @'
+printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"
+printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"
+'@
+    $raw = docker run --rm --entrypoint sh $Image -c $script 2>$null
+    $claude = $null
+    $codex = $null
+    foreach ($line in @($raw)) {
+        if ($line -like 'CLAUDE:*') {
+            $claude = ($line.Substring(7) -replace ' *\(.*', '').Trim()
+        } elseif ($line -like 'CODEX:*') {
+            $codex = ($line.Substring(6) -replace '^codex-cli *', '').Trim()
+        }
+    }
+    return [PSCustomObject]@{ Claude = $claude; Codex = $codex }
 }
 
 function Get-LatestNpmVersion([string]$Package) {
@@ -152,16 +178,12 @@ $baseSource  = $null
 $baseBaked   = $null
 $baseLatest  = $null
 
-if (Test-ImageExists $ClaudeImage) {
-    $claudeBaked = Get-BakedClaudeVersion $ClaudeImage
+if (Test-ImageExists $AgentImage) {
+    $bakedVersions = Get-BakedAgentVersions $AgentImage
+    $claudeBaked = $bakedVersions.Claude
+    $codexBaked  = $bakedVersions.Codex
 } else {
-    Write-Note "Image $ClaudeImage not found — Claude baked version will be shown as (unknown)."
-}
-
-if (Test-ImageExists $CodexImage) {
-    $codexBaked = Get-BakedCodexVersion $CodexImage
-} else {
-    Write-Note "Image $CodexImage not found — Codex baked version will be shown as (unknown)."
+    Write-Note "Image $AgentImage not found — baked agent versions will be shown as (unknown)."
 }
 
 if (Test-ImageExists $BaseImage) {
@@ -193,13 +215,23 @@ if ($baseSource) {
 }
 
 # -------------------------------------------------------------------
-# Porcelain: emit stale target names only, in build order (base first).
+# Porcelain: one tab-separated row per component (see header comment).
 # -------------------------------------------------------------------
 
 if ($Porcelain) {
-    if (Test-Stale $baseBaked   $baseLatest)   { 'base' }
-    if (Test-Stale $claudeBaked $claudeLatest) { 'claude' }
-    if (Test-Stale $codexBaked  $codexLatest)  { 'codex' }
+    # '-' is the empty marker agent-update treats as unset.
+    function Format-PorcelainValue([string]$Value) {
+        if ($Value) { return $Value }
+        return '-'
+    }
+
+    # Base staleness compares short digests (like the .sh) so a registry digest
+    # and a baked digest that share the same 12-char prefix compare equal.
+    $baseStatus = Get-ComponentStatus (Format-ShortDigest $baseBaked) (Format-ShortDigest $baseLatest)
+    $tab = "`t"
+    'base' + $tab + $baseStatus + $tab + (Format-PorcelainValue $baseBaked) + $tab + (Format-PorcelainValue $baseLatest)
+    'claude' + $tab + (Get-ComponentStatus $claudeBaked $claudeLatest) + $tab + (Format-PorcelainValue $claudeBaked) + $tab + (Format-PorcelainValue $claudeLatest)
+    'codex' + $tab + (Get-ComponentStatus $codexBaked $codexLatest) + $tab + (Format-PorcelainValue $codexBaked) + $tab + (Format-PorcelainValue $codexLatest)
     return
 }
 

@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("base", "claude", "codex", "all")]
+  [ValidateSet("base", "agent", "all")]
   [string]$Target = "all",
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",
@@ -111,35 +111,27 @@ try {
   }
 
   # -Pull only makes sense for the base image (whose FROM is an upstream
-  # registry image). The agent images' only FROM is the locally-built
-  # powbox-agent-base, so passing --pull to their bake invocation would make
+  # registry image). The agent image's only FROM is the locally-built
+  # powbox-agent-base, so passing --pull to its bake invocation would make
   # buildx try to resolve it from a registry and fail. When the user requests
-  # -Pull on an agent target, refresh the base first (cascading any digest
+  # -Pull on the agent target, refresh the base first (cascading any digest
   # change into the agent layers automatically) and then build the agent
   # without --pull.
   switch ($Target) {
     "all" {
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
-      Invoke-Bake -Targets @("claude", "codex") -WithNoCache:$NoCache
+      Invoke-Bake -Targets @("agent") -WithNoCache:$NoCache
+    }
+    "agent" {
+      if ($Pull) {
+        Invoke-Bake -Targets @("base") -WithPull
+      } else {
+        Assert-BaseImage
+      }
+      Invoke-Bake -Targets @("agent") -WithNoCache:$NoCache
     }
     "base" {
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
-    }
-    "claude" {
-      if ($Pull) {
-        Invoke-Bake -Targets @("base") -WithPull
-      } else {
-        Assert-BaseImage
-      }
-      Invoke-Bake -Targets @("claude") -WithNoCache:$NoCache
-    }
-    "codex" {
-      if ($Pull) {
-        Invoke-Bake -Targets @("base") -WithPull
-      } else {
-        Assert-BaseImage
-      }
-      Invoke-Bake -Targets @("codex") -WithNoCache:$NoCache
     }
   }
 }

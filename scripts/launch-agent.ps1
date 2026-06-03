@@ -64,13 +64,13 @@ $nodeModulesVolume = "agent-nm-$projectSlug"
 
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
-$composeOverlay = Join-Path $rootDir "compose.$Agent.yml"
+$composeOverlay = Join-Path $rootDir "compose.agent.yml"
 $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
-# Ensure shared named volumes exist (compose won't auto-create external volumes).
-$sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history")
-if ($Agent -eq "claude") { $sharedVolumes += "claude-config" }
-else { $sharedVolumes += "codex-config" }
+# Ensure named volumes exist (compose won't auto-create external volumes). Both
+# config volumes are always created/mounted so the non-primary agent can be
+# spun up in-container with its own persistent login and skills.
+$sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history", "claude-config", "codex-config")
 foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {
@@ -100,7 +100,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 if ($Build) {
-  & (Join-Path $rootDir "scripts/build-image.ps1") -Target $Agent
+  & (Join-Path $rootDir "scripts/build-image.ps1") -Target agent
 }
 
 if ($Resume) {
@@ -288,15 +288,10 @@ elseif ($Volatile -and -not $Persist) {
 }
 
 $continueLabel = if ($Continue) { "true" } else { "false" }
-$envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "-e", "CONTAINER_NAME=$containerName")
-if ($Agent -eq "claude") {
-  $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else { "" }
-  $envArgs += @("-e", "ANTHROPIC_API_KEY=$apiKey")
-}
-elseif ($Agent -eq "codex") {
-  $apiKey = if ($env:OPENAI_API_KEY) { $env:OPENAI_API_KEY } else { "" }
-  $envArgs += @("-e", "OPENAI_API_KEY=$apiKey")
-}
+# PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
+# Both API keys flow through via compose.agent.yml so a delegated peer agent can
+# authenticate too.
+$envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent")
 
 # Mount a per-project named volume over node_modules inside the bind mount.
 # This shadows the host's node_modules with a Linux-native volume so that

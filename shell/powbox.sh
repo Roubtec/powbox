@@ -155,9 +155,7 @@ _powbox_build_from_table() {
             claude) claude_ver="$ver" ;;
             codex)  codex_ver="$ver" ;;
         esac
-    done <<EOF
-$table
-EOF
+    done < <(printf '%s\n' "$table")
     local args=(agent)
     [ -n "$claude_ver" ] && args+=(--claude-version "$claude_ver")
     [ -n "$codex_ver" ]  && args+=(--codex-version "$codex_ver")
@@ -236,9 +234,7 @@ agent-update() {
         case "$name" in
             claude|codex) [ "$status" = stale ] && stale="$stale $name" ;;
         esac
-    done <<EOF
-$table
-EOF
+    done < <(printf '%s\n' "$table")
     stale="${stale# }"
 
     if [ -z "$stale" ]; then

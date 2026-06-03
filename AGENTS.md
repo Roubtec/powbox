@@ -43,7 +43,7 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 - Each per-agent hook (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) is run in full for every agent. Each writes only into its own config dir (`~/.claude` vs `~/.codex`/`~/.agents`), so there is no conflict; hooks are idempotent, no-clobber, and build-epoch-gated, and read their baked assets from `AGENT_SEED_DIR`.
 - `entrypoint-core.sh` is a wrapper-style entrypoint that must end with `exec "$@"` and is unchanged by the unification (still runs the single `AGENT_SETUP_HOOK`).
 - The shared instruction template is rendered via `envsubst` with agent-specific variables (including `${AGENT_PEERS}`, the registry-derived peer list for the "Delegating to another agent" section).
-- `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal.
+- `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal. On success it also adds a container-global `url."https://github.com/".insteadOf "git@github.com:"` rewrite (written to the ephemeral `GIT_CONFIG_GLOBAL`, never the host) so SSH-form `origin` remotes push/fetch over HTTPS+gh without rewriting the host repo.
 - Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering.
 
 ## Project Identity

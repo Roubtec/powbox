@@ -10,7 +10,14 @@ services:
     environment:
       GH_CONFIG_DIR: /home/node/.config/gh
       GH_HOST_SEED_DIR: /home/node/.config/gh-host
+      # V8 heap cap per Node process (MB) — NOT the container/VM memory limit.
+      # The WSL2 VM already gets ~50% of host RAM and no per-container limit is
+      # set, so builds can grow into that. Raise this only if a build OOMs
+      # inside V8 ("JavaScript heap out of memory"). It is per process, so N
+      # parallel worktree builds can use ~this value x N. To go bigger, swap the
+      # active line for the commented one below.
       NODE_OPTIONS: --max-old-space-size=4096
+      # NODE_OPTIONS: --max-old-space-size=8192   # generous heap for heavy / parallel builds
     volumes:
       - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh

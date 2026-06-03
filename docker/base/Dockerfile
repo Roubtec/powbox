@@ -162,9 +162,9 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
 # Copy the substrate startup scripts shared by every agent while still root.
-# Agent-specific entrypoint shims and hooks are intentionally NOT baked here;
-# each agent image (docker/{claude,codex}/Dockerfile) copies its own so that
-# editing a hook rebuilds only that agent's layer — see those Dockerfiles.
+# The unified entrypoint and the per-agent setup hooks are intentionally NOT
+# baked here; the agent image (docker/agent/Dockerfile) copies them so that
+# editing one rebuilds only that layer — see that Dockerfile.
 COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \

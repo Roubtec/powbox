@@ -1,0 +1,23 @@
+services:
+  agent:
+    image: powbox-agent:latest
+    environment:
+      # Both API keys are always passed through; only the primary agent needs
+      # its own, but a delegated peer invocation needs the other's key present.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Which agent this container runs; the launcher overrides it per invocation.
+      PRIMARY_AGENT: ${PRIMARY_AGENT:-claude}
+    volumes:
+      # Both config volumes are always mounted so either agent can run, and so a
+      # primary agent can spin up the other in-container.
+      - claude-config:/home/node/.claude
+      - codex-config:/home/node/.codex
+
+volumes:
+  claude-config:
+    name: claude-config
+    external: true
+  codex-config:
+    name: codex-config
+    external: true

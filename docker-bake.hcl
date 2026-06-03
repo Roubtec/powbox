@@ -33,30 +33,21 @@ target "base" {
   }
 }
 
-target "claude" {
+target "agent" {
   inherits = ["_common"]
-  dockerfile = "docker/claude/Dockerfile"
-  tags = ["powbox-claude:latest"]
+  dockerfile = "docker/agent/Dockerfile"
+  tags = ["powbox-agent:latest"]
   args = {
     BASE_IMAGE = BASE_IMAGE
     CLAUDE_CODE_VERSION = CLAUDE_CODE_VERSION
-  }
-}
-
-target "codex" {
-  inherits = ["_common"]
-  dockerfile = "docker/codex/Dockerfile"
-  tags = ["powbox-codex:latest"]
-  args = {
-    BASE_IMAGE = BASE_IMAGE
     CODEX_VERSION = CODEX_VERSION
   }
 }
 
 group "all" {
-  targets = ["base", "claude", "codex"]
+  targets = ["base", "agent"]
 }
 
 group "default" {
-  targets = ["base", "claude", "codex"]
+  targets = ["base", "agent"]
 }

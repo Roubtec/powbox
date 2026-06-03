@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-exec "${ROOT_DIR}/scripts/smoke-test-image.sh" "${1:-powbox-codex:latest}" \
+exec "${ROOT_DIR}/scripts/smoke-test-image.sh" "${1:-powbox-agent:latest}" \
 	"codex --version >/dev/null" \
 	"bwrap --version >/dev/null" \
 	"gh --version >/dev/null" \

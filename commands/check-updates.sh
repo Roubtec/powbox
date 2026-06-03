@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Compare the agent versions baked into the local Docker images against the
+# Compare the agent versions baked into the local unified image against the
 # latest releases on npm and report any available updates.
 #
-# With --porcelain, suppress all human-readable output and instead print just
-# the names of the stale build targets (base|claude|codex), one per line, for
-# `agent-update` to consume. A target is stale when a latest version is known
-# and differs from what is baked in (a missing image counts as stale).
+# With --porcelain, suppress all human-readable output and instead print one
+# tab-separated row per component for `agent-update` to consume:
+#
+#     base	<ok|stale|unknown>	<baked-digest|->	<latest-digest|->
+#     claude	<ok|stale|unknown>	<baked-version|->	<latest-version|->
+#     codex	<ok|stale|unknown>	<baked-version|->	<latest-version|->
+#
+# A component is stale when a latest value is known and differs from what is
+# baked in (a missing image counts as stale); unknown means the latest could not
+# be determined (npm/registry unreachable) and must never force a rebuild. The
+# baked/latest versions let agent-update pin each binary so Docker rebuilds only
+# the layers that actually changed.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,9 +28,8 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-CLAUDE_IMAGE="${positional[0]:-powbox-claude:latest}"
-CODEX_IMAGE="${positional[1]:-powbox-codex:latest}"
-BASE_IMAGE="${positional[2]:-powbox-agent-base:latest}"
+AGENT_IMAGE="${positional[0]:-powbox-agent:latest}"
+BASE_IMAGE="${positional[1]:-powbox-agent-base:latest}"
 
 # Emit informational text only in human mode so --porcelain stdout stays clean.
 note() {
@@ -37,14 +44,16 @@ has_image() {
 	docker image inspect "$1" >/dev/null 2>&1
 }
 
-baked_claude_version() {
-	docker run --rm --entrypoint claude "$1" --version 2>/dev/null \
-		| head -1 | sed 's/ *(.*//; s/[[:space:]]*$//'
-}
-
-baked_codex_version() {
-	docker run --rm --entrypoint codex "$1" --version 2>/dev/null \
-		| head -1 | sed 's/^codex-cli *//; s/[[:space:]]*$//'
+# Read both agents' baked versions in a SINGLE container start (the unified
+# image carries both binaries). Emits two lines, tagged so each can be parsed
+# back regardless of either command's own output quirks:
+#   CLAUDE:<raw claude --version line>
+#   CODEX:<raw codex --version line>
+baked_versions_raw() {
+	docker run --rm --entrypoint sh "$1" -c '
+		printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"
+		printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"
+	' 2>/dev/null
 }
 
 latest_npm_version() {
@@ -85,16 +94,22 @@ short_digest() {
 	echo "$1" | sed -n 's/^sha256:\([0-9a-f]\{12\}\).*/\1/p'
 }
 
-# Stale when a latest value is known and differs from the baked value. An
-# empty baked value (missing/unknown image) with a known latest counts as
-# stale so agent-update will build it.
-is_stale() {
+# Classify a baked/latest pair as ok | stale | unknown. A latest value that
+# could not be determined (npm/registry unreachable) is "unknown" and must never
+# force a rebuild; an empty baked value (missing/unknown image) with a known
+# latest counts as "stale" so agent-update will build it.
+component_status() {
 	local baked="$1" latest="$2"
-	[ -n "$latest" ] || return 1
-	[ "$baked" != "$latest" ]
+	if [ -z "$latest" ]; then
+		echo unknown
+	elif [ "$baked" != "$latest" ]; then
+		echo stale
+	else
+		echo ok
+	fi
 }
 
-# The marker emitted here must mirror is_stale: a known latest with a missing or
+# The marker emitted here must mirror component_status: a known latest with a missing or
 # unlabeled (empty) baked value is stale and needs a build, so it is flagged just
 # like a version mismatch. This keeps the human report consistent with the
 # porcelain output that agent-update consumes. An unknown latest (registry/npm
@@ -154,16 +169,12 @@ claude_baked="" codex_baked=""
 claude_latest="" codex_latest=""
 base_source="" base_baked="" base_latest=""
 
-if has_image "$CLAUDE_IMAGE"; then
-	claude_baked="$(baked_claude_version "$CLAUDE_IMAGE")"
+if has_image "$AGENT_IMAGE"; then
+	versions_raw="$(baked_versions_raw "$AGENT_IMAGE")"
+	claude_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CLAUDE://p' | head -1 | sed 's/ *(.*//; s/[[:space:]]*$//')"
+	codex_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CODEX://p' | head -1 | sed 's/^codex-cli *//; s/[[:space:]]*$//')"
 else
-	note "Image $CLAUDE_IMAGE not found — Claude baked version will be shown as (unknown)."
-fi
-
-if has_image "$CODEX_IMAGE"; then
-	codex_baked="$(baked_codex_version "$CODEX_IMAGE")"
-else
-	note "Image $CODEX_IMAGE not found — Codex baked version will be shown as (unknown)."
+	note "Image $AGENT_IMAGE not found — baked agent versions will be shown as (unknown)."
 fi
 
 if has_image "$BASE_IMAGE"; then
@@ -183,8 +194,8 @@ fi
 # When the local base image is absent (or carries no source label) we can't
 # read the upstream it was built from, but a missing base should still count as
 # stale. Fall back to the Dockerfile's upstream so base_latest can be resolved.
-# If the registry is then unreachable, base_latest stays empty and is_stale
-# treats the base as not-stale — an unreachable registry must not force a rebuild.
+# If the registry is then unreachable, base_latest stays empty and component_status
+# treats the base as "unknown" — an unreachable registry must not force a rebuild.
 [ -n "$base_source" ] || base_source="$(default_base_source)"
 
 if [ -n "$base_source" ]; then
@@ -192,13 +203,19 @@ if [ -n "$base_source" ]; then
 fi
 
 # -------------------------------------------------------------------
-# Porcelain: emit stale target names only, in build order (base first).
+# Porcelain: one tab-separated row per component (see header comment).
 # -------------------------------------------------------------------
 
 if $PORCELAIN; then
-	if is_stale "$base_baked" "$base_latest"; then echo base; fi
-	if is_stale "$claude_baked" "$claude_latest"; then echo claude; fi
-	if is_stale "$codex_baked" "$codex_latest"; then echo codex; fi
+	printf '%s\t%s\t%s\t%s\n' base \
+		"$(component_status "$(short_digest "$base_baked")" "$(short_digest "$base_latest")")" \
+		"${base_baked:--}" "${base_latest:--}"
+	printf '%s\t%s\t%s\t%s\n' claude \
+		"$(component_status "$claude_baked" "$claude_latest")" \
+		"${claude_baked:--}" "${claude_latest:--}"
+	printf '%s\t%s\t%s\t%s\n' codex \
+		"$(component_status "$codex_baked" "$codex_latest")" \
+		"${codex_baked:--}" "${codex_latest:--}"
 	exit 0
 fi
 

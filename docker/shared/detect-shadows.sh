@@ -60,6 +60,22 @@ fi
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"
 if [ -f "$POWBOX_YML" ]; then
 	workspace_resolved="$(realpath -- "$WORKSPACE_DIR")"
+
+	# Append a resolved path to the shadow list iff it stays under the
+	# workspace root; otherwise reject it.  The second argument is the
+	# original (pre-resolution) path used only for the diagnostic message.
+	add_shadow_path() {
+		local resolved="$1" original="$2"
+		case "$resolved" in
+			"$workspace_resolved"/*)
+				shadows+=("$resolved")
+				;;
+			*)
+				echo "detect-shadows: skipping '$original' — resolves outside workspace root." >&2
+				;;
+		esac
+	}
+
 	while IFS= read -r pattern; do
 		[ -z "$pattern" ] && continue
 		case "$pattern" in
@@ -67,20 +83,27 @@ if [ -f "$POWBOX_YML" ]; then
 		esac
 		# .powbox.yml patterns resolve to the path itself (not appending /node_modules)
 		# so the user has full control over what gets shadowed.
-		# shellcheck disable=SC2086
-		for shadow_dir in $WORKSPACE_DIR/$pattern; do
-			[ -d "$shadow_dir" ] || continue
-			# Resolve symlinks / ".." and validate the path stays under WORKSPACE_DIR.
-			resolved="$(realpath -- "$shadow_dir")" || continue
-			case "$resolved" in
-				"$workspace_resolved"/*)
-					shadows+=("$resolved")
-					;;
-				*)
-					echo "detect-shadows: skipping '$shadow_dir' — resolves outside workspace root." >&2
-					;;
-			esac
-		done
+		case "$pattern" in
+			*[][*?]*)
+				# Glob pattern: expand it and keep the existence gate — a glob
+				# cannot be mkdir'd, so only matching directories make sense.
+				# shellcheck disable=SC2086
+				for shadow_dir in $WORKSPACE_DIR/$pattern; do
+					[ -d "$shadow_dir" ] || continue
+					# Resolve symlinks / ".." and validate it stays under WORKSPACE_DIR.
+					resolved="$(realpath -- "$shadow_dir")" || continue
+					add_shadow_path "$resolved" "$shadow_dir"
+				done
+				;;
+			*)
+				# Literal path: emit it even when it does not exist yet, so
+				# committed declarations (e.g. gitignored worktree dirs absent on
+				# a fresh checkout) are created and shadowed at startup.  realpath
+				# -m tolerates non-existent paths; shadow-mounts.sh mkdir -p's them.
+				resolved="$(realpath -m -- "$WORKSPACE_DIR/$pattern")" || continue
+				add_shadow_path "$resolved" "$WORKSPACE_DIR/$pattern"
+				;;
+		esac
 	done < <(yq -r '.shadow[]? // empty' "$POWBOX_YML" 2>/dev/null || true)
 fi
 

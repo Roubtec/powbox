@@ -37,7 +37,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$TARGET" in
-base | claude | codex | all) ;;
+base | agent | all) ;;
 *)
 	echo "Unknown build target: $TARGET" >&2
 	exit 1
@@ -126,24 +126,24 @@ ensure_base_image() {
 }
 
 # --pull only makes sense for the base image (whose FROM is an upstream
-# registry image). The agent images' only FROM is the locally-built
-# powbox-agent-base, so passing --pull to their bake invocation would make
+# registry image). The agent image's only FROM is the locally-built
+# powbox-agent-base, so passing --pull to its bake invocation would make
 # buildx try to resolve it from a registry and fail. When the user requests
-# --pull on an agent target, refresh the base first (cascading any digest
+# --pull on the agent target, refresh the base first (cascading any digest
 # change into the agent layers automatically) and then build the agent
 # without --pull.
 case "$TARGET" in
 all)
 	run_bake "$PULL" "$NO_CACHE" base
-	run_bake false "$NO_CACHE" claude codex
+	run_bake false "$NO_CACHE" agent
 	;;
-claude | codex)
+agent)
 	if [ "$PULL" = true ]; then
 		run_bake true false base
 	else
 		ensure_base_image
 	fi
-	run_bake false "$NO_CACHE" "$TARGET"
+	run_bake false "$NO_CACHE" agent
 	;;
 base)
 	run_bake "$PULL" "$NO_CACHE" base

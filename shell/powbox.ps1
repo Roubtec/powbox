@@ -116,24 +116,137 @@ function agent-reset-claude-history {
     & "$env:POWBOX_ROOT\commands\reset-claude-history.ps1" @args
 }
 
+# Read the machine-readable update table once (one container start reads both
+# baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
+function _Powbox-AgentPorcelain {
+    & "$env:POWBOX_ROOT\commands\check-updates.ps1" -Porcelain
+}
+
+function _Powbox-InvokeBuild {
+    param(
+        [ValidateSet("base", "agent", "all")]
+        [string]$Target,
+        [string]$ClaudeVersion = "",
+        [string]$CodexVersion = "",
+        [switch]$Pull,
+        [switch]$NoCache,
+        [object[]]$ExtraArgs = @()
+    )
+    $buildParams = @{ Target = $Target }
+    if ($ClaudeVersion) { $buildParams["ClaudeVersion"] = $ClaudeVersion }
+    if ($CodexVersion)  { $buildParams["CodexVersion"] = $CodexVersion }
+    if ($Pull)          { $buildParams["Pull"] = $true }
+    if ($NoCache)       { $buildParams["NoCache"] = $true }
+
+    for ($i = 0; $i -lt $ExtraArgs.Count; $i++) {
+        $arg = [string]$ExtraArgs[$i]
+        switch ($arg.ToLowerInvariant()) {
+            '-target' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -Target" }
+                $i++
+                $buildParams["Target"] = [string]$ExtraArgs[$i]
+            }
+            '-claudeversion' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -ClaudeVersion" }
+                $i++
+                $buildParams["ClaudeVersion"] = [string]$ExtraArgs[$i]
+            }
+            '-codexversion' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -CodexVersion" }
+                $i++
+                $buildParams["CodexVersion"] = [string]$ExtraArgs[$i]
+            }
+            '-pull' {
+                $buildParams["Pull"] = $true
+            }
+            '-nocache' {
+                $buildParams["NoCache"] = $true
+            }
+            default {
+                throw "Unsupported build argument for agent-update: $arg"
+            }
+        }
+    }
+
+    & "$env:POWBOX_ROOT\build.ps1" @buildParams
+}
+
+# Build the unified agent image from a porcelain table, pinning each binary so
+# Docker rebuilds only the layers that actually changed.
+#   -Table        porcelain table rows (array of TAB-separated strings)
+#   -Force        agents to force to their latest version (array of names)
+#   -Target       build target (agent|all)
+#   @ExtraArgs    extra args forwarded to build.ps1
+# Agents not in the force list are pinned to their currently baked version so
+# Docker reuses that layer. Because Codex sits below Claude in the image, a
+# Claude-only update rebuilds just the Claude layer; a Codex update also
+# rebuilds the Claude layer above it (the accepted, rarer cost).
+function _Powbox-BuildFromTable {
+    param(
+        [string[]]$Table,
+        [string[]]$Force,
+        [ValidateSet("agent", "all")]
+        [string]$Target = "agent",
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [object[]]$ExtraArgs
+    )
+    $claudeVer = ""
+    $codexVer = ""
+    foreach ($row in $Table) {
+        if (-not $row) { continue }
+        $fields = $row -split "`t"
+        $name = $fields[0]
+        if (-not $name -or $name -eq 'base') { continue }
+        $baked = if ($fields.Count -gt 2) { $fields[2] } else { "" }
+        $latest = if ($fields.Count -gt 3) { $fields[3] } else { "" }
+        # Forced: install latest. Otherwise: pin baked so Docker reuses the layer.
+        $ver = if ($Force -contains $name) { $latest } else { $baked }
+        # '-' is the porcelain's empty marker (unknown/missing); leave unpinned so
+        # the build falls back to the `latest` tag for that binary.
+        if ($ver -eq '-') { $ver = "" }
+        switch ($name) {
+            'claude' { $claudeVer = $ver }
+            'codex'  { $codexVer = $ver }
+        }
+    }
+    _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -ExtraArgs $ExtraArgs
+}
+
 function agent-update-claude {
-    & "$env:POWBOX_ROOT\build.ps1" -Target claude -NoCache @args
+    $table = _Powbox-AgentPorcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "agent-update-claude: update check failed"
+        return
+    }
+    _Powbox-BuildFromTable -Table @($table) -Force @("claude") @args
 }
 
 function agent-update-codex {
-    & "$env:POWBOX_ROOT\build.ps1" -Target codex -NoCache @args
+    $table = _Powbox-AgentPorcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "agent-update-codex: update check failed"
+        return
+    }
+    _Powbox-BuildFromTable -Table @($table) -Force @("codex") @args
 }
 
 function agent-update-base {
-    & "$env:POWBOX_ROOT\build.ps1" -Target base -Pull -NoCache @args
+    # A new base means the whole agent image should be rebuilt on top of it.
+    $table = _Powbox-AgentPorcelain
+    if ($LASTEXITCODE -eq 0) {
+        _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        return
+    }
+    _Powbox-InvokeBuild -Target all -Pull -NoCache -ExtraArgs $args
 }
 
 # Show the full update report, then (if anything is stale) ask for confirmation
 # before rebuilding. On confirmation we re-check rather than reusing the first
 # result, so an update approved in another terminal while this prompt was waiting
-# is still picked up. A stale base image is upstream of the agents, so it triggers
-# a full -Pull -NoCache rebuild of base + both agents; otherwise each stale agent
-# image is rebuilt on its own. Extra args are forwarded to build.ps1.
+# is still picked up. A stale base image is upstream of everything, so it triggers
+# a full -Pull -NoCache rebuild of base + the agent image; otherwise only the
+# stale agents are forced to latest and the unified image is rebuilt with minimal
+# layers (the unchanged binary's layer is reused). Extra args go to build.ps1.
 function agent-update {
     # check-updates.ps1 writes its report via Write-Host (the information
     # stream); 6>&1 captures it so we can both display it and scan it for the
@@ -153,24 +266,42 @@ function agent-update {
         return
     }
 
-    $stale = & "$env:POWBOX_ROOT\commands\check-updates.ps1" -Porcelain
-    $stale = @($stale | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+    # Re-read the porcelain table on confirmation so an update applied elsewhere
+    # while this prompt was waiting is still picked up.
+    $table = @(_Powbox-AgentPorcelain | Where-Object { $_ -and $_.Trim() })
+    if ($table.Count -eq 0) {
+        Write-Error "agent-update: update check failed"
+        return
+    }
+
+    # A stale base is upstream of the agent image: rebuild base (with -Pull,
+    # -NoCache) and the agent image on top. Otherwise force only the stale
+    # agents to latest and rebuild the agent image with minimal layers.
+    $baseStale = $false
+    $stale = @()
+    foreach ($row in $table) {
+        $fields = $row -split "`t"
+        $name = $fields[0]
+        $status = if ($fields.Count -gt 1) { $fields[1] } else { "" }
+        if ($name -eq 'base' -and $status -eq 'stale') { $baseStale = $true }
+        if (($name -eq 'claude' -or $name -eq 'codex') -and $status -eq 'stale') {
+            $stale += $name
+        }
+    }
+
+    if ($baseStale) {
+        Write-Host "Base image is stale — rebuilding base (with -Pull) and the agent image on top."
+        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        return
+    }
 
     if ($stale.Count -eq 0) {
         Write-Host "Nothing to update — already up to date."
         return
     }
 
-    if ($stale -contains 'base') {
-        Write-Host "Base image is stale — rebuilding base (with -Pull) and both agent images on top."
-        & "$env:POWBOX_ROOT\build.ps1" -Target all -Pull -NoCache @args
-        return
-    }
-
-    foreach ($target in $stale) {
-        Write-Host "Rebuilding $target image..."
-        & "$env:POWBOX_ROOT\build.ps1" -Target $target -NoCache @args
-    }
+    Write-Host "Updating: $($stale -join ', ') (rebuilding only the affected image layers)."
+    _Powbox-BuildFromTable -Table $table -Force $stale @args
 }
 
 function cc-list {

@@ -24,6 +24,14 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Editors | `nano`, `vim` |
 | Sandbox | `bubblewrap` (`bwrap`) |
 
+## Delegating to another agent
+
+This container ships more than one agent harness. Besides yourself, the following peer agent(s) are installed, on `PATH`, and already configured (each keeps its own persistent login and skills in this container):
+
+${AGENT_PEERS}
+
+Invoke a peer directly when it helps — e.g. ask the other agent for an independent review of your work, or hand a self-contained sub-task to it. A peer shares this container and the `/workspace` bind mount, so it sees the same files you do. Run it non-interactively for a one-shot task, or interactively to hand off the session.
+
 ## Git and GitHub
 
 - This container authenticates to GitHub via **HTTPS** using the `gh` credential helper, which is configured automatically at startup. There are no SSH keys in the container.

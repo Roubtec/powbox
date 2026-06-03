@@ -171,15 +171,12 @@ CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 NM_VOLUME="agent-nm-${PROJECT_NAME}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.${AGENT}.yml")
+COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
 
-# Ensure shared named volumes exist (compose won't auto-create external volumes).
-SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history)
-if [ "$AGENT" = "claude" ]; then
-	SHARED_VOLUMES+=(claude-config)
-else
-	SHARED_VOLUMES+=(codex-config)
-fi
+# Ensure named volumes exist (compose won't auto-create external volumes). Both
+# config volumes are always created/mounted so the non-primary agent can be
+# spun up in-container with its own persistent login and skills.
+SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history claude-config codex-config)
 for vol in "${SHARED_VOLUMES[@]}"; do
 	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
 		docker volume create "$vol" >/dev/null
@@ -203,7 +200,7 @@ if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 fi
 
 if [ "$BUILD" = true ]; then
-	"${ROOT_DIR}/scripts/build-image.sh" "$AGENT"
+	"${ROOT_DIR}/scripts/build-image.sh" agent
 fi
 
 if [ "$RESUME" = true ]; then
@@ -358,12 +355,10 @@ elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 	RUN_ARGS+=(--rm)
 fi
 
-EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME")
-if [ "$AGENT" = "claude" ]; then
-	EXTRA_ENV+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}")
-elif [ "$AGENT" = "codex" ]; then
-	EXTRA_ENV+=(-e "OPENAI_API_KEY=${OPENAI_API_KEY:-}")
-fi
+# PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
+# Both API keys flow through via compose.agent.yml so a delegated peer agent can
+# authenticate too.
+EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
 
 # Mount a per-project named volume over node_modules inside the bind mount.
 # This shadows the host's node_modules with a Linux-native volume so that

@@ -2,6 +2,11 @@
 set -euo pipefail
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
+# Directory holding this agent's image-baked seed assets (instruction template,
+# statusline, skills, build epoch). Defaults to the legacy shared path so the
+# hook still works if run standalone; the unified entrypoint points it at the
+# per-agent subdirectory /home/node/.agent-container/<agent>.
+AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
 
 # Merge two JSON files (jq deep merge: base * overlay) into dst.
 # Best-effort: logs a warning and leaves dst untouched on any failure.
@@ -32,25 +37,25 @@ chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
 # Seed the statusline script (no-clobber: preserves user customizations on the
 # volume; delete the file to pick up the latest version on next container start).
-STATUSLINE_SRC="/home/node/.agent-container/statusline-command.sh"
+STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"
 if [ -f "$STATUSLINE_SRC" ] && [ ! -f "$AGENT_CONFIG_DIR/statusline-command.sh" ]; then
 	cp "$STATUSLINE_SRC" "$AGENT_CONFIG_DIR/statusline-command.sh"
 fi
 
-AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
+AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"
 if [ -f "$AGENT_TMPL" ]; then
-	IMAGE_EPOCH=$(cat /home/node/.agent-container/build-epoch 2>/dev/null || echo 0)
+	IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 	[[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
 	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
 	[[ "$VOLUME_EPOCH" =~ ^[0-9]+$ ]] || VOLUME_EPOCH=0
 	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
 		# envsubst needs literal ${VAR} names, not shell-expanded values
 		# shellcheck disable=SC2016
-		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' \
 			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 
 		# Merge the statusLine key into settings.json (preserves all other keys).
-		STATUSLINE_JSON="/home/node/.agent-container/statusline-settings.json"
+		STATUSLINE_JSON="$AGENT_SEED_DIR/statusline-settings.json"
 		SETTINGS_FILE="$AGENT_CONFIG_DIR/settings.json"
 		if [ -f "$STATUSLINE_JSON" ]; then
 			if [ -f "$SETTINGS_FILE" ]; then
@@ -64,7 +69,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		# preserves user-modified versions; delete the skill folder to pick up the
 		# latest image version on next container start). Per-repo .claude/skills/
 		# still takes precedence at invoke time.
-		SKILLS_SRC="/home/node/.agent-container/skills"
+		SKILLS_SRC="$AGENT_SEED_DIR/skills"
 		SKILLS_DEST="$AGENT_CONFIG_DIR/skills"
 		if [ -d "$SKILLS_SRC" ]; then
 			mkdir -p "$SKILLS_DEST"

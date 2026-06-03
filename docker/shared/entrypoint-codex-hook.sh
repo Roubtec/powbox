@@ -2,6 +2,11 @@
 set -euo pipefail
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
+# Directory holding this agent's image-baked seed assets (instruction template,
+# skills, build epoch). Defaults to the legacy shared path so the hook still
+# works standalone; the unified entrypoint points it at the per-agent
+# subdirectory /home/node/.agent-container/<agent>.
+AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
 
 ensure_top_level_array_setting() {
 	local file="$1" key="$2" values="$3"
@@ -182,23 +187,23 @@ ensure_table_array_setting "$CONFIG_FILE" "tui" "status_line" "$STATUS_LINE_DEFA
 ensure_top_level_array_setting "$CONFIG_FILE" "terminal_title" "$TERMINAL_TITLE_DEFAULTS"
 chmod 600 "$CONFIG_FILE" || true
 
-AGENT_TMPL="/home/node/.agent-container/agent.md.tmpl"
+AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"
 if [ -f "$AGENT_TMPL" ]; then
-	IMAGE_EPOCH=$(cat /home/node/.agent-container/build-epoch 2>/dev/null || echo 0)
+	IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 	[[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
 	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
 	[[ "$VOLUME_EPOCH" =~ ^[0-9]+$ ]] || VOLUME_EPOCH=0
 	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
 		# shellcheck disable=SC2016
 		# envsubst needs literal ${VAR} names.
-		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR}' \
+		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' \
 			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 
 		# Seed image-baked skills (no-clobber: preserves user-modified versions;
 		# delete the skill directory to pick up the latest image version on next
 		# container start). Per-repo .agents/skills/ still takes precedence at
 		# invoke time.
-		SKILLS_SRC="/home/node/.agent-container/skills"
+		SKILLS_SRC="$AGENT_SEED_DIR/skills"
 		SKILLS_DEST="$AGENT_CONFIG_DIR/agents/skills"
 		if [ -d "$SKILLS_SRC" ]; then
 			mkdir -p "$SKILLS_DEST"
@@ -228,7 +233,7 @@ if [ -f "$AGENT_TMPL" ]; then
 	fi
 fi
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
+if [ -z "${OPENAI_API_KEY:-}" ] && [ "${PRIMARY_AGENT:-codex}" = "codex" ]; then
 	echo "Warning: OPENAI_API_KEY is not set. Codex CLI will not be able to authenticate with OpenAI." >&2
-	echo "Pass it via: -e OPENAI_API_KEY=\$OPENAI_API_KEY when launching the container." >&2
+	echo "Set OPENAI_API_KEY on the host before launching, or pass it with docker run/compose." >&2
 fi

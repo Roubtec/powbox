@@ -1,5 +1,5 @@
 param(
-  [string]$Image = "powbox-codex:latest"
+  [string]$Image = "powbox-agent:latest"
 )
 
 $ErrorActionPreference = "Stop"

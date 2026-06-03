@@ -1,0 +1,4 @@
+interface:
+  display_name: "Enable Worktrees"
+  short_description: "Prepare repos for parallel worktrees"
+  default_prompt: "Use $enable-worktrees to prepare this repo for parallel task work with git worktrees."

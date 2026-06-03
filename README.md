@@ -222,10 +222,31 @@ shadow:
   - tools/legacy-build/vendor     # non-standard path
 ```
 
-Patterns are resolved as globs relative to the project root.
-Only directories that exist at container start are shadowed.
+Patterns are resolved relative to the project root.
+A pattern containing glob metacharacters (`*`, `?`, `[`, `]`) is expanded as a glob, and only directories that exist at container start are shadowed.
+A literal path (no glob metacharacters) is shadowed even if it does not exist yet — it is created and tmpfs-mounted at startup. This lets committed declarations for gitignored, fresh-checkout-absent directories take effect without a manual `mkdir`.
+In both cases a pattern that resolves outside the workspace root is rejected.
 
 Auto-detection and `.powbox.yml` patterns are merged and deduplicated.
+
+### Git Worktree Parallel Development
+
+Shadowed literal paths make the container a clean home for git-worktree-based parallel development — for example an orchestrator that creates one worktree per task under `.worktrees/`. Declare the worktree scaffolding in `.powbox.yml`:
+
+```yaml
+shadow:
+  - .worktrees          # worktree working trees
+  - .claude/worktrees   # harness-native worktrees (EnterWorktree / agent isolation)
+  - .git/worktrees      # per-worktree git metadata
+```
+
+These directories are gitignored and absent on a fresh checkout, but because they are literal paths they are auto-created and shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
+
+**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The worktree working files under `.worktrees/` and the per-worktree `.git/worktrees/<name>` metadata are ephemeral tmpfs and vanish when the container stops. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa.
+
+**Discipline.** Commit and push often. Since only the common `.git` persists, push committed work to the remote, then `git pull` on the host to sync — anything left only in a worktree's working tree is lost on container stop.
+
+**tmpfs sizing.** All worktrees under `.worktrees` share that single tmpfs mount's `SHADOW_TMPFS_SIZE` cap (default 2g, sized to hold a few parallel worktrees each with their own `node_modules`). tmpfs allocates lazily, so the cap bounds the worst case rather than reserving memory up front. Worktree-heavy work — many parallel `pnpm install`s, or large `node_modules` — can still exhaust it and fail with `ENOSPC`. Relaunch the container with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration) below) when that happens.
 
 ### Mid-Session Refresh
 
@@ -248,8 +269,9 @@ The root `node_modules` Docker volume is unaffected and persists across restarts
 
 ### Configuration
 
-Each tmpfs mount is capped at **512 MB** by default.
-Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `1g`, `256m`) before launching the container.
+Each tmpfs mount is capped at **2 GB** by default.
+Because tmpfs allocates lazily, this ceiling bounds the worst case and does not reserve memory up front — an empty or lightly used mount costs almost nothing.
+Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `4g`, `512m`) before launching the container.
 Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh.sh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
 If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
 

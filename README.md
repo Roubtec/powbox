@@ -2,7 +2,7 @@
 
 PowBox builds and launches isolated Docker environments for CLI coding agents.
 
-The repo uses a shared Docker base image for common tooling and two thin agent images layered on top of it.
+The repo uses a shared Docker base image for common tooling and a single unified agent image layered on top of it that ships both the Claude Code and Codex binaries. Which agent runs is chosen at container start via the `PRIMARY_AGENT` env var; both agents are seeded so either can invoke the other in-container.
 
 Runtime orchestration is handled by shared Compose files at the repo root.
 
@@ -36,7 +36,7 @@ Get from a fresh clone to a working PowBox in three steps.
 
    This exposes the `cc`, `cx`, and `agent-*` helpers in your shell.
 
-3. **Build the images** with `agent-update`. It prints an update report and then prompts before doing anything. On a machine with no images yet, every image shows as stale, so confirming performs the first full build (base + both agents):
+3. **Build the images** with `agent-update`. It prints an update report and then prompts before doing anything. On a machine with no images yet, everything shows as stale, so confirming performs the first full build (base + the unified agent image):
 
    ```bash
    agent-update
@@ -53,47 +53,49 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image used by both agents (Node.js, Python, PHP, Git, shell utilities, and more)
-- `docker/claude/Dockerfile`: thin Claude image on top of the shared base
-- `docker/codex/Dockerfile`: thin Codex image on top of the shared base
+- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Git, shell utilities, and more) used by the unified agent image
+- `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `compose.shared.yml`: common runtime service and shared volumes
-- `compose.claude.yml`: Claude-specific runtime overlay
-- `compose.codex.yml`: Codex-specific runtime overlay
-- `docker-bake.hcl`: named Bake targets for `base`, `claude`, `codex`, and `all`
+- `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
+- `docker-bake.hcl`: named Bake targets for `base`, `agent`, and `all`
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, and session history reset
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
-- `docker/claude/agent-container/`: Claude-specific files baked into the image at `/home/node/.agent-container/` (statusline script, statusline settings overlay, `skills/` for reusable Claude skills)
-- `docker/codex/agent-container/`: Codex-specific files baked into the image at `/home/node/.agent-container/` (`skills/` for reusable Codex skills)
+- `docker/shared/entrypoint-agent.sh`: the unified entrypoint — selects the primary agent, seeds every agent at startup, then hands off to `entrypoint-core.sh`
+- `docker/shared/entrypoint-{claude,codex}-hook.sh`: per-agent config-seeding hooks, run in full for every agent at startup
+- `docker/claude/agent-container/`: Claude-specific seed assets baked into the image at `/home/node/.agent-container/claude/` (statusline script, statusline settings overlay, `skills/` for reusable Claude skills)
+- `docker/codex/agent-container/`: Codex-specific seed assets baked into the image at `/home/node/.agent-container/codex/` (`skills/` for reusable Codex skills)
 
 ## Build Modes
 
 Cached builds are the default.
 
-Use the root build wrappers to rebuild the images you need.
+Use the root build wrappers to rebuild the images you need. Build targets are `base`, `agent`, and `all`.
+
+Both `--claude-version` and `--codex-version` feed the single `agent` image. The Dockerfile installs Codex below Claude, so bumping the Claude version (the common, frequent case) busts only the Claude layer and the cheap asset/entrypoint layers above it, while the Codex layer underneath is reused from cache. Bumping the Codex version rebuilds the Claude layer on top as a side effect — an accepted, rarer cost. `agent-update` exploits this by pinning each binary's version per build (see [Profile Shortcuts](#profile-shortcuts)).
 
 Examples:
 
 ```bash
 ./build.sh base
-./build.sh claude --claude-version latest
-./build.sh codex --codex-version latest
-./build.sh codex --codex-version latest --no-cache
+./build.sh agent
+./build.sh agent --claude-version latest
+./build.sh agent --codex-version latest
+./build.sh agent --codex-version latest --no-cache
 ./build.sh base --no-cache --pull
 ```
 
 ## Updating Agent Instructions
 
 Container instructions for both agents are generated from a single shared template (`docker/shared/container-agent.md.tmpl`).
-The template is baked into each agent image at build time and rendered with agent-specific variables at container start.
+The template is baked into the unified image once per agent (at `/home/node/.agent-container/<agent>/agent.md.tmpl`) and rendered with agent-specific variables at container start.
 
-After editing the template, rebuild the affected images for the changes to take effect:
+After editing the template, rebuild the agent image for the changes to take effect:
 
 ```bash
-./build.sh claude
-./build.sh codex
-# or rebuild everything
+./build.sh agent
+# or rebuild everything (base + agent)
 ./build.sh
 ```
 
@@ -108,14 +110,14 @@ No volume cleanup is needed — the entrypoint conditionally re-renders the temp
 
 ## Image-Baked Agent Skills
 
-Repo-agnostic skills are baked into each agent's image. They are designed to provide the same functionality across both agents, even though the per-agent SKILL.md files differ where the underlying mechanics differ (e.g. Claude uses its `Agent` tool with `subagent_type: "general-purpose"`; Codex uses its built-in `worker` / `explorer` subagent types).
+Repo-agnostic skills are baked into the unified image, one tree per agent. They are designed to provide the same functionality across both agents, even though the per-agent SKILL.md files differ where the underlying mechanics differ (e.g. Claude uses its `Agent` tool with `subagent_type: "general-purpose"`; Codex uses its built-in `worker` / `explorer` subagent types).
 
-Per-agent sources:
+Per-agent sources (each copied into the image under `/home/node/.agent-container/<agent>/skills/`, which each agent's setup hook reads via `AGENT_SEED_DIR`):
 
 - Claude — `docker/claude/agent-container/skills/`
 - Codex — `docker/codex/agent-container/skills/` (each skill additionally ships an `agents/openai.yaml` for UI labels and default prompts)
 
-At container start, the entrypoint seeds the baked skills into the agent's user-level skills directory from the same epoch-gated block that re-renders the agent instruction template:
+At container start, the entrypoint seeds the baked skills into each agent's user-level skills directory from the same epoch-gated block that re-renders the agent instruction template (every agent is seeded, not just the primary one):
 
 - Claude — `$CLAUDE_CONFIG_DIR/skills/` (backed by the `claude-config` volume)
 - Codex — `$HOME/.agents/skills/` (backed by the `codex-config` volume via a `~/.agents → ~/.codex/agents` symlink seeded by the entrypoint)
@@ -140,17 +142,27 @@ Shared volume names are kept stable to preserve existing data:
 - `agent-pnpm-store`
 - `agent-zsh-history`
 
-Agent-specific state volumes remain separate:
+Agent-specific state volumes remain separate, and both are always mounted regardless of which agent is primary (required so the primary agent can invoke the other in-container — see [Cross-Agent Delegation](#cross-agent-delegation)):
 
-- `claude-config`
-- `codex-config`
+- `claude-config` → `/home/node/.claude`
+- `codex-config` → `/home/node/.codex`
 
-Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless).
-Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
+`cc` and `cx` still produce distinct, separately-resumable containers per project — the launcher selects the primary agent via `PRIMARY_AGENT` and keeps the per-agent container-name prefix (`claude-` / `codex-`), so Claude and Codex sessions on the same repo never collide.
+
+Both API keys are always passed through to the container — `OPENAI_API_KEY` for Codex and the optional `ANTHROPIC_API_KEY` for Claude — so that whichever agent is primary, a delegated peer invocation of the other agent can still authenticate.
+Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless); Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
 
 Either agent can be started first in a clean Docker environment.
 
 All shared volumes are marked `external` in the Compose files and pre-created by the launch scripts on first use.
+
+### Cross-Agent Delegation
+
+Because the unified image ships both agent binaries on `PATH` and the entrypoint seeds every agent's config at startup, the running primary agent can invoke the other agent directly inside the same container — no Docker-in-Docker, no mounted socket, no sibling container.
+
+This is intended for delegated sub-tasks such as asking the other agent for an independent review, or handing it a self-contained piece of work.
+The peer runs against its own seeded config (login, skills, instruction file) and shares the same `/workspace` bind mount, so it sees the same files.
+The in-container instruction file (`CLAUDE.md` for Claude, `AGENTS.md` for Codex) renders a "Delegating to another agent" section listing each peer's executable and autonomy flag (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`).
 
 ## Per-Project Workspace Paths
 
@@ -325,9 +337,9 @@ Functions exposed by both libraries:
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
-- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding the stale images in the correct order (a stale base rebuilds base + both agents; otherwise each stale agent rebuilds on its own). On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet.
-- `agent-update-claude`, `agent-update-codex` — rebuild the corresponding image with `--no-cache`
-- `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions (`--pull --no-cache`)
+- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet.
+- `agent-update-claude`, `agent-update-codex` — rebuild the unified image bumping just that agent to its latest release, pinning the other binary to its baked version so only the affected layers rebuild (no `--no-cache`)
+- `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 
 ### Environment Variables
@@ -386,10 +398,10 @@ agent-check-updates
 # Review the update report and confirm before rebuilding stale images
 agent-update
 
-# Rebuild the Claude image with the latest release
+# Bump just Claude to its latest release (rebuilds only the Claude layers)
 agent-update-claude
 
-# Rebuild the Codex image with the latest release
+# Bump just Codex to its latest release (rebuilds Codex + the Claude layer above)
 agent-update-codex
 
 # Re-pull the base image and rebuild the shared substrate with latest packages
@@ -454,10 +466,10 @@ agent-check-updates
 # Review the update report and confirm before rebuilding stale images
 agent-update
 
-# Rebuild the Claude image with the latest release
+# Bump just Claude to its latest release (rebuilds only the Claude layers)
 agent-update-claude
 
-# Rebuild the Codex image with the latest release
+# Bump just Codex to its latest release (rebuilds Codex + the Claude layer above)
 agent-update-codex
 
 # Re-pull the base image and rebuild the shared substrate with latest packages
@@ -493,8 +505,7 @@ docker buildx bake --file docker-bake.hcl --print
 Render the merged runtime config with:
 
 ```bash
-docker compose -p powbox -f compose.shared.yml -f compose.claude.yml config
-docker compose -p powbox -f compose.shared.yml -f compose.codex.yml config
+docker compose -p powbox -f compose.shared.yml -f compose.agent.yml config
 ```
 
 Smoke test the built images with:

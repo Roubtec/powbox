@@ -15,8 +15,11 @@ Teach or question the user if that is in the best interest of the final product.
 
 See README "Layout" for the repo file map. Rules that map does not state:
 
+- There is one unified agent image `powbox-agent:latest` (`docker/agent/Dockerfile`) built on `powbox-agent-base:latest`. It installs both agent binaries — Codex below Claude so a Claude version bump (the common case) busts only the Claude layer plus the cheap asset/entrypoint layers above it; a Codex bump rebuilds the Claude layer on top too (accepted). The old per-agent images (`powbox-claude`, `powbox-codex`) and Dockerfiles are gone.
+- Each agent's image-baked seed assets live under a per-agent directory `/home/node/.agent-container/<agent>` (e.g. `docker/claude/agent-container/` → `/home/node/.agent-container/claude/`), read by that agent's hook via the `AGENT_SEED_DIR` variable so the two agents' templates, skills, statusline, and build epoch never collide.
 - Image-baked Claude slash commands in `docker/claude/agent-container/commands/` are seeded into `$CLAUDE_CONFIG_DIR/commands/` at startup; a per-repo `.claude/commands/` overrides on name collision.
-- Entrypoint scripts all live in `docker/shared/`, but only `entrypoint-core.sh` is baked by the base image. The agent-specific shims and hooks (`entrypoint-{claude,codex}.sh`, `entrypoint-{claude,codex}-hook.sh`) are baked by their respective agent images, so editing a hook only requires rebuilding that agent — not the base.
+- Entrypoint scripts all live in `docker/shared/`, but only `entrypoint-core.sh` is baked by the base image. The unified entrypoint `entrypoint-agent.sh` and both per-agent hooks (`entrypoint-{claude,codex}-hook.sh`) are baked by the agent image, so editing the entrypoint or a hook only requires rebuilding the agent image — not the base. The old per-agent entrypoint shims (`entrypoint-{claude,codex}.sh`) are gone, replaced by `entrypoint-agent.sh` plus its in-script agent registry.
+- After cutover the obsolete `powbox-claude` / `powbox-codex` images can be removed with `docker image rm powbox-claude powbox-codex` — non-destructive to the `claude-config` / `codex-config` volumes.
 
 ## Key Paths
 
@@ -24,17 +27,23 @@ See README "Layout" for the repo file map. Rules that map does not state:
 |------|---------|
 | `/workspace/<project-slug>` | Bind-mounted project directory (working directory; slug is `<name>-<hash>`) |
 | `/ctx` | Optional read-only context volume (`--ctx`) |
-| `/home/node/.claude` | Claude config volume |
-| `/home/node/.codex` | Codex config volume |
+| `/home/node/.claude` | Claude config volume (`claude-config`); always mounted regardless of primary agent |
+| `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
+| `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
 | `/home/node/.local/share/pnpm/store` | Shared pnpm store volume |
 | `/workspace/<project-slug>/node_modules` | Per-project package volume |
 
+Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
+
 ## Entrypoint and Runtime
 
-- `entrypoint-core.sh` is a wrapper-style entrypoint that must end with `exec "$@"`.
+- `entrypoint-agent.sh` is the image ENTRYPOINT. It reads `PRIMARY_AGENT` (`claude` | `codex`, defaulting to `claude` for an unknown value), holds the agent registry (`agent_env` maps each agent to its `AGENT_CONFIG_DIR`, `AGENT_SETUP_HOOK`, `AGENT_SEED_DIR`, name, binary, autonomy flag, instruction file, and label), then seeds every agent and execs `entrypoint-core.sh` for the primary. Adding a harness = extend `agent_env` and `ALL_AGENTS`.
+- It seeds in two passes: each non-primary agent is seeded directly (export its `AGENT_*` vars, run its hook); the primary agent's env is exported and handed to `entrypoint-core.sh`, which runs the primary's hook (so it is not run twice) alongside firewall/git/shadow setup before execing the CMD.
+- Each per-agent hook (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) is run in full for every agent. Each writes only into its own config dir (`~/.claude` vs `~/.codex`/`~/.agents`), so there is no conflict; hooks are idempotent, no-clobber, and build-epoch-gated, and read their baked assets from `AGENT_SEED_DIR`.
+- `entrypoint-core.sh` is a wrapper-style entrypoint that must end with `exec "$@"` and is unchanged by the unification (still runs the single `AGENT_SETUP_HOOK`).
+- The shared instruction template is rendered via `envsubst` with agent-specific variables (including `${AGENT_PEERS}`, the registry-derived peer list for the "Delegating to another agent" section).
 - `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal.
-- Agent-specific hooks (`entrypoint-claude-hook.sh`, `entrypoint-codex-hook.sh`) own config seeding and instruction-file rendering; the shared instruction template is rendered via `envsubst` with agent-specific variables set in the entrypoint shims.
 - Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering.
 
 ## Project Identity

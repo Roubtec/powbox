@@ -82,6 +82,15 @@ fi
 if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	if ! (cd "$HOME" && gh auth setup-git); then
 		echo "Warning: gh auth is present, but git credential helper setup failed; continuing without automatic gh git integration." >&2
+	else
+		# Route SSH-form GitHub remotes (git@github.com:...) through HTTPS so the
+		# gh credential helper above authenticates them — host-mounted repos often
+		# carry an SSH origin, and the container has no SSH keys. This rewrite is
+		# written only to the container-local GIT_CONFIG_GLOBAL; the host repo's
+		# remote URL is left untouched.
+		if ! git config --global url."https://github.com/".insteadOf "git@github.com:"; then
+			echo "Warning: failed to configure SSH→HTTPS rewrite for GitHub remotes; continuing." >&2
+		fi
 	fi
 fi
 

@@ -36,14 +36,7 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 
 - This container authenticates to GitHub via **HTTPS** using the `gh` credential helper, which is configured automatically at startup. There are no SSH keys in the container.
 - Prefer `gh` for remote operations: `gh pr create`, `gh pr merge`, etc. These use the GitHub API directly and are not affected by the remote URL protocol.
-- For `git push`/`git pull`, the remote URL **must** be HTTPS. Host-mounted workspaces often have SSH remote URLs (`git@github.com:...`) which will fail. Before pushing, check and fix if needed:
-
-  ```sh
-  # check current remote
-  git remote get-url origin
-  # if it starts with git@, switch to HTTPS
-  git remote set-url origin "$(git remote get-url origin | sed 's|git@github.com:|https://github.com/|')"
-  ```
+- Host-mounted workspaces often have an SSH-form `origin` remote (`git@github.com:...`). You do **not** need to rewrite it: a container-local `insteadOf` rewrite transparently routes SSH-form GitHub remotes through HTTPS + the gh credential helper, so `git push origin`, `git fetch`, and `gh pr create` just work with no action needed. The rewrite lives only in the container's git config — the host repo's remote URL is left untouched.
 
 - `git` is available for all local operations (status, diff, log, commit, branch, etc.).
 - The global git config is seeded from the host on first run. Do not modify `/home/node/.gitconfig-host` (read-only mount).

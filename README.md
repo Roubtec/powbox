@@ -222,10 +222,31 @@ shadow:
   - tools/legacy-build/vendor     # non-standard path
 ```
 
-Patterns are resolved as globs relative to the project root.
-Only directories that exist at container start are shadowed.
+Patterns are resolved relative to the project root.
+A pattern containing glob metacharacters (`*`, `?`, `[`, `]`) is expanded as a glob, and only directories that exist at container start are shadowed.
+A literal path (no glob metacharacters) is shadowed even if it does not exist yet — it is created and tmpfs-mounted at startup. This lets committed declarations for gitignored, fresh-checkout-absent directories take effect without a manual `mkdir`.
+In both cases a pattern that resolves outside the workspace root is rejected.
 
 Auto-detection and `.powbox.yml` patterns are merged and deduplicated.
+
+### Git Worktree Parallel Development
+
+Shadowed literal paths make the container a clean home for git-worktree-based parallel development — for example an orchestrator that creates one worktree per task under `.worktrees/`. Declare the worktree scaffolding in `.powbox.yml`:
+
+```yaml
+shadow:
+  - .worktrees          # worktree working trees
+  - .claude/worktrees   # harness-native worktrees (EnterWorktree / agent isolation)
+  - .git/worktrees      # per-worktree git metadata
+```
+
+These directories are gitignored and absent on a fresh checkout, but because they are literal paths they are auto-created and shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed.
+
+**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The worktree working files under `.worktrees/` and the per-worktree `.git/worktrees/<name>` metadata are ephemeral tmpfs and vanish when the container stops. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa.
+
+**Discipline.** Commit and push often. Since only the common `.git` persists, push committed work to the remote, then `git pull` on the host to sync — anything left only in a worktree's working tree is lost on container stop.
+
+**tmpfs sizing.** All worktrees under `.worktrees` share that single tmpfs mount's `SHADOW_TMPFS_SIZE` cap (default 512m). Worktree-heavy work — especially several parallel `pnpm install`s — can exhaust it and fail with `ENOSPC`. Relaunch the container with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration) below) when that happens.
 
 ### Mid-Session Refresh
 

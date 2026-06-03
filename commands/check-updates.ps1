@@ -232,6 +232,7 @@ if ($Porcelain) {
     'base' + $tab + $baseStatus + $tab + (Format-PorcelainValue $baseBaked) + $tab + (Format-PorcelainValue $baseLatest)
     'claude' + $tab + (Get-ComponentStatus $claudeBaked $claudeLatest) + $tab + (Format-PorcelainValue $claudeBaked) + $tab + (Format-PorcelainValue $claudeLatest)
     'codex' + $tab + (Get-ComponentStatus $codexBaked $codexLatest) + $tab + (Format-PorcelainValue $codexBaked) + $tab + (Format-PorcelainValue $codexLatest)
+    $global:LASTEXITCODE = 0
     return
 }
 
@@ -248,3 +249,4 @@ if ($baseBaked   -or $baseLatest)   { Write-BaseComparison $baseBaked $baseLates
 if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }
 Write-Host ''
+$global:LASTEXITCODE = 0

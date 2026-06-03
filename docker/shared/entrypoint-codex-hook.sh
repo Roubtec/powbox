@@ -233,7 +233,7 @@ if [ -f "$AGENT_TMPL" ]; then
 	fi
 fi
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
+if [ -z "${OPENAI_API_KEY:-}" ] && [ "${PRIMARY_AGENT:-codex}" = "codex" ]; then
 	echo "Warning: OPENAI_API_KEY is not set. Codex CLI will not be able to authenticate with OpenAI." >&2
-	echo "Pass it via: -e OPENAI_API_KEY=\$OPENAI_API_KEY when launching the container." >&2
+	echo "Set OPENAI_API_KEY on the host before launching, or pass it with docker run/compose." >&2
 fi

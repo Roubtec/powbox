@@ -122,10 +122,60 @@ function _Powbox-AgentPorcelain {
     & "$env:POWBOX_ROOT\commands\check-updates.ps1" -Porcelain
 }
 
+function _Powbox-InvokeBuild {
+    param(
+        [ValidateSet("base", "agent", "all")]
+        [string]$Target,
+        [string]$ClaudeVersion = "",
+        [string]$CodexVersion = "",
+        [switch]$Pull,
+        [switch]$NoCache,
+        [object[]]$ExtraArgs = @()
+    )
+    $buildParams = @{ Target = $Target }
+    if ($ClaudeVersion) { $buildParams["ClaudeVersion"] = $ClaudeVersion }
+    if ($CodexVersion)  { $buildParams["CodexVersion"] = $CodexVersion }
+    if ($Pull)          { $buildParams["Pull"] = $true }
+    if ($NoCache)       { $buildParams["NoCache"] = $true }
+
+    for ($i = 0; $i -lt $ExtraArgs.Count; $i++) {
+        $arg = [string]$ExtraArgs[$i]
+        switch ($arg.ToLowerInvariant()) {
+            '-target' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -Target" }
+                $i++
+                $buildParams["Target"] = [string]$ExtraArgs[$i]
+            }
+            '-claudeversion' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -ClaudeVersion" }
+                $i++
+                $buildParams["ClaudeVersion"] = [string]$ExtraArgs[$i]
+            }
+            '-codexversion' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -CodexVersion" }
+                $i++
+                $buildParams["CodexVersion"] = [string]$ExtraArgs[$i]
+            }
+            '-pull' {
+                $buildParams["Pull"] = $true
+            }
+            '-nocache' {
+                $buildParams["NoCache"] = $true
+            }
+            default {
+                throw "Unsupported build argument for agent-update: $arg"
+            }
+        }
+    }
+
+    & "$env:POWBOX_ROOT\build.ps1" @buildParams
+}
+
 # Build the unified agent image from a porcelain table, pinning each binary so
 # Docker rebuilds only the layers that actually changed.
 #   -Table        porcelain table rows (array of TAB-separated strings)
 #   -Force        agents to force to their latest version (array of names)
+#   -Target       build target (agent|all)
 #   @ExtraArgs    extra args forwarded to build.ps1
 # Agents not in the force list are pinned to their currently baked version so
 # Docker reuses that layer. Because Codex sits below Claude in the image, a
@@ -135,6 +185,8 @@ function _Powbox-BuildFromTable {
     param(
         [string[]]$Table,
         [string[]]$Force,
+        [ValidateSet("agent", "all")]
+        [string]$Target = "agent",
         [Parameter(ValueFromRemainingArguments = $true)]
         [object[]]$ExtraArgs
     )
@@ -157,10 +209,7 @@ function _Powbox-BuildFromTable {
             'codex'  { $codexVer = $ver }
         }
     }
-    $buildArgs = @("-Target", "agent")
-    if ($claudeVer) { $buildArgs += @("-ClaudeVersion", $claudeVer) }
-    if ($codexVer)  { $buildArgs += @("-CodexVersion", $codexVer) }
-    & "$env:POWBOX_ROOT\build.ps1" @buildArgs @ExtraArgs
+    _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -ExtraArgs $ExtraArgs
 }
 
 function agent-update-claude {
@@ -183,7 +232,12 @@ function agent-update-codex {
 
 function agent-update-base {
     # A new base means the whole agent image should be rebuilt on top of it.
-    & "$env:POWBOX_ROOT\build.ps1" -Target all -Pull -NoCache @args
+    $table = _Powbox-AgentPorcelain
+    if ($LASTEXITCODE -eq 0) {
+        _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        return
+    }
+    _Powbox-InvokeBuild -Target all -Pull -NoCache -ExtraArgs $args
 }
 
 # Show the full update report, then (if anything is stale) ask for confirmation
@@ -237,7 +291,7 @@ function agent-update {
 
     if ($baseStale) {
         Write-Host "Base image is stale — rebuilding base (with -Pull) and the agent image on top."
-        & "$env:POWBOX_ROOT\build.ps1" -Target all -Pull -NoCache @args
+        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @args
         return
     }
 

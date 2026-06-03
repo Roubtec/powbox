@@ -131,14 +131,15 @@ _powbox_agent_porcelain() {
 # Docker rebuilds only the layers that actually changed.
 #   $1            porcelain table (multi-line)
 #   $2            space-separated agents to force to their latest version
-#   $3..          extra args forwarded to build.sh
+#   $3            build target (agent|all)
+#   $4..          extra args forwarded to build.sh
 # Agents not in the force list are pinned to their currently baked version so
 # Docker reuses that layer. Because Codex sits below Claude in the image, a
 # Claude-only update rebuilds just the Claude layer; a Codex update also
 # rebuilds the Claude layer above it (the accepted, rarer cost).
 _powbox_build_from_table() {
-    local table="$1" force=" $2 "
-    shift 2
+    local table="$1" force=" $2 " target="$3"
+    shift 3
     local name status baked latest ver
     local claude_ver="" codex_ver=""
     while IFS=$'\t' read -r name status baked latest; do
@@ -156,7 +157,7 @@ _powbox_build_from_table() {
             codex)  codex_ver="$ver" ;;
         esac
     done < <(printf '%s\n' "$table")
-    local args=(agent)
+    local args=("$target")
     [ -n "$claude_ver" ] && args+=(--claude-version "$claude_ver")
     [ -n "$codex_ver" ]  && args+=(--codex-version "$codex_ver")
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
@@ -168,7 +169,7 @@ agent-update-claude() {
         echo "agent-update-claude: update check failed" >&2
         return 1
     fi
-    _powbox_build_from_table "$table" "claude" "$@"
+    _powbox_build_from_table "$table" "claude" agent "$@"
 }
 
 agent-update-codex() {
@@ -177,12 +178,17 @@ agent-update-codex() {
         echo "agent-update-codex: update check failed" >&2
         return 1
     fi
-    _powbox_build_from_table "$table" "codex" "$@"
+    _powbox_build_from_table "$table" "codex" agent "$@"
 }
 
 agent-update-base() {
     # A new base means the whole agent image should be rebuilt on top of it.
-    "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+    local table
+    if table="$(_powbox_agent_porcelain)"; then
+        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
+    else
+        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+    fi
 }
 
 # Show the full update report, then (if anything is stale) ask for confirmation
@@ -225,7 +231,7 @@ agent-update() {
 
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
         echo "Base image is stale — rebuilding base (with --pull) and the agent image on top."
-        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
         return $?
     fi
 
@@ -243,7 +249,7 @@ agent-update() {
     fi
 
     echo "Updating: ${stale// /, } (rebuilding only the affected image layers)."
-    _powbox_build_from_table "$table" "$stale" "$@"
+    _powbox_build_from_table "$table" "$stale" agent "$@"
 }
 
 cc-list() {

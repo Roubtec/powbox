@@ -23,6 +23,7 @@ case " $ALL_AGENTS " in
 	PRIMARY_AGENT="claude"
 	;;
 esac
+export PRIMARY_AGENT
 
 # Populate the AGENT_* variables for the named agent. AGENT_BINARY and
 # AGENT_LABEL feed the peer list rendered into each agent's instruction file.

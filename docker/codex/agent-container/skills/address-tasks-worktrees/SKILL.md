@@ -25,32 +25,44 @@ So:
 
 ### Durability & host isolation (this container)
 
-This repo may be bind-mounted from a Windows host into a Linux container.
-The PowBox worktree roots (`.worktrees/`, `.claude/worktrees/`, plus `.git/worktrees/`) are **tmpfs-shadowed** via `.powbox.yml`, so worktree working files and per-worktree git metadata stay **container-local and invisible to the host** — no cross-platform path pollution.
-Task worktrees created by this skill live under `.worktrees/`; `.claude/worktrees/` is the harness-native worktree shadow path currently documented by PowBox, not a Claude-specific execution requirement for Codex.
+This repo's main checkout may be bind-mounted from a Windows host into a Linux container, so the PowBox worktree roots are **shadowed** to keep their writes container-local and invisible to the host (no cross-platform path pollution). They are shadowed two different ways, and the difference matters:
+
+- **`.worktrees/`** is backed by a **persistent per-project ext4 Docker volume** that the powbox launcher mounts there, and which *also* holds the pnpm store (`.worktrees/.pnpm-store`). Because the store and every `.worktrees/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — so worktree installs are near-free, there is **no shared 2 GB tmpfs cap**, and many worktrees can install concurrently. The volume is on disk (the Docker VM's ext4), not RAM. *(Fallback: if the container was launched without that volume, `.worktrees` is tmpfs-shadowed instead — see Bootstrap.)*
+- **`.claude/worktrees/`** and **`.git/worktrees/`** remain **tmpfs-shadowed** (ephemeral): the harness-native worktree path (documented by PowBox, not a Codex execution requirement) and the per-worktree git metadata.
 
 Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs (`.git/refs/heads/...`) persist on the host.
-**Committed work therefore survives container recycle even without pushing** — only uncommitted changes and the ephemeral worktree scaffolding are lost.
+**Committed work therefore survives container recycle even without pushing** — only uncommitted changes are lost.
 The operating discipline that follows:
 
-- **Commit early and often**, and **push after every commit** (work-in-progress in a tmpfs worktree is slightly more volatile, and pushing also lets the host sync via `git pull`).
-- A recycled container leaves clean host state: branches + commits remain in `.git` and on the remote; tmpfs scaffolding simply vanishes (no `git worktree prune` needed because `.git/worktrees` is shadowed too).
+- **Commit early and often**, and **push after every commit** (a worktree's working tree is more volatile than committed `.git`, and pushing also lets the host sync via `git pull`).
+- On recycle, the `.worktrees` **volume persists** (so the pnpm store — the efficiency win — survives), but the per-worktree git metadata in the tmpfs `.git/worktrees` does **not**. A leftover `.worktrees/<task>` working dir from a crashed prior session is therefore orphaned (its `.git` pointer dangles); the Bootstrap prunes such orphans while preserving `.pnpm-store`. Worktrees remain disposable — push committed work.
 
 ## Session Bootstrap (run once, before any worktree)
 
 Do this in the **main working tree** before creating worktrees.
 All steps are idempotent.
 
-1. **Verify the worktree shadows are mounted.** When `.powbox.yml` declares the PowBox worktree roots (`.worktrees`, `.claude/worktrees`, and `.git/worktrees`) as literal shadow paths, the container creates and tmpfs-shadows them automatically at startup — even on a fresh checkout where they do not yet exist. Confirm that happened (and self-heal if `.powbox.yml` was missing the entries or shadowing was skipped):
+1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher mounts the per-project ext4 volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. Confirm each is its own mount and **not** the host bind-mount filesystem (`9p`/`drvfs`/`virtiofs`), self-healing the tmpfs ones if `.powbox.yml` was missing entries:
 
    ```bash
    mkdir -p .worktrees .claude/worktrees .git/worktrees
-   shadow-refresh.sh "$(git rev-parse --show-toplevel)"
-   # verify all three are tmpfs (host-invisible):
-   findmnt -no TARGET,FSTYPE -T .worktrees
+   shadow-refresh.sh "$(git rev-parse --show-toplevel)"   # tmpfs-shadows any unmounted root (fallback for .worktrees too)
+   # .worktrees should be ext4 (the volume) or tmpfs (fallback); the others tmpfs:
+   findmnt -no TARGET,FSTYPE -T .worktrees .claude/worktrees .git/worktrees
    ```
 
-   If `findmnt` does not report `tmpfs`, stop and tell the user — without the shadow, worktree files would leak to the host. (All worktrees share one tmpfs size cap, default 2g; if installs/builds inside worktrees hit `ENOSPC`, the container must be relaunched with a larger `SHADOW_TMPFS_SIZE`.)
+   If `.worktrees` reports the host bind-mount fstype (`9p`/`drvfs`/`virtiofs`) rather than `ext4`/`tmpfs`, **stop and tell the user** — worktree files would leak to the host. When `.worktrees` is the ext4 volume, per-worktree `pnpm install` hardlinks from the co-located store, so there is no shared 2 GB cap to exhaust. *(Only in the tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means the container must be relaunched with a larger `SHADOW_TMPFS_SIZE`, or — better — with the worktrees volume.)*
+
+   Then prune any worktree dirs orphaned by a prior recycle (their tmpfs git metadata is gone), preserving the persistent store:
+
+   ```bash
+   git worktree prune
+   for d in .worktrees/*/; do
+     [ -e "$d" ] || continue
+     case "$d" in .worktrees/.pnpm-store/) continue ;; esac
+     git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || rm -rf "$d"
+   done
+   ```
 
 2. **Ensure pushes work without rewriting the host remote.** If `origin` is an SSH URL, add a *container-local* rewrite so git reaches it over HTTPS via the gh credential helper (this touches only the container's global config, never the host `.git/config`):
 

@@ -111,6 +111,27 @@ for _dir in /workspace/*/; do
 done
 unset _dir _targets
 
+# Co-locate the pnpm store with the per-project worktrees volume so that
+# `pnpm install` inside a worktree HARDLINKS package files from the store
+# instead of copying them.  pnpm can only hardlink when the store and the
+# target node_modules live under the SAME mount (not merely the same device),
+# so the launcher mounts an ext4 volume at <workspace>/.worktrees and passes
+# its store path here; the store then sits beside every .worktrees/<task>/
+# node_modules under that one mount.  Guarded so a bad value never aborts the
+# container start — pnpm just keeps the image-default store and copies.
+if [ -n "${PNPM_STORE_DIR:-}" ]; then
+	if mkdir -p "$PNPM_STORE_DIR" 2>/dev/null; then
+		pnpm config --global set store-dir "$PNPM_STORE_DIR" ||
+			echo "Warning: failed to set pnpm store-dir to $PNPM_STORE_DIR; keeping default." >&2
+		# Re-assert auto here too so an image built before this default still
+		# hardlinks once the store and worktrees share a mount.
+		pnpm config --global set package-import-method auto ||
+			echo "Warning: failed to set pnpm package-import-method=auto; continuing." >&2
+	else
+		echo "Warning: cannot create pnpm store dir $PNPM_STORE_DIR; leaving store-dir at default." >&2
+	fi
+fi
+
 if [ "$#" -eq 0 ]; then
 	exec zsh
 fi

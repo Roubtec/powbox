@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# Remove orphaned agent-nm-* Docker volumes that no longer belong to any
-# existing container. This is the Linux/macOS counterpart of prune-volumes.ps1.
+# Remove orphaned per-project Docker volumes that no longer belong to any
+# existing container: agent-nm-* (node_modules) and agent-wt-* (worktrees +
+# pnpm store). Also offers the deprecated shared agent-pnpm-store volume (the
+# store is now per-project inside each agent-wt-* volume). This is the
+# Linux/macOS counterpart of prune-volumes.ps1.
 set -euo pipefail
 
-# Collect project suffixes from all existing claude-*/codex-* containers.
+# Collect expected per-project volumes from all existing claude-*/codex-*
+# containers. Each container expects both an nm and a wt volume for its project.
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
 	case "$name" in
-	claude-*) expected+=("agent-nm-${name#claude-}") ;;
-	codex-*) expected+=("agent-nm-${name#codex-}") ;;
+	claude-*) suffix="${name#claude-}" ;;
+	codex-*) suffix="${name#codex-}" ;;
+	*) continue ;;
 	esac
+	expected+=("agent-nm-${suffix}" "agent-wt-${suffix}")
 done < <(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 
-# Find all agent-nm-* volumes.
+# Find all per-project candidate volumes, plus the deprecated shared store.
 candidates=()
 while IFS= read -r vol; do
 	[ -z "$vol" ] && continue
 	candidates+=("$vol")
-done < <(docker volume ls --format "{{.Name}}" | grep '^agent-nm-')
+done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt)-|^agent-pnpm-store$')
 
-# Determine which volumes are orphaned.
+# Determine which volumes are orphaned. agent-pnpm-store is never "expected",
+# so it is always pruned when present.
 prune=()
 for vol in "${candidates[@]}"; do
 	orphaned=true
@@ -36,7 +43,7 @@ for vol in "${candidates[@]}"; do
 done
 
 if [ "${#prune[@]}" -eq 0 ]; then
-	echo "No orphaned agent-nm-* volumes found."
+	echo "No orphaned agent-nm-*/agent-wt-* (or deprecated agent-pnpm-store) volumes found."
 	exit 0
 fi
 
@@ -55,7 +62,7 @@ case "$answer" in
 		echo "Removed $vol"
 		removed=$((removed + 1))
 	done
-	echo "Removed $removed orphaned agent-nm-* volume(s)."
+	echo "Removed $removed orphaned volume(s)."
 	;;
 *)
 	echo "Aborted."

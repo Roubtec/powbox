@@ -19,15 +19,21 @@ foreach ($containerName in $containerNames) {
     }
 
     if ($projectSuffix) {
+        # Each container expects both an nm (node_modules) and a wt (worktrees +
+        # pnpm store) volume for its project.
         [void]$expectedVolumes.Add("agent-nm-$projectSuffix")
+        [void]$expectedVolumes.Add("agent-wt-$projectSuffix")
     }
 }
 
-$nodeModulesVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' })
-$pruneCandidates = @($nodeModulesVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
+# Per-project candidates (agent-nm-* / agent-wt-*) plus the deprecated shared
+# store (agent-pnpm-store), which nothing mounts anymore now that the store is
+# per-project inside each agent-wt-* volume.
+$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -eq 'agent-pnpm-store' })
+$pruneCandidates = @($candidateVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
 
 if ($pruneCandidates.Count -eq 0) {
-    Write-Host 'No orphaned agent-nm-* volumes found.'
+    Write-Host 'No orphaned agent-nm-*/agent-wt-* (or deprecated agent-pnpm-store) volumes found.'
     return
 }
 
@@ -37,7 +43,7 @@ $pruneCandidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
 $removedCount = 0
 
 foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
-    if ($PSCmdlet.ShouldProcess($volumeName, 'Remove orphaned node_modules volume')) {
+    if ($PSCmdlet.ShouldProcess($volumeName, 'Remove orphaned per-project volume')) {
         docker volume rm $volumeName | Out-Null
         $removedCount += 1
         Write-Host "Removed $volumeName"
@@ -45,5 +51,5 @@ foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
 }
 
 if ($removedCount -gt 0) {
-    Write-Host "Removed $removedCount orphaned agent-nm-* volume(s)."
+    Write-Host "Removed $removedCount orphaned volume(s)."
 }

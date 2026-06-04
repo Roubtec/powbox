@@ -39,7 +39,7 @@ For worktree-based parallelism a repo needs two committed things.
 
    `.git/worktrees` needs **no** gitignore entry — it lives inside the untracked `.git/` directory.
 
-Why this is safe and durable: the common `.git` (objects + refs) is *not* shadowed, so committed work persists on the host and survives container recycle; only the ephemeral worktree scaffolding lives in tmpfs.
+Why this is safe and durable: the common `.git` (objects + refs) is *not* shadowed, so committed work persists on the host and survives container recycle. The powbox launcher backs `.worktrees` with a **persistent per-project volume** (which also holds the pnpm store, so worktree `pnpm install` hardlinks from it); `.claude/worktrees` and `.git/worktrees` stay ephemeral tmpfs. The `.worktrees` entry below is then a harmless **fallback** — skipped when the volume is mounted, used only if the container is launched without it.
 powbox's README "Workspace Shadow Mounts → Git Worktree Parallel Development" has the full model (readable at `/ctx` if the powbox repo happens to be mounted, but this skill ships the contract so that is optional).
 
 ## Procedure

@@ -134,13 +134,19 @@ Each agent discovers these skills at startup and includes their `SKILL.md` front
 
 Both agent launch flows resolve through the same shared Compose base and the same Compose project name.
 
-The shared GitHub, pnpm, and zsh-history volumes are declared once in the shared Compose configuration.
+The shared GitHub and zsh-history volumes are declared once in the shared Compose configuration.
 
 Shared volume names are kept stable to preserve existing data:
 
 - `agent-gh-config`
-- `agent-pnpm-store`
 - `agent-zsh-history`
+
+The launcher also creates **per-project** volumes, keyed by project so a project's Claude and Codex containers share them:
+
+- `agent-nm-<project>` → the root `node_modules`
+- `agent-wt-<project>` → the `.worktrees` tree, which **also holds the per-project pnpm store** (`.worktrees/.pnpm-store`)
+
+> The pnpm store moved from a single shared `agent-pnpm-store` volume to a per-project store inside each `agent-wt-<project>` volume so that worktree `pnpm install` can **hardlink** package files from it instead of copying them (the store and the worktree `node_modules` must share one mount — see [Git Worktree Parallel Development](#git-worktree-parallel-development)). The old shared `agent-pnpm-store` volume is no longer mounted and can be removed with `prune-volumes`.
 
 Agent-specific state volumes remain separate, and both are always mounted regardless of which agent is primary (required so the primary agent can invoke the other in-container — see [Cross-Agent Delegation](#cross-agent-delegation)):
 
@@ -240,13 +246,17 @@ shadow:
   - .git/worktrees      # per-worktree git metadata
 ```
 
-These directories are gitignored and absent on a fresh checkout, but because they are literal paths they are auto-created and shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
+These directories are gitignored and absent on a fresh checkout. `.claude/worktrees` and `.git/worktrees` are literal shadow paths, so they are auto-created and tmpfs-shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
 
-**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The worktree working files under `.worktrees/` and the per-worktree `.git/worktrees/<name>` metadata are ephemeral tmpfs and vanish when the container stops. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa.
+**`.worktrees` is backed by a volume, not tmpfs.** The launcher mounts the per-project `agent-wt-<project>` ext4 volume at `.worktrees`, so that mount (not a tmpfs shadow) is what shadows the host path. The `.worktrees` entry in `.powbox.yml` is then a harmless **fallback**: `shadow-mounts.sh` skips it because the path is already a mountpoint, so existing `.powbox.yml` files keep working unchanged, and `.worktrees` still gets tmpfs-shadowed if the container is ever launched without the volume.
 
-**Discipline.** Commit and push often. Since only the common `.git` persists, push committed work to the remote, then `git pull` on the host to sync — anything left only in a worktree's working tree is lost on container stop.
+**Why a volume.** The volume also holds the pnpm store at `.worktrees/.pnpm-store`. Because the store and every `.worktrees/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — `link(2)` only works within a single mount, so co-location is the whole point. Worktree installs drop from a full ~425 MB–1.1 GB copy to tens of MB of metadata, there is **no shared 2 GB cap**, and many worktrees can install concurrently. The volume is on the Docker VM's ext4 (disk, hundreds of GB), not RAM.
 
-**tmpfs sizing.** All worktrees under `.worktrees` share that single tmpfs mount's `SHADOW_TMPFS_SIZE` cap (default 2g, sized to hold a few parallel worktrees each with their own `node_modules`). tmpfs allocates lazily, so the cap bounds the worst case rather than reserving memory up front. Worktree-heavy work — many parallel `pnpm install`s, or large `node_modules` — can still exhaust it and fail with `ENOSPC`. Relaunch the container with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration) below) when that happens.
+**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The `.worktrees` **volume persists** across recycles too — keeping the pnpm store warm — but the per-worktree `.git/worktrees/<name>` metadata is ephemeral tmpfs. So after a recycle a leftover `.worktrees/<task>` working dir can be orphaned (its `.git` pointer dangles); the `address-tasks-worktrees` bootstrap prunes such orphans while preserving `.pnpm-store`. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa.
+
+**Discipline.** Commit and push often. Since only the common `.git` persists to the host, push committed work to the remote, then `git pull` on the host to sync — a worktree's uncommitted working-tree changes are not durable.
+
+**tmpfs sizing (the other two roots, and the `.worktrees` fallback).** `.claude/worktrees` and `.git/worktrees` are tmpfs and share the `SHADOW_TMPFS_SIZE` cap (default 2g) — they hold metadata and are tiny, so this rarely matters. The old constraint where *all worktrees' `node_modules`* shared one 2g tmpfs only applies in the fallback path where `.worktrees` itself is tmpfs (launched without the volume); there, many parallel `pnpm install`s can exhaust it and fail with `ENOSPC` — relaunch with a larger `SHADOW_TMPFS_SIZE` (see [Configuration](#configuration)), or with the worktrees volume.
 
 ### Mid-Session Refresh
 
@@ -261,11 +271,11 @@ Already-mounted paths are skipped.
 
 ### Lifecycle
 
-Shadow mounts are **ephemeral** — they use tmpfs (memory-backed) and are lost when the container stops.
-After restarting (or resuming) a container, run `pnpm install` to repopulate subpackage `node_modules` from the shared pnpm store.
+Subpackage shadow mounts are **ephemeral** — they use tmpfs (memory-backed) and are lost when the container stops.
+After restarting (or resuming) a container, run `pnpm install` to repopulate subpackage `node_modules` from the per-project pnpm store.
 With a warm store this typically takes only a few seconds.
 
-The root `node_modules` Docker volume is unaffected and persists across restarts as before.
+The root `node_modules` (`agent-nm-<project>`) and the `.worktrees` tree with its pnpm store (`agent-wt-<project>`) are **Docker volumes**, not tmpfs — they persist across restarts, so the store stays warm and worktree installs stay cheap.
 
 ### Configuration
 
@@ -538,7 +548,7 @@ Smoke test the built image with:
 
 This runs two stages: a fast presence sweep over every expected CLI, then a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't). Skip the second stage for a tools-only run with `POWBOX_SMOKE_SKIP_DB=1 ./commands/smoke-test.sh` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb`).
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check
 
@@ -566,7 +576,7 @@ Expected results:
 
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
-- the pnpm store is `/home/node/.local/share/pnpm/store`
+- the pnpm store is per-project at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 
@@ -594,7 +604,7 @@ Expected results:
 - user is `node`
 - `CODEX_CONFIG_DIR` is `/home/node/.codex`
 - `bwrap` is available
-- the pnpm store is `/home/node/.local/share/pnpm/store`
+- the pnpm store is per-project at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 

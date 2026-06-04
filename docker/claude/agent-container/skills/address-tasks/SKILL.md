@@ -57,6 +57,7 @@ Construct a prompt that contains:
 - **Commit and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
 - **Coordination instructions** — remind the implementer that it is not alone in the codebase, must not revert unrelated edits made by others, and should accommodate concurrent changes.
+- **No shared task-tracker.** Tell the implementer not to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools. A subagent's entries leak into the orchestrator's task view and linger there as stale, misleading items (e.g. a child's `in_progress` step that has already finished), adding noise to every later turn without helping the orchestrator spot a struggling task — that signal comes from the implement→review→fix result, not from a child's micro-steps. The implementer should track its own steps however it likes and surface progress only in its final report.
 - **Reporting instructions** — when done, report back with:
   - A concise summary of what was implemented.
   - Any decisions, tradeoffs, or deviations from the task description.
@@ -113,6 +114,7 @@ It is launched in the **foreground** (not background) since the feedback loop mu
   - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
 - **Instruction NOT to edit any files** — the reviewer only reads and reports. It must not create, update, or delete follow-up task files; any suggested follow-up work belongs in the review report only.
+- **Instruction not to use the shared task-tracker** — like the implementer, tell the reviewer not to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools; a subagent's task entries bleed into the orchestrator's view.
 
 #### Code quality dimensions to check
 

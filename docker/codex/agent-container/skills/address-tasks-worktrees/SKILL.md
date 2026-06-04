@@ -108,6 +108,7 @@ When in doubt, treat tasks that touch the same files or migrations as dependent.
   - Independent task (wave 1, or no dependency in-batch) → branch from and PR against the user's chosen base (default `main`, or an explicit override).
   - Dependent task → branch from and PR against its **dependency's branch** (stacked PRs), so it builds on work that may not be merged yet.
   - If a task depends on *several* tasks, branch from an integration branch that merges them, or from the single dependency it most directly extends — pick the simplest base that contains the code it needs and note the choice.
+  - **Building a multi-parent integration branch is the orchestrator's job** — a bounded exception to "the orchestrator does not implement." Creating the branch and resolving its merge conflicts is small, mechanical, and a prerequisite for the wave rather than task work, so do it yourself rather than delegating. Keep the merge minimal, build/lint the result before branching any task off it, and record any non-trivial conflict resolutions (in the batch summary or a short merge-advice note) so they can be reproduced when the stack later lands on `main`.
 - Start a wave only after every task it depends on has **passed review** (its branch is stable enough to build on).
 
 If the whole batch is a linear dependency chain, this degrades gracefully to one task per wave — i.e. effectively sequential, like `address-tasks`, but still worktree-isolated.

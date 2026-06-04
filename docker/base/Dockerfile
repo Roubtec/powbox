@@ -179,6 +179,40 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
     && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
 
+# Rootless container engine (Podman) so an in-sandbox agent can build, run, and
+# orchestrate its own containers — databases, Adminer, whole service stacks —
+# without Docker-in-Docker. Podman runs as the unprivileged `node` user through
+# a user namespace, so the blast radius stays inside this container: no
+# privileged daemon, no host Docker socket. `podman-docker` provides a `docker`
+# command shim and `podman-compose` backs `docker compose` / `podman compose`.
+# fuse-overlayfs is the rootless storage driver (needs /dev/fuse, passed through
+# by launch-agent.sh; entrypoint-core.sh falls back to vfs when it is absent);
+# slirp4netns/passt give rootless networking and netavark + aardvark-dns provide
+# inter-container DNS. The /etc/subuid + /etc/subgid ranges are what newuidmap
+# (from uidmap) maps into the user namespace. Placed low in the file so it never
+# busts the expensive gh / mssql / pwsh / npm layers above it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    podman \
+    podman-docker \
+    podman-compose \
+    uidmap \
+    fuse-overlayfs \
+    slirp4netns \
+    passt \
+    crun \
+    netavark \
+    aardvark-dns \
+    catatonit \
+    && rm -rf /var/lib/apt/lists/* \
+    && { grep -q '^node:' /etc/subuid 2>/dev/null || echo 'node:100000:65536' >> /etc/subuid; } \
+    && { grep -q '^node:' /etc/subgid 2>/dev/null || echo 'node:100000:65536' >> /etc/subgid; } \
+    && touch /etc/containers/nodocker
+
+# Engine defaults for running Podman inside a container without systemd:
+# cgroupfs (no systemd cgroup delegation available), the file event logger
+# (no journald), and the netavark backend + aardvark-dns for container DNS.
+COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d/10-powbox.conf
+
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint and the per-agent setup hooks are intentionally NOT
 # baked here; the agent image (docker/agent/Dockerfile) copies them so that
@@ -199,6 +233,11 @@ ENV PNPM_HOME="/home/node/.local/share/pnpm"
 ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/zsh
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
+
+# Rootless Podman keeps its transient runtime state (sockets, runroot) under
+# XDG_RUNTIME_DIR. A home-dir path avoids depending on systemd-logind to create
+# /run/user/<uid>; entrypoint-core.sh creates it mode 700 at startup.
+ENV XDG_RUNTIME_DIR=/home/node/.local/run
 
 # Point Marp / Puppeteer at the system Chromium (PDF, PPTX, PNG output).
 # CHROME_NO_SANDBOX=true is appropriate here: the container itself is the

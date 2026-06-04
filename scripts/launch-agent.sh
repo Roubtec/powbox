@@ -177,6 +177,9 @@ WT_VOLUME="agent-wt-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
+# Per-project rootless Podman storage (images + named volumes) so an in-sandbox
+# agent's containers and their data persist across container restarts.
+PODMAN_VOLUME="agent-podman-${PROJECT_NAME}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
@@ -376,8 +379,9 @@ fi
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \
 	-v "${WT_VOLUME}:/mnt/worktrees" \
+	-v "${PODMAN_VOLUME}:/mnt/containers" \
 	agent \
-	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees && chown node:node /mnt/node_modules /mnt/worktrees'
+	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers'
 
 RUN_ARGS=()
 if [ "$DETACH" = true ]; then
@@ -385,6 +389,22 @@ if [ "$DETACH" = true ]; then
 elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 	RUN_ARGS+=(--rm)
 fi
+
+# Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
+# Auto-detect from the host; POWBOX_FUSE=on|off overrides. When the device is
+# absent the container falls back to the slower vfs driver (see entrypoint-core.sh),
+# so this is best-effort and never aborts the launch.
+case "${POWBOX_FUSE:-auto}" in
+on)
+	RUN_ARGS+=(--device /dev/fuse)
+	;;
+off) ;;
+*)
+	if [ -e /dev/fuse ]; then
+		RUN_ARGS+=(--device /dev/fuse)
+	fi
+	;;
+esac
 
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
@@ -415,6 +435,7 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \
 	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
 	-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees" \
+	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
 	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

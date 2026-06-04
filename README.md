@@ -217,6 +217,18 @@ This is intended for delegated sub-tasks such as asking the other agent for an i
 The peer runs against its own seeded config (login, skills, instruction file) and shares the same `/workspace` bind mount, so it sees the same files.
 The in-container instruction file (`CLAUDE.md` for Claude, `AGENTS.md` for Codex) renders a "Delegating to another agent" section listing each peer's executable and autonomy flag (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`).
 
+## Nested Containers (rootless Podman)
+
+The image ships **rootless [Podman](https://podman.io/)** so an in-sandbox agent can build, run, and orchestrate its own containers — databases, Adminer, whole service stacks — for projects whose dev workflow depends on them. A `docker` shim and `podman compose` mean `docker` / `docker compose` commands and project scripts work unchanged.
+
+This is deliberately **not** Docker-in-Docker or a mounted host socket — both of which would hand a runaway agent the keys to the host. Podman runs as the unprivileged `node` user through a user namespace, so the blast radius stays inside the container: no privileged daemon, no host socket. As a bonus, rootless Podman NATs nested containers' outbound traffic through this container's network namespace, so they **inherit the egress firewall** — nested containers reach the public internet but not your LAN or host, just like the agent.
+
+- **Persistence:** a per-project `agent-podman-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts.
+- **Access pattern:** reach a nested service from the agent via its **published port on `localhost`**; container-to-container uses service names over netavark/aardvark-dns.
+- **Storage driver:** fuse-overlayfs when `/dev/fuse` is available (passed through automatically when the host exposes it; force with `POWBOX_FUSE=on`), otherwise the slower `vfs` driver.
+
+The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal to move that workload to a dedicated VM. See [docs/rootless-podman.md](docs/rootless-podman.md) for design notes and a validation procedure.
+
 ## Per-Project Workspace Paths
 
 Each project is mounted at `/workspace/<project>-<hash>` inside the container instead of a shared `/workspace` path.
@@ -432,6 +444,7 @@ Both libraries honour the same variables:
 |---|---|---|
 | `POWBOX_ROOT` | auto-detected from the script's location | Path to your PowBox checkout. Only needed if auto-detection fails. |
 | `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
+| `POWBOX_FUSE` | `auto` | Whether to pass `/dev/fuse` through for rootless Podman's fuse-overlayfs storage driver. `auto` detects the device on the host; `on` forces it (use when the daemon has `/dev/fuse` but the host shell doesn't, e.g. some Docker Desktop setups); `off` skips it and falls back to the slower `vfs` driver. |
 
 Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.
 

@@ -132,6 +132,26 @@ if [ -n "${PNPM_STORE_DIR:-}" ]; then
 	fi
 fi
 
+# Prepare rootless Podman (only present once the image gained container-engine
+# support). XDG_RUNTIME_DIR must exist and be private for the runtime/runroot,
+# and the storage driver is chosen by whether /dev/fuse was passed through:
+# fuse-overlayfs when present, otherwise the slower vfs driver so `podman` still
+# works. The graphroot (~/.local/share/containers) is a per-project Docker
+# volume mounted by launch-agent.sh, so images and named volumes persist.
+if command -v podman >/dev/null 2>&1; then
+	_xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"
+	mkdir -p "$_xdg" && chmod 700 "$_xdg" || echo "Warning: could not prepare XDG_RUNTIME_DIR ($_xdg) for Podman; continuing." >&2
+	mkdir -p "$HOME/.config/containers"
+	if [ -e /dev/fuse ]; then
+		# Use the image default (overlay + fuse-overlayfs); drop any stale vfs override.
+		rm -f "$HOME/.config/containers/storage.conf"
+	else
+		echo "Note: /dev/fuse not available; Podman will use the slower vfs storage driver. Pass it through with POWBOX_FUSE=on, or it is auto-detected from the host." >&2
+		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
+	fi
+	unset _xdg
+fi
+
 if [ "$#" -eq 0 ]; then
 	exec zsh
 fi

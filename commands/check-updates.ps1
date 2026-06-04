@@ -246,7 +246,9 @@ if ($Porcelain) {
 Write-Host ''
 Write-Host 'Agent update check:'
 if ($baseBaked   -or $baseLatest)   { Write-BaseComparison $baseBaked $baseLatest }
-if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
+# Codex before Claude: Codex updates less often and the Claude layer is built on
+# top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }
+if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
 Write-Host ''
 $global:LASTEXITCODE = 0

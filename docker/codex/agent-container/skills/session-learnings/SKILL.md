@@ -59,6 +59,7 @@ Do not use this skill to file ordinary product bugs, code-review findings, or fe
    # Agent Session Learnings - YYYY-MM-DD HH:MM UTC
 
    Repository: <repo name or path>
+   Agent: Codex
    Session focus: <one-line summary of the work>
    Status: Uncommitted retrospective note
 

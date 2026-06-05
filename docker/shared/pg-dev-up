@@ -72,13 +72,17 @@ psql_postgres() {
 	"$BINDIR/psql" -h "$PG_HOST" -p "$PGPORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"
 }
 
-role_exists() { [ "$(psql_postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$1'")" = "1" ]; }
-db_exists() { [ "$(psql_postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$1'")" = "1" ]; }
+# Pass identifiers/literals as psql variables so psql does the SQL quoting
+# (:'var' → quoted string literal, :"var" → quoted identifier). Never splice
+# $POSTGRES_* straight into SQL — values may contain quotes or injection.
+role_exists() { [ "$(psql_postgres -tA -v rolname="$1" -c "SELECT 1 FROM pg_roles WHERE rolname = :'rolname'")" = "1" ]; }
+db_exists() { [ "$(psql_postgres -tA -v datname="$1" -c "SELECT 1 FROM pg_database WHERE datname = :'datname'")" = "1" ]; }
 
 ensure_role_db() {
 	if [ "$POSTGRES_USER" != "postgres" ] && ! role_exists "$POSTGRES_USER"; then
 		log "Creating role $POSTGRES_USER…"
-		psql_postgres -c "CREATE ROLE \"$POSTGRES_USER\" LOGIN SUPERUSER PASSWORD '$POSTGRES_PASSWORD';" >/dev/null
+		psql_postgres -v rolname="$POSTGRES_USER" -v rolpass="$POSTGRES_PASSWORD" \
+			-c "CREATE ROLE :\"rolname\" LOGIN SUPERUSER PASSWORD :'rolpass';" >/dev/null
 	fi
 	if ! db_exists "$POSTGRES_DB"; then
 		log "Creating database $POSTGRES_DB (owner $POSTGRES_USER)…"
@@ -86,10 +90,32 @@ ensure_role_db() {
 	fi
 }
 
+# Percent-encode a string for safe use as a URL component (RFC 3986: keep the
+# unreserved set literal, %-encode everything else). LC_ALL=C makes the loop
+# iterate byte-wise so multibyte chars encode correctly.
+urlencode() {
+	local LC_ALL=C s="$1" i c out=""
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		case "$c" in
+		[A-Za-z0-9.~_-]) out+="$c" ;;
+		*) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
 print_url() {
-	local url="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${PGPORT}/${POSTGRES_DB}"
+	# Percent-encode credentials so metacharacters (@ / # & : etc.) don't
+	# corrupt the URL; the consumer percent-decodes per RFC 3986.
+	local user pass db url
+	user="$(urlencode "$POSTGRES_USER")"
+	pass="$(urlencode "$POSTGRES_PASSWORD")"
+	db="$(urlencode "$POSTGRES_DB")"
+	url="postgresql://${user}:${pass}@localhost:${PGPORT}/${db}"
 	if [ "${1:-}" = "--export" ]; then
-		printf 'export DATABASE_URL=%s\n' "$url"
+		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe.
+		printf 'export DATABASE_URL=%q\n' "$url"
 	else
 		printf '%s\n' "$url"
 	fi

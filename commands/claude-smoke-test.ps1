@@ -18,6 +18,8 @@ $rootDir = Split-Path -Parent $scriptDir
     'python3 --version >/dev/null'
     'sqlcmd -? >/dev/null'
     'sqlite3 --version >/dev/null'
+    'psql --version >/dev/null'
+    'pg-dev-up check >/dev/null'
     'shellcheck --version >/dev/null'
     'ping -V >/dev/null'
     'nc -h >/dev/null 2>&1'

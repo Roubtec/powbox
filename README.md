@@ -53,7 +53,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Git, shell utilities, and more) used by the unified agent image
+- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, PostgreSQL 16, Git, shell utilities, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`

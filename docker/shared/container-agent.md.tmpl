@@ -16,7 +16,8 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | PowerShell | `pwsh` runs `.ps1` scripts; lint them with `pwsh -Command "Invoke-ScriptAnalyzer -Path ."` (PSScriptAnalyzer is a `pwsh` module/cmdlet, not a shell command — and `shellcheck` does *not* lint PowerShell) |
 | Build | `make`, `patch`, `gcc`, `g++` |
 | Archives/transfer | `wget`, `curl`, `zip`, `unzip`, `rsync`, `bzip2`, `xz`, `zstd` |
-| Data | `sqlcmd`, `sqlite3`, `envsubst`, `bc`, `xxd` |
+| Data | `envsubst`, `bc`, `xxd` |
+| Databases | `sqlite3`, `sqlcmd`/`bcp` (Azure SQL / MSSQL), `psql` + a bundled **PostgreSQL 16** server — run `pg-dev-up` to start a throwaway local cluster (see "Local PostgreSQL" below) |
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
 | Document processing | `pdftotext`, `pdftoppm`, `pdfinfo`, `pandoc`, `marp` (Markdown → slide decks), `mmdc` (Mermaid diagram source → SVG/PNG/PDF) |
@@ -56,6 +57,23 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 ## Network
 
 Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+
+## Local PostgreSQL
+
+The PostgreSQL 16 server binaries are baked in, but no daemon runs by default (it would clash with a project's own docker-compose Postgres). When a suite needs a live database (`prisma migrate`, a `test:db` integration run, etc.), stand one up on demand:
+
+```bash
+pg-dev-up                      # initdb + start + create db, prints DATABASE_URL
+eval "$(pg-dev-up url --export)"   # export DATABASE_URL into the current shell
+```
+
+It runs as the unprivileged `node` user with trust auth on a loopback socket (the container is the security boundary), so no `sudo -u postgres` dance is needed. Defaults are `postgres`/`postgres`/`postgres` on port `5432`; override per project to match its `.env` before the first call:
+
+```bash
+POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
+```
+
+Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up help`.
 
 ## Installing additional packages
 

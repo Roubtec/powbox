@@ -54,6 +54,12 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 
 See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm's store is pinned outside the workspace with `package-import-method=copy` because the workspace bind mount and the pnpm volume are different filesystems.
 
+## Bundled PostgreSQL
+
+- The base image installs the PostgreSQL 16 server + client + contrib from the official PGDG apt repo (`docker/base/Dockerfile`), version-matched to the `postgres:16.x` images projects pin so integration suites don't hit behavior drift from Debian's stock 15.
+- No daemon is started at build or runtime. `docker/shared/pg-dev-up` (baked to `/usr/local/bin/pg-dev-up`) stands up a throwaway loopback cluster on demand under `$PGDATA` (default `/tmp/pgdata`), as the unprivileged `node` user with trust auth — so it needs **no** sudoers entry. Credentials/port/db are env-overridable; see the script header.
+- The server binaries live off `PATH` at `/usr/lib/postgresql/<major>/bin`; `pg-dev-up` resolves the newest installed major itself, so a future PG bump needs no path edit.
+
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.

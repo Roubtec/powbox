@@ -97,7 +97,7 @@ Read `AGENTS.md` first for project conventions.
 
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
 It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
-It must be a **new** `Agent` invocation — never a `SendMessage` continuation of the implementer.
+It must be a **new** `Agent` invocation — a fresh-eyes agent with no implementation context, never a continuation of the implementer (see the note under [Feedback Loop](#feedback-loop) about the misleading `SendMessage` footer).
 Spawn it only **after** the implementer has fully completed and its commits have landed — never concurrently with the implementer, and never in the same turn or parallel tool block. You share one working tree, so a concurrent reviewer scans an empty or half-finished branch and wrongly reports "no implementation" (see the shared-working-tree rule in Architecture).
 It is launched in the **foreground** (not background) since the feedback loop must complete before the orchestrator can advance branches or start the next task.
 
@@ -212,6 +212,8 @@ For each task file in the input set:
 ## Feedback Loop
 
 When the reviewer reports material issues:
+
+> **Fix-ups always use a fresh `Agent` spawn — never a "continued" prior implementer.** Every `Agent` result prints a `use SendMessage with to: '<id>' to continue this agent` footer, but **`SendMessage` is not available as a tool in this harness** (it is not in the toolset and `ToolSearch` does not find it). Treat that footer as harness boilerplate and ignore it — you are not missing a capability you need to hunt for. A fresh spawn is the *preferred* path here, not a workaround: the fix-up agent reads the already-committed branch plus the reviewer's verbatim findings with no attachment to its earlier choices, which keeps the fix honest. The only thing "lost" is a context window you wanted cleared anyway; re-reading the branch is cheap and bounded.
 
 1. **Spawn a new implementer agent** (on its own, as in step 4) with:
    - The original task file content.

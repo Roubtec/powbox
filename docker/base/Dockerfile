@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     strace \
     sudo \
+    time \
     tree \
     unixodbc-dev \
     unzip \

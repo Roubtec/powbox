@@ -26,8 +26,9 @@ while IFS= read -r vol; do
 	candidates+=("$vol")
 done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt)-|^agent-pnpm-store$')
 
-# Determine which volumes are orphaned. agent-pnpm-store is never "expected",
-# so it is always pruned when present.
+# Determine which volumes are orphaned. agent-pnpm-store is never "expected", so it
+# is always a candidate when present — but if a pre-change container still mounts it,
+# the removal below is skipped gracefully (Docker refuses to remove an in-use volume).
 prune=()
 for vol in "${candidates[@]}"; do
 	orphaned=true
@@ -57,12 +58,24 @@ read -r answer
 case "$answer" in
 [yY]*)
 	removed=0
+	skipped=0
 	for vol in "${prune[@]}"; do
-		docker volume rm "$vol" >/dev/null
-		echo "Removed $vol"
-		removed=$((removed + 1))
+		# Capture stderr (discard the success-name on stdout). Run inside the `if`
+		# condition so a non-zero exit does not trip `set -e` and abort the loop —
+		# a volume still referenced by an existing container (e.g. a pre-change
+		# container holding the deprecated agent-pnpm-store) can't be removed yet.
+		if err="$(docker volume rm "$vol" 2>&1 >/dev/null)"; then
+			echo "Removed $vol"
+			removed=$((removed + 1))
+		else
+			echo "Skipped $vol — could not remove (still in use by a container?): ${err}" >&2
+			skipped=$((skipped + 1))
+		fi
 	done
 	echo "Removed $removed orphaned volume(s)."
+	if [ "$skipped" -gt 0 ]; then
+		echo "Skipped $skipped volume(s) still in use — remove or recreate the owning container, then re-run." >&2
+	fi
 	;;
 *)
 	echo "Aborted."

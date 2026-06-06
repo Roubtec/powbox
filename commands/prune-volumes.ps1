@@ -41,15 +41,29 @@ Write-Host 'Prune candidates:'
 $pruneCandidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
 
 $removedCount = 0
+$skippedCount = 0
 
 foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
     if ($PSCmdlet.ShouldProcess($volumeName, 'Remove orphaned per-project volume')) {
-        docker volume rm $volumeName | Out-Null
-        $removedCount += 1
-        Write-Host "Removed $volumeName"
+        # Capture output (merging stderr) and key off the exit code: a volume still
+        # referenced by an existing container (e.g. a pre-change container holding the
+        # deprecated agent-pnpm-store) can't be removed yet, and docker returns non-zero.
+        # Don't count or report it as removed.
+        $rmOutput = docker volume rm $volumeName 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $removedCount += 1
+            Write-Host "Removed $volumeName"
+        }
+        else {
+            $skippedCount += 1
+            Write-Warning "Skipped $volumeName - could not remove (still in use by a container?): $rmOutput"
+        }
     }
 }
 
 if ($removedCount -gt 0) {
     Write-Host "Removed $removedCount orphaned volume(s)."
+}
+if ($skippedCount -gt 0) {
+    Write-Warning "Skipped $skippedCount volume(s) still in use - remove or recreate the owning container, then re-run."
 }

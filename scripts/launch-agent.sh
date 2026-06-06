@@ -174,8 +174,9 @@ NM_VOLUME="agent-nm-${PROJECT_NAME}"
 # instead of copying them. ext4, persistent, container-local, and shared between
 # this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
 WT_VOLUME="agent-wt-${PROJECT_NAME}"
+WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
-WT_STORE_DIR="/workspace/${PROJECT_NAME}/.worktrees/.pnpm-store"
+WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
@@ -283,6 +284,30 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Detect whether the existing container predates the per-project .worktrees volume
+# (and its co-located pnpm store). Such a container was created before this change,
+# so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
+# it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
+# stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
+# take effect; warn (don't disrupt) if it is currently running.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -z "$HAS_WT_MOUNT" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to enable hardlinked worktree node_modules." >&2
+		else
+			echo "Container ${CONTAINER_NAME} predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		if [ "$DETACH" = true ]; then
@@ -347,8 +372,6 @@ CTX_ARGS=()
 if [ -n "$CTX_PATH" ]; then
 	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
 fi
-
-WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \

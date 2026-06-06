@@ -25,7 +25,7 @@ So:
 
 ### Durability & host isolation (this container)
 
-This repo's main checkout may be bind-mounted from a non-Linux host into a Linux container, so the PowBox worktree roots are **shadowed** to keep their writes container-local and invisible to the host (no cross-platform path pollution). They are shadowed two different ways, and the difference matters:
+This repo's main checkout is bind-mounted from the host, so the PowBox worktree roots are **shadowed** to keep their writes container-local and invisible to the host. They are shadowed two different ways, and the difference matters:
 
 - **`.worktrees/`** is backed by a **persistent per-project Docker volume** that the powbox launcher mounts there, and which *also* holds the pnpm store (`.worktrees/.pnpm-store`). Because the store and every `.worktrees/$CONTAINER_NAME/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — so installs avoid full package copies, there is **no shared 2 GB tmpfs cap**, and many worktrees can install concurrently. The volume is on disk, not RAM. *(Fallback: if the container was launched without that volume, `.worktrees` is tmpfs-shadowed instead — see Bootstrap.)*
 - **`.claude/worktrees/`** and **`.git/worktrees/`** remain **tmpfs-shadowed** (ephemeral): the harness-native worktree path (documented by PowBox, not a Codex execution requirement) and the per-worktree git metadata.
@@ -43,7 +43,7 @@ The operating discipline that follows:
 Do this in the **main working tree** before creating worktrees.
 All steps are idempotent.
 
-1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher normally mounts the per-project volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. `shadow-refresh.sh` can apply existing declarations immediately, but it cannot repair missing declarations — if a check below fails, stop and run `enable-worktrees` before continuing:
+1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher normally mounts the per-project volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. `shadow-refresh.sh` applies existing declarations immediately but cannot add missing ones — if a check below fails, stop and fix it before continuing: run `enable-worktrees` to add any missing `.powbox.yml` declarations, or, if the roots are already declared, rebuild the powbox image on the host (`./build.sh all`) and relaunch (the running image predates worktree-shadow support):
 
    ```bash
    ROOT="$(git rev-parse --show-toplevel)"
@@ -146,7 +146,7 @@ Prefer a slower run that completes over a faster one that fails, and never push 
 
 Cap each wave's concurrency at the **minimum** of its dependency-derived width and what the environment can support. Concretely, before and during each wave:
 
-- **Storage headroom.** Before launching a wave, measure free space on the `.worktrees` mount (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). On the normal volume-backed path, pnpm packages are hardlinked, so budget mainly for build artifacts and package metadata. If `.worktrees` is the tmpfs fallback, measure one representative install and include its package-copy cost. Run the wave in smaller sub-batches when projected demand approaches available space.
+- **Storage headroom.** Before launching a wave, measure free space on the `.worktrees` mount (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). Estimate `per_worktree_need`, then cap width at `max_concurrent = max(1, floor(free_bytes / per_worktree_need))`; if that is below the wave's task count, run the wave in **sub-batches** of `max_concurrent` rather than all at once. On the normal volume-backed path pnpm packages are hardlinked, so `per_worktree_need` is mainly build artifacts plus package metadata; on the tmpfs fallback, measure one representative install and add its full package-copy cost. When unsure, measure one install before fanning out.
 - **`ENOSPC` mid-wave.** Stop adding concurrency, let viable in-flight tasks finish, and reclaim only worktrees whose changes are committed and pushed. Then retry the failed and remaining tasks in smaller sub-batches — ultimately one at a time. Never force-remove a worktree with uncommitted changes just to free space, and never abandon a task because the parallel attempt failed.
 - **Shared exclusive resources.** Some validation cannot run two-at-once even in separate worktrees because it contends for a single host-wide resource: a fixed listen port, one shared dev database on one port, or a build/e2e server that infers the workspace root from the repo-root lockfile (see below). Run such phases **serially** regardless of wave width — give each task exclusive use, then move on.
 - **Provider rate-limiting.** Repeated rate-limit / overload errors when spawning many subagents at once are a signal to fan out less. Reduce the number of concurrent subagents per phase and proceed.

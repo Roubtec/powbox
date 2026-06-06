@@ -19,7 +19,7 @@ powbox keeps declared workspace subdirectories container-local so writes there n
    shadow:
      - .worktrees          # orchestrator-created worktrees (one per task)
      - .claude/worktrees   # harness-native worktrees (EnterWorktree / Agent isolation)
-     - .git/worktrees      # per-worktree git metadata — keeps host Windows-path
+     - .git/worktrees      # per-worktree git metadata — keeps the host's own
                            #   worktree registrations out of the container, and ours off the host
    ```
 

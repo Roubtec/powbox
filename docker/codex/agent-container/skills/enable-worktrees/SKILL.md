@@ -24,7 +24,7 @@ For worktree-based parallelism a repo needs two committed things.
    shadow:
      - .worktrees          # orchestrator-created worktrees (one per task)
      - .claude/worktrees   # PowBox-documented harness-native worktrees
-     - .git/worktrees      # per-worktree git metadata — keeps host Windows-path
+     - .git/worktrees      # per-worktree git metadata — keeps the host's own
                            #   worktree registrations out of the container, and ours off the host
    ```
 

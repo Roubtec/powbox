@@ -65,19 +65,23 @@ if ($SkipDb) {
 }
 
 Write-Host "Running pg-dev-up functional test against $Image ..."
-$dbScript = @'
-set -e
-pg-dev-up up >/dev/null
-url=$(pg-dev-up url)
-echo "DATABASE_URL=$url"
-printf %s "$url" | grep -qF "p%40s%2Fs%26w%23d" || { echo "FAIL: password not percent-encoded in URL" >&2; exit 1; }
-printf %s "$url" | grep -qF "@127.0.0.1:" || { echo "FAIL: URL host is not 127.0.0.1" >&2; exit 1; }
-eval "$(pg-dev-up url --export)"
-out=$(psql "$DATABASE_URL" -tAc "SELECT current_user, current_database()")
-echo "psql SELECT -> $out"
-printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }
-pg-dev-up down >/dev/null
-'@
+# Build the in-container script with explicit LF joins (single-quoted lines so
+# PowerShell leaves the shell $vars alone). A here-string would inherit this
+# file's CRLF endings (.gitattributes pins *.ps1 to eol=crlf), and the stray
+# ^M would break parsing under /bin/sh -lc on a Windows checkout.
+$dbScript = @(
+  'set -e'
+  'pg-dev-up up >/dev/null'
+  'url=$(pg-dev-up url)'
+  'echo "DATABASE_URL=$url"'
+  'printf %s "$url" | grep -qF "p%40s%2Fs%26w%23d" || { echo "FAIL: password not percent-encoded in URL" >&2; exit 1; }'
+  'printf %s "$url" | grep -qF "@127.0.0.1:" || { echo "FAIL: URL host is not 127.0.0.1" >&2; exit 1; }'
+  'eval "$(pg-dev-up url --export)"'
+  'out=$(psql "$DATABASE_URL" -tAc "SELECT current_user, current_database()")'
+  'echo "psql SELECT -> $out"'
+  'printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }'
+  'pg-dev-up down >/dev/null'
+) -join "`n"
 
 docker run --rm `
   -e POSTGRES_USER=t `

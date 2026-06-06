@@ -61,6 +61,13 @@ $safeProject = (($projectName.ToLowerInvariant() -replace '[^a-z0-9_.-]', '-') -
 $projectSlug = "$safeProject-$projectHash"
 $containerName = "$Agent-$projectSlug"
 $nodeModulesVolume = "agent-nm-$projectSlug"
+# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+# ONE mount so pnpm hardlinks package files into per-worktree node_modules
+# instead of copying them. ext4, persistent, container-local, and shared between
+# this project's Claude and Codex containers (project-keyed, like the nm volume).
+$worktreesVolume = "agent-wt-$projectSlug"
+# pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
+$worktreesStoreDir = "/workspace/$projectSlug/.worktrees/.pnpm-store"
 
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
@@ -70,7 +77,7 @@ $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
 # config volumes are always created/mounted so the non-primary agent can be
 # spun up in-container with its own persistent login and skills.
-$sharedVolumes = @("agent-gh-config", "agent-pnpm-store", "agent-zsh-history", "claude-config", "codex-config")
+$sharedVolumes = @("agent-gh-config", "agent-zsh-history", "claude-config", "codex-config")
 foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {
@@ -195,6 +202,34 @@ if (-not $Volatile -and $containerExists) {
   }
 }
 
+# Detect whether the existing container predates the per-project .worktrees volume
+# (and its co-located pnpm store). Such a container was created before this change,
+# so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
+# it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
+# stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
+# take effect; warn (don't disrupt) if it is currently running.
+if (-not $Volatile -and $containerExists) {
+  $hasWtMount = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/.worktrees`"}}yes{{end}}{{end}}" $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $hasWtMount = "" }
+  if ([string]::IsNullOrWhiteSpace($hasWtMount)) {
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use -Volatile) to enable hardlinked worktree node_modules." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "Container $containerName predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting a missing .worktrees volume mount."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+}
+
 if (-not $Volatile -and $containerExists) {
   if ($containerRunning) {
     if ($Detach) {
@@ -272,8 +307,9 @@ if ($resolvedCtx -ne "") {
 
 docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
   -v "${nodeModulesVolume}:/mnt/node_modules" `
+  -v "${worktreesVolume}:/mnt/worktrees" `
   agent `
-  -lc "mkdir -p /mnt/node_modules && chown node:node /mnt/node_modules"
+  -lc "mkdir -p /mnt/node_modules /mnt/worktrees && chown node:node /mnt/node_modules /mnt/worktrees"
 
 if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
@@ -291,21 +327,25 @@ $continueLabel = if ($Continue) { "true" } else { "false" }
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
 # authenticate too.
-$envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent")
+$envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent", "-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 
-# Mount a per-project named volume over node_modules inside the bind mount.
-# This shadows the host's node_modules with a Linux-native volume so that
+# Mount per-project named volumes over node_modules and .worktrees inside the
+# bind mount. Both shadow the host paths with Linux-native ext4 volumes so that
 # native binaries compiled for the container OS are never mixed with host
-# binaries. The trade-off is that Docker may create an empty node_modules/
-# directory on the host the first time (usually harmless since the project
-# already has one), and the host's node_modules is inaccessible inside the
-# container (intentional — use the volume copy for all in-container installs).
+# binaries. The .worktrees volume additionally co-locates the pnpm store
+# (PNPM_STORE_DIR) with each worktree's node_modules under one mount, so
+# per-worktree `pnpm install` hardlinks from the store instead of copying.
+# The trade-off is that Docker may create empty node_modules/ and .worktrees/
+# directories on the host the first time (harmless; .worktrees is gitignored in
+# worktree-enabled repos), and the host's copies are inaccessible inside the
+# container (intentional — use the volume copies for all in-container installs).
 docker compose @composeArgs run @runArgs `
   @envArgs `
   @gitConfigArgs `
   @ghConfigArgs `
   @ctxArgs `
   -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
+  -v "${worktreesVolume}:${workspaceMount}/.worktrees" `
   -w $workspaceMount `
   agent `
   @command

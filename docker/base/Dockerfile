@@ -209,10 +209,16 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV CHROME_NO_SANDBOX=true
 
-# Keep pnpm's store outside the workspace because the workspace bind mount and
-# the shared pnpm volume are different filesystems.
+# Default pnpm store location and import method. `auto` lets pnpm hardlink (or
+# reflink-clone) package files from the store into node_modules when the store
+# and node_modules share one mount, and transparently fall back to copying when
+# they don't — so it is never worse than the old forced `copy`, and is far
+# cheaper when they are co-located. The launcher overrides store-dir per project
+# at startup to a path inside the worktrees volume (see entrypoint-core.sh) so
+# that per-worktree installs hardlink instead of copying. This store-dir is only
+# the fallback default for that runtime override.
 RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
-    && pnpm config --global set package-import-method copy
+    && pnpm config --global set package-import-method auto
 
 # Install Oh My Zsh and the shared zsh configuration.
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended

@@ -169,6 +169,14 @@ PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
 PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 NM_VOLUME="agent-nm-${PROJECT_NAME}"
+# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+# ONE mount so pnpm hardlinks package files into per-worktree node_modules
+# instead of copying them. ext4, persistent, container-local, and shared between
+# this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
+WT_VOLUME="agent-wt-${PROJECT_NAME}"
+WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
+# pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
+WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
@@ -176,7 +184,7 @@ COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/comp
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
 # config volumes are always created/mounted so the non-primary agent can be
 # spun up in-container with its own persistent login and skills.
-SHARED_VOLUMES=(agent-gh-config agent-pnpm-store agent-zsh-history claude-config codex-config)
+SHARED_VOLUMES=(agent-gh-config agent-zsh-history claude-config codex-config)
 for vol in "${SHARED_VOLUMES[@]}"; do
 	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
 		docker volume create "$vol" >/dev/null
@@ -276,6 +284,30 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Detect whether the existing container predates the per-project .worktrees volume
+# (and its co-located pnpm store). Such a container was created before this change,
+# so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
+# it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
+# stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
+# take effect; warn (don't disrupt) if it is currently running.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -z "$HAS_WT_MOUNT" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to enable hardlinked worktree node_modules." >&2
+		else
+			echo "Container ${CONTAINER_NAME} predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		if [ "$DETACH" = true ]; then
@@ -341,12 +373,11 @@ if [ -n "$CTX_PATH" ]; then
 	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
 fi
 
-WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
-
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \
+	-v "${WT_VOLUME}:/mnt/worktrees" \
 	agent \
-	-lc 'mkdir -p /mnt/node_modules && chown node:node /mnt/node_modules'
+	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees && chown node:node /mnt/node_modules /mnt/worktrees'
 
 RUN_ARGS=()
 if [ "$DETACH" = true ]; then
@@ -358,15 +389,18 @@ fi
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
 # authenticate too.
-EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
+EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT" -e "PNPM_STORE_DIR=$WT_STORE_DIR")
 
-# Mount a per-project named volume over node_modules inside the bind mount.
-# This shadows the host's node_modules with a Linux-native volume so that
+# Mount per-project named volumes over node_modules and .worktrees inside the
+# bind mount. Both shadow the host paths with Linux-native ext4 volumes so that
 # native binaries compiled for the container OS are never mixed with host
-# binaries. The trade-off is that Docker may create an empty node_modules/
-# directory on the host the first time (usually harmless since the project
-# already has one), and the host's node_modules is inaccessible inside the
-# container (intentional — use the volume copy for all in-container installs).
+# binaries. The .worktrees volume additionally co-locates the pnpm store
+# (PNPM_STORE_DIR) with each worktree's node_modules under one mount, so
+# per-worktree `pnpm install` hardlinks from the store instead of copying.
+# The trade-off is that Docker may create empty node_modules/ and .worktrees/
+# directories on the host the first time (harmless; .worktrees is gitignored in
+# worktree-enabled repos), and the host's copies are inaccessible inside the
+# container (intentional — use the volume copies for all in-container installs).
 CONTINUE_LABEL="false"
 if [ "$CONTINUE" = true ]; then
 	CONTINUE_LABEL="true"
@@ -380,6 +414,7 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \
 	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
+	-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees" \
 	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

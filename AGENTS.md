@@ -31,8 +31,8 @@ See README "Layout" for the repo file map. Rules that map does not state:
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
-| `/home/node/.local/share/pnpm/store` | Shared pnpm store volume |
-| `/workspace/<project-slug>/node_modules` | Per-project package volume |
+| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project>`) |
+| `/workspace/<project-slug>/.worktrees` | Per-project worktrees volume (`agent-wt-<project>`); also holds the per-project pnpm store at `.worktrees/.pnpm-store` |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 
@@ -52,7 +52,7 @@ Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars)
 
 ## Volumes and Stores
 
-See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm's store is pinned outside the workspace with `package-import-method=copy` because the workspace bind mount and the pnpm volume are different filesystems.
+See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm can only **hardlink** from its store when the store and the target `node_modules` share **one mount** (not merely one device — `link(2)` returns `EXDEV` across mount points even on the same filesystem). So the per-project pnpm store lives *inside* the `.worktrees` volume (`agent-wt-<project>`) alongside every `.worktrees/<task>/node_modules`, and `package-import-method=auto` lets pnpm hardlink there and transparently fall back to copying for the root `node_modules` (a separate mount). The launcher passes `PNPM_STORE_DIR` and `entrypoint-core.sh` points pnpm at it per project.
 
 ## Bundled PostgreSQL
 

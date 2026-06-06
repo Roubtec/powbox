@@ -21,15 +21,11 @@ services:
     volumes:
       - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh
-      - pnpm-store:/home/node/.local/share/pnpm/store
       - zsh-history:/home/node/.zsh_history_dir
 
 volumes:
   gh-config:
     name: agent-gh-config
-    external: true
-  pnpm-store:
-    name: agent-pnpm-store
     external: true
   zsh-history:
     name: agent-zsh-history

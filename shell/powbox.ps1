@@ -138,6 +138,44 @@ function _Powbox-OfferReseed {
     }
 }
 
+function _Powbox-NormLabel {
+    param([string]$Value)
+    if (-not $Value -or $Value -eq '<no value>') { return 'unknown' }
+    return $Value
+}
+
+# Show the powbox commit that built each layer of powbox-agent:latest, plus the
+# powbox working-tree HEAD so a stale image (built from an older repo state) is
+# obvious even when the agent binaries themselves are current. A piecemeal build
+# can carry up to three distinct commits: the base image has its own parent, and
+# the Claude layer can rebuild without touching the Codex layer below it.
+function agent-image-info {
+    $img = "powbox-agent:latest"
+    docker image inspect $img *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Image $img not found - build it with agent-update."
+        return
+    }
+    $fmt = '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}'
+    $p = (docker image inspect $img --format $fmt) -split '\|'
+    Write-Host "$img - powbox commit that built each layer:"
+    Write-Host ("  base:         {0}" -f (_Powbox-NormLabel $p[0]))
+    Write-Host ("  codex:        {0}  (codex {1})" -f (_Powbox-NormLabel $p[1]), (_Powbox-NormLabel $p[3]))
+    Write-Host ("  claude/top:   {0}  (claude {1})" -f (_Powbox-NormLabel $p[2]), (_Powbox-NormLabel $p[4]))
+    $head = git -C $env:POWBOX_ROOT rev-parse --short HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $head) {
+        $dirty = git -C $env:POWBOX_ROOT status --porcelain 2>$null
+        if ($dirty) { $head = "$head-dirty" }
+        Write-Host ("  working tree: {0}" -f $head)
+    }
+}
+
+# Print image provenance, then offer the skill re-seed, after a successful build.
+function _Powbox-PostBuild {
+    agent-image-info 2>$null
+    _Powbox-OfferReseed
+}
+
 # Read the machine-readable update table once (one container start reads both
 # baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
 function _Powbox-AgentPorcelain {
@@ -277,6 +315,11 @@ function agent-update {
     $report = & "$env:POWBOX_ROOT\commands\check-updates.ps1" 6>&1 | ForEach-Object { $_.ToString() }
     $report | ForEach-Object { Write-Host $_ }
 
+    # Provenance: which powbox commit built the current image vs. the working
+    # tree. A current binary set can still sit on an image built from an older
+    # repo - this surfaces that so the user can rebuild for repo changes alone.
+    agent-image-info 2>$null
+
     if (-not ($report -match 'update available')) {
         Write-Host "All agent images are up to date."
         return
@@ -314,7 +357,7 @@ function agent-update {
     if ($baseStale) {
         Write-Host "Base image is stale — rebuilding base (with -Pull) and the agent image on top."
         _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @args
-        if ($LASTEXITCODE -eq 0) { _Powbox-OfferReseed }
+        if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
         return
     }
 
@@ -325,7 +368,7 @@ function agent-update {
 
     Write-Host "Updating: $($stale -join ', ') (rebuilding only the affected image layers)."
     _Powbox-BuildFromTable -Table $table -Force $stale @args
-    if ($LASTEXITCODE -eq 0) { _Powbox-OfferReseed }
+    if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
 }
 
 function cc-list {

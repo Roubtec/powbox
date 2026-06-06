@@ -49,9 +49,20 @@ COPY --chown=node:node docker/codex/agent-container/ /home/node/.agent-container
 # changes — the expensive Codex/Claude install layers sit ABOVE and are never
 # affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
 # default keeps standalone `docker build` working.
+#
+# /home/node/.powbox/{claude,codex}.commit are the in-container provenance
+# surface (base.commit is inherited from the base image). claude.commit equals
+# POWBOX_COMMIT (this top layer); codex.commit is POWBOX_COMMIT_CODEX, which the
+# build script carries forward when the Codex install layer is reused so it
+# reflects the commit that actually built Codex — not this build's commit. It is
+# NOT stamped inside the Codex layer itself, which would bust that layer's cache.
 ARG POWBOX_COMMIT=unknown
+ARG POWBOX_COMMIT_CODEX=unknown
 RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.agent-container/codex/build-epoch >/dev/null \
-    && printf '%s\n' "${POWBOX_COMMIT}" | tee /home/node/.agent-container/claude/build-commit /home/node/.agent-container/codex/build-commit >/dev/null
+    && printf '%s\n' "${POWBOX_COMMIT}" | tee /home/node/.agent-container/claude/build-commit /home/node/.agent-container/codex/build-commit >/dev/null \
+    && mkdir -p /home/node/.powbox \
+    && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/claude.commit \
+    && printf '%s\n' "${POWBOX_COMMIT_CODEX}" > /home/node/.powbox/codex.commit
 
 # --- Entrypoint + every agent's setup hook -----------------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
@@ -61,7 +72,19 @@ COPY --chmod=755 \
     docker/shared/entrypoint-claude-hook.sh \
     docker/shared/entrypoint-codex-hook.sh \
     docker/shared/seed-skills.sh \
+    docker/shared/powbox-provenance \
     /usr/local/bin/
+
+# --- Provenance labels -------------------------------------------------------
+# Host-side introspection surface (docker image inspect / docker inspect). The
+# base commit is inherited from the base image's powbox.commit.base label. The
+# Codex/Claude versions let the build script tell whether the Codex install
+# layer will be reused (same version) and thus whether to carry its commit
+# forward. Declared last so they only rebuild this trivial metadata layer.
+LABEL powbox.commit.claude="${POWBOX_COMMIT}" \
+      powbox.commit.codex="${POWBOX_COMMIT_CODEX}" \
+      powbox.codex.version="${CODEX_VERSION}" \
+      powbox.claude.version="${CLAUDE_CODE_VERSION}"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-agent.sh"]
 CMD ["claude", "--dangerously-skip-permissions"]

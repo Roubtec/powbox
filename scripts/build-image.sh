@@ -68,6 +68,37 @@ powbox_commit() {
 }
 POWBOX_COMMIT="$(powbox_commit)"
 
+image_label() {
+	# Echo a label value off a local image, or empty when the image/label is absent.
+	local v
+	v="$(docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}" 2>/dev/null)" || return 0
+	[ "$v" = "<no value>" ] && v=""
+	printf '%s' "$v"
+}
+
+# Commit that built the Codex install layer. Stamping it inside that layer would
+# bust its cache on every commit (defeating the Codex-below-Claude ordering), so
+# resolve it here: use HEAD when the layer will rebuild this run, otherwise carry
+# the existing image's recorded value forward. The version-label comparison
+# mirrors Docker's own cache key (CODEX_VERSION is part of the install
+# instruction). See docs/skills-refresh-and-provenance.md.
+POWBOX_COMMIT_CODEX="$POWBOX_COMMIT"
+resolve_codex_commit() {
+	# Any of these rebuild the Codex layer, so it was built at HEAD.
+	[ "$NO_CACHE" = true ] && return
+	[ "$PULL" = true ] && return
+	case "$TARGET" in base | all) return ;; esac
+	docker image inspect powbox-agent:latest >/dev/null 2>&1 || return
+	local prev_ver prev_commit
+	prev_ver="$(image_label powbox-agent:latest powbox.codex.version)"
+	prev_commit="$(image_label powbox-agent:latest powbox.commit.codex)"
+	# Same Codex version (with a base we are not rebuilding) => layer reused.
+	if [ -n "$prev_commit" ] && [ "$prev_ver" = "$CODEX_VERSION" ]; then
+		POWBOX_COMMIT_CODEX="$prev_commit"
+	fi
+}
+resolve_codex_commit
+
 registry_base_digest() {
 	docker buildx imagetools inspect "$BASE_SOURCE_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null || true
 }
@@ -114,12 +145,13 @@ run_bake() {
 
 	cmd+=("${target_args[@]}")
 
-	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} ${cmd[*]}"
+	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} POWBOX_COMMIT_CODEX=${POWBOX_COMMIT_CODEX} ${cmd[*]}"
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
+		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		"${cmd[@]}"
 }
 
@@ -141,6 +173,7 @@ ensure_base_image() {
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
+		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
 }
 

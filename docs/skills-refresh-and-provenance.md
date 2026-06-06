@@ -195,7 +195,12 @@ hook and the updater worker read it next to `build-epoch`.
 
 ---
 
-## Three-anchor image provenance — design, deferred to a STACKED branch
+## Three-anchor image provenance — IMPLEMENTED on the stacked branch
+
+Status: built on branch `agent-image-provenance` (stacked on `agent-update-skills`).
+The codex read-back resolver was unit-tested against a `docker` stub across the
+rebuild/reuse matrix, and `agent-image-info` was exercised via a label stub; a real
+image build is still to be validated on the host.
 
 Reality: a piecemeal-updated stack can carry up to **three** distinct powbox commits.
 
@@ -247,9 +252,10 @@ The single agent `build-commit` baked in THIS branch (D6) is the same value as t
 - `agent-update` re-seed/prune prompt, bash + PowerShell (D5).
 - Docs: update README "Refreshing Skills", AGENTS.md, this file.
 
-**Stacked branch (image-provenance):** three-anchor labels + files, `build-image.sh`
-read-back/carry-forward, `agent-update` commit display, `zsh` helper. Per the user's
-offer, kept off this branch to keep the skills diff reviewable.
+**Stacked branch (`agent-image-provenance`) — done:** three-anchor labels + files,
+`build-image.{sh,ps1}` codex read-back/carry-forward, `agent-update` commit display,
+the `agent-image-info` shell function, and the baked in-container `powbox-provenance`
+command. Kept off the skills branch to keep that diff reviewable.
 
 ---
 

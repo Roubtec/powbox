@@ -2,80 +2,127 @@
 # Runs INSIDE a throwaway powbox-agent container (see update-skills.sh /
 # update-skills.ps1, which bind-mount this file and the config volumes).
 #
-# Refreshes the image-baked skills onto the persistent agent-config volumes,
-# deliberately overriding the startup seeding's no-clobber. The entrypoint hooks
-# only seed a skill folder when it is absent (docker/shared/entrypoint-*-hook.sh),
-# so a rebuilt image with updated skill text never replaces the stale copy left
-# on the volume by an earlier container start. This worker copies each baked
-# skill over the volume copy so the next agent run sees the latest version.
+# Force-refreshes the image-baked skills onto the persistent agent-config volumes,
+# deliberately overriding the startup seeding's no-clobber. The copy logic and the
+# .powbox-seeded ownership marker live in the shared /usr/local/bin/seed-skills.sh
+# (baked into the image, also sourced by the entrypoint hooks) so the two never
+# drift. This worker adds the refresh-only concerns: classifying each skill,
+# resolving unmarked name-collisions, and pruning obsolete seeds.
 #
-# The copy is staged in a sibling temp dir and swapped in with mv so a
-# concurrently running agent never observes a half-written skill. Skills present
-# on the volume but NOT baked into the image (user-authored, or removed from the
-# image since the last seed) are left untouched.
+# Ownership marker: the entrypoint seeds and this worker stamp every skill they
+# place with <skill>/.powbox-seeded. The marker means "powbox owns this copy":
+#   - marked  -> safe to refresh (overwrite) and to prune when no longer baked
+#   - unmarked-> user-authored or hand-forked; never touched silently
+#
+# Output protocol: one TAB-separated record per line on STDOUT, consumed by the
+# launcher which renders all human-facing text. Warnings go to STDERR.
+#   would-seed|would-refresh|conflict|orphan   (classify mode: no changes)
+#   seeded|refreshed|adopted|pruned|conflict|orphan|error   (apply mode)
+# where each record is: <verb> <TAB> <agent> <TAB> <skill-name>.
+#
+# Modes (env):
+#   POWBOX_SEED_MODE  classify | apply           (default apply)
+#   POWBOX_ADOPT_ALL  true | false               (apply: overwrite+adopt unmarked
+#                                                  name-collisions; default false)
+#   POWBOX_PRUNE      true | false               (apply: delete orphaned seeds;
+#                                                  default false)
 set -euo pipefail
 
-DRY_RUN="${POWBOX_DRY_RUN:-false}"
+# shellcheck source=docker/shared/seed-skills.sh
+. /usr/local/bin/seed-skills.sh
 
-# Copy every skill baked into $src over the matching folder in $dest.
-refresh_agent() {
-	local agent="$1" src="$2" dest="$3"
-	if [ ! -d "$src" ]; then
-		echo "[$agent] no baked skills found at $src; skipping."
-		return 0
-	fi
+MODE="${POWBOX_SEED_MODE:-apply}"
+ADOPT_ALL="${POWBOX_ADOPT_ALL:-false}"
+PRUNE="${POWBOX_PRUNE:-false}"
 
-	local count=0 failed=0 skill_dir name target tmp
-	mkdir -p "$dest"
-	for skill_dir in "$src"/*/; do
-		[ -d "$skill_dir" ] || continue
-		name="$(basename "$skill_dir")"
+emit() { printf '%s\t%s\t%s\n' "$1" "$2" "$3"; }
+
+# Classify (and, in apply mode, act on) one agent's baked skills against its
+# on-volume skills dir. Returns nonzero if any copy/delete failed.
+process_agent() {
+	local agent="$1" src="$2" dest="$3" meta="$4"
+	[ -d "$src" ] || return 0
+
+	local marker rc=0 name target
+	marker="$(seed_marker_content "$meta")"
+	[ "$MODE" = apply ] && mkdir -p "$dest"
+
+	# Set of baked skill names, for the orphan membership test below.
+	local -A baked=()
+	while IFS= read -r name; do
+		[ -n "$name" ] && baked["$name"]=1
+	done < <(seed_skill_names "$src")
+
+	# Classify each baked skill: absent -> seed, marked -> refresh,
+	# unmarked-existing -> conflict (adopt only when explicitly allowed).
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
 		target="$dest/$name"
-
-		if [ "$DRY_RUN" = true ]; then
-			if [ -d "$target" ]; then
-				echo "[$agent] would refresh skill: $name"
+		if [ ! -d "$target" ]; then
+			if [ "$MODE" = classify ]; then
+				emit would-seed "$agent" "$name"
+			elif seed_skill "$src/$name" "$target" "$marker"; then
+				emit seeded "$agent" "$name"
 			else
-				echo "[$agent] would add skill:     $name"
+				emit error "$agent" "$name"
+				rc=1
 			fi
-			count=$((count + 1))
-			continue
-		fi
-
-		tmp="$(mktemp -d "$dest/.${name}.tmp.XXXXXX")"
-		if cp -a "$skill_dir"/. "$tmp"/; then
-			# Drop the stale copy and swap the fresh one in. The window between
-			# rm and mv is tiny, and an agent re-reads SKILL.md at invoke time.
-			rm -rf "$target"
-			if mv "$tmp" "$target"; then
-				echo "[$agent] refreshed skill: $name"
-				count=$((count + 1))
-				continue
+		elif seed_is_marked "$target"; then
+			if [ "$MODE" = classify ]; then
+				emit would-refresh "$agent" "$name"
+			elif seed_skill "$src/$name" "$target" "$marker"; then
+				emit refreshed "$agent" "$name"
+			else
+				emit error "$agent" "$name"
+				rc=1
+			fi
+		else
+			# Unmarked folder colliding with a baked skill name: ambiguous
+			# (legacy seed vs. user fork). Never overwrite silently.
+			if [ "$MODE" = apply ] && [ "$ADOPT_ALL" = true ]; then
+				if seed_skill "$src/$name" "$target" "$marker"; then
+					emit adopted "$agent" "$name"
+				else
+					emit error "$agent" "$name"
+					rc=1
+				fi
+			else
+				emit conflict "$agent" "$name"
 			fi
 		fi
-		rm -rf "$tmp"
-		echo "[$agent] WARNING: failed to refresh skill: $name" >&2
-		failed=$((failed + 1))
-	done
+	done < <(seed_skill_names "$src")
 
-	if [ "$DRY_RUN" = true ]; then
-		echo "[$agent] $count skill(s) would be refreshed in $dest."
-	else
-		echo "[$agent] $count skill(s) refreshed in $dest."
-	fi
-	[ "$failed" -eq 0 ]
+	# Orphans: skills we previously seeded (marked) that are no longer baked.
+	# Unmarked on-volume skills are user-authored and are left entirely alone.
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		[ -n "${baked[$name]:-}" ] && continue
+		seed_is_marked "$dest/$name" || continue
+		if [ "$MODE" = apply ] && [ "$PRUNE" = true ]; then
+			if rm -rf "${dest:?}/${name:?}"; then
+				emit pruned "$agent" "$name"
+			else
+				emit error "$agent" "$name"
+				rc=1
+			fi
+		else
+			emit orphan "$agent" "$name"
+		fi
+	done < <(seed_skill_names "$dest")
+
+	return "$rc"
 }
 
-# agent | baked seed skills dir | destination skills dir on the config volume.
-# Mirrors the SKILLS_SRC/SKILLS_DEST pairs in entrypoint-{claude,codex}-hook.sh
-# and the AGENT_SEED_DIR mapping in entrypoint-agent.sh.
+# agent | baked skills dir | destination skills dir | seed meta dir.
+# Mirrors the entrypoint hooks: claude seeds into $CONFIG/skills, codex into
+# $CONFIG/agents/skills (the ~/.agents symlink target).
 rc=0
-while read -r agent src dest; do
+while read -r agent src dest meta; do
 	[ -n "$agent" ] || continue
-	refresh_agent "$agent" "$src" "$dest" || rc=1
+	process_agent "$agent" "$src" "$dest" "$meta" || rc=1
 done <<'EOF'
-claude /home/node/.agent-container/claude/skills /home/node/.claude/skills
-codex  /home/node/.agent-container/codex/skills  /home/node/.codex/agents/skills
+claude /home/node/.agent-container/claude/skills /home/node/.claude/skills /home/node/.agent-container/claude
+codex  /home/node/.agent-container/codex/skills  /home/node/.codex/agents/skills /home/node/.agent-container/codex
 EOF
 
 exit "$rc"

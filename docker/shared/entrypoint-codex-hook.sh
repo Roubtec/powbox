@@ -201,33 +201,14 @@ if [ -f "$AGENT_TMPL" ]; then
 
 		# Seed image-baked skills (no-clobber: preserves user-modified versions;
 		# delete the skill directory to pick up the latest image version on next
-		# container start). Per-repo .agents/skills/ still takes precedence at
-		# invoke time.
-		SKILLS_SRC="$AGENT_SEED_DIR/skills"
-		SKILLS_DEST="$AGENT_CONFIG_DIR/agents/skills"
-		if [ -d "$SKILLS_SRC" ]; then
-			mkdir -p "$SKILLS_DEST"
-			for skill_dir in "$SKILLS_SRC"/*/; do
-				[ -d "$skill_dir" ] || continue
-				skill_name="$(basename "$skill_dir")"
-				dest_dir="$SKILLS_DEST/$skill_name"
-				[ -d "$dest_dir" ] && continue
-				tmp_dir="$(mktemp -d "$SKILLS_DEST/.${skill_name}.tmp.XXXXXX")"
-				if cp -a "$skill_dir"/. "$tmp_dir"/; then
-					if [ -d "$dest_dir" ]; then
-						rm -rf "$tmp_dir"
-						continue
-					fi
-					if mv "$tmp_dir" "$dest_dir"; then
-						continue
-					fi
-				fi
-				rm -rf "$tmp_dir"
-				if [ ! -d "$dest_dir" ]; then
-					echo "Warning: failed to seed skill $skill_name" >&2
-				fi
-			done
-		fi
+		# container start, or run `agent-update-skills` to force a refresh).
+		# Per-repo .agents/skills/ still takes precedence at invoke time. The copy
+		# logic and the .powbox-seeded ownership marker live in the shared
+		# seed-skills.sh so this and the updater never drift.
+		# shellcheck source=docker/shared/seed-skills.sh
+		. /usr/local/bin/seed-skills.sh
+		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/agents/skills" noclobber "$AGENT_SEED_DIR" ||
+			echo "Warning: one or more Codex skills failed to seed; continuing." >&2
 
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi

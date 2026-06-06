@@ -48,8 +48,11 @@ All steps are idempotent.
    mkdir -p .worktrees .claude/worktrees .git/worktrees
    shadow-refresh.sh "$(git rev-parse --show-toplevel)"   # tmpfs-shadows any unmounted root (fallback for .worktrees too)
    # .worktrees should be a container-local mount — the per-project volume (typically
-   # ext4, but any local fs: xfs/btrfs/…) or the tmpfs fallback; the others tmpfs:
-   findmnt -no TARGET,FSTYPE -T .worktrees .claude/worktrees .git/worktrees
+   # ext4, but any local fs: xfs/btrfs/…) or the tmpfs fallback; the others tmpfs.
+   # findmnt -T takes a single target, so check each root in a loop:
+   for root in .worktrees .claude/worktrees .git/worktrees; do
+     findmnt -no TARGET,FSTYPE -T "$root"
+   done
    ```
 
    The safety criterion is the **mount, not a specific fstype**: each root must be its own mountpoint and must **not** report the host bind-mount fstype (`9p`/`drvfs`/`virtiofs`). If `.worktrees` reports a host bind-mount fstype (or isn't a distinct mount of its own), **stop and tell the user** — worktree files would leak to the host. Any container-local filesystem is fine: when `.worktrees` is the per-project volume (ext4/xfs/btrfs/…), per-worktree `pnpm install` hardlinks from the co-located store, so there is no shared 2 GB cap to exhaust. *(Only in the tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means the container must be relaunched with a larger `SHADOW_TMPFS_SIZE`, or — better — with the worktrees volume.)*

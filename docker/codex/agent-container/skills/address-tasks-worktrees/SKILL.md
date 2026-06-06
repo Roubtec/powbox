@@ -25,10 +25,10 @@ So:
 
 ### Durability & host isolation (this container)
 
-This repo's main checkout is bind-mounted from the host, so the PowBox worktree roots are **shadowed** to keep their writes container-local and invisible to the host. They are shadowed two different ways, and the difference matters:
+This repo's main checkout is bind-mounted from the host, so the worktree roots are **shadowed** to keep their writes container-local and invisible to the host. They are shadowed two different ways, and the difference matters:
 
 - **`.worktrees/`** is backed by a **persistent per-project Docker volume** that the powbox launcher mounts there, and which *also* holds the pnpm store (`.worktrees/.pnpm-store`). Because the store and every `.worktrees/$CONTAINER_NAME/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — so installs avoid full package copies, there is **no shared 2 GB tmpfs cap**, and many worktrees can install concurrently. The volume is on disk, not RAM. *(Fallback: if the container was launched without that volume, `.worktrees` is tmpfs-shadowed instead — see Bootstrap.)*
-- **`.claude/worktrees/`** and **`.git/worktrees/`** remain **tmpfs-shadowed** (ephemeral): the harness-native worktree path (documented by PowBox, not a Codex execution requirement) and the per-worktree git metadata.
+- **`.claude/worktrees/`** and **`.git/worktrees/`** remain **tmpfs-shadowed** (ephemeral): the harness-native worktree path (not a Codex execution requirement) and the per-worktree git metadata.
 
 Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs (`.git/refs/heads/...`) persist on the host.
 **Committed work therefore survives container recycle even without pushing** — only uncommitted changes are lost.

@@ -1,9 +1,9 @@
 ---
 name: enable-worktrees
-description: Prepare a repository so powbox can run git-worktree-based parallel development in it — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks-worktrees) or for unrelated .gitignore edits.
+description: Prepare a repository for git-worktree-based parallel development — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks-worktrees) or for unrelated .gitignore edits.
 ---
 
-Prepare the current repository to support powbox's git-worktree parallel-development workflow.
+Prepare the current repository to support the git-worktree parallel-development workflow.
 
 This is the **setup** counterpart to `address-tasks-worktrees`.
 That skill *runs* a task batch across worktrees and assumes the repo is already prepared; this skill *prepares* the repo's committed config so the workflow works hands-free on every future container.
@@ -12,9 +12,9 @@ Run it once per repo, and re-run any time to verify or repair.
 This is a small, mechanical config task — do it inline yourself.
 Do **not** spawn worker or explorer subagents.
 
-## What "worktree-ready" means (the powbox contract)
+## What "worktree-ready" means
 
-powbox keeps declared workspace subdirectories container-local so writes there never reach the host bind mount.
+Declared workspace subdirectories are kept container-local so writes there never reach the host bind mount.
 The launcher-mounted `.worktrees` volume takes precedence; declared roots that are not already mountpoints get tmpfs shadows.
 For worktree-based parallelism a repo needs two committed things.
 
@@ -23,13 +23,13 @@ For worktree-based parallelism a repo needs two committed things.
    ```yaml
    shadow:
      - .worktrees          # orchestrator-created worktrees (one per task)
-     - .claude/worktrees   # PowBox-documented harness-native worktrees
+     - .claude/worktrees   # harness-native worktrees (cross-agent parity)
      - .git/worktrees      # per-worktree git metadata — keeps the host's own
                            #   worktree registrations out of the container, and ours off the host
    ```
 
    Task worktrees created by Codex's `address-tasks-worktrees` live under `.worktrees/`.
-   The `.claude/worktrees/` entry is part of the current PowBox cross-agent shadow contract; it is not a requirement for Codex subagent execution, but keeping it declared preserves parity for repos used by either primary agent.
+   The `.claude/worktrees/` entry is part of the current cross-agent shadow contract; it is not a requirement for Codex subagent execution, but keeping it declared preserves parity for repos used by either primary agent.
 
 2. **`.gitignore`** ignoring the two working-tree roots so worktree files are never committed:
 

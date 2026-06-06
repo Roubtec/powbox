@@ -73,16 +73,18 @@ psql_postgres() {
 }
 
 # Pass identifiers/literals as psql variables so psql does the SQL quoting
-# (:'var' → quoted string literal, :"var" → quoted identifier). Never splice
-# $POSTGRES_* straight into SQL — values may contain quotes or injection.
-role_exists() { [ "$(psql_postgres -tA -v rolname="$1" -c "SELECT 1 FROM pg_roles WHERE rolname = :'rolname'")" = "1" ]; }
-db_exists() { [ "$(psql_postgres -tA -v datname="$1" -c "SELECT 1 FROM pg_database WHERE datname = :'datname'")" = "1" ]; }
+# (:'var' → quoted string literal, :"var" → quoted identifier), never splicing
+# $POSTGRES_* straight into SQL where quotes could break it or inject. The SQL
+# is fed on stdin, not via -c: psql only performs :var interpolation when
+# reading from stdin/-f — a -c argument is sent to the server verbatim.
+role_exists() { [ "$(printf '%s\n' "SELECT 1 FROM pg_roles WHERE rolname = :'rolname'" | psql_postgres -tA -v rolname="$1")" = "1" ]; }
+db_exists() { [ "$(printf '%s\n' "SELECT 1 FROM pg_database WHERE datname = :'datname'" | psql_postgres -tA -v datname="$1")" = "1" ]; }
 
 ensure_role_db() {
 	if [ "$POSTGRES_USER" != "postgres" ] && ! role_exists "$POSTGRES_USER"; then
 		log "Creating role $POSTGRES_USER…"
-		psql_postgres -v rolname="$POSTGRES_USER" -v rolpass="$POSTGRES_PASSWORD" \
-			-c "CREATE ROLE :\"rolname\" LOGIN SUPERUSER PASSWORD :'rolpass';" >/dev/null
+		printf '%s\n' "CREATE ROLE :\"rolname\" LOGIN SUPERUSER PASSWORD :'rolpass';" |
+			psql_postgres -v rolname="$POSTGRES_USER" -v rolpass="$POSTGRES_PASSWORD" >/dev/null
 	fi
 	if ! db_exists "$POSTGRES_DB"; then
 		log "Creating database $POSTGRES_DB (owner $POSTGRES_USER)…"
@@ -98,8 +100,11 @@ urlencode() {
 	for ((i = 0; i < ${#s}; i++)); do
 		c="${s:i:1}"
 		case "$c" in
-		[A-Za-z0-9.~_-]) out+="$c" ;;
-		*) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+			[A-Za-z0-9.~_-]) out+="$c" ;;
+			*)
+				printf -v c '%%%02X' "'$c"
+				out+="$c"
+				;;
 		esac
 	done
 	printf '%s' "$out"

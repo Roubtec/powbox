@@ -108,9 +108,36 @@ When in doubt, treat tasks that touch the same files or migrations as dependent.
   - Independent task (wave 1, or no dependency in-batch) → branch from and PR against the user's chosen base (default `main`, or an explicit override).
   - Dependent task → branch from and PR against its **dependency's branch** (stacked PRs), so it builds on work that may not be merged yet.
   - If a task depends on *several* tasks, branch from an integration branch that merges them, or from the single dependency it most directly extends — pick the simplest base that contains the code it needs and note the choice.
+  - **Building a multi-parent integration branch is the orchestrator's job** — a bounded exception to "the orchestrator does not implement." Creating the branch and resolving its merge conflicts is small, mechanical, and a prerequisite for the wave rather than task work, so do it yourself rather than delegating. Keep the merge minimal, build/lint the result before branching any task off it, and record any non-trivial conflict resolutions (in the batch summary or a short merge-advice note) so they can be reproduced when the stack later lands on `main`.
 - Start a wave only after every task it depends on has **passed review** (its branch is stable enough to build on).
 
 If the whole batch is a linear dependency chain, this degrades gracefully to one task per wave — i.e. effectively sequential, like `address-tasks`, but still worktree-isolated.
+
+## Adaptive throttling (finish over fan-out)
+
+When this skill runs **unattended**, completing the batch matters more than maximizing parallel width.
+A wave that runs four-wide and dies to `ENOSPC`, a port clash, or provider rate-limiting has delivered nothing; the same wave run two-wide — or serially — delivers everything a little slower.
+So treat wave width as a knob to turn **down** the moment concurrency is the problem.
+Prefer a slower run that completes over a faster one that fails, and never push fan-out past what the container can sustain.
+
+Cap each wave's concurrency at the **minimum** of its dependency-derived width and what the environment can support. Concretely, before and during each wave:
+
+- **tmpfs headroom.** Before launching a wave, measure free space on the worktree tmpfs (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). A full per-worktree `pnpm install` in a node monorepo can copy on the order of a gigabyte into tmpfs when the store can't be hardlinked. Don't assume a fixed number — measure one install if unsure, then set `max_concurrent = max(1, floor(free_bytes / per_worktree_need))`, where `per_worktree_need ≈ install size + build-artifact headroom`. If `max_concurrent` is below the wave's task count, run the wave in **sub-batches** of `max_concurrent`, not all at once.
+- **`ENOSPC` mid-wave.** If any worktree's install/build fails with `ENOSPC`, stop adding concurrency: remove that worktree, halve `max_concurrent` (floor 1), and retry the remaining tasks in smaller sub-batches — ultimately one at a time. Never abandon a task because the *parallel* attempt failed; fall back to serial and let it through.
+- **Shared exclusive resources.** Some validation cannot run two-at-once even in separate worktrees because it contends for a single host-wide resource: a fixed listen port, one shared dev database on one port, or a build/e2e server that infers the workspace root from the repo-root lockfile (see below). Run such phases **serially** regardless of wave width — give each task exclusive use, then move on.
+- **Provider rate-limiting.** Repeated rate-limit / overload errors when spawning many subagents at once are a signal to fan out less. Reduce the number of concurrent subagents per phase and proceed.
+
+Record in the final summary whenever you throttled below the dependency-derived width, and why — it tells the user whether the run was capacity-bound (worth relaunching with a larger `SHADOW_TMPFS_SIZE`) or genuinely serial by dependency.
+
+### App-server / e2e validation in a worktree
+
+Validation that boots a *built* app server is the most common thing that won't run from inside a worktree. Next.js `next build` standalone output and Playwright's `webServer` both infer the workspace root from the repo-root lockfile, then look for the server at a path that ignores the nested `.worktrees/<slug>/` prefix — so `test:e2e` can't find the server and self-skips or errors. This is a repo-config limitation, not something the worktree skill can fix from the outside; handle it by choosing one of these, in order of preference:
+
+1. **Run that task's e2e phase serially in the main checkout** after its branch is pushed: from the main tree, check out the task branch, build, run e2e, then restore. This keeps unit/integration coverage in-worktree and serializes only the part that needs the un-nested path.
+2. **Defer e2e to CI** and rely on the in-worktree unit/integration suites for the in-loop signal, noting in the PR that e2e runs in CI.
+3. **Run it in-worktree only if the repo's config is worktree-aware** (resolves the standalone/server path from `next build`'s actual output dir rather than assuming repo root).
+
+Treat a task whose acceptance hinges on app-server e2e as a **serialize-this-phase** task per the shared-resource rule above, and say so in the summary. (Browser availability itself is fine in-worktree: point Playwright at the baked Chromium — `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium`, or `npx playwright install chromium` — the worktree problem is the server path, not the browser.)
 
 ## Per-wave execution
 
@@ -163,12 +190,12 @@ Include in each implementer prompt:
 - **Coordination:** it must not revert unrelated or concurrent edits, and must accommodate that its base branch may itself be a sibling task's branch.
 - **Reporting:** when done, report what was implemented, decisions/tradeoffs/deviations, and any areas needing focused review.
 
-On a fix-up round, additionally paste the reviewer's numbered findings verbatim and instruct the implementer to address each specifically and report what changed (same branch, same worktree).
+On a fix-up round, spawn a fresh `worker` implementer for the task; do not continue the prior implementer thread with `send_input`. Fresh context is intentional because the fix-up agent should read the committed worktree plus the reviewer's findings without attachment to earlier choices. Paste the reviewer's numbered findings verbatim and instruct it to address each specifically and report what changed (same branch, same worktree).
 
 ## Reviewer Agent
 
 Same fresh-eyes contract and code-quality checklist as `address-tasks`.
-A reviewer is always a **fresh** `explorer` subagent spawn (never a `send_input` continuation of the implementer), launched only **after** every Phase-A implementer in the wave has returned.
+A reviewer is always a **fresh** `explorer` subagent spawn, never a `send_input` continuation of the implementer, launched only **after** every Phase-A implementer in the wave has returned.
 
 Include in each reviewer prompt:
 

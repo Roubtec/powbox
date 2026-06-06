@@ -55,10 +55,14 @@ function Test-ImageExists([string]$Image) {
 # leading "codex-cli " prefix — matching the baked_versions_raw parsing in
 # commands/check-updates.sh.
 function Get-BakedAgentVersions([string]$Image) {
-    $script = @'
-printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"
-printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"
-'@
+    # Build with explicit LF joins (single-quoted lines so PowerShell leaves the
+    # shell $() substitutions literal). A here-string would inherit this file's
+    # CRLF endings (.gitattributes pins *.ps1 to eol=crlf), and the stray ^M can
+    # break parsing under `sh -c` on a Windows checkout.
+    $script = @(
+      'printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"'
+      'printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"'
+    ) -join "`n"
     $raw = docker run --rm --entrypoint sh $Image -c $script 2>$null
     $claude = $null
     $codex = $null
@@ -246,7 +250,9 @@ if ($Porcelain) {
 Write-Host ''
 Write-Host 'Agent update check:'
 if ($baseBaked   -or $baseLatest)   { Write-BaseComparison $baseBaked $baseLatest }
-if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
+# Codex before Claude: Codex updates less often and the Claude layer is built on
+# top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }
+if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
 Write-Host ''
 $global:LASTEXITCODE = 0

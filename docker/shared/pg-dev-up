@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# pg-dev-up — stand up a throwaway local PostgreSQL for integration suites.
+#
+# powbox bakes the PostgreSQL 16 server binaries but deliberately does NOT
+# auto-start a daemon (most containers never need one, and an always-on server
+# would clash with a project's own docker-compose Postgres). This helper does
+# the initdb + start + createdb dance on demand, as the unprivileged `node`
+# user: the Debian `postgres` system user has no password set, so the usual
+# `sudo -u postgres ...` path is a dead end here. Trust auth on a loopback-only
+# socket is appropriate — the container itself is the security boundary.
+#
+# Usage:
+#   pg-dev-up [up]      init (first run) + start, ensure role/db, print DATABASE_URL
+#   pg-dev-up status    report whether the dev cluster is running (exit 1 if not)
+#   pg-dev-up url       print the DATABASE_URL for the configured role/db
+#   pg-dev-up down      stop the dev cluster ($PGDATA is kept for a later restart)
+#   pg-dev-up check     verify the server binaries are present (no daemon needed)
+#   pg-dev-up help
+#
+# Environment overrides (defaults in parentheses):
+#   PGDATA            cluster data directory    (/tmp/pgdata)
+#   PGPORT            listen port               (5432)
+#   POSTGRES_USER     app role to ensure        (postgres)
+#   POSTGRES_PASSWORD app role password         (postgres)
+#   POSTGRES_DB       app database to ensure    (postgres)
+#
+# To match a project's expected credentials, set the env vars before calling,
+# e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
+#
+# Export the connection string into your current shell with:
+#   eval "$(pg-dev-up url --export)"
+set -euo pipefail
+
+PGDATA="${PGDATA:-/tmp/pgdata}"
+PGPORT="${PGPORT:-5432}"
+PG_HOST="127.0.0.1"
+PG_SOCKDIR="/tmp"
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
+POSTGRES_DB="${POSTGRES_DB:-postgres}"
+
+log() { printf 'pg-dev-up: %s\n' "$*" >&2; }
+
+# Debian keeps the server binaries (initdb, pg_ctl, postgres) off PATH under
+# /usr/lib/postgresql/<major>/bin; pick the highest installed major version.
+find_bindir() {
+	local d best=""
+	for d in /usr/lib/postgresql/*/bin; do
+		[ -x "$d/initdb" ] || continue
+		if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "$best" "$d" | sort -V | tail -1)" = "$d" ]; then
+			best="$d"
+		fi
+	done
+	[ -n "$best" ] || return 1
+	printf '%s\n' "$best"
+}
+
+BINDIR="$(find_bindir || true)"
+
+require_bindir() {
+	if [ -z "$BINDIR" ]; then
+		log "PostgreSQL server binaries not found (expected /usr/lib/postgresql/*/bin)."
+		exit 1
+	fi
+}
+
+pg_running() {
+	[ -f "$PGDATA/postmaster.pid" ] && "$BINDIR/pg_ctl" -D "$PGDATA" status >/dev/null 2>&1
+}
+
+psql_postgres() {
+	"$BINDIR/psql" -h "$PG_HOST" -p "$PGPORT" -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"
+}
+
+# Pass identifiers/literals as psql variables so psql does the SQL quoting
+# (:'var' → quoted string literal, :"var" → quoted identifier), never splicing
+# $POSTGRES_* straight into SQL where quotes could break it or inject. The SQL
+# is fed on stdin, not via -c: psql only performs :var interpolation when
+# reading from stdin/-f — a -c argument is sent to the server verbatim.
+role_exists() { [ "$(printf '%s\n' "SELECT 1 FROM pg_roles WHERE rolname = :'rolname'" | psql_postgres -tA -v rolname="$1")" = "1" ]; }
+db_exists() { [ "$(printf '%s\n' "SELECT 1 FROM pg_database WHERE datname = :'datname'" | psql_postgres -tA -v datname="$1")" = "1" ]; }
+
+ensure_role_db() {
+	if [ "$POSTGRES_USER" != "postgres" ] && ! role_exists "$POSTGRES_USER"; then
+		log "Creating role $POSTGRES_USER…"
+		printf '%s\n' "CREATE ROLE :\"rolname\" LOGIN SUPERUSER PASSWORD :'rolpass';" |
+			psql_postgres -v rolname="$POSTGRES_USER" -v rolpass="$POSTGRES_PASSWORD" >/dev/null
+	fi
+	if ! db_exists "$POSTGRES_DB"; then
+		log "Creating database $POSTGRES_DB (owner $POSTGRES_USER)…"
+		"$BINDIR/createdb" -h "$PG_HOST" -p "$PGPORT" -U postgres -O "$POSTGRES_USER" "$POSTGRES_DB" >/dev/null
+	fi
+}
+
+# Percent-encode a string for safe use as a URL component (RFC 3986: keep the
+# unreserved set literal, %-encode everything else). LC_ALL=C makes the loop
+# iterate byte-wise so multibyte chars encode correctly.
+urlencode() {
+	local LC_ALL=C s="$1" i c out=""
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		case "$c" in
+			[A-Za-z0-9.~_-]) out+="$c" ;;
+			*)
+				printf -v c '%%%02X' "'$c"
+				out+="$c"
+				;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
+print_url() {
+	# Percent-encode credentials so metacharacters (@ / # & : etc.) don't
+	# corrupt the URL; the consumer percent-decodes per RFC 3986.
+	local user pass db url
+	user="$(urlencode "$POSTGRES_USER")"
+	pass="$(urlencode "$POSTGRES_PASSWORD")"
+	db="$(urlencode "$POSTGRES_DB")"
+	# Use $PG_HOST (127.0.0.1), not "localhost": the server binds IPv4 only, so
+	# a client that resolves localhost to ::1 first would fail to connect.
+	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}"
+	if [ "${1:-}" = "--export" ]; then
+		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe.
+		printf 'export DATABASE_URL=%q\n' "$url"
+	else
+		printf '%s\n' "$url"
+	fi
+}
+
+cmd_up() {
+	require_bindir
+	if [ ! -s "$PGDATA/PG_VERSION" ]; then
+		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
+		mkdir -p "$PGDATA"
+		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null
+	fi
+	if pg_running; then
+		log "Already running on $PG_HOST:$PGPORT."
+	else
+		log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
+		"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
+			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null
+	fi
+	ensure_role_db
+	log "Ready. DATABASE_URL printed below; export it with: eval \"\$(pg-dev-up url --export)\""
+	print_url
+}
+
+cmd_down() {
+	require_bindir
+	if pg_running; then
+		"$BINDIR/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null
+		log "Stopped. Data kept at $PGDATA (run 'pg-dev-up' to restart)."
+	else
+		log "Not running."
+	fi
+}
+
+cmd_status() {
+	require_bindir
+	if pg_running; then
+		log "running on $PG_HOST:$PGPORT (PGDATA=$PGDATA)"
+	else
+		log "not running (PGDATA=$PGDATA)"
+		return 1
+	fi
+}
+
+cmd_check() {
+	require_bindir
+	"$BINDIR/initdb" --version
+	"$BINDIR/postgres" --version
+}
+
+usage() { sed -n '2,31p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+
+case "${1:-up}" in
+	up | "") cmd_up ;;
+	down | stop) cmd_down ;;
+	status) cmd_status ;;
+	url)
+		shift
+		print_url "${1:-}"
+		;;
+	check) cmd_check ;;
+	help | -h | --help) usage ;;
+	*)
+		log "unknown command '$1' (try: up, down, status, url, check, help)"
+		exit 2
+		;;
+esac

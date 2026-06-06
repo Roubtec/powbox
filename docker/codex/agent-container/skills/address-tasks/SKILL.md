@@ -71,6 +71,7 @@ Construct a prompt that contains:
 - **Commit and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
 - **Coordination instructions** — remind the implementer that it is not alone in the codebase, must not revert unrelated edits made by others, and should accommodate concurrent changes.
+- **No shared task/plan tracker.** Tell the implementer not to write to any shared task or plan tracker (e.g. a shared todo/plan list). A subagent's entries leak into the orchestrator's view and linger there as stale, misleading items (e.g. a child step still shown as in-progress after it finished), adding noise to every later turn without helping the orchestrator spot a struggling task — that signal comes from the implement→review→fix result, not from a child's micro-steps. The implementer should track its own steps however it likes and surface progress only in its final report.
 - **Reporting instructions** — when done, report back with:
   - A concise summary of what was implemented.
   - Any decisions, tradeoffs, or deviations from the task description.
@@ -127,6 +128,7 @@ Wait for completion and close the reviewer before the orchestrator advances bran
   - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
 - **Instruction NOT to edit any files** — the reviewer only reads and reports. It must not create, update, or delete follow-up task files; any suggested follow-up work belongs in the review report only.
+- **Instruction not to use any shared task/plan tracker** — like the implementer, a reviewer's entries in a shared todo/plan list bleed into the orchestrator's view.
 
 #### Code quality dimensions to check
 
@@ -225,7 +227,7 @@ For each task file in the input set:
 
 When the reviewer reports material issues:
 
-1. **Spawn a new implementer agent** (on its own, as in step 4) with:
+1. **Spawn a fresh `worker` implementer** (on its own, as in step 4). Do not continue the prior implementer thread with `send_input`; fresh context is intentional because the fix-up agent should read the committed branch plus the reviewer's findings without attachment to earlier choices. Include:
    - The original task file content.
    - The reviewer's numbered findings, verbatim.
    - The branch name (same as before).

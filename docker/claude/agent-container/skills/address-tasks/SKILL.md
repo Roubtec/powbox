@@ -57,6 +57,7 @@ Construct a prompt that contains:
 - **Commit and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
 - **Coordination instructions** — remind the implementer that it is not alone in the codebase, must not revert unrelated edits made by others, and should accommodate concurrent changes.
+- **No shared task-tracker.** Tell the implementer not to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools. A subagent's entries leak into the orchestrator's task view and linger there as stale, misleading items (e.g. a child's `in_progress` step that has already finished), adding noise to every later turn without helping the orchestrator spot a struggling task — that signal comes from the implement→review→fix result, not from a child's micro-steps. The implementer should track its own steps however it likes and surface progress only in its final report.
 - **Reporting instructions** — when done, report back with:
   - A concise summary of what was implemented.
   - Any decisions, tradeoffs, or deviations from the task description.
@@ -96,7 +97,7 @@ Read `AGENTS.md` first for project conventions.
 
 The reviewer is a **fresh** subagent with no knowledge of the implementation process.
 It evaluates the current codebase state against two orthogonal dimensions: acceptance criteria compliance and implementation quality.
-It must be a **new** `Agent` invocation — never a `SendMessage` continuation of the implementer.
+It must be a **new** `Agent` invocation — a fresh-eyes agent with no implementation context, never a continuation of the implementer. Ignore any `SendMessage` continuation footer from earlier `Agent` results; this harness does not expose that tool.
 Spawn it only **after** the implementer has fully completed and its commits have landed — never concurrently with the implementer, and never in the same turn or parallel tool block. You share one working tree, so a concurrent reviewer scans an empty or half-finished branch and wrongly reports "no implementation" (see the shared-working-tree rule in Architecture).
 It is launched in the **foreground** (not background) since the feedback loop must complete before the orchestrator can advance branches or start the next task.
 
@@ -113,6 +114,7 @@ It is launched in the **foreground** (not background) since the feedback loop mu
   - **Issues** — a numbered list of specific, actionable findings. Each finding must include: the category (criteria gap vs. quality), where in the code the gap is, and what needs to change.
 - **Instruction to be strict but fair** — flag genuine gaps and functional problems, not style preferences or minor nitpicks.
 - **Instruction NOT to edit any files** — the reviewer only reads and reports. It must not create, update, or delete follow-up task files; any suggested follow-up work belongs in the review report only.
+- **Instruction not to use the shared task-tracker** — like the implementer, tell the reviewer not to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools; a subagent's task entries bleed into the orchestrator's view.
 
 #### Code quality dimensions to check
 
@@ -210,6 +212,8 @@ For each task file in the input set:
 ## Feedback Loop
 
 When the reviewer reports material issues:
+
+> **Fix-ups always use a fresh `Agent` spawn — never a "continued" prior implementer.** If an `Agent` result prints a `SendMessage` continuation footer, ignore it; this harness does not expose that tool. A fresh spawn is the preferred path: the fix-up agent reads the already-committed branch plus the reviewer's verbatim findings with no attachment to its earlier choices.
 
 1. **Spawn a new implementer agent** (on its own, as in step 4) with:
    - The original task file content.

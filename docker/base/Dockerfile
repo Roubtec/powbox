@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     strace \
     sudo \
+    time \
     tree \
     unixodbc-dev \
     unzip \
@@ -83,6 +84,23 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 powershell \
     && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
     && ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PostgreSQL 16 (server + client + contrib) from the official PGDG apt
+# repo so the major version matches what projects pin (e.g. postgres:16.x) and
+# avoids the silent behavior drift Debian's stock 15 would introduce. No daemon
+# is started at build or runtime; the baked `pg-dev-up` helper stands up a
+# throwaway loopback cluster on demand for integration suites (prisma migrate,
+# `test:db`, etc.) — see docker/shared/pg-dev-up.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-16 \
+        postgresql-client-16 \
+        postgresql-contrib-16 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PSScriptAnalyzer (the PowerShell linter — shellcheck cannot lint
@@ -171,6 +189,7 @@ COPY --chmod=755 \
     docker/shared/shadow-mounts.sh \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
+    docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
     /usr/local/bin/
 

@@ -53,7 +53,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Git, shell utilities, and more) used by the unified agent image
+- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, PostgreSQL 16, Git, shell utilities, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -292,7 +292,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
-- `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
+- `commands/smoke-test.*` for smoke-testing the unified agent image
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/check-updates.*` for checking whether newer agent releases are available
@@ -530,12 +530,13 @@ Render the merged runtime config with:
 docker compose -p powbox -f compose.shared.yml -f compose.agent.yml config
 ```
 
-Smoke test the built images with:
+Smoke test the built image with:
 
 ```bash
-./commands/claude-smoke-test.sh
-./commands/codex-smoke-test.sh
+./commands/smoke-test.sh
 ```
+
+This runs two stages: a fast presence sweep over every expected CLI, then a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't). Skip the second stage for a tools-only run with `POWBOX_SMOKE_SKIP_DB=1 ./commands/smoke-test.sh` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb`).
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
 

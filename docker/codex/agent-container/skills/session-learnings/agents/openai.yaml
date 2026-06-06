@@ -1,0 +1,4 @@
+interface:
+  display_name: "Session Learnings"
+  short_description: "Capture agent-run improvement notes"
+  default_prompt: "Use $session-learnings to capture actionable powbox environment and orchestration learnings from this agent run."

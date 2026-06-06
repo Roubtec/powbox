@@ -229,6 +229,8 @@ fi
 echo ""
 echo "Agent update check:"
 if [ -n "$base_baked" ] || [ -n "$base_latest" ]; then compare_base "$base_baked" "$base_latest"; fi
-if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
+# Codex before Claude: Codex updates less often and the Claude layer is built on
+# top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
 if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi
+if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
 echo ""

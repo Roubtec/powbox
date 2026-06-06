@@ -112,7 +112,9 @@ print_url() {
 	user="$(urlencode "$POSTGRES_USER")"
 	pass="$(urlencode "$POSTGRES_PASSWORD")"
 	db="$(urlencode "$POSTGRES_DB")"
-	url="postgresql://${user}:${pass}@localhost:${PGPORT}/${db}"
+	# Use $PG_HOST (127.0.0.1), not "localhost": the server binds IPv4 only, so
+	# a client that resolves localhost to ::1 first would fail to connect.
+	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}"
 	if [ "${1:-}" = "--export" ]; then
 		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe.
 		printf 'export DATABASE_URL=%q\n' "$url"

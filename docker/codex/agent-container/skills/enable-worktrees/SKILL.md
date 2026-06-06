@@ -63,10 +63,10 @@ Every step is idempotent and surgical — preserve unrelated content, comments, 
 
    ```bash
    shadow-refresh.sh "$ROOT"
-   findmnt -no TARGET,FSTYPE -T "$ROOT/.worktrees"   # expect a line ending in: tmpfs
+   findmnt -no TARGET,FSTYPE -T "$ROOT/.worktrees"   # expect the per-project volume (ext4/xfs/btrfs) or, as a fallback, tmpfs
    ```
 
-   If `findmnt` does not report `tmpfs`, the running image likely predates the literal-path auto-shadow fix — tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch. The repo config you just wrote is still correct.
+   `.worktrees` is healthy when it is its own mount on **any** container-local filesystem — the powbox launcher's per-project volume (typically `ext4`, but `xfs`/`btrfs` are equally fine) or the `tmpfs` fallback. Only a **host bind-mount fstype** (`9p`/`drvfs`/`virtiofs`), or `.worktrees` not being a distinct mount at all, signals a problem: the running image likely predates the literal-path auto-shadow fix — tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch. The repo config you just wrote is still correct either way.
 
 6. **Commit the config.** These files belong in version control so every teammate and every future container inherits a worktree-ready repo. Stage `.powbox.yml` and `.gitignore` and commit them following the repo's commit conventions — or, if the user prefers to review first, leave them staged and say so.
 

@@ -1,7 +1,7 @@
 # Worktree `node_modules`: from copy to hardlink
 
 Status: **implemented (Option A)** — shipped on branch `worktree-hardlinks` (PR #37);
-design derived from the orchestration-session retrospective (issue #1). Verified in a
+design derived from item 1 of the orchestration-session retrospective. Verified in a
 freshly built container on 2026-06-06: a worktree `pnpm install` hardlinks from the
 co-located store (see *Validation* below).
 Date: 2026-06-04 (design) · 2026-06-06 (implemented & verified in-container).
@@ -214,7 +214,7 @@ Confirmed in-container. The runtime wiring landed as designed:
   425 MB–1.1 GB tmpfs copy — and its `ENOSPC`/concurrency cliff — is gone.
 
 ## Out of scope here
-Docker daemon (issues #2/#5) is tracked on branch `docker-for-agents`. The
+Docker daemon (retrospective items 2 and 5) is tracked on branch `docker-for-agents`. The
 session retrospective's other items were either already satisfied
 (commit/push-every-milestone discipline), intentional (`sudo` scope), upstream
 (harness transport), or folded into skill tweaks (subagent task-tracker bleed;

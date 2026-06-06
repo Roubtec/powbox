@@ -536,6 +536,8 @@ Smoke test the built image with:
 ./commands/smoke-test.sh
 ```
 
+This runs two stages: a fast presence sweep over every expected CLI, then a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't). Skip the second stage for a tools-only run with `POWBOX_SMOKE_SKIP_DB=1 ./commands/smoke-test.sh` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb`).
+
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check

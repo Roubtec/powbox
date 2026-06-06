@@ -29,7 +29,8 @@ This repo's main checkout is bind-mounted from a Windows host into a Linux conta
 Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs (`.git/refs/heads/...`) persist on the host. **Committed work therefore survives container recycle even without pushing** — only uncommitted changes are lost. The operating discipline that follows:
 
 - **Commit early and often**, and **push after every commit** (a worktree's working tree is more volatile than committed `.git`, and pushing also lets the host sync via `git pull`).
-- On recycle, the `.worktrees` **volume persists** (so the pnpm store — the efficiency win — survives), but the per-worktree git metadata in the tmpfs `.git/worktrees` does **not**. A leftover `.worktrees/<task>` working dir from a crashed prior session is therefore orphaned (its `.git` pointer dangles); the Bootstrap prunes such orphans while preserving `.pnpm-store`. Worktrees remain disposable — push committed work.
+- On recycle, the `.worktrees` **volume persists** (so the pnpm store — the efficiency win — survives), but the per-worktree git metadata in the tmpfs `.git/worktrees` does **not**. A leftover `.worktrees/$CONTAINER_NAME/<task>` working dir from a crashed prior session is therefore orphaned (its `.git` pointer dangles); the Bootstrap prunes such orphans while preserving `.pnpm-store`. Worktrees remain disposable — push committed work.
+- **The `.worktrees` volume is project-keyed, so this project's Claude and Codex containers share it** — but each container's `.git/worktrees` metadata is its own tmpfs, so a *peer* container's live worktree has no metadata here and looks exactly like an orphan. To never delete a peer's in-progress work, **each container creates and prunes its worktrees under its own `.worktrees/$CONTAINER_NAME/` subdir** (`$CONTAINER_NAME` = `<agent>-<project>`, Docker-unique and stable across recycle). The prune then only ever reaps *this* container's own crashed-session orphans; a peer's subdir is never scanned. The shared `.pnpm-store` stays at the volume root.
 
 ## Session Bootstrap (run once, before any worktree)
 
@@ -50,13 +51,14 @@ Do this in the **main working tree** before creating worktrees. All steps are id
 
    The safety criterion is the **mount, not a specific fstype**: each root must be its own mountpoint and must **not** report the host bind-mount fstype (`9p`/`drvfs`/`virtiofs`). If `.worktrees` reports a host bind-mount fstype (or isn't a distinct mount of its own), **stop and tell the user** — worktree files would leak to the host. Any container-local filesystem is fine: when `.worktrees` is the per-project volume (ext4/xfs/btrfs/…), per-worktree `pnpm install` hardlinks from the co-located store, so there is no shared 2 GB cap to exhaust. *(Only in the tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means the container must be relaunched with a larger `SHADOW_TMPFS_SIZE`, or — better — with the worktrees volume.)*
 
-   Then prune any worktree dirs orphaned by a prior recycle (their tmpfs git metadata is gone), preserving the persistent store:
+   Then prune any of **this container's own** worktree dirs orphaned by a prior recycle (their tmpfs git metadata is gone). Worktrees live under a per-container `.worktrees/$CONTAINER_NAME/` subdir (see Durability), so scope the scan there — scanning the whole volume would delete a *peer* container's live worktrees and any uncommitted work in them:
 
    ```bash
+   MINE=".worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+   mkdir -p "$MINE"
    git worktree prune
-   for d in .worktrees/*/; do
+   for d in "$MINE"/*/; do
      [ -e "$d" ] || continue
-     case "$d" in .worktrees/.pnpm-store/) continue ;; esac
      git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || rm -rf "$d"
    done
    ```
@@ -126,14 +128,16 @@ Treat a task whose acceptance hinges on app-server e2e as a **serialize-this-pha
 
 For a wave of tasks `T1..Tn`:
 
-1. **Create a worktree per task** from the main tree (orchestrator git calls; safe to run while other waves' subagents are active — they touch only their own worktrees):
+1. **Create a worktree per task** from the main tree (orchestrator git calls; safe to run while other waves' subagents are active — they touch only their own worktrees). Create them under this container's own `.worktrees/$CONTAINER_NAME/` subdir so a peer container's prune can never mistake them for orphans (see Durability):
 
    ```bash
    ROOT="$(git rev-parse --show-toplevel)"
-   git worktree add "$ROOT/.worktrees/<task-slug>" -b <branch-name> <base-branch>
+   WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+   mkdir -p "$WT_BASE"
+   git worktree add "$WT_BASE/<task-slug>" -b <branch-name> <base-branch>
    ```
 
-   Use a stable, collision-free slug per task (e.g. the task number + short name). The absolute path `"$ROOT/.worktrees/<task-slug>"` is what you hand to that task's subagents.
+   Use a stable, collision-free slug per task (e.g. the task number + short name). The absolute path `"$WT_BASE/<task-slug>"` is what you hand to that task's subagents.
 
 2. **Run each task's loop, fanned out by phase.** Each task runs its own implement→review→fix loop, but you advance all of the wave's tasks **in lockstep by phase** so that same-phase agents (which live in different worktrees) can be spawned **together in one tool block and run concurrently**:
 

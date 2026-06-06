@@ -121,12 +121,26 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
 `node_modules` lives **inside** each worktree dir, so the worktrees must be on
 the volume (not tmpfs) for the hardlink. That makes worktree *working dirs*
 persistent, while `.git/worktrees` *metadata* stays tmpfs (ephemeral). After a
-container recycle, stale `.worktrees/<task>` dirs can be left behind (their
-`.git` pointer dangles) while the valuable `.pnpm-store` persists. Mitigation: a
-bootstrap cleanup step removes orphaned worktree dirs (everything under
-`.worktrees` except `.pnpm-store` that `git worktree list` doesn't know about)
-at session start. This keeps the skill's "worktrees are disposable, commit +
-push" model intact.
+container recycle, stale `.worktrees/<owner>/<task>` dirs can be left behind
+(their `.git` pointer dangles) while the valuable `.pnpm-store` persists.
+Mitigation: a bootstrap cleanup step removes orphaned worktree dirs (those under
+this container's own subdir that `git worktree list` doesn't know about) at
+session start. This keeps the skill's "worktrees are disposable, commit + push"
+model intact.
+
+**Peer-container isolation.** The `.worktrees` volume is *project-keyed*
+(`agent-wt-<proj>`), so the project's Claude and Codex containers mount the same
+volume — but each keeps its own tmpfs `.git/worktrees` metadata. A peer's live
+worktree therefore has no metadata in the other container and is
+indistinguishable from a crash orphan, so a naive "prune everything `git
+worktree list` doesn't know" would `rm -rf` the peer's active working dir and its
+uncommitted work. Fix: each container namespaces its worktrees under
+`.worktrees/$CONTAINER_NAME/` (`$CONTAINER_NAME` = `<agent>-<project>`, which
+Docker keeps unique and which is stable across recycle) and scopes both creation
+and the orphan prune to that subdir. Ownership — not liveness — is what makes
+this safe: a container only ever reaps orphans it owns, so no cross-container
+liveness check or lockfile is needed, and a peer's subdir is never scanned. The
+shared `.pnpm-store` stays at the volume root.
 
 *Alternative `A-coherent`*: also persist `.git/worktrees` (and
 `.claude/worktrees`) on volumes so worktrees fully survive recycle. More volumes

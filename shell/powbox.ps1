@@ -116,6 +116,13 @@ function agent-reset-claude-history {
     & "$env:POWBOX_ROOT\commands\reset-claude-history.ps1" @args
 }
 
+# Re-seed the image-baked skills onto the claude-config/codex-config volumes,
+# overriding the startup no-clobber so updated skill text in a rebuilt image
+# replaces the stale copies left on the volumes. Forwards flags like -DryRun.
+function agent-update-skills {
+    & "$env:POWBOX_ROOT\commands\update-skills.ps1" @args
+}
+
 # Read the machine-readable update table once (one container start reads both
 # baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
 function _Powbox-AgentPorcelain {

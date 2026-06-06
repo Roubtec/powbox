@@ -58,7 +58,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
 - `docker-bake.hcl`: named Bake targets for `base`, `agent`, and `all`
-- `commands/`: user-facing host commands for launch, smoke-test, volume pruning, and session history reset
+- `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
 - `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
@@ -123,12 +123,35 @@ At container start, the entrypoint seeds the baked skills into each agent's user
 - Codex — `$HOME/.agents/skills/` (backed by the `codex-config` volume via a `~/.agents → ~/.codex/agents` symlink seeded by the entrypoint)
 
 Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
-To pick up an updated version of an image-shipped skill after a rebuild, delete that skill folder from the destination above and restart the container.
+This also means a rebuilt image with updated skill text does *not* replace the stale copies already on the volumes. To push the latest baked skills onto the volumes after a rebuild, run `agent-update-skills` (or `commands/update-skills.*` directly) — it copies each baked skill over the volume copy in one throwaway container, so you no longer need to enter a container, delete skills by hand, exit, and relaunch to re-seed. It works whether or not any agent containers are running (they share the volumes); skills you authored on the volume that are not baked into the image are left untouched. See [Refreshing Skills](#refreshing-skills) below.
 
 Per-repo skills (e.g. `.claude/skills/<name>/` or `.agents/skills/<name>/`) still take precedence at invoke time, so any repo can override an individual skill without losing the rest.
 User-added skills in the same volume directory are unaffected by image rebuilds.
 
 Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`).
+
+### Refreshing Skills
+
+Because seeding is no-clobber, editing a skill in this repo and rebuilding the image is not enough — the volumes still hold the previously-seeded copy. `commands/update-skills.*` closes that gap by copying the freshly baked skills over the volume copies in a single throwaway container, replacing the old manual dance (enter a container, delete skills, exit, relaunch to re-seed).
+
+It seeds from whatever is in `powbox-agent:latest`, so rebuild the image first (e.g. `cc <project> --build`, `agent-update`, or `build.sh agent`) so the baked skills reflect your edits. The config volumes are shared by every agent container, so this works whether or not any containers are running — a running agent picks up a refreshed skill the next time that skill is invoked (restart it for certainty). Skills you authored on the volume that are not baked into the image are left untouched.
+
+```bash
+# Preview which skills would be refreshed
+./commands/update-skills.sh --dry-run
+
+# Refresh the baked skills onto both config volumes
+./commands/update-skills.sh
+```
+
+On PowerShell, use `-DryRun` for a preview:
+
+```powershell
+.\commands\update-skills.ps1 -DryRun
+.\commands\update-skills.ps1
+```
+
+If you are using the profile shortcuts described below, the same script is exposed as `agent-update-skills` — flags (`--dry-run` on bash, `-DryRun` in PowerShell) are forwarded.
 
 ## Runtime
 
@@ -305,6 +328,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/smoke-test.*` for smoke-testing the unified agent image
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
+- `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes (its in-container worker is `commands/update-skills-incontainer.sh`)
 - `commands/check-updates.*` for checking whether newer agent releases are available
 
 ## Resuming Sessions
@@ -373,6 +397,7 @@ Functions exposed by both libraries:
 - `agent-update-claude`, `agent-update-codex` — rebuild the unified image bumping just that agent to its latest release, pinning the other binary to its baked version so only the affected layers rebuild (no `--no-cache`)
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
+- `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies; forwards `--dry-run` (bash) or `-DryRun` (PowerShell). Rebuild the image first so the baked skills are current.
 
 ### Environment Variables
 
@@ -438,6 +463,10 @@ agent-update-codex
 
 # Re-pull the base image and rebuild the shared substrate with latest packages
 agent-update-base
+
+# Re-seed updated baked skills onto the config volumes (preview, then apply)
+agent-update-skills -DryRun
+agent-update-skills
 
 # List Claude containers
 cc-list
@@ -506,6 +535,10 @@ agent-update-codex
 
 # Re-pull the base image and rebuild the shared substrate with latest packages
 agent-update-base
+
+# Re-seed updated baked skills onto the config volumes (preview, then apply)
+agent-update-skills --dry-run
+agent-update-skills
 
 # List Claude containers
 cc-list

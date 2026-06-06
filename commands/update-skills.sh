@@ -43,6 +43,11 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
+if ! docker info >/dev/null 2>&1; then
+	echo "Docker daemon is not running. Start Docker Desktop (or the Docker daemon) and try again." >&2
+	exit 1
+fi
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Image '$IMAGE' not found. Build it first (e.g. './build.sh agent' or 'cc <project> --build')." >&2
 	exit 1

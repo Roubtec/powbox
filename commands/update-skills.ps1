@@ -27,6 +27,12 @@ $image = "powbox-agent:latest"
 # $PSScriptRoot is the commands/ directory, where the worker lives alongside it.
 $worker = Join-Path $PSScriptRoot "update-skills-incontainer.sh"
 
+docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Docker daemon is not running. Start Docker Desktop (or the Docker daemon) and try again."
+  exit 1
+}
+
 docker image inspect $image *> $null
 if ($LASTEXITCODE -ne 0) {
   Write-Error "Image '$image' not found. Build it first (e.g. '.\build.ps1 agent' or 'cc <project> -Build')."

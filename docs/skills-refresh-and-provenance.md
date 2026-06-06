@@ -1,9 +1,13 @@
 # Skills refresh: unified seeding, ownership markers, pruning, and image provenance
 
-Status: **design locked, implementation in progress** on branch `agent-update-skills`.
+Status: **implemented** on branch `agent-update-skills` (this-branch scope below);
+the three-anchor provenance display remains deferred to a stacked branch. Logic was
+unit-tested out-of-container against a sandbox skill tree (seed/refresh/conflict/
+adopt/orphan/prune) and both launchers were exercised with a `docker` stub; a real
+image build + in-container refresh is still to be validated.
 This document is the agreed plan and resume point; it captures every decision and
-its rationale so the work can continue if the working session is lost.
-Date: 2026-06-06 (design).
+its rationale so the work can be resumed if the working session is lost.
+Date: 2026-06-06 (design + implementation).
 
 ## TL;DR
 

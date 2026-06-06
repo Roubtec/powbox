@@ -125,6 +125,8 @@ At container start, the entrypoint seeds the baked skills into each agent's user
 Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
 This also means a rebuilt image with updated skill text does *not* replace the stale copies already on the volumes. To push the latest baked skills onto the volumes after a rebuild, run `agent-update-skills` (or `commands/update-skills.*` directly) — it copies each baked skill over the volume copy in one throwaway container, so you no longer need to enter a container, delete skills by hand, exit, and relaunch to re-seed. It works whether or not any agent containers are running (they share the volumes); skills you authored on the volume that are not baked into the image are left untouched. See [Refreshing Skills](#refreshing-skills) below.
 
+Every skill powbox seeds carries a hidden `.powbox-seeded` ownership marker (recording the image build epoch and the powbox commit that built it). The marker means *"powbox owns this copy"*: the refresher may overwrite or prune a marked skill, while a folder **without** the marker is treated as user-authored and is never touched. To adopt a seeded skill as your own (fork-and-keep), delete its `.powbox-seeded` (or rename the folder), and powbox leaves it alone for good.
+
 Per-repo skills (e.g. `.claude/skills/<name>/` or `.agents/skills/<name>/`) still take precedence at invoke time, so any repo can override an individual skill without losing the rest.
 User-added skills in the same volume directory are unaffected by image rebuilds.
 
@@ -134,24 +136,35 @@ Each agent discovers these skills at startup and includes their `SKILL.md` front
 
 Because seeding is no-clobber, editing a skill in this repo and rebuilding the image is not enough — the volumes still hold the previously-seeded copy. `commands/update-skills.*` closes that gap by copying the freshly baked skills over the volume copies in a single throwaway container, replacing the old manual dance (enter a container, delete skills, exit, relaunch to re-seed).
 
-It seeds from whatever is in `powbox-agent:latest`, so rebuild the image first (e.g. `cc <project> --build`, `agent-update`, or `build.sh agent`) so the baked skills reflect your edits. The config volumes are shared by every agent container, so this works whether or not any containers are running — a running agent picks up a refreshed skill the next time that skill is invoked (restart it for certainty). Skills you authored on the volume that are not baked into the image are left untouched.
+It seeds from whatever is in `powbox-agent:latest`, so rebuild the image first (e.g. `cc <project> --build`, `agent-update`, or `build.sh agent`) so the baked skills reflect your edits. The config volumes are shared by every agent container, so this works whether or not any containers are running — a running agent picks up a refreshed skill the next time that skill is invoked (restart it for certainty).
+
+The command prints a plan (how many skills it will seed and refresh), then applies it. Using the `.powbox-seeded` ownership marker it also handles two edge cases:
+
+- **Conflicts** — an *unmarked* folder whose name collides with a baked skill is ambiguous (a legacy seed from before markers, or a skill you authored/forked). It is **never overwritten silently**; it is reported and left untouched. Resolve it with `--adopt-all` (take the baked version and start tracking it) — but only if it is a stale seed, not your own work; otherwise rename your folder first.
+- **Obsolete seeds** — a *marked* skill that is no longer baked into the image is reported, and removed only with `--prune`.
+
+With a terminal attached you are prompted before adopting or pruning; the flags pre-approve those non-interactively. Skills you authored (no marker) are never reported, adopted, or pruned.
 
 ```bash
-# Preview which skills would be refreshed
+# Preview the plan (seed / refresh / conflicts / obsolete) without changing anything
 ./commands/update-skills.sh --dry-run
 
-# Refresh the baked skills onto both config volumes
+# Refresh the baked skills onto both config volumes (prompts before adopt/prune on a TTY)
 ./commands/update-skills.sh
+
+# Non-interactive: also drop obsolete seeds and take baked versions of conflicts
+./commands/update-skills.sh --prune --adopt-all
 ```
 
-On PowerShell, use `-DryRun` for a preview:
+On PowerShell the flags are `-DryRun`, `-Prune`, `-AdoptAll`:
 
 ```powershell
 .\commands\update-skills.ps1 -DryRun
 .\commands\update-skills.ps1
+.\commands\update-skills.ps1 -Prune -AdoptAll
 ```
 
-If you are using the profile shortcuts described below, the same script is exposed as `agent-update-skills` — flags (`--dry-run` on bash, `-DryRun` in PowerShell) are forwarded.
+If you are using the profile shortcuts described below, the same script is exposed as `agent-update-skills` (flags forwarded). `agent-update` also offers to run it for you right after a successful image rebuild.
 
 ## Runtime
 
@@ -328,7 +341,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/smoke-test.*` for smoke-testing the unified agent image
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
-- `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes (its in-container worker is `commands/update-skills-incontainer.sh`)
+- `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `commands/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
 
 ## Resuming Sessions
@@ -393,11 +406,11 @@ Functions exposed by both libraries:
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
-- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet.
+- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet. After a successful rebuild it offers (on a TTY) to re-seed skills from the fresh image via `agent-update-skills`.
 - `agent-update-claude`, `agent-update-codex` — rebuild the unified image bumping just that agent to its latest release, pinning the other binary to its baked version so only the affected layers rebuild (no `--no-cache`)
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
-- `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies; forwards `--dry-run` (bash) or `-DryRun` (PowerShell). Rebuild the image first so the baked skills are current.
+- `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies. Skills are tracked by a `.powbox-seeded` ownership marker, so it refreshes only powbox's own copies and leaves user-authored skills alone. Flags: `--dry-run`/`-DryRun` (preview the plan), `--prune`/`-Prune` (remove obsolete seeds no longer baked), `--adopt-all`/`-AdoptAll` (take the baked version of unmarked name-collisions); on a TTY it prompts before pruning/adopting. Rebuild the image first so the baked skills are current.
 
 ### Environment Variables
 
@@ -467,6 +480,8 @@ agent-update-base
 # Re-seed updated baked skills onto the config volumes (preview, then apply)
 agent-update-skills -DryRun
 agent-update-skills
+# Also drop obsolete seeds and take baked versions of unmarked name-collisions
+agent-update-skills -Prune -AdoptAll
 
 # List Claude containers
 cc-list
@@ -539,6 +554,8 @@ agent-update-base
 # Re-seed updated baked skills onto the config volumes (preview, then apply)
 agent-update-skills --dry-run
 agent-update-skills
+# Also drop obsolete seeds and take baked versions of unmarked name-collisions
+agent-update-skills --prune --adopt-all
 
 # List Claude containers
 cc-list

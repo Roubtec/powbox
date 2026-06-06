@@ -44,10 +44,11 @@ COPY --chown=node:node docker/codex/agent-container/ /home/node/.agent-container
 # build-epoch is a monotonic stamp that gates instruction/skill re-seeding.
 # build-commit records the powbox commit that built these top (asset/claude)
 # layers; the .powbox-seeded skill marker copies it so a seeded skill can be
-# traced back to its source. Both live in this always-rebuilt layer (the epoch
-# is non-deterministic), so stamping the commit here never costs an extra cache
-# miss. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the default
-# keeps standalone `docker build` working.
+# traced back to its source. Referencing POWBOX_COMMIT here busts only this
+# metadata layer (and the cheap entrypoint COPY below it) when the commit
+# changes — the expensive Codex/Claude install layers sit ABOVE and are never
+# affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
+# default keeps standalone `docker build` working.
 ARG POWBOX_COMMIT=unknown
 RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.agent-container/codex/build-epoch >/dev/null \
     && printf '%s\n' "${POWBOX_COMMIT}" | tee /home/node/.agent-container/claude/build-commit /home/node/.agent-container/codex/build-commit >/dev/null

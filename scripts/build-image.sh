@@ -92,9 +92,13 @@ resolve_codex_commit() {
 	local prev_ver prev_commit
 	prev_ver="$(image_label powbox-agent:latest powbox.codex.version)"
 	prev_commit="$(image_label powbox-agent:latest powbox.commit.codex)"
-	# Same Codex version (with a base we are not rebuilding) => layer reused.
-	if [ -n "$prev_commit" ] && [ "$prev_ver" = "$CODEX_VERSION" ]; then
-		POWBOX_COMMIT_CODEX="$prev_commit"
+	# Same Codex version (with a base we are not rebuilding) => layer reused, so
+	# carry its recorded commit forward. An image built before provenance
+	# labelling has none to carry, and we cannot know which commit built the
+	# reused layer, so record "unknown" rather than misattributing this build's
+	# HEAD to it. A differing version rebuilds the layer at HEAD (the default).
+	if [ "$prev_ver" = "$CODEX_VERSION" ]; then
+		POWBOX_COMMIT_CODEX="${prev_commit:-unknown}"
 	fi
 }
 resolve_codex_commit

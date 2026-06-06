@@ -53,7 +53,14 @@ try {
     if ($LASTEXITCODE -ne 0) { return $script:PowboxCommit }
     $prevVer = Get-ImageLabel "powbox-agent:latest" "powbox.codex.version"
     $prevCommit = Get-ImageLabel "powbox-agent:latest" "powbox.commit.codex"
-    if ($prevCommit -and $prevVer -eq $CodexVersion) { return $prevCommit }
+    # Same Codex version (with a base we are not rebuilding) => layer reused, so
+    # carry its recorded commit forward. An image built before provenance
+    # labelling has none to carry, and we cannot know which commit built the
+    # reused layer, so record "unknown" rather than misattributing HEAD. A
+    # differing version rebuilds the layer at HEAD (returned below).
+    if ($prevVer -eq $CodexVersion) {
+      if ($prevCommit) { return $prevCommit } else { return "unknown" }
+    }
     return $script:PowboxCommit
   }
   $script:PowboxCommitCodex = Get-CodexCommit

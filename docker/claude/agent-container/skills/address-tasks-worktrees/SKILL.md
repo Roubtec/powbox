@@ -21,9 +21,9 @@ A git worktree removes that constraint. Each worktree is a **separate working di
 
 ### Durability & host isolation (this container)
 
-This repo's main checkout is bind-mounted from a Windows host into a Linux container, so the worktree roots are **shadowed** to keep their writes container-local and invisible to the host (no cross-platform path pollution). They are shadowed two different ways, and the difference matters:
+This repo's main checkout may be bind-mounted from a non-Linux host into a Linux container, so the worktree roots are **shadowed** to keep their writes container-local and invisible to the host (no cross-platform path pollution). They are shadowed two different ways, and the difference matters:
 
-- **`.worktrees/`** is backed by a **persistent per-project ext4 Docker volume** that the powbox launcher mounts there, and which *also* holds the pnpm store (`.worktrees/.pnpm-store`). Because the store and every `.worktrees/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — so worktree installs are near-free, there is **no shared 2 GB tmpfs cap**, and many worktrees can install concurrently. The volume is on disk (the Docker VM's ext4), not RAM. *(Fallback: if the container was launched without that volume, `.worktrees` is tmpfs-shadowed instead — see Bootstrap.)*
+- **`.worktrees/`** is backed by a **persistent per-project Docker volume** that the powbox launcher mounts there, and which *also* holds the pnpm store (`.worktrees/.pnpm-store`). Because the store and every `.worktrees/$CONTAINER_NAME/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — so installs avoid full package copies, there is **no shared 2 GB tmpfs cap**, and many worktrees can install concurrently. The volume is on disk, not RAM. *(Fallback: if the container was launched without that volume, `.worktrees` is tmpfs-shadowed instead — see Bootstrap.)*
 - **`.claude/worktrees/`** and **`.git/worktrees/`** remain **tmpfs-shadowed** (ephemeral): the harness-native worktree path and the per-worktree git metadata.
 
 Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs (`.git/refs/heads/...`) persist on the host. **Committed work therefore survives container recycle even without pushing** — only uncommitted changes are lost. The operating discipline that follows:
@@ -36,27 +36,33 @@ Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs
 
 Do this in the **main working tree** before creating worktrees. All steps are idempotent.
 
-1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher mounts the per-project ext4 volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. Confirm each is its own mount and **not** the host bind-mount filesystem (`9p`/`drvfs`/`virtiofs`), self-healing the tmpfs ones if `.powbox.yml` was missing entries:
+1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher normally mounts the per-project volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. `shadow-refresh.sh` can apply existing declarations immediately, but it cannot repair missing declarations — if a check below fails, stop and run `enable-worktrees` before continuing:
 
    ```bash
-   mkdir -p .worktrees .claude/worktrees .git/worktrees
-   shadow-refresh.sh "$(git rev-parse --show-toplevel)"   # tmpfs-shadows any unmounted root (fallback for .worktrees too)
-   # .worktrees should be a container-local mount — the per-project volume (typically
-   # ext4, but any local fs: xfs/btrfs/…) or the tmpfs fallback; the others tmpfs.
-   # findmnt -T takes a single target, so check each root in a loop:
-   for root in .worktrees .claude/worktrees .git/worktrees; do
+   ROOT="$(git rev-parse --show-toplevel)"
+   mkdir -p "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"
+   shadow-refresh.sh "$ROOT"   # tmpfs-shadows declared, unmounted roots
+   for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+     mountpoint -q "$root" || { echo "Unsafe worktree root (not a mountpoint): $root" >&2; exit 1; }
      findmnt -no TARGET,FSTYPE -T "$root"
    done
+   for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+     [ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
+       { echo "Unsafe worktree metadata root (expected tmpfs): $root" >&2; exit 1; }
+   done
+   case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
+     9p|drvfs|virtiofs) echo "Unsafe .worktrees host filesystem" >&2; exit 1 ;;
+   esac
    ```
 
-   The safety criterion is the **mount, not a specific fstype**: each root must be its own mountpoint and must **not** report the host bind-mount fstype (`9p`/`drvfs`/`virtiofs`). If `.worktrees` reports a host bind-mount fstype (or isn't a distinct mount of its own), **stop and tell the user** — worktree files would leak to the host. Any container-local filesystem is fine: when `.worktrees` is the per-project volume (ext4/xfs/btrfs/…), per-worktree `pnpm install` hardlinks from the co-located store, so there is no shared 2 GB cap to exhaust. *(Only in the tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means the container must be relaunched with a larger `SHADOW_TMPFS_SIZE`, or — better — with the worktrees volume.)*
+   The safety criterion for `.worktrees` is the **mount**, not one specific local fstype: the volume may be backed by ext4, xfs, btrfs, or another container-local filesystem; tmpfs is the supported fallback. The other two roots must be tmpfs. If any check fails, worktree files or metadata could leak to the host. *(Only in the `.worktrees` tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means relaunching with the worktrees volume or a larger `SHADOW_TMPFS_SIZE`.)*
 
    Then prune any of **this container's own** worktree dirs orphaned by a prior recycle (their tmpfs git metadata is gone). Worktrees live under a per-container `.worktrees/$CONTAINER_NAME/` subdir (see Durability), so scope the scan there — scanning the whole volume would delete a *peer* container's live worktrees and any uncommitted work in them:
 
    ```bash
-   MINE=".worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+   MINE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
    mkdir -p "$MINE"
-   git worktree prune
+   git -C "$ROOT" worktree prune
    for d in "$MINE"/*/; do
      [ -e "$d" ] || continue
      git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || rm -rf "$d"
@@ -107,16 +113,16 @@ When this skill runs **unattended**, completing the batch matters more than maxi
 
 Cap each wave's concurrency at the **minimum** of its dependency-derived width and what the environment can support. Concretely, before and during each wave:
 
-- **tmpfs headroom.** Before launching a wave, measure free space on the worktree tmpfs (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). A full per-worktree `pnpm install` in a node monorepo can copy on the order of a gigabyte into tmpfs when the store can't be hardlinked. Don't assume a fixed number — measure one install if unsure, then set `max_concurrent = max(1, floor(free_bytes / per_worktree_need))`, where `per_worktree_need ≈ install size + build-artifact headroom`. If `max_concurrent` is below the wave's task count, run the wave in **sub-batches** of `max_concurrent`, not all at once.
-- **`ENOSPC` mid-wave.** If any worktree's install/build fails with `ENOSPC`, stop adding concurrency: remove that worktree, halve `max_concurrent` (floor 1), and retry the remaining tasks in smaller sub-batches — ultimately one at a time. Never abandon a task because the *parallel* attempt failed; fall back to serial and let it through.
+- **Storage headroom.** Before launching a wave, measure free space on the `.worktrees` mount (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). On the normal volume-backed path, pnpm packages are hardlinked, so budget mainly for build artifacts and package metadata. If `.worktrees` is the tmpfs fallback, measure one representative install and include its package-copy cost. Run the wave in smaller sub-batches when projected demand approaches available space.
+- **`ENOSPC` mid-wave.** Stop adding concurrency, let viable in-flight tasks finish, and reclaim only worktrees whose changes are committed and pushed. Then retry the failed and remaining tasks in smaller sub-batches — ultimately one at a time. Never force-remove a worktree with uncommitted changes just to free space, and never abandon a task because the parallel attempt failed.
 - **Shared exclusive resources.** Some validation cannot run two-at-once even in separate worktrees because it contends for a single host-wide resource: a fixed listen port, one shared dev database on one port, or a build/e2e server that infers the workspace root from the repo-root lockfile (see below). Run such phases **serially** regardless of wave width — give each task exclusive use, then move on.
 - **Provider rate-limiting.** Repeated `429`/`529` errors when spawning many subagents at once are a signal to fan out less. Reduce the number of concurrent subagents per phase and proceed.
 
-Record in the final summary whenever you throttled below the dependency-derived width, and why — it tells the user whether the run was capacity-bound (worth relaunching with a larger `SHADOW_TMPFS_SIZE`) or genuinely serial by dependency.
+Record in the final summary whenever you throttled below the dependency-derived width, and why — it tells the user whether the run was storage-bound, provider-bound, resource-serialized, or genuinely serial by dependency. Mention `SHADOW_TMPFS_SIZE` only when `.worktrees` is actually using the tmpfs fallback.
 
 ### App-server / e2e validation in a worktree
 
-Validation that boots a *built* app server is the most common thing that won't run from inside a worktree. Next.js `next build` standalone output and Playwright's `webServer` both infer the workspace root from the repo-root lockfile, then look for the server at a path that ignores the nested `.worktrees/<slug>/` prefix — so `test:e2e` can't find the server and self-skips or errors. This is a repo-config limitation, not something the worktree skill can fix from the outside; handle it by choosing one of these, in order of preference:
+Validation that boots a *built* app server is the most common thing that won't run from inside a worktree. Next.js `next build` standalone output and Playwright's `webServer` both infer the workspace root from the repo-root lockfile, then look for the server at a path that ignores the nested `.worktrees/$CONTAINER_NAME/<slug>/` prefix — so `test:e2e` can't find the server and self-skips or errors. This is a repo-config limitation, not something the worktree skill can fix from the outside; handle it by choosing one of these, in order of preference:
 
 1. **Run that task's e2e phase serially in the main checkout** after its branch is pushed: from the main tree, check out the task branch, build, run e2e, then restore. This keeps unit/integration coverage in-worktree and serializes only the part that needs the un-nested path.
 2. **Defer e2e to CI** and rely on the in-worktree unit/integration suites for the in-loop signal, noting in the PR that e2e runs in CI.
@@ -150,7 +156,7 @@ For a wave of tasks `T1..Tn`:
 
    Concurrency is safe here **only because each agent has its own worktree.** If for any reason a task is not running in its own worktree, fall back to serializing that task as in `address-tasks`.
 
-3. **On pass, push and open a PR** for the task (see Delivery), then `git worktree remove` its worktree to free tmpfs (the branch and its commits persist in `.git` and on the remote).
+3. **On pass, push and open a PR** for the task (see Delivery), then `git worktree remove` its worktree to reclaim storage (the branch and its commits persist in `.git` and on the remote).
 
 4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches).
 
@@ -169,7 +175,7 @@ Include in each implementer prompt:
 - **Upstream context:** if this task builds on a dependency task, briefly describe what that task introduced (and that the worktree was branched from it, so that code is already present).
 - **Commit, push, and validation instructions:**
   - Commit at logical milestones, keeping each commit buildable when practical.
-  - **After every commit, push:** `git push -u origin HEAD` on the first push, `git push` thereafter. WIP in a tmpfs worktree is volatile; pushing is the backup. If a push fails (e.g. no remote auth), keep committing and note it — commits still persist locally.
+  - **After every commit, push:** `git push -u origin HEAD` on the first push, `git push` thereafter. Worktrees are disposable and their git metadata is ephemeral, so pushing is the backup. If a push fails (e.g. no remote auth), keep committing and note it — commits still persist locally.
   - Run the project build/lint periodically and a full build check before reporting done.
 - **Coordination:** it must not revert unrelated or concurrent edits, and must accommodate that its base branch may itself be a sibling task's branch.
 - **Reporting:** when done, report what was implemented, decisions/tradeoffs/deviations, and any areas needing focused review.
@@ -204,13 +210,13 @@ Default behavior, matching the existing workflow: each task that passes review g
    - For stacked PRs, note in the body which branch it stacks on, so reviewers understand the base.
 3. If pushing/PR creation is unavailable (no remote auth — see Bootstrap step 2), fall back to **local reviewed branches**: the work still persists in `.git`, and the host can `git pull` once a remote is reachable. Note the fallback in the final summary.
 
-After the PR is open, `git worktree remove "<absolute worktree path>"` to reclaim tmpfs. Do not delete the branch — the PR and any dependents need it.
+After the PR is open, `git worktree remove "<absolute worktree path>"` to reclaim storage. Do not delete the branch — the PR and any dependents need it.
 
 ## Cleanup
 
 - Remove each task's worktree once its PR is open (or once you've decided to stop on it): `git worktree remove <path>` (add `--force` only if you've confirmed the work is committed and pushed).
 - Because `.git/worktrees` is tmpfs-shadowed, you do **not** need `git worktree prune` for host hygiene — the metadata never reaches the host. Prune only if a removed worktree leaves a stale registration *within the live session*.
-- Never remove a worktree whose branch a not-yet-started dependent wave still needs to branch from; branch the dependent first, then remove.
+- Removing a worktree does not delete its branch; future dependent waves can still branch from that ref after the worktree is gone.
 
 ## Final Output
 

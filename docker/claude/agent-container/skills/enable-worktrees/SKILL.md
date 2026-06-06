@@ -1,6 +1,6 @@
 ---
 name: enable-worktrees
-description: Prepare a repository so powbox can run git-worktree-based parallel development in it — verify and fix the repo-root .powbox.yml shadow declarations and .gitignore so worktree scaffolding (.worktrees, .claude/worktrees, .git/worktrees) is tmpfs-shadowed (container-local, invisible to the host) and never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks-worktrees) or for unrelated .gitignore edits.
+description: Prepare a repository so powbox can run git-worktree-based parallel development in it — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks-worktrees) or for unrelated .gitignore edits.
 ---
 
 Prepare the current repository to support powbox's git-worktree parallel-development workflow.
@@ -11,9 +11,9 @@ This is a small, mechanical config task — do it inline yourself. Do **not** sp
 
 ## What "worktree-ready" means (the powbox contract)
 
-powbox tmpfs-shadows declared workspace subdirectories so writes there stay container-local and never reach the host bind mount. For worktree-based parallelism a repo needs two committed things.
+powbox keeps declared workspace subdirectories container-local so writes there never reach the host bind mount. The launcher-mounted `.worktrees` volume takes precedence; declared roots that are not already mountpoints get tmpfs shadows. For worktree-based parallelism a repo needs two committed things.
 
-1. **`.powbox.yml`** at the repo root declaring the worktree scaffolding as **literal** shadow paths. powbox's `detect-shadows.sh` creates and tmpfs-shadows literal paths (no `* ? [ ]` glob metacharacters) at container startup *even when they do not exist yet*, so committed declarations apply hands-free on a fresh checkout:
+1. **`.powbox.yml`** at the repo root declaring the worktree scaffolding as **literal** shadow paths. powbox's `detect-shadows.sh` creates literal paths (no `* ? [ ]` glob metacharacters) at container startup *even when they do not exist yet* and tmpfs-shadows any that are not already mountpoints, so committed declarations apply hands-free on a fresh checkout:
 
    ```yaml
    shadow:
@@ -45,7 +45,7 @@ Operate on the current repository only. Every step is idempotent and surgical �
    - Present → ensure the `shadow:` list contains each of the three entries and add any that are missing. **Keep every existing entry** (other shadow paths, monorepo `node_modules` globs, etc.) untouched. If the file has a `shadow:` key that is malformed or not a list, stop and report rather than rewriting it.
 
 3. **Reconcile `.gitignore`.** Ensure `$ROOT/.gitignore` ignores `.worktrees/` and `.claude/worktrees/`.
-   - Accept an existing equivalent entry (`.worktrees` without a trailing slash also matches the directory). Only add what is missing, under a short comment such as `# powbox git worktrees (tmpfs-shadowed; never commit working trees)`.
+   - Accept an existing equivalent entry (`.worktrees` without a trailing slash also matches the directory). Only add what is missing, under a short comment such as `# powbox git worktrees (container-local; never commit working trees)`.
    - Do **not** add `.git/worktrees`.
 
 4. **Guard against leaked tracking.** Run `git -C "$ROOT" ls-files -- .worktrees .claude/worktrees`. If anything is tracked, `git -C "$ROOT" rm -r --cached` it (keeping the working copy) so worktree contents stop being committed. Report what you untracked.
@@ -54,10 +54,20 @@ Operate on the current repository only. Every step is idempotent and surgical �
 
    ```bash
    shadow-refresh.sh "$ROOT"
-   findmnt -no TARGET,FSTYPE -T "$ROOT/.worktrees"   # expect the per-project volume (ext4/xfs/btrfs) or, as a fallback, tmpfs
+   for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+     mountpoint -q "$root" || { echo "Unsafe worktree root (not a mountpoint): $root" >&2; exit 1; }
+     findmnt -no TARGET,FSTYPE -T "$root"
+   done
+   for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+     [ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
+       { echo "Unsafe worktree metadata root (expected tmpfs): $root" >&2; exit 1; }
+   done
+   case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
+     9p|drvfs|virtiofs) echo "Unsafe .worktrees host filesystem" >&2; exit 1 ;;
+   esac
    ```
 
-   `.worktrees` is healthy when it is its own mount on **any** container-local filesystem — the powbox launcher's per-project volume (typically `ext4`, but `xfs`/`btrfs` are equally fine) or the `tmpfs` fallback. Only a **host bind-mount fstype** (`9p`/`drvfs`/`virtiofs`), or `.worktrees` not being a distinct mount at all, signals a problem: the running image likely predates the literal-path auto-shadow fix — tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch. The repo config you just wrote is still correct either way.
+   `.worktrees` is healthy when it is its own mount on any container-local filesystem — normally the per-project volume, or tmpfs as a fallback. The other two roots must be tmpfs. If a check fails, tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch; the repo config you wrote is still correct.
 
 6. **Commit the config.** These files belong in version control so every teammate and every future container inherits a worktree-ready repo. Stage `.powbox.yml` and `.gitignore` and commit them following the repo's commit conventions — or, if the user prefers to review first, leave them staged and say so.
 
@@ -67,7 +77,7 @@ State concisely:
 
 - Whether the repo was already compliant, or what you changed, per file.
 - Anything you untracked in step 4.
-- Whether shadows are live in the current session (step 5) or pending the next container start.
+- Whether the container-local mounts are live in the current session (step 5) or pending the next container start.
 - Any blocker: not a git repo, a malformed `.powbox.yml`, or a stale image.
 
 ## Notes

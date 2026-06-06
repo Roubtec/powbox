@@ -152,11 +152,11 @@ Include in each implementer prompt:
 - **Coordination:** it must not revert unrelated or concurrent edits, and must accommodate that its base branch may itself be a sibling task's branch.
 - **Reporting:** when done, report what was implemented, decisions/tradeoffs/deviations, and any areas needing focused review.
 
-On a fix-up round, spawn a **fresh** implementer for the task — a new `Agent`, never a "continued" prior implementer. The `use SendMessage … to continue this agent` footer printed after every `Agent` result is boilerplate for a tool that is **not available in this harness**; ignore it, and prefer the fresh spawn regardless (the new implementer reads the committed worktree plus the findings without bias toward its earlier choices). Paste the reviewer's numbered findings verbatim and instruct it to address each specifically and report what changed (same branch, same worktree).
+On a fix-up round, spawn a **fresh** implementer for the task — a new `Agent`, never a "continued" prior implementer. If an `Agent` result prints a `SendMessage` continuation footer, ignore it; this harness does not expose that tool. A fresh spawn is the preferred path because the new implementer reads the committed worktree plus the findings without bias toward its earlier choices. Paste the reviewer's numbered findings verbatim and instruct it to address each specifically and report what changed (same branch, same worktree).
 
 ## Reviewer Agent
 
-Same fresh-eyes contract and code-quality checklist as `address-tasks`. A reviewer is always a **new** `Agent` invocation — a fresh-eyes spawn, never a continuation of the implementer — launched only **after** every Phase-A implementer in the wave has returned. (`SendMessage`, the tool the `Agent` result footer suggests for continuation, is not available in this harness; ignore that footer — see the fix-up note below.)
+Same fresh-eyes contract and code-quality checklist as `address-tasks`. A reviewer is always a **new** `Agent` invocation — a fresh-eyes spawn, never a continuation of the implementer — launched only **after** every Phase-A implementer in the wave has returned. Ignore any `SendMessage` continuation footer from earlier `Agent` results; this harness does not expose that tool.
 
 Include in each reviewer prompt:
 

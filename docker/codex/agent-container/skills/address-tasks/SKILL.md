@@ -227,7 +227,7 @@ For each task file in the input set:
 
 When the reviewer reports material issues:
 
-1. **Spawn a new implementer agent** (on its own, as in step 4) with:
+1. **Spawn a fresh `worker` implementer** (on its own, as in step 4). Do not continue the prior implementer thread with `send_input`; fresh context is intentional because the fix-up agent should read the committed branch plus the reviewer's findings without attachment to earlier choices. Include:
    - The original task file content.
    - The reviewer's numbered findings, verbatim.
    - The branch name (same as before).

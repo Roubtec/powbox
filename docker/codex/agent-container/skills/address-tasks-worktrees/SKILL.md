@@ -190,12 +190,12 @@ Include in each implementer prompt:
 - **Coordination:** it must not revert unrelated or concurrent edits, and must accommodate that its base branch may itself be a sibling task's branch.
 - **Reporting:** when done, report what was implemented, decisions/tradeoffs/deviations, and any areas needing focused review.
 
-On a fix-up round, additionally paste the reviewer's numbered findings verbatim and instruct the implementer to address each specifically and report what changed (same branch, same worktree).
+On a fix-up round, spawn a fresh `worker` implementer for the task; do not continue the prior implementer thread with `send_input`. Fresh context is intentional because the fix-up agent should read the committed worktree plus the reviewer's findings without attachment to earlier choices. Paste the reviewer's numbered findings verbatim and instruct it to address each specifically and report what changed (same branch, same worktree).
 
 ## Reviewer Agent
 
 Same fresh-eyes contract and code-quality checklist as `address-tasks`.
-A reviewer is always a **fresh** `explorer` subagent spawn (never a `send_input` continuation of the implementer), launched only **after** every Phase-A implementer in the wave has returned.
+A reviewer is always a **fresh** `explorer` subagent spawn, never a `send_input` continuation of the implementer, launched only **after** every Phase-A implementer in the wave has returned.
 
 Include in each reviewer prompt:
 

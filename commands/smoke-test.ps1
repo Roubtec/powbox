@@ -10,7 +10,9 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 
-# Stage 1 - tool presence: every expected CLI resolves and runs.
+# Stage 1 - tool presence + key image config: every expected CLI resolves and
+# runs, and pnpm ships package-import-method=auto (not the old forced copy) so
+# worktree installs can hardlink from a co-located store.
 & (Join-Path $rootDir "scripts/smoke-test-image.ps1") `
   -Image $Image `
   -Commands @(
@@ -21,6 +23,7 @@ $rootDir = Split-Path -Parent $scriptDir
     'node --version >/dev/null'
     'npm --version >/dev/null'
     'pnpm --version >/dev/null'
+    'pnpm config get package-import-method | grep -qx auto'
     'pip3 --version >/dev/null'
     'python3 --version >/dev/null'
     'sqlcmd -? >/dev/null'

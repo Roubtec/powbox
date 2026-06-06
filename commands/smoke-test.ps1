@@ -2,6 +2,9 @@ param(
   [string]$Image = "powbox-agent:latest"
 )
 
+# The agent image is unified: both claude and codex (and codex's bwrap sandbox)
+# are baked into the same image alongside the shared toolchain, so one smoke
+# test validates everything in a single pass.
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
@@ -10,6 +13,8 @@ $rootDir = Split-Path -Parent $scriptDir
   -Image $Image `
   -Commands @(
     'claude --version >/dev/null'
+    'codex --version >/dev/null'
+    'bwrap --version >/dev/null'
     'gh --version >/dev/null'
     'node --version >/dev/null'
     'npm --version >/dev/null'
@@ -28,6 +33,7 @@ $rootDir = Split-Path -Parent $scriptDir
     'lsof -v >/dev/null 2>&1'
     'tree --version >/dev/null'
     'fd --version >/dev/null'
+    'fzf --version >/dev/null'
     'bat --version >/dev/null'
     'ssh -V >/dev/null 2>&1'
     'rsync --version >/dev/null'

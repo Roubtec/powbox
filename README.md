@@ -292,7 +292,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
-- `commands/claude-smoke-test.*` and `commands/codex-smoke-test.*` for smoke tests
+- `commands/smoke-test.*` for smoke-testing the unified agent image
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/check-updates.*` for checking whether newer agent releases are available
@@ -530,11 +530,10 @@ Render the merged runtime config with:
 docker compose -p powbox -f compose.shared.yml -f compose.agent.yml config
 ```
 
-Smoke test the built images with:
+Smoke test the built image with:
 
 ```bash
-./commands/claude-smoke-test.sh
-./commands/codex-smoke-test.sh
+./commands/smoke-test.sh
 ```
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config`, `agent-pnpm-store`, and `agent-zsh-history`, plus separate `claude-config` and `codex-config` volumes.

@@ -1,7 +1,10 @@
 # Worktree `node_modules`: from copy to hardlink
 
-Status: **design / decision pending** — derived from the orchestration-session retrospective (issue #1).
-Date: 2026-06-04.
+Status: **implemented (Option A)** — shipped on branch `worktree-hardlinks` (PR #37);
+design derived from the orchestration-session retrospective (issue #1). Verified in a
+freshly built container on 2026-06-06: a worktree `pnpm install` hardlinks from the
+co-located store (see *Validation* below).
+Date: 2026-06-04 (design) · 2026-06-06 (implemented & verified in-container).
 
 ## TL;DR
 
@@ -170,15 +173,23 @@ principle.
   mode point it at its single-mount location. No behavior change until a mode
   unifies the mounts, but it removes the hardcoded `copy` and centralizes the knob.
 
-## Validation (must run on a host with a Docker daemon — not available in-container)
+## Validation
 
-After implementing, on the host:
+Building/launching needs a Docker daemon (host-side), but once a container is up with
+the new wiring, the hardlink assertion runs **in-container** (no daemon needed).
+
+On the host, rebuild the image so the Dockerfile/entrypoint changes take effect, then
+relaunch the agent (the launcher recreates a stopped pre-change container so the new
+`.worktrees` volume + `PNPM_STORE_DIR` apply):
 
 ```bash
-# rebuild the image so the Dockerfile/entrypoint changes take effect
 ./build.sh   # or build.ps1
+```
 
-# launch against a pnpm project, create a worktree, install, and assert hardlinks
+Inside the resulting container — against any pnpm project, or a throwaway dir under
+`.worktrees` if the repo isn't a node project — create a worktree, install, and assert:
+
+```bash
 git -C /workspace/<proj> worktree add .worktrees/hltest -b hltest
 cd /workspace/<proj>/.worktrees/hltest && pnpm install
 # a hardlinked store file has link count >= 2:
@@ -187,6 +198,20 @@ stat -c '%h %n' "$f"          # expect link count >= 2
 findmnt -no TARGET,FSTYPE -T node_modules   # expect the .worktrees volume, not tmpfs
 du -sh node_modules           # expect tens of MB unique, not the full copy
 ```
+
+### Results (freshly built image, 2026-06-06, in `claude-powbox-…`)
+
+Confirmed in-container. The runtime wiring landed as designed:
+
+- `PNPM_STORE_DIR=…/.worktrees/.pnpm-store`, `pnpm config get store-dir` matches, and
+  `package-import-method=auto`; `.worktrees` is the `agent-wt-<proj>` ext4 volume
+  (919 GB free), **not** a 2 GB tmpfs.
+- A worktree install **hardlinks**: the installed file and its store entry share one
+  inode (`stat` link count = 2), and `node_modules` lands on the `.worktrees` volume.
+- Three worktrees installing the same deps concurrently all share the store inode
+  (link count = 4 = store + 3 worktrees); total real disk for 3 worktrees + store was
+  ~store size (~7 MB), i.e. N worktrees ≈ the cost of one. The old per-worktree
+  425 MB–1.1 GB tmpfs copy — and its `ENOSPC`/concurrency cliff — is gone.
 
 ## Out of scope here
 Docker daemon (issues #2/#5) is tracked on branch `docker-for-agents`. The

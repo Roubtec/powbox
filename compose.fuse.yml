@@ -1,26 +1,16 @@
-# Optional overlay: expose the host devices rootless Podman needs to its agent
-# container. `docker compose run` has no `--device` flag (only `docker run` does),
-# so devices must be declared in a compose file. The launchers add this file to
-# the `-f` chain only when fuse is requested (POWBOX_FUSE=on, or `auto` when the
-# host shell already has /dev/fuse). When it is included and the Docker host
-# cannot expose a listed device, the run hard-fails — intentional for callers who
-# explicitly demand a working nested-container runtime.
+# Optional overlay: expose /dev/fuse to the agent container for rootless Podman's
+# fuse-overlayfs storage driver (the `overlay` graph driver). Without it Podman
+# falls back to the slower `vfs` driver, which still works — so this device is a
+# best-effort accelerator, not a hard requirement.
 #
-# Two devices travel together here:
-#   /dev/fuse    — fuse-overlayfs storage driver (overlay). Without it Podman
-#                  falls back to the slower vfs driver (still functional).
-#   /dev/net/tun — REQUIRED for nested-container networking. slirp4netns (and
-#                  pasta) create a tap via /dev/net/tun; without it EVERY
-#                  `podman run` fails ("slirp4netns ... open(/dev/net/tun): No
-#                  such file or directory"), regardless of storage driver. The
-#                  tun kernel module must be present on the Docker host (WSL2's
-#                  Microsoft kernel and Docker Desktop's VM both ship it).
-#
-# Caveat of bundling tun with the fuse gate: POWBOX_FUSE=off skips this whole
-# file, so it also drops nested networking. `off` is a deliberate "no device
-# passthrough" opt-out; use `auto`/`on` for working nested containers.
+# `docker compose run` has no `--device` flag (only `docker run` does), so the
+# device must be declared in a compose file. The launchers add this file to the
+# `-f` chain via the POWBOX_PODMAN gate (POWBOX_FUSE is the deprecated alias):
+# `on` forces it, `auto` (default) attaches it when the launcher's host shell can
+# see /dev/fuse, `off` skips it. Networking lives in its own overlay
+# (compose.netdev.yml, /dev/net/tun) so a host that can expose tun but not fuse
+# still gets nested networking on the vfs fallback.
 services:
   agent:
     devices:
       - /dev/fuse:/dev/fuse
-      - /dev/net/tun:/dev/net/tun

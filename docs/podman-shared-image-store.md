@@ -24,14 +24,16 @@ outer-container reasons invisible to `podman info` — (1) `/dev/net/tun` was ne
 passed in, so slirp4netns/pasta networking dies on every run; and (2) the host
 runtime's default seccomp profile stacks onto every descendant and blocks the
 syscalls crun needs (`keyctl` and `pivot_root` return EPERM), so even
-`--network=none` died at "create keyring"/"pivot_root". Fixed in commit `17e42b1`:
-`/dev/net/tun` added to `compose.fuse.yml` (same `POWBOX_FUSE` gate as `/dev/fuse`);
-`security_opt: seccomp=unconfined + apparmor=unconfined` added to
-`compose.shared.yml`. See [rootless-podman.md](rootless-podman.md) for the full
-run-path validation this unblocks.
+`--network=none` died at "create keyring"/"pivot_root". Fixed: `security_opt:
+seccomp=unconfined + apparmor=unconfined` in `compose.shared.yml` (commit `17e42b1`),
+and the two host devices each in their own overlay — `/dev/fuse` in
+`compose.fuse.yml`, `/dev/net/tun` in `compose.netdev.yml` — both gated by the
+single `POWBOX_PODMAN` switch (`POWBOX_FUSE` is the deprecated alias). See
+[rootless-podman.md](rootless-podman.md) for the full run-path validation this
+unblocks.
 
-**Next session:** rebuild base+agent at ≥ commit `17e42b1`, relaunch with
-`POWBOX_FUSE=on`, then run the **Validation plan** below (image-store sharing) AND
+**Next session:** rebuild base+agent at ≥ the device-split commit, relaunch with
+`POWBOX_PODMAN=on`, then run the **Validation plan** below (image-store sharing) AND
 the run-path validation prompt in [rootless-podman.md](rootless-podman.md).
 Pick this up from such a session: confirm the two prerequisites below, then run
 both validations, then update the user-facing docs (step 6).
@@ -313,36 +315,42 @@ surviving `exec "$@"` (#5) still want a check, plus the cross-container sharing
 test (Validation plan step 3) and the whole run-path suite in
 [rootless-podman.md](rootless-podman.md).
 
-## Enabling `/dev/fuse` (WSL2 / Windows 11 host)
+## Enabling the Podman devices (`/dev/fuse` + `/dev/net/tun`) (WSL2 / Windows 11 host)
 
-The launcher attaches `/dev/fuse` (by adding `compose.fuse.yml` to the `-f` chain
-— `docker compose run` has no `--device` flag, only `docker run` does) when
-`POWBOX_FUSE=on`, or under the default `auto` when the **shell that runs the
-launcher** already has `/dev/fuse`.
-`SYS_ADMIN` is already in `compose.shared.yml`, so the device is the only host-side
-gate. Where the device must exist depends on how Docker runs:
+The launcher attaches the two devices rootless Podman needs — `/dev/fuse` (overlay
+storage driver, via `compose.fuse.yml`) and `/dev/net/tun` (nested networking, via
+`compose.netdev.yml`) — by adding those files to the `-f` chain (`docker compose
+run` has no `--device` flag, only `docker run` does). Both ride under one gate,
+`POWBOX_PODMAN` (`POWBOX_FUSE` is the deprecated alias): `on` forces both, the
+default `auto` attaches each device the **shell that runs the launcher** can
+already see, `off` skips both. `SYS_ADMIN` and the unconfined seccomp/apparmor
+profile are already in `compose.shared.yml`, so these devices are the only
+remaining host-side gate. Where they must exist depends on how Docker runs:
 
 - **Docker Desktop (WSL2 backend)** — the common Windows 11 case. Containers run in
-  Docker Desktop's *own* managed VM, not your distro, and that VM ships `/dev/fuse`.
-  But `auto` checks the launcher's shell (Windows PowerShell has no `/dev`; a WSL2
-  distro's `/dev/fuse` doesn't reflect the Docker VM), so `auto` under-detects and
-  falls back to vfs. **Force it: `POWBOX_FUSE=on`.**
-  - PowerShell: `$env:POWBOX_FUSE='on'; .\scripts\launch-agent.ps1 …`
-  - bash/WSL: `POWBOX_FUSE=on ./scripts/launch-agent.sh …`
-  - If `POWBOX_FUSE=on` hard-fails at `docker … run` with a device error, the Docker
-    VM isn't exposing `/dev/fuse` — update Docker Desktop and run `wsl --update`
-    (Windows) for a current kernel, then retry.
+  Docker Desktop's *own* managed VM, not your distro, and that VM ships both
+  `/dev/fuse` and `/dev/net/tun`. But `auto` checks the launcher's shell (Windows
+  PowerShell has no `/dev`; a WSL2 distro's `/dev` doesn't reflect the Docker VM),
+  so `auto` under-detects and skips both (→ vfs **and** no nested networking).
+  **Force it: `POWBOX_PODMAN=on`.**
+  - PowerShell: `$env:POWBOX_PODMAN='on'; .\scripts\launch-agent.ps1 …`
+  - bash/WSL: `POWBOX_PODMAN=on ./scripts/launch-agent.sh …`
+  - If `POWBOX_PODMAN=on` hard-fails at `docker … run` with a device error, the
+    Docker VM isn't exposing that device — update Docker Desktop and run
+    `wsl --update` (Windows) for a current kernel, then retry.
 - **Docker engine native inside a WSL2 distro** (docker-ce in Ubuntu, no Docker
-  Desktop) — containers share the distro kernel + `/dev`, so `/dev/fuse` must exist
-  in that distro:
-  - `ls -l /dev/fuse` — if present, `auto` already passes it (`POWBOX_FUSE=on` also works).
-  - If missing: `sudo modprobe fuse` (Microsoft's WSL2 kernel ships the module);
-    confirm with `grep fuse /proc/filesystems`. Persist with a
-    `/etc/modules-load.d/fuse.conf` containing `fuse`. Keep the kernel current via
-    `wsl --update` + `wsl --shutdown` from Windows.
+  Desktop) — containers share the distro kernel + `/dev`, so both devices must
+  exist in that distro (here `auto` actually works):
+  - `ls -l /dev/fuse /dev/net/tun` — if present, `auto` passes them (`on` also works).
+  - If `/dev/fuse` is missing: `sudo modprobe fuse` (Microsoft's WSL2 kernel ships
+    the module); confirm with `grep fuse /proc/filesystems`. Persist with a
+    `/etc/modules-load.d/fuse.conf` containing `fuse`.
+  - If `/dev/net/tun` is missing: `sudo modprobe tun`; confirm with
+    `grep tun /proc/misc`. Persist with `/etc/modules-load.d/tun.conf` containing
+    `tun`. Keep the kernel current via `wsl --update` + `wsl --shutdown` from Windows.
 
-**After relaunch, verify inside the new container:** `ls -l /dev/fuse` (present) and
-`podman info --format '{{.Store.GraphDriverName}}'` → `overlay`.
+**After relaunch, verify inside the new container:** `ls -l /dev/fuse /dev/net/tun`
+(both present) and `podman info --format '{{.Store.GraphDriverName}}'` → `overlay`.
 
 > **Gotcha — the per-container driver is pinned on first init.** The persistent
 > `agent-podman-<container>` graphroot records its storage driver
@@ -361,7 +369,7 @@ This plan covers the **shared image store** only. The container-**run** path
 [rootless-podman.md](rootless-podman.md)'s validation prompt — run that too, since
 steps 3–4 below now depend on a working `podman run` (unblocked by commit
 `17e42b1`). Run inside a freshly rebuilt container (overlay, `/dev/fuse` +
-`/dev/net/tun` present, `POWBOX_FUSE=on`):
+`/dev/net/tun` present, `POWBOX_PODMAN=on`):
 
 1. `seed-image-store.sh status` → store mounted, overlay yes, seeded no.
 2. `seed-image-store.sh seed` → pulls the curated set; re-run → all `present`,

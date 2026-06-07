@@ -423,24 +423,38 @@ elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 	RUN_ARGS+=(--rm)
 fi
 
-# Pass the host devices rootless Podman needs (/dev/fuse for the fuse-overlayfs
-# storage driver, /dev/net/tun for nested-container networking) through to the
-# agent. `docker compose run` has no --device flag (only `docker run` does), so
-# both are declared in compose.fuse.yml and added to the -f chain here rather than
-# as CLI flags. Auto-detect from the host; POWBOX_FUSE=on|off overrides. NOTE: the
-# two devices are bundled, so `off` (or `auto` not detecting /dev/fuse) drops BOTH
-# — that means no overlay driver AND no nested networking (every `podman run`
-# fails on the missing tun). `on` forces them, so if the Docker host cannot expose
-# a device the run hard-fails — intentional for callers who demand a working
-# nested runtime. See compose.fuse.yml for the bundling rationale and caveat.
-case "${POWBOX_FUSE:-auto}" in
+# Pass the host devices rootless Podman needs through to the agent, each in its
+# own compose overlay (`docker compose run` has no --device flag, only `docker
+# run` does, so a device must be declared in a compose file added to the -f chain):
+#   compose.fuse.yml   -> /dev/fuse    (fuse-overlayfs overlay storage driver;
+#                                       absence just falls back to the vfs driver)
+#   compose.netdev.yml -> /dev/net/tun (slirp4netns/pasta nested networking;
+#                                       absence breaks every default `podman run`)
+# POWBOX_PODMAN gates both (POWBOX_FUSE is the deprecated alias):
+#   on   -> force both. Use on Docker Desktop / WSL2, where the devices live in the
+#          Docker VM and the launcher's host shell cannot see them to auto-detect.
+#          If the Docker host cannot expose a forced device the run hard-fails —
+#          intentional for callers who demand a working nested runtime.
+#   off  -> neither (Podman still runs: vfs storage, networking only via
+#          --network=host/none).
+#   auto -> attach each device independently when the launcher's host shell can see
+#          it (reliable where /dev is shared, e.g. native Linux / WSL; under-detects
+#          on Docker Desktop — use `on` there). The two are detected separately so a
+#          host exposing /dev/net/tun but not /dev/fuse still gets networking on vfs.
+if [ -z "${POWBOX_PODMAN:-}" ] && [ -n "${POWBOX_FUSE:-}" ]; then
+	echo "Note: POWBOX_FUSE is deprecated; use POWBOX_PODMAN (it now gates both /dev/fuse and /dev/net/tun)." >&2
+fi
+case "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" in
 on)
-	COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml")
+	COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml" -f "${ROOT_DIR}/compose.netdev.yml")
 	;;
 off) ;;
 *)
 	if [ -e /dev/fuse ]; then
 		COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml")
+	fi
+	if [ -e /dev/net/tun ]; then
+		COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.netdev.yml")
 	fi
 	;;
 esac

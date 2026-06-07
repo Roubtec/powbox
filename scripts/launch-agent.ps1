@@ -80,6 +80,7 @@ $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.agent.yml"
 $composeFuse = Join-Path $rootDir "compose.fuse.yml"
+$composeNetdev = Join-Path $rootDir "compose.netdev.yml"
 $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
@@ -253,7 +254,7 @@ if (-not $Volatile -and $containerExists) {
   if ($LASTEXITCODE -ne 0) { $hasPodmanMount = "" }
   if ([string]::IsNullOrWhiteSpace($hasPodmanMount)) {
     if ($containerRunning) {
-      Write-Host "Note: container $containerName predates the per-container Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
+      Write-Host "Note: container $containerName predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
     }
     else {
       Write-Host "Container $containerName predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
@@ -365,22 +366,34 @@ elseif ($Volatile -and -not $Persist) {
   $runArgs += "--rm"
 }
 
-# Pass the host devices rootless Podman needs (/dev/fuse for the fuse-overlayfs
-# storage driver, /dev/net/tun for nested-container networking) through to the
-# agent. `docker compose run` has no --device flag (only `docker run` does), so
-# both are declared in compose.fuse.yml and added to the -f chain here rather than
-# as CLI flags. Auto-detect on the host; POWBOX_FUSE=on|off overrides. NOTE: the
-# two devices are bundled, so `off` (or `auto` not detecting /dev/fuse) drops BOTH
-# — no overlay driver AND no nested networking (every `podman run` fails on the
-# missing tun). `on` forces them; if the Docker host cannot expose a device the
-# run hard-fails. On a Windows host shell /dev/fuse does not exist, so `auto`
-# resolves to off there; force it with POWBOX_FUSE=on only when the Docker Desktop
-# VM exposes the devices. See compose.fuse.yml for the bundling rationale.
-switch ($env:POWBOX_FUSE) {
-  "on" { $composeArgs += @("-f", $composeFuse) }
+# Pass the host devices rootless Podman needs through to the agent, each in its
+# own compose overlay (`docker compose run` has no --device flag, only `docker
+# run` does, so a device must be declared in a compose file added to the -f chain):
+#   compose.fuse.yml   -> /dev/fuse    (fuse-overlayfs overlay storage driver;
+#                                       absence just falls back to the vfs driver)
+#   compose.netdev.yml -> /dev/net/tun (slirp4netns/pasta nested networking;
+#                                       absence breaks every default `podman run`)
+# POWBOX_PODMAN gates both (POWBOX_FUSE is the deprecated alias):
+#   on   -> force both. Use on Docker Desktop / WSL2, where the devices live in the
+#          Docker VM and the launcher's host shell cannot see them to auto-detect;
+#          if the Docker host cannot expose a forced device the run hard-fails.
+#   off  -> neither (Podman still runs: vfs storage, networking only via
+#          --network=host/none).
+#   auto -> attach each device independently when the host shell can see it. On a
+#          Windows host shell /dev/* does not exist, so `auto` resolves to off
+#          there; force with POWBOX_PODMAN=on when the Docker Desktop VM has them.
+#          The two are detected separately so a host exposing /dev/net/tun but not
+#          /dev/fuse still gets networking on vfs.
+if (-not $env:POWBOX_PODMAN -and $env:POWBOX_FUSE) {
+  Write-Host "Note: POWBOX_FUSE is deprecated; use POWBOX_PODMAN (it now gates both /dev/fuse and /dev/net/tun)." -ForegroundColor Yellow
+}
+$podmanDeviceMode = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
+switch ($podmanDeviceMode) {
+  "on" { $composeArgs += @("-f", $composeFuse, "-f", $composeNetdev) }
   "off" { }
   default {
     if (Test-Path "/dev/fuse") { $composeArgs += @("-f", $composeFuse) }
+    if (Test-Path "/dev/net/tun") { $composeArgs += @("-f", $composeNetdev) }
   }
 }
 

@@ -152,7 +152,7 @@ if command -v podman >/dev/null 2>&1; then
 	# slower vfs driver. The driver is baked into the persistent graphroot on
 	# first use, and Podman requires `podman system reset` before changing
 	# storage.conf's `driver`, so silently flipping it when /dev/fuse availability
-	# changes (moved host, POWBOX_FUSE toggled, outer container recreated) would
+	# changes (moved host, POWBOX_PODMAN toggled, outer container recreated) would
 	# orphan the existing images and volumes. So pick a driver from /dev/fuse only
 	# on first init, record it on the persistent volume, and honour that recorded
 	# choice on every later launch — warning instead of switching on a mismatch.
@@ -212,7 +212,7 @@ if command -v podman >/dev/null 2>&1; then
 		fi
 	else
 		if [ ! -e /dev/fuse ]; then
-			echo "Note: /dev/fuse not available; Podman will use the slower vfs storage driver. Pass it through with POWBOX_FUSE=on, or it is auto-detected from the host." >&2
+			echo "Note: /dev/fuse not available; Podman will use the slower vfs storage driver. Pass it through with POWBOX_PODMAN=on, or it is auto-detected from the host." >&2
 		fi
 		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
 	fi

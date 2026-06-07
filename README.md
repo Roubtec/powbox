@@ -225,7 +225,8 @@ This is deliberately **not** Docker-in-Docker or a mounted host socket — both 
 
 - **Persistence:** a per-container `agent-podman-<agent>-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts. It's keyed per outer container (agent + project), not just per project, so a project's Claude and Codex containers can run concurrently without two Podman instances sharing — and corrupting — one graphroot.
 - **Access pattern:** reach a nested service from the agent via its **published port on `localhost`**; container-to-container uses service names over netavark/aardvark-dns.
-- **Storage driver:** fuse-overlayfs when `/dev/fuse` is available (passed through automatically when the host exposes it; force with `POWBOX_FUSE=on`), otherwise the slower `vfs` driver.
+- **Storage driver:** fuse-overlayfs when `/dev/fuse` is available, otherwise the slower `vfs` driver.
+- **Devices:** rootless Podman needs two host devices — `/dev/fuse` (overlay storage driver) and `/dev/net/tun` (nested-container networking; without it default `podman run` can't bring up its network). Both are passed through under the single `POWBOX_PODMAN` gate: `auto` attaches each when the host exposes it, `on` forces both (Docker Desktop), `off` skips both.
 
 The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal to move that workload to a dedicated VM. See [docs/rootless-podman.md](docs/rootless-podman.md) for design notes and a validation procedure.
 
@@ -444,7 +445,7 @@ Both libraries honour the same variables:
 |---|---|---|
 | `POWBOX_ROOT` | auto-detected from the script's location | Path to your PowBox checkout. Only needed if auto-detection fails. |
 | `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
-| `POWBOX_FUSE` | `auto` | Whether to pass `/dev/fuse` through for rootless Podman's fuse-overlayfs storage driver. `auto` detects the device on the host; `on` forces it (use when the daemon has `/dev/fuse` but the host shell doesn't, e.g. some Docker Desktop setups); `off` skips it and falls back to the slower `vfs` driver. |
+| `POWBOX_PODMAN` | `auto` | Whether to pass the host devices rootless Podman needs into the agent: `/dev/fuse` (fuse-overlayfs `overlay` storage driver; absence falls back to the slower `vfs`) and `/dev/net/tun` (nested-container networking; absence breaks default `podman run`). `auto` attaches each device when the launcher's host shell can see it; `on` forces both (use when the Docker daemon/VM has them but the host shell doesn't, e.g. Docker Desktop); `off` skips both. (`POWBOX_FUSE` is a deprecated alias for this variable.) |
 
 Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.
 

@@ -9,9 +9,13 @@ so the shared read path + per-container write isolation both hold under a real
 `podman run`/compose workload. The run path (`podman run`, networking, compose
 stacks) is owned by [rootless-podman.md](rootless-podman.md) and is now fully green
 post-rebuild (one new fix there: `firewall_driver=iptables`); this doc owns the
-shared image store. **Still open** (both inherently need a *second* container, which
-can't be launched from inside one): cross-container sharing (Validation plan step 3)
-and read-while-write (open question #4).
+shared image store. **Cross-container validation COMPLETE (2026-06-07):** a second
+container on a different project (rebuilt with the baked `firewall_driver=iptables`)
+ran the reader role from [podman-test.md](podman-test.md) against a live seed in this
+container — cross-container sharing (Validation plan step 3), read-while-write (open
+question #4), and concurrent same-image pull into its own graphroot (open question #5)
+all **PASS** (see Validation plan / open questions below). The only remaining follow-up
+is the user-facing docs (wiring-checklist step 6).
 
 ### Current state (2026-06-07)
 
@@ -48,12 +52,16 @@ green (see [rootless-podman.md](rootless-podman.md)). Image-store checks done th
    actual is 1.13-dev; fusermount3 3.17.2). The 4 curated images resolve `RO=true`
    from the bare-graphroot `additionalimagestores` mount, nothing copies into the
    writable store — overlay path semantics re-confirmed on the new version.
-3. ⏳ **STILL OPEN** — Validation plan step 3 (cross-container sharing) and open
-   questions #4 (read-while-write) and #5's concurrent-seed half all need a *second*
-   container for a different project; they can't be exercised from inside the single
-   running container. Next session: launch a 2nd container (`cc`/`cx` on another
-   scratch project) and run Validation plan step 3.
-4. ⏳ Step 6 user-facing docs still pending (after step 3 passes).
+3. ✅ **DONE (2026-06-07)** — Validation plan step 3 (cross-container sharing) and open
+   questions #4 (read-while-write) + #5 (concurrent same-image pull) all ran from a
+   *second* container (different project) via [podman-test.md](podman-test.md) and
+   PASS. Evidence: that container's fresh empty graphroot saw the 4 curated images
+   `RO=true` pre-pull (sharing); during a live 6-image seed from this container it did
+   18 reads (`podman images`, curated pulls, `podman run` from store, plus pulls of the
+   actively-seeded set) with **0 errors, 0 deadlocks** (#4); and it pulled all 6
+   actively-seeded images into its own graphroot (`RO=false` copies) with none erroring
+   or hanging (#5).
+4. ⏳ Step 6 user-facing docs still pending (now the only remaining follow-up).
 
 > **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
 > `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`
@@ -282,18 +290,22 @@ These are the unverified Podman mechanics. Resolve each by running, not guessing
    store + vfs consumer), which needs `/dev/fuse` to set up. Mitigation already in
    the design: the entrypoint writes the `additionalimagestores` line ONLY on the
    overlay branch, so a vfs consumer never sees the overlay store in the first place.
-4. **Read-while-write.** Seed (writer) running while another container reads the
-   store: does the read-only consumer tolerate it? Seeding is rare (first run +
-   explicit update); the flock serializes writers, but a consumer mid-read during
-   a seed is the edge to check.
-5. **Background first-run seed.** PARTIALLY RESOLVED on overlay (2026-06-07): on
+4. **Read-while-write.** RESOLVED (2026-06-07, cross-container). A second container
+   ran 18 reads (`podman images`, curated pulls, `podman run` straight from the store,
+   plus pulls of the actively-seeded images) across a live 6-image seed driven from
+   another container — **0 errors, 0 deadlocks**; no read errored or timed out. The
+   read-only consumer tolerates a concurrent seed (brief lock-blocking, no hang). The
+   flock only serializes *writers*; readers contend on podman's internal store locks
+   and were fine.
+5. **Background first-run seed.** RESOLVED (2026-06-07). First half (overlay): on
    first boot the entrypoint's backgrounded `seed-image-store.sh seed` survived
    `exec "$@"` and ran to completion — `/tmp/powbox-image-store-seed.log` ends
    `Image store: 4 pulled, 0 present, 0 failed` and the `.powbox-image-store-seeded`
-   marker was written ~1 min after container start. Still untested: an agent in
-   another container pulling the same image concurrently into its own graphroot
-   while a seed is mid-flight not deadlocking on the store. Worst acceptable case:
-   the image just isn't shared yet and the agent pulls its own copy.
+   marker was written ~1 min after container start. Second half (cross-container,
+   now confirmed): a second container pulled all 6 actively-seeded images
+   (nginx/httpd/python/node/golang/ruby-alpine) into its **own** graphroot
+   (`RO=false` copies) while this container was seeding those exact images into the
+   shared store — every pull succeeded, none deadlocked on the store.
 6. **build-epoch/commit path.** RESOLVED by inspection. Build metadata lands at
    `/home/node/.agent-container/<agent>/build-{epoch,commit}` (written identically
    for every agent by `docker/agent/Dockerfile`), **not** `/usr/local/share/powbox/`
@@ -324,13 +336,12 @@ overlay image-store happy path end-to-end (seed → consumer resolves all four
 curated images `R/O: true` → nothing copied into the writable graphroot), settling
 open questions #1 and the read-only sharing model on overlay (above).
 
-Still unverified — these need the next rebuild (≥ commit `17e42b1`) because they
-depend on actually **running** a nested container, which only worked after the
-`/dev/net/tun` + seccomp fix: the true driver-mismatch case is now moot (overlay
-everywhere), but read-while-write (#4) and the backgrounded first-run seed
-surviving `exec "$@"` (#5) still want a check, plus the cross-container sharing
-test (Validation plan step 3) and the whole run-path suite in
-[rootless-podman.md](rootless-podman.md).
+All verified as of 2026-06-07: the true driver-mismatch case is moot (overlay
+everywhere); read-while-write (#4), the backgrounded first-run seed surviving
+`exec "$@"` (#5), and the cross-container sharing test (Validation plan step 3) all
+PASS — the first via this container, the last three via a second container running
+[podman-test.md](podman-test.md)'s reader role against a live seed here. The whole
+run-path suite is green too (see [rootless-podman.md](rootless-podman.md)).
 
 **Update 2026-06-07 (run validation, Claude):** the run path was exercised for the
 first time. The shared store is now confirmed **consumed by a real `podman run`**,
@@ -338,10 +349,11 @@ not just by inspection — `podman images --all` shows all four curated images
 `R/O=true`, the step-2 postgres started from the shared copy with no layer pull,
 and only the non-curated probe images (`alpine`, `hello-world`) landed in the
 writable per-container graphroot (`overlay-images/`), so write isolation holds.
-Cross-**container** sharing (Validation plan step 3) and read-while-write (#4)
-still need a second container, which can't be launched from inside. The run-path
-suite itself surfaced a new sysctl blocker (read-only `/proc/sys`, fixed via
-`systempaths=unconfined` in `compose.shared.yml`, pending relaunch) and a Podman
+Cross-**container** sharing (Validation plan step 3) and read-while-write (#4) were
+**since confirmed** (2026-06-07) from a second container — see the status header and
+open questions #4/#5. The run-path suite itself surfaced a new sysctl blocker
+(read-only `/proc/sys`, fixed via `systempaths=unconfined` in `compose.shared.yml`)
+and a Podman
 4.3.1 compose-subcommand gap — both owned by [rootless-podman.md](rootless-podman.md).
 
 ## Enabling the Podman devices (`/dev/fuse` + `/dev/net/tun`) (WSL2 / Windows 11 host)
@@ -403,13 +415,17 @@ steps 3–4 below now depend on a working `podman run` (unblocked by commit
 1. `seed-image-store.sh status` → store mounted, overlay yes, seeded no.
 2. `seed-image-store.sh seed` → pulls the curated set; re-run → all `present`,
    nothing re-pulled. `seed-image-store.sh list` → all `present`.
-3. **Sharing works:** in a *second* container for a different project,
-   `podman pull docker.io/library/postgres:16-alpine` should resolve from the
-   shared store (near-instant, no network layer pulls) — compare against a
-   curated image vs. a non-curated one to see the difference.
-4. **Writable still isolated:** `podman run` a curated image, write data to a
-   `podman volume`; confirm it lands in the per-container graphroot, not the
-   shared store (shared store stays read-only/unchanged).
+3. **Sharing works:** ✅ DONE (2026-06-07, see [podman-test.md](podman-test.md)). In a
+   *second* container for a different project, the 4 curated images were visible
+   `RO=true` in a fresh empty graphroot **before pulling anything** — that pre-pull
+   visibility is the proof of sharing. (Note: do NOT judge this by `grep 'Copying
+   blob'` counts — podman prints those per layer during manifest assembly even when
+   the layer data is reused from the store, so they reflect layer count, not
+   downloads; the curated postgres still printed 11. Use RO=true visibility instead.)
+4. **Writable still isolated:** ✅ DONE. The second container's pulls of non-curated /
+   actively-seeded images landed `RO=false` in its own graphroot while the curated set
+   stayed `RO=true` from the shared store; the shared store was unchanged by the reader
+   (this container also re-verified: only non-curated probes are `RO=false` locally).
 5. **Firewall/isolation unaffected:** re-run the egress check from
    `docs/rootless-podman.md` step 4 (PUBLIC_OK / LAN_BLOCKED).
 6. **Prune safety:** `commands/prune-volumes.sh` must **not** list

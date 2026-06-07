@@ -15,11 +15,12 @@ network / published port died with `netavark: nftables error: unable to execute 
 Fixed by setting `firewall_driver = "iptables"` in the `containers.conf` drop-in
 (`docker/shared/containers.conf`) — we already ship `iptables` (nf_tables-backed) for
 the agent's own egress firewall, so netavark reuses it with no new package. This was
-validated live via a user `containers.conf` override; the baked drop-in change
-**takes effect on the next base+agent rebuild**. Still open (needs a *second*
-container, can't run from inside one): cross-container image-store sharing and
-read-while-write — see [podman-shared-image-store.md](podman-shared-image-store.md).
-Filled-in post-rebuild results in **Results** below.
+validated live via a user `containers.conf` override; the baked drop-in change was
+**since confirmed working on a freshly-rebuilt second container** (which carried the
+bake natively, no override). That second container also closed the last open
+image-store items — cross-container sharing and read-while-write both **PASS** (see
+[podman-shared-image-store.md](podman-shared-image-store.md)). Filled-in post-rebuild
+results in **Results** below.
 
 **Update 2026-06-07:** validation found that nested
 containers could pull/build/store images but could not **run** — `/dev/net/tun`
@@ -246,7 +247,7 @@ surfaced the netavark-nftables finding._
 | 3. Compose + published ports + DNS | **PASS** | After the `firewall_driver=iptables` fix (see below): `docker compose up -d` **and** `podman compose up -d` both bring up db+adminer; `curl http://localhost:8080` returns Adminer HTML (**published port on a bridge network works** — netavark `route_localnet`/DNAT succeed on the now-writable `/proc/sys`); aardvark resolves `db` → `10.89.0.2`. Native `podman compose` subcommand exists on 5.4.2 (delegates to `podman-compose` 1.3.0). |
 | 3b. `podman build` networked RUN | **PASS** | `Containerfile` with `RUN apk add curl && curl https://example.com` builds clean (`networked RUN ok`) — the read-only `/proc/sys` build-RUN failure is gone. |
 | 4. Firewall inheritance | **PASS** | Nested container: `PUBLIC_OK` + `LAN_BLOCKED` — egress firewall still inherited even with netavark's iptables driver adding its own chains. |
-| Image store | **PASS** | `seed-image-store.sh status` → mounted/overlay/seeded; the 4 curated images resolve `RO=true` (shared store), the two probe pulls (`alpine`,`hello-world`) are `RO=false` (per-container writable graphroot) — write isolation holds. (Cross-*container* sharing still needs a second container.) |
+| Image store | **PASS** | `seed-image-store.sh status` → mounted/overlay/seeded; the 4 curated images resolve `RO=true` (shared store), the two probe pulls (`alpine`,`hello-world`) are `RO=false` (per-container writable graphroot) — write isolation holds. Cross-*container* sharing + read-while-write **since confirmed PASS** from a second container (see [podman-shared-image-store.md](podman-shared-image-store.md)). |
 
 **New finding (fixed): netavark nftables driver / no `nft` binary.** First `docker
 compose up` failed with `netavark: nftables error: unable to execute nft: No such
@@ -266,8 +267,10 @@ here** — pull, run, persistent named volumes, **compose stacks with published 
 inter-container DNS, networked image builds, and the shared read-only image store all
 work, and the egress firewall is still inherited (`LAN_BLOCKED`). The only required
 workaround beyond the unconfined seccomp/apparmor/systempaths profile is the one-line
-`firewall_driver=iptables` (baked, pending rebuild). Remaining open items are
-cross-container image-store checks that inherently need a *second* container.
+`firewall_driver=iptables` (now baked in `docker/shared/containers.conf` and confirmed
+on a freshly-rebuilt second container). Cross-container image-store sharing and
+read-while-write — the last open items — also **PASS** (see
+[podman-shared-image-store.md](podman-shared-image-store.md)). No open items remain.
 
 ---
 
@@ -443,15 +446,16 @@ prompt's step 3 can now use `docker compose`/`podman compose` again.
 
 ## How to resume after the rebuild (next session)
 
-> **Mostly DONE (2026-06-07 post-rebuild run).** The rebuild happened and steps 1–4
-> below were executed and **PASS** (see the post-rebuild Results table) — plus one
-> new fix (`firewall_driver=iptables`). Step 6 (Results) is filled in. The only items
-> still outstanding are in **step 5 (image-store cross-container check)**, which
-> inherently needs a *second* container launched for a different project and so
-> cannot be run from inside a single container. Note: the `firewall_driver=iptables`
-> drop-in fix landed *after* this run and was validated via a user-config override,
-> so the very next rebuilt container should re-confirm step 3 with the baked drop-in
-> (no user override) once more.
+> **DONE (2026-06-07).** The rebuild happened and steps 1–5 below were executed and
+> **PASS** (see the post-rebuild Results table) — plus one new fix
+> (`firewall_driver=iptables`). Step 6 (Results) is filled in. **Step 5
+> (image-store cross-container check) is also complete:** a freshly-rebuilt *second*
+> container on a different project ran [podman-test.md](podman-test.md)'s reader role
+> against a live seed here — cross-container sharing, read-while-write (#4), and
+> concurrent same-image pull (#5) all PASS. That second container carried the
+> `firewall_driver=iptables` bake natively (no user override needed), so the baked
+> drop-in is confirmed too. The only remaining follow-up is the user-facing docs
+> (image-store wiring-checklist step 6).
 
 Everything below was **applied in the repo on this branch and needed a host-side
 rebuild + relaunch to take effect** (the launcher and base image both changed). The
@@ -484,13 +488,13 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
    - **`podman build` with a networked RUN step** (the case that failed on read-only
      `/proc/sys`): a `Containerfile` whose `RUN apk add …` needs the network.
    - Re-confirm Step 4 (firewall: `PUBLIC_OK` / `LAN_BLOCKED`) still holds.
-5. **Image-store cross-container check** (see
+5. ✅ **Image-store cross-container check — DONE** (see
    [podman-shared-image-store.md](podman-shared-image-store.md) Validation plan
-   step 3 + open questions #4/#5): launch a *second* container for a different
-   project and confirm a curated image resolves from the shared store with no layer
-   pull, while a seed is/ isn't mid-flight.
-6. **Fill in the Results table above** for the post-rebuild run and flip the
-   remaining PARTIAL rows; update the status header.
+   step 3 + open questions #4/#5): a *second* container on a different project saw the
+   curated images `RO=true` pre-pull (sharing), did 18 reads with 0 errors/0 deadlocks
+   across a live seed (#4), and pulled all 6 actively-seeded images into its own
+   graphroot without hanging (#5). Harness: [podman-test.md](podman-test.md).
+6. ✅ **Results table filled in** for the post-rebuild run; status header updated.
 
 ## Follow-ups
 

@@ -49,6 +49,18 @@ if ($pruneCandidates.Count -eq 0) {
 Write-Host 'Prune candidates:'
 $pruneCandidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
 
+# Confirm once for the whole batch, mirroring prune-volumes.sh. Skip the prompt
+# when -WhatIf is in effect (the ShouldProcess call below previews each removal
+# instead) or when -Confirm was passed explicitly (ShouldProcess then prompts
+# per volume, so a batch prompt would just double up).
+if (-not $WhatIfPreference -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+    $answer = Read-Host "`nRemove these volumes? [y/N]"
+    if ($answer -notmatch '^[yY]') {
+        Write-Host 'Aborted.'
+        return
+    }
+}
+
 $removedCount = 0
 $skippedCount = 0
 
@@ -70,7 +82,9 @@ foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
     }
 }
 
-if ($removedCount -gt 0) {
+# Print the removed-count summary unconditionally after a confirmed run (matches
+# prune-volumes.sh), but not during a -WhatIf preview where nothing was touched.
+if (-not $WhatIfPreference) {
     Write-Host "Removed $removedCount orphaned volume(s)."
 }
 if ($skippedCount -gt 0) {

@@ -34,7 +34,7 @@ candidates=()
 while IFS= read -r vol; do
 	[ -z "$vol" ] && continue
 	candidates+=("$vol")
-done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt|podman)-|^agent-pnpm-store$')
+done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt|podman)-|^agent-pnpm-store$' | sort)
 
 # Determine which volumes are orphaned. agent-pnpm-store is never "expected", so it
 # is always a candidate when present — but if a pre-change container still mounts it,

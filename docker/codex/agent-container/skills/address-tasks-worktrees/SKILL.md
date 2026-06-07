@@ -299,7 +299,7 @@ The prompt contract is:
 
 Close the subagent after it returns.
 Verify the canonical `bN` tips still equal the SHAs captured before creating the guide branches, verify the dedicated worktree is clean with no rebase in progress, then remove only that worktree.
-If the subagent unexpectedly returns with a rebase in progress or dirty files, use the disposable branch's reported pre-rebase ref to abort/reset it cleanly before removal; never force-remove unresolved state.
+If the subagent unexpectedly returns with a rebase in progress or dirty files, reset it to the disposable branch's reported pre-rebase ref, clear any untracked leftovers with `git clean -fd`, and confirm a clean `git status` before removal; never force-remove unresolved state.
 Delete only the exact `refs/pre-rebase/...` snapshots the subagent created for these disposable guide branches; the unchanged canonical `bN` refs are their recovery source.
 Never bulk-delete unrelated pre-rebase refs.
 Do not delete or push the guide branches; they are the local artifact the maintainer can inspect.

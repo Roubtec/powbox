@@ -62,11 +62,11 @@ Another skill may invoke `rebase-stack` without an interactive user only when it
 In that mode:
 
 - Validate and print the proposed chain for the record, but treat the parent prompt as confirmation and do not wait for another `go`.
-- Never re-derive, reorder, skip, push, or fetch.
+- Never re-derive, reorder, or drop branches from the chain, and never push or fetch. (This bars dropping a *chain branch*; the `git rebase --skip` used for the "patch already represented in HEAD" trivial subtype is still expected.)
 - Resolve trivial conflicts as usual.
 - On the first non-trivial conflict, abort the current rebase and stop; do not leave conflict markers or an in-progress rebase for the parent agent.
 - If conflict resolution completes but validation cannot be repaired confidently, reset that disposable branch to its pre-rebase ref and stop.
-- Return with a clean working tree so the parent can remove the dedicated worktree.
+- Before returning, run `git clean -fd` to remove untracked leftovers (`git rebase --abort` and `git reset --hard` restore tracked files but leave `.orig`/build outputs) and confirm `git status --porcelain` is empty, so the parent can `git worktree remove` without `--force`.
 
 Do not infer this mode merely because the caller is a subagent.
 Without all three guarantees — explicit chain, explicit authorization, and disposable branches — use the normal interactive confirmation and stopping behavior.
@@ -249,7 +249,7 @@ When `git rebase` halts on a conflict:
    - **Patch already represented in HEAD**: run `git rebase --skip` (do *not* edit files). Narrate one line: "skipped redundant commit `<short-sha>` — content already on rebased base". Do not `git add` or `git rebase --continue` for this subtype; `--skip` advances the rebase by itself.
 4. **Non-trivial → stop unattended, otherwise propose and confirm.**
    In delegated unattended mode, record the conflicting files, offending commit, and why it is non-trivial; then run `git rebase --abort`, report the branch as the stop point, and return without touching subsequent branches.
-   The current disposable branch is restored to its pre-rebase tip and the working tree must be clean.
+   The current disposable branch is restored to its pre-rebase tip; since `git rebase --abort` leaves untracked files behind, also run `git clean -fd` and confirm `git status --porcelain` is empty before returning (the parent's `git worktree remove` refuses untracked files without `--force`).
    In normal interactive mode, present the conflict, the proposed resolution (with reasoning, including any traceable precedent), and ask the user to confirm before applying.
    On user "go": apply, `git add`, `git rebase --continue` (or `git rebase --skip` if the proposed resolution is "skip this commit").
    On user "no": stop the skill (see step 7 below).
@@ -286,7 +286,7 @@ When validation is required:
    The conflict resolution may have introduced a real issue (e.g., dropped a dependency, misnamed a symbol).
    Read the failure, attempt a focused fix, commit it as a follow-on commit on `<X>` (do not amend the rebased commits), re-run validation.
 4. **If the fix is ambiguous or attempts fail** — stop the skill at this branch.
-   In delegated unattended mode, record the exact failure and attempted fixes, run `git reset --hard <pre-rebase-ref>` on the disposable branch, verify the working tree is clean, and stop without touching subsequent branches.
+   In delegated unattended mode, record the exact failure and attempted fixes, run `git reset --hard <pre-rebase-ref>` on the disposable branch, then `git clean -fd` to drop untracked build/test outputs that `git reset --hard` leaves behind, confirm `git status --porcelain` is empty, and stop without touching subsequent branches.
    In normal interactive mode, tell the user:
    - The rebase succeeded but validation is failing.
    - The exact failure output.

@@ -315,7 +315,7 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
-# Detect whether the existing container predates the per-project Podman storage
+# Detect whether the existing container predates the per-container Podman storage
 # volume. Such a container was created before rootless-Podman support, so its
 # /home/node/.local/share/containers is ephemeral (no agent-podman-* mount) and
 # it was launched without /dev/fuse — pulled images and podman volumes would not
@@ -326,9 +326,9 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_PODMAN_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} predates the per-project Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
+			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
 		else
-			echo "Container ${CONTAINER_NAME} predates the per-project Podman storage volume; recreating it so rootless Podman images and volumes persist."
+			echo "Container ${CONTAINER_NAME} predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
@@ -420,9 +420,11 @@ elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 fi
 
 # Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
-# Auto-detect from the host; POWBOX_FUSE=on|off overrides. When the device is
-# absent the container falls back to the slower vfs driver (see entrypoint-core.sh),
-# so this is best-effort and never aborts the launch.
+# Auto-detect from the host; POWBOX_FUSE=on|off overrides. In `auto` (and `off`)
+# this is best-effort: a missing device just drops the container to the slower vfs
+# driver (see entrypoint-core.sh), never aborting the launch. `on` forces the
+# device, so if the Docker host cannot expose /dev/fuse the run hard-fails — that
+# is intentional for callers who explicitly demand the overlay driver.
 case "${POWBOX_FUSE:-auto}" in
 on)
 	RUN_ARGS+=(--device /dev/fuse)

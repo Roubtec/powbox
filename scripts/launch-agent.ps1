@@ -237,7 +237,7 @@ if (-not $Volatile -and $containerExists) {
   }
 }
 
-# Detect whether the existing container predates the per-project Podman storage
+# Detect whether the existing container predates the per-container Podman storage
 # volume. Such a container was created before rootless-Podman support, so its
 # /home/node/.local/share/containers is ephemeral (no agent-podman-* mount) and
 # it was launched without /dev/fuse — pulled images and podman volumes would not
@@ -249,10 +249,10 @@ if (-not $Volatile -and $containerExists) {
   if ($LASTEXITCODE -ne 0) { $hasPodmanMount = "" }
   if ([string]::IsNullOrWhiteSpace($hasPodmanMount)) {
     if ($containerRunning) {
-      Write-Host "Note: container $containerName predates the per-project Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
+      Write-Host "Note: container $containerName predates the per-container Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
     }
     else {
-      Write-Host "Container $containerName predates the per-project Podman storage volume; recreating it so rootless Podman images and volumes persist."
+      Write-Host "Container $containerName predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
       docker rm $containerName *> $null
       if ($LASTEXITCODE -ne 0) {
         docker container inspect $containerName *> $null
@@ -361,11 +361,12 @@ elseif ($Volatile -and -not $Persist) {
 }
 
 # Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
-# Auto-detect on the host; POWBOX_FUSE=on|off overrides. When the device is
-# absent the container falls back to the slower vfs driver (see entrypoint-core.sh),
-# so this is best-effort and never aborts the launch. On a Windows host shell
-# /dev/fuse does not exist, so `auto` resolves to off there; force it with
-# POWBOX_FUSE=on when the Docker Desktop VM exposes the device.
+# Auto-detect on the host; POWBOX_FUSE=on|off overrides. In `auto` (and `off`)
+# this is best-effort: a missing device just drops the container to the slower vfs
+# driver (see entrypoint-core.sh), never aborting the launch. `on` forces the
+# device, so if the Docker host cannot expose /dev/fuse the run hard-fails. On a
+# Windows host shell /dev/fuse does not exist, so `auto` resolves to off there;
+# force it with POWBOX_FUSE=on only when the Docker Desktop VM exposes the device.
 switch ($env:POWBOX_FUSE) {
   "on" { $runArgs += @("--device", "/dev/fuse") }
   "off" { }

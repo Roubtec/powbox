@@ -136,8 +136,9 @@ fi
 # support). XDG_RUNTIME_DIR must exist, be private, and be exported so Podman
 # uses it for the runtime/runroot instead of falling back to a /run/user/<uid>
 # that does not exist in this container. The graphroot
-# (~/.local/share/containers) is a per-project Docker volume mounted by
-# launch-agent.sh, so images and named volumes persist across restarts.
+# (~/.local/share/containers) is a per-container Docker volume (keyed by agent +
+# project) mounted by launch-agent.sh, so images and named volumes persist across
+# restarts while Claude and Codex keep separate, non-clobbering stores.
 if command -v podman >/dev/null 2>&1; then
 	_xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"
 	if mkdir -p "$_xdg" && chmod 700 "$_xdg"; then

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Remove orphaned per-project Docker volumes that no longer belong to any
-# existing container: agent-nm-* (node_modules), agent-wt-* (worktrees + pnpm
-# store), and agent-podman-* (rootless Podman storage). Also offers the
-# deprecated shared agent-pnpm-store volume (the store is now per-project inside
-# each agent-wt-* volume). This is the Linux/macOS counterpart of
-# prune-volumes.ps1.
+# Remove orphaned agent Docker volumes that no longer belong to any existing
+# container: agent-nm-* (node_modules) and agent-wt-* (worktrees + pnpm store),
+# both project-keyed (shared by a project's two agents); and agent-podman-*
+# (rootless Podman storage), keyed per container (agent + project) so Claude and
+# Codex never share one graphroot. Also offers the deprecated shared
+# agent-pnpm-store volume (the store is now per-project inside each agent-wt-*
+# volume). This is the Linux/macOS counterpart of prune-volumes.ps1.
 set -euo pipefail
 
 # Collect expected volumes from all existing claude-*/codex-* containers. Each

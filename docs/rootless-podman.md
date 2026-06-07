@@ -510,5 +510,20 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
 - If/when GUI, emulator, or non-headless-browser needs appear, that's the signal
   to move that workload to a dedicated Ubuntu VM (snapshot-based reset), per the
   original Option B → VM plan.
-- Consider a smoke-test addition (`scripts/smoke-test-image.sh`) once the manual
-  validation passes, so future base bumps catch Podman regressions automatically.
+- **Smoke test — DONE** (`scripts/smoke-test-podman.{sh,ps1}`, wired as stage 3 of
+  `commands/smoke-test.{sh,ps1}`). Future base/Podman bumps now catch engine
+  regressions automatically: it runs the built image with the launch-time wiring
+  the launcher supplies via the compose overlays (`/dev/net/tun`, optional
+  `/dev/fuse`, and `seccomp/apparmor/systempaths=unconfined` +
+  `SYS_ADMIN/NET_ADMIN/NET_RAW`) and asserts the high-signal subset of the manual
+  validation prompt above: engine sanity (rootless, `cgroupfs`, `netavark`, the
+  `firewall_driver=iptables` drop-in, subuid/subgid, the `podman compose`
+  subcommand that the trixie bump exists for), a nested run on the default network
+  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), and a bridge
+  network with a published port (proves the iptables firewall driver + the
+  `route_localnet` sysctl `systempaths=unconfined` unblocks). It mirrors the
+  launcher's `POWBOX_PODMAN` gate and **auto-skips** (rather than failing) on a host
+  that cannot expose `/dev/net/tun` — e.g. the Docker Desktop VM under the default
+  `auto`, where `POWBOX_PODMAN=on` forces it. The full validation prompt above stays
+  the deeper manual check (postgres on a named volume, compose + adminer,
+  firewall-inheritance `LAN_BLOCKED`); the smoke test is the fast automated guard.

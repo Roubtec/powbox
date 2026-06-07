@@ -1,6 +1,7 @@
 param(
   [string]$Image = "powbox-agent:latest",
-  [switch]$SkipDb
+  [switch]$SkipDb,
+  [switch]$SkipPodman
 )
 
 # The agent image is unified: both claude and codex (and codex's bwrap sandbox)
@@ -64,10 +65,9 @@ $rootDir = Split-Path -Parent $scriptDir
 # bring-up (and keep the fast presence-only sweep) with -SkipDb.
 if ($SkipDb) {
   Write-Host "Skipping pg-dev-up functional test (-SkipDb)."
-  return
 }
-
-Write-Host "Running pg-dev-up functional test against $Image ..."
+else {
+  Write-Host "Running pg-dev-up functional test against $Image ..."
 # Build the in-container script with explicit LF joins (single-quoted lines so
 # PowerShell leaves the shell $vars alone). A here-string would inherit this
 # file's CRLF endings (.gitattributes pins *.ps1 to eol=crlf), and the stray
@@ -96,4 +96,23 @@ if ($LASTEXITCODE -ne 0) {
   throw "pg-dev-up functional test failed. See container output above."
 }
 
-Write-Host "Smoke test (tools + pg-dev-up) passed."
+  Write-Host "pg-dev-up functional test passed."
+}
+
+# Stage 3 - rootless Podman engine: the agent image bakes podman + a docker shim
+# (docs/rootless-podman.md). This is the automated guard that follow-up asked for -
+# a base/Podman bump that regresses the engine (a dropped containers.conf drop-in, a
+# Podman without the `compose` subcommand, a nested run that no longer starts) is
+# caught here. The helper runs the image with the launch-time device + security
+# wiring the launcher normally supplies via the compose overlays, and auto-skips on
+# a host that cannot expose /dev/net/tun. Skip it explicitly with -SkipPodman; see
+# scripts/smoke-test-podman.ps1 for what it covers. The helper throws on failure, so
+# $ErrorActionPreference = "Stop" propagates that up.
+if ($SkipPodman) {
+  Write-Host "Skipping Podman smoke test (-SkipPodman)."
+}
+else {
+  & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+}
+
+Write-Host "Smoke test complete."

@@ -59,15 +59,13 @@ IMAGE="${1:-powbox-agent:latest}"
 # bring-up (and keep the fast presence-only sweep) with POWBOX_SMOKE_SKIP_DB=1.
 if [ -n "${POWBOX_SMOKE_SKIP_DB:-}" ]; then
 	echo "Skipping pg-dev-up functional test (POWBOX_SMOKE_SKIP_DB is set)."
-	exit 0
-fi
-
-echo "Running pg-dev-up functional test against $IMAGE ..."
-docker run --rm \
-	-e POSTGRES_USER=t \
-	-e POSTGRES_PASSWORD='p@s/s&w#d' \
-	-e POSTGRES_DB=app \
-	--entrypoint /bin/sh "$IMAGE" -lc '
+else
+	echo "Running pg-dev-up functional test against $IMAGE ..."
+	docker run --rm \
+		-e POSTGRES_USER=t \
+		-e POSTGRES_PASSWORD='p@s/s&w#d' \
+		-e POSTGRES_DB=app \
+		--entrypoint /bin/sh "$IMAGE" -lc '
 set -e
 pg-dev-up up >/dev/null
 url=$(pg-dev-up url)
@@ -80,4 +78,21 @@ echo "psql SELECT -> $out"
 printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }
 pg-dev-up down >/dev/null
 '
-echo "Smoke test (tools + pg-dev-up) passed."
+	echo "pg-dev-up functional test passed."
+fi
+
+# Stage 3 — rootless Podman engine: the agent image bakes podman + a docker shim
+# (docs/rootless-podman.md). This is the automated guard that follow-up asked for —
+# a base/Podman bump that regresses the engine (a dropped containers.conf drop-in,
+# a Podman without the `compose` subcommand, a nested run that no longer starts) is
+# caught here. The helper runs the image with the launch-time device + security
+# wiring the launcher normally supplies via the compose overlays, and auto-skips on
+# a host that cannot expose /dev/net/tun. Skip it explicitly with
+# POWBOX_SMOKE_SKIP_PODMAN=1; see scripts/smoke-test-podman.sh for what it covers.
+if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
+	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
+else
+	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
+fi
+
+echo "Smoke test complete."

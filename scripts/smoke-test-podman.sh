@@ -88,6 +88,7 @@ command -v podman >/dev/null 2>&1 || exit 97
 # entrypoint-core.sh is irrelevant here.
 _xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"
 mkdir -p "$_xdg" && chmod 700 "$_xdg"
+export XDG_RUNTIME_DIR="$_xdg"
 if [ "${SMOKE_HAVE_FUSE:-false}" != true ]; then
 	mkdir -p "$HOME/.config/containers"
 	printf "[storage]\ndriver = \"vfs\"\n" >"$HOME/.config/containers/storage.conf"

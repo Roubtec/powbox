@@ -1,12 +1,17 @@
 # Hand-off: shared read-only Podman image store (`additionalimagestores`)
 
-**Status:** image-store wiring **APPLIED** (steps 1–5 below) and the image-store
-overlay path is now **VALIDATED on overlay** (2026-06-07, from a rebuilt
-`/dev/fuse` container). While validating, a separate and more fundamental blocker
-surfaced — nested containers could not **RUN at all** — now **fixed in compose
-(commit `17e42b1`), pending the next base+agent rebuild**. The run path itself
-(`podman run`, networking, compose stacks) is owned by
-[rootless-podman.md](rootless-podman.md); this doc owns the shared image store.
+**Status:** image-store wiring **APPLIED** (steps 1–5 below) and **VALIDATED on the
+trixie/Podman-5.4.2 base** (2026-06-07 post-rebuild). On the rebuilt container the
+store is overlay, seeded (`.powbox-image-store-seeded` present), and all four curated
+images resolve **`RO=true`** in the consumer while the two non-curated probe pulls
+(`alpine`, `hello-world`) land `RO=false` in the per-container writable graphroot —
+so the shared read path + per-container write isolation both hold under a real
+`podman run`/compose workload. The run path (`podman run`, networking, compose
+stacks) is owned by [rootless-podman.md](rootless-podman.md) and is now fully green
+post-rebuild (one new fix there: `firewall_driver=iptables`); this doc owns the
+shared image store. **Still open** (both inherently need a *second* container, which
+can't be launched from inside one): cross-container sharing (Validation plan step 3)
+and read-while-write (open question #4).
 
 ### Current state (2026-06-07)
 
@@ -32,24 +37,23 @@ single `POWBOX_PODMAN` switch (`POWBOX_FUSE` is the deprecated alias). See
 [rootless-podman.md](rootless-podman.md) for the full run-path validation this
 unblocks.
 
-**Next session — how to resume after the rebuild:** the base image was bumped from
-Debian bookworm to **Debian 13 (`node:24-trixie-slim`, Podman 5.4.2)** on this
-branch (to fix the Podman-4.3.1 compose-subcommand gap — see
-[rootless-podman.md](rootless-podman.md) → "Compose command compatibility" and "How
-to resume after the rebuild"). So this is a **base-OS upgrade**, not just a compose
-tweak — rebuild **base + agent** and relaunch with `POWBOX_PODMAN=on` first. Then:
-1. Follow the run-path resume checklist in
+**Resume status (2026-06-07 post-rebuild):** the base was bumped from Debian bookworm
+to **Debian 13 (`node:24-trixie-slim`, Podman 5.4.2)** and rebuilt; the run path is
+green (see [rootless-podman.md](rootless-podman.md)). Image-store checks done this run:
+1. ✅ Run-path resume checklist in
    [rootless-podman.md](rootless-podman.md#how-to-resume-after-the-rebuild-next-session)
-   (confirm `podman --version` → 5.4.2, `/proc/sys` now `rw`, devices present).
-2. Confirm the two prerequisites below still hold on the trixie image
-   (`podman info` exits 0, driver `overlay`) — fuse-overlayfs is now **1.14** on
-   trixie, so re-confirm overlay + `additionalimagestores` resolve `R/O: true` once
-   (the path semantics are driver-independent but the version changed).
-3. Run the **Validation plan** below — the still-open items need a *second*
-   container (cross-container sharing, step 3) which couldn't be exercised from
-   inside the single running container: open question #4 (read-while-write) and #5
-   (concurrent cross-container pull during a seed).
-4. Update the user-facing docs (step 6).
+   confirmed (`podman --version` → 5.4.2, `/proc/sys` `rw`, both devices present).
+2. ✅ Prerequisites both hold on trixie: `podman info` exits 0, driver `overlay`;
+   **fuse-overlayfs is `1.13-dev`** on this trixie build (the doc had guessed 1.14 —
+   actual is 1.13-dev; fusermount3 3.17.2). The 4 curated images resolve `RO=true`
+   from the bare-graphroot `additionalimagestores` mount, nothing copies into the
+   writable store — overlay path semantics re-confirmed on the new version.
+3. ⏳ **STILL OPEN** — Validation plan step 3 (cross-container sharing) and open
+   questions #4 (read-while-write) and #5's concurrent-seed half all need a *second*
+   container for a different project; they can't be exercised from inside the single
+   running container. Next session: launch a 2nd container (`cc`/`cx` on another
+   scratch project) and run Validation plan step 3.
+4. ⏳ Step 6 user-facing docs still pending (after step 3 passes).
 
 > **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
 > `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`

@@ -1,6 +1,27 @@
 # Rootless containers inside the sandbox (Podman)
 
-**Status:** implemented. **Update 2026-06-07:** validation found that nested
+**Status:** implemented and **validated end-to-end on the trixie/Podman-5.4.2 base**
+(2026-06-07). **Update 2026-06-07 (post-rebuild validation, Claude):** ran the full
+validation prompt in the first container built on the Debian 13 base. Everything
+that was PARTIAL/FAIL on bookworm/4.3.1 now **PASSES**: `podman --version` → 5.4.2;
+`/proc/sys` is `rw` (no longer a masked ro mount → `systempaths=unconfined` took);
+`keyctl ok`; both devices present; default-network run, persistent named volumes,
+**compose stacks with published ports on a bridge network**, aardvark inter-container
+DNS, egress-firewall inheritance, and **`podman build` with a networked RUN** all
+pass; `podman compose` (native subcommand) **and** `docker compose` (shim) both work.
+One **new** blocker surfaced and was fixed: Podman 5.x's netavark defaults its
+firewall driver to **nftables**, but the image ships no `nft` binary, so every bridge
+network / published port died with `netavark: nftables error: unable to execute nft`.
+Fixed by setting `firewall_driver = "iptables"` in the `containers.conf` drop-in
+(`docker/shared/containers.conf`) — we already ship `iptables` (nf_tables-backed) for
+the agent's own egress firewall, so netavark reuses it with no new package. This was
+validated live via a user `containers.conf` override; the baked drop-in change
+**takes effect on the next base+agent rebuild**. Still open (needs a *second*
+container, can't run from inside one): cross-container image-store sharing and
+read-while-write — see [podman-shared-image-store.md](podman-shared-image-store.md).
+Filled-in post-rebuild results in **Results** below.
+
+**Update 2026-06-07:** validation found that nested
 containers could pull/build/store images but could not **run** — `/dev/net/tun`
 was not passed in (networking) and the host's default seccomp profile blocked
 `keyctl`/`pivot_root` (crun's keyring + pivot_root). Both are fixed in commit
@@ -70,7 +91,7 @@ emulators, or a non-headless browser. Track that separately.
 | File | Change |
 |------|--------|
 | `docker/base/Dockerfile` | New apt layer installing `podman`, `podman-docker`, `podman-compose`, `uidmap`, `fuse-overlayfs`, `slirp4netns`, `passt`, `crun`, `netavark`, `aardvark-dns`, `catatonit`; writes `/etc/subuid`+`/etc/subgid` ranges for `node`; `touch /etc/containers/nodocker`. Sets `ENV XDG_RUNTIME_DIR=/home/node/.local/run`. Placed low so it doesn't bust the gh/mssql/pwsh/npm layers. |
-| `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`. |
+| `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`, **`firewall_driver=iptables`** (2026-06-07 — Podman 5.x netavark defaults to nftables, which needs an `nft` binary the image lacks; we already ship `iptables`/nf_tables for the egress firewall, so netavark reuses it). |
 | `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` (commit `17e42b1`) **plus `systempaths=unconfined`** (2026-06-07). seccomp/apparmor unblock the syscalls crun needs to RUN (`keyctl`, `pivot_root` → EPERM); `systempaths=unconfined` makes the Docker-masked read-only `/proc/sys` writable so crun can set `ping_group_range` (every run) and netavark can set `route_localnet` (published ports on bridge networks) — without it both EPERM. Acceptable because this container + its egress firewall ARE the boundary. |
 | `compose.fuse.yml` | Optional overlay (added to the `-f` chain by the `POWBOX_PODMAN` gate) carrying `/dev/fuse` for the overlay storage driver; absent → vfs fallback. `docker compose run` has no `--device` flag, hence a compose file. |
 | `compose.netdev.yml` | Optional overlay carrying `/dev/net/tun` for nested-container networking (slirp4netns/pasta; without it every default `podman run` fails). Same `POWBOX_PODMAN` gate as `compose.fuse.yml`, but a separate file so the two devices attach independently under `auto` (commit `17e42b1` + the device split). |
@@ -212,6 +233,44 @@ is rootless Podman usable for hands-free dev here, and did any step need a worka
 
 _Fill this in after running the validation prompt so we keep continuity across sessions._
 
+_Run 2026-06-07 (Claude), **post-rebuild on the trixie/Podman-5.4.2 base** with
+`POWBOX_PODMAN=on`. First container on the Debian 13 base; this is the run that
+cleared the two previously-blocked rows (compose+published-ports and build RUN) and
+surfaced the netavark-nftables finding._
+
+| Step | PASS/FAIL | Notes |
+|------|-----------|-------|
+| 0. Engine sanity | **PASS** | uid=1000(node); podman/docker/podman-compose present; subuid/subgid `node:` lines OK; `XDG_RUNTIME_DIR` 700; **both `/dev/fuse` and `/dev/net/tun` present**; `keyctl ok`; **`/proc/sys` now `rw`** (no longer a masked ro mount — `systempaths=unconfined` took); `podman --version` → **5.4.2**; `podman info` → `true \| overlay \| cgroupfs \| netavark \| …/storage`. |
+| 1. Pull + run | **PASS** | `hello-world` + `alpine echo ok` both run with **no** `ping_group_range` EPERM (the read-only `/proc/sys` blocker is gone). |
+| 2. Persistent volume | **PASS** (prior run) | Re-confirmed from the earlier run: postgres on a named volume, reachable over published `127.0.0.1:5432`, data survives recreate. |
+| 3. Compose + published ports + DNS | **PASS** | After the `firewall_driver=iptables` fix (see below): `docker compose up -d` **and** `podman compose up -d` both bring up db+adminer; `curl http://localhost:8080` returns Adminer HTML (**published port on a bridge network works** — netavark `route_localnet`/DNAT succeed on the now-writable `/proc/sys`); aardvark resolves `db` → `10.89.0.2`. Native `podman compose` subcommand exists on 5.4.2 (delegates to `podman-compose` 1.3.0). |
+| 3b. `podman build` networked RUN | **PASS** | `Containerfile` with `RUN apk add curl && curl https://example.com` builds clean (`networked RUN ok`) — the read-only `/proc/sys` build-RUN failure is gone. |
+| 4. Firewall inheritance | **PASS** | Nested container: `PUBLIC_OK` + `LAN_BLOCKED` — egress firewall still inherited even with netavark's iptables driver adding its own chains. |
+| Image store | **PASS** | `seed-image-store.sh status` → mounted/overlay/seeded; the 4 curated images resolve `RO=true` (shared store), the two probe pulls (`alpine`,`hello-world`) are `RO=false` (per-container writable graphroot) — write isolation holds. (Cross-*container* sharing still needs a second container.) |
+
+**New finding (fixed): netavark nftables driver / no `nft` binary.** First `docker
+compose up` failed with `netavark: nftables error: unable to execute nft: No such
+file or directory`. Podman 5.x's netavark defaults `firewall_driver` to `nftables`,
+which shells out to `nft`; the image has no `nftables` package. The image *does* ship
+`iptables` v1.8.11 (nf_tables backend) for the agent's own egress firewall, so the
+fix is `firewall_driver = "iptables"` in the `containers.conf` drop-in — netavark
+then drives the existing `iptables`, no new package, everything on one firewall
+interface. Validated live with a user `~/.config/containers/containers.conf` override
+(the baked drop-in change takes effect next rebuild).
+
+**Host:** WSL2 (Docker Desktop backend) — **/dev/fuse + /dev/net/tun present:** y —
+**storage driver:** overlay — **/proc/sys:** rw — **Podman:** 5.4.2.
+
+**Verdict (post-rebuild):** rootless Podman is now **fully usable for hands-free dev
+here** — pull, run, persistent named volumes, **compose stacks with published ports**,
+inter-container DNS, networked image builds, and the shared read-only image store all
+work, and the egress firewall is still inherited (`LAN_BLOCKED`). The only required
+workaround beyond the unconfined seccomp/apparmor/systempaths profile is the one-line
+`firewall_driver=iptables` (baked, pending rebuild). Remaining open items are
+cross-container image-store checks that inherently need a *second* container.
+
+---
+
 _Run 2026-06-07 (Claude), inside a container rebuilt at ≥ commit `3bf4e98` with
 `POWBOX_PODMAN=on`. This is the first container that could attempt a real `podman
 run` — and doing so surfaced a third sysctl blocker (read-only `/proc/sys`) below._
@@ -309,6 +368,23 @@ hands-free:**
   so `podman build` with a networked `RUN` still fails `open …/ping_group_range:
   Read-only file system`). `systempaths=unconfined` is the only fix that covers all
   three (default run, published ports, build RUN).
+- **netavark can't run `nft` — `nftables error: unable to execute nft` (CONFIRMED
+  2026-06-07 on Podman 5.4.2; FIX APPLIED in the drop-in).** Only surfaced once the
+  base moved to trixie/Podman 5.x: netavark 1.x defaults `firewall_driver` to
+  `nftables`, which shells out to the `nft` binary — not installed in the image. So
+  every **bridge network** (i.e. every compose stack) and every **published port**
+  failed at container start with `netavark: nftables error: unable to execute nft:
+  No such file or directory`. The default rootless network + `-p` (rootlessport, no
+  netavark bridge) still worked, which is why single `podman run -p` survived but
+  compose did not — the same split as the old `/proc/sys` blocker, different cause.
+  Fix: `firewall_driver = "iptables"` in `docker/shared/containers.conf` — the image
+  already ships `iptables` v1.8.11 (nf_tables backend) for the agent's egress
+  firewall, so netavark reuses it; no `nftables` package needed and the whole
+  container stays on one firewall interface. Alternative (not taken): `apt-get
+  install nftables` and keep netavark's nftables default — rejected to avoid image
+  bloat and mixing native-nft (netavark) with iptables-nft-compat (init-firewall)
+  rule styles. Takes effect on the next rebuild; validated in-place via a user
+  `~/.config/containers/containers.conf` override.
 - **`newuidmap: write to uid_map failed`.** Means the `/etc/subuid`/`/etc/subgid`
   ranges didn't take; verify the apt layer wrote the `node:` lines and that
   `uidmap` is installed (`which newuidmap`).
@@ -367,10 +443,20 @@ prompt's step 3 can now use `docker compose`/`podman compose` again.
 
 ## How to resume after the rebuild (next session)
 
-Everything below is **applied in the repo on this branch but needs a host-side
+> **Mostly DONE (2026-06-07 post-rebuild run).** The rebuild happened and steps 1–4
+> below were executed and **PASS** (see the post-rebuild Results table) — plus one
+> new fix (`firewall_driver=iptables`). Step 6 (Results) is filled in. The only items
+> still outstanding are in **step 5 (image-store cross-container check)**, which
+> inherently needs a *second* container launched for a different project and so
+> cannot be run from inside a single container. Note: the `firewall_driver=iptables`
+> drop-in fix landed *after* this run and was validated via a user-config override,
+> so the very next rebuilt container should re-confirm step 3 with the baked drop-in
+> (no user override) once more.
+
+Everything below was **applied in the repo on this branch and needed a host-side
 rebuild + relaunch to take effect** (the launcher and base image both changed). The
-running container that produced these findings is bookworm/Podman-4.3.1 and cannot
-self-rebuild.
+running container that produced the *pre-rebuild* findings was bookworm/Podman-4.3.1
+and could not self-rebuild; the post-rebuild run above was done on the trixie image.
 
 1. **Rebuild base + agent** (base changed → both): from the powbox repo on this
    branch, `./build.sh base && ./build.sh agent` (or `./build.sh all`). Confirm the

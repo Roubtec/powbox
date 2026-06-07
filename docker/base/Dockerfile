@@ -234,5 +234,15 @@ WORKDIR /home/node
 # rebuilds this trivial metadata layer, never the substrate layers above.
 ARG BASE_SOURCE_IMAGE="node:24-slim"
 ARG BASE_SOURCE_DIGEST=""
+# Powbox commit that built this base image. Recorded both as an inheritable
+# label (child agent images don't override powbox.commit.base, so they expose
+# the base's commit automatically) and as a baked file readable in-container.
+# The base has a different parent than the agent layers, so its commit can lag
+# the agent's. Supplied by scripts/build-image.{sh,ps1}. Declared last so a new
+# commit only rebuilds this trivial metadata layer.
+ARG POWBOX_COMMIT="unknown"
+RUN mkdir -p /home/node/.powbox \
+    && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/base.commit
 LABEL powbox.base.source="${BASE_SOURCE_IMAGE}" \
-      powbox.base.source.digest="${BASE_SOURCE_DIGEST}"
+      powbox.base.source.digest="${BASE_SOURCE_DIGEST}" \
+      powbox.commit.base="${POWBOX_COMMIT}"

@@ -68,6 +68,58 @@ powbox_commit() {
 }
 POWBOX_COMMIT="$(powbox_commit)"
 
+image_label() {
+	# Echo a label value off a local image, or empty when the image/label is absent.
+	local v
+	v="$(docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}" 2>/dev/null)" || return 0
+	[ "$v" = "<no value>" ] && v=""
+	printf '%s' "$v"
+}
+
+base_image_id() {
+	# Content ID of the local base image (empty when absent). The parent half of
+	# the Codex layer's cache key: stamped onto the agent (powbox.base.image.id)
+	# and compared against the previous agent's recorded value to tell whether a
+	# separate base rebuild will bust that layer.
+	docker image inspect powbox-agent-base:latest --format '{{.Id}}' 2>/dev/null || true
+}
+
+# Commit that built the Codex install layer. Stamping it inside that layer would
+# bust its cache on every commit (defeating the Codex-below-Claude ordering), so
+# resolve it here: use HEAD when the layer will rebuild this run, otherwise carry
+# the existing image's recorded value forward. The reuse test mirrors Docker's
+# cache key for that layer: its parent (the base image) AND the install
+# instruction (CODEX_VERSION). See docs/skills-refresh-and-provenance.md.
+POWBOX_COMMIT_CODEX="$POWBOX_COMMIT"
+resolve_codex_commit() {
+	# Any of these rebuild the Codex layer, so it was built at HEAD.
+	[ "$NO_CACHE" = true ] && return 0
+	[ "$PULL" = true ] && return 0
+	case "$TARGET" in base | all) return 0 ;; esac
+	docker image inspect powbox-agent:latest >/dev/null 2>&1 || return 0
+	# The Codex layer's parent is the base image, so a base that differs from the
+	# one the previous agent was built on (e.g. a separate `build.sh base`)
+	# rebuilds the Codex layer regardless of version. Only an identical base ID
+	# means the layer can be reused; an absent base (about to be built) or a
+	# previous agent with no recorded base ID counts as changed -> HEAD.
+	local cur_base_id prev_base_id
+	cur_base_id="$(base_image_id)"
+	prev_base_id="$(image_label powbox-agent:latest powbox.base.image.id)"
+	[ -n "$cur_base_id" ] && [ "$cur_base_id" = "$prev_base_id" ] || return 0
+	local prev_ver prev_commit
+	prev_ver="$(image_label powbox-agent:latest powbox.codex.version)"
+	prev_commit="$(image_label powbox-agent:latest powbox.commit.codex)"
+	# Same base and same Codex version => layer reused, so carry its recorded
+	# commit forward. An image built before provenance labelling has none to
+	# carry, and we cannot know which commit built the reused layer, so record
+	# "unknown" rather than misattributing this build's HEAD to it. A differing
+	# version rebuilds the layer at HEAD (the default).
+	if [ "$prev_ver" = "$CODEX_VERSION" ]; then
+		POWBOX_COMMIT_CODEX="${prev_commit:-unknown}"
+	fi
+}
+resolve_codex_commit
+
 registry_base_digest() {
 	docker buildx imagetools inspect "$BASE_SOURCE_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null || true
 }
@@ -78,16 +130,19 @@ local_base_digest() {
 }
 
 resolve_base_source_digest() {
-	# Usage: resolve_base_source_digest <with_pull>. With --pull the build uses
-	# the registry-latest base, so stamp the registry digest. Otherwise the build
-	# reuses whatever base is cached locally; stamp that, falling back to the
-	# registry digest when the base is not present locally (buildx will pull it).
+	# Usage: resolve_base_source_digest <with_pull>. --pull refreshes the upstream
+	# tag in the LOCAL IMAGE STORE via `docker pull`. buildx's own --pull only
+	# updates BuildKit's separate build cache, leaving the `docker images` entry
+	# stale; pulling into the store means this bake builds FROM the refreshed image
+	# AND the next no-pull rebuild reuses it, so the stamped digest always matches
+	# what we actually built from. Read it back from the store afterwards, falling
+	# back to the registry digest only when the base is absent locally (e.g. the
+	# pull failed offline) — buildx pulls it at bake time.
 	if [ "$1" = true ]; then
-		BASE_SOURCE_DIGEST="$(registry_base_digest)"
-	else
-		BASE_SOURCE_DIGEST="$(local_base_digest)"
-		[ -n "$BASE_SOURCE_DIGEST" ] || BASE_SOURCE_DIGEST="$(registry_base_digest)"
+		docker pull "$BASE_SOURCE_IMAGE" >/dev/null 2>&1 || true
 	fi
+	BASE_SOURCE_DIGEST="$(local_base_digest)"
+	[ -n "$BASE_SOURCE_DIGEST" ] || BASE_SOURCE_DIGEST="$(registry_base_digest)"
 }
 
 run_bake() {
@@ -104,22 +159,24 @@ run_bake() {
 
 	local cmd=(docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl")
 
-	if [ "$with_pull" = true ]; then
-		cmd+=(--pull)
-	fi
-
+	# No --pull here: resolve_base_source_digest already pulled the upstream base
+	# into the local image store when --pull was requested, and this bake builds
+	# FROM that store image. A bake --pull would re-resolve from the registry into
+	# BuildKit's cache instead, re-introducing the store/cache split.
 	if [ "$with_no_cache" = true ]; then
 		cmd+=(--no-cache)
 	fi
 
 	cmd+=("${target_args[@]}")
 
-	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} ${cmd[*]}"
+	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} POWBOX_COMMIT_CODEX=${POWBOX_COMMIT_CODEX} ${cmd[*]}"
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
+		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
+		POWBOX_BASE_IMAGE_ID="$(base_image_id)" \
 		"${cmd[@]}"
 }
 
@@ -141,16 +198,17 @@ ensure_base_image() {
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
+		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
 }
 
 # --pull only makes sense for the base image (whose FROM is an upstream
-# registry image). The agent image's only FROM is the locally-built
-# powbox-agent-base, so passing --pull to its bake invocation would make
-# buildx try to resolve it from a registry and fail. When the user requests
-# --pull on the agent target, refresh the base first (cascading any digest
-# change into the agent layers automatically) and then build the agent
-# without --pull.
+# registry image); it re-pulls that upstream tag into the local image store
+# (see resolve_base_source_digest). The agent image's only FROM is the
+# locally-built powbox-agent-base, which is not a registry image, so when the
+# user requests --pull on the agent target we refresh the base first (cascading
+# any digest change into the agent layers automatically) and then build the
+# agent.
 case "$TARGET" in
 all)
 	run_bake "$PULL" "$NO_CACHE" base

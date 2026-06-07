@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Print the powbox commit(s) that built this image's layers, read from the baked
+# /home/node/.powbox/*.commit files. Informational only — no logic depends on
+# these values. Baked into the agent image as /usr/local/bin/powbox-provenance.
+#
+# A piecemeal-updated image can carry up to three distinct powbox commits: the
+# base image has its own parent, and the Claude layer can be rebuilt without
+# touching the Codex layer below it. An agent running in this container can read
+# the claude/top commit and diff it against the powbox repo's working tree
+# (`git -C <powbox-repo> diff <commit>..HEAD`) to see what changed since the
+# image was built.
+set -euo pipefail
+
+DIR="${POWBOX_PROVENANCE_DIR:-/home/node/.powbox}"
+
+read_commit() {
+	local f="$DIR/$1.commit"
+	if [ -f "$f" ]; then
+		cat "$f"
+	else
+		echo unknown
+	fi
+}
+
+echo "powbox commit that built each layer of this image:"
+printf '  base:        %s\n' "$(read_commit base)"
+printf '  codex:       %s\n' "$(read_commit codex)"
+printf '  claude/top:  %s\n' "$(read_commit claude)"

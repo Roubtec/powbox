@@ -166,6 +166,17 @@ On PowerShell the flags are `-DryRun`, `-Prune`, `-AdoptAll`:
 
 If you are using the profile shortcuts described below, the same script is exposed as `agent-update-skills` (flags forwarded). `agent-update` also offers to run it for you right after a successful image rebuild.
 
+### Image provenance
+
+Each image records the powbox commit it was built from, so you can tell whether a running image predates repo changes even when the agent binaries themselves are current. Because the build is layered, a piecemeal-updated image can carry up to **three** distinct commits: the base image has its own parent, and the Claude layer can be rebuilt without touching the Codex layer below it.
+
+The commit that built each layer is recorded two ways:
+
+- **Image labels** `powbox.commit.{base,codex,claude}` (plus `powbox.{codex,claude}.version`) for host-side `docker image inspect`. The host helper `agent-image-info` prints them alongside your working-tree HEAD, and `agent-update` shows the same block before asking to rebuild.
+- **Baked files** `/home/node/.powbox/{base,codex,claude}.commit` for in-container reading. The `powbox-provenance` command prints them; an agent in the container can diff the building commit against the powbox repo (`git -C <powbox-repo> diff <claude-commit>..HEAD`).
+
+The Codex commit is special: stamping it inside the Codex install layer would bust that layer's cache on every commit (defeating the Codex-below-Claude ordering), so the build script computes it — using `HEAD` when that layer rebuilds and carrying the previous value forward when it is reused — and records it only in the top metadata layer. A `-dirty` suffix marks an image built from an uncommitted worktree. No automated decision is made from these commits; they are introspection only.
+
 ## Runtime
 
 Both agent launch flows resolve through the same shared Compose base and the same Compose project name.
@@ -411,6 +422,7 @@ Functions exposed by both libraries:
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 - `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies. Skills are tracked by a `.powbox-seeded` ownership marker, so it refreshes only powbox's own copies and leaves user-authored skills alone. Flags: `--dry-run`/`-DryRun` (preview the plan), `--prune`/`-Prune` (remove obsolete seeds no longer baked), `--adopt-all`/`-AdoptAll` (take the baked version of unmarked name-collisions); on a TTY it prompts before pruning/adopting. Rebuild the image first so the baked skills are current.
+- `agent-image-info` — print the powbox commit that built each layer of `powbox-agent:latest` (base / codex / claude/top) from the image's `powbox.commit.*` labels, plus your working-tree HEAD, so a stale image is obvious even when the agent binaries are current. In-container, the baked `powbox-provenance` command prints the same from `/home/node/.powbox/*.commit`. See [Image provenance](#image-provenance).
 
 ### Environment Variables
 

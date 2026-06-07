@@ -144,6 +144,44 @@ _powbox_offer_reseed() {
     esac
 }
 
+_powbox_norm_label() {
+    case "$1" in "" | "<no value>") echo unknown ;; *) echo "$1" ;; esac
+}
+
+# Show the powbox commit that built each layer of powbox-agent:latest, plus the
+# powbox working-tree HEAD so a stale image (built from an older repo state) is
+# obvious even when the agent binaries themselves are current. A piecemeal build
+# can carry up to three distinct commits: the base image has its own parent, and
+# the Claude layer can rebuild without touching the Codex layer below it. The
+# base commit is read from the label the agent image inherits from its base.
+agent-image-info() {
+    local img="powbox-agent:latest"
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+        echo "Image $img not found — build it with agent-update." >&2
+        return 1
+    fi
+    local base codex claude codexver claudever
+    IFS=$'\t' read -r base codex claude codexver claudever < <(
+        docker image inspect "$img" --format \
+            '{{index .Config.Labels "powbox.commit.base"}}{{"\t"}}{{index .Config.Labels "powbox.commit.codex"}}{{"\t"}}{{index .Config.Labels "powbox.commit.claude"}}{{"\t"}}{{index .Config.Labels "powbox.codex.version"}}{{"\t"}}{{index .Config.Labels "powbox.claude.version"}}'
+    )
+    echo "$img — powbox commit that built each layer:"
+    printf '  base:         %s\n' "$(_powbox_norm_label "$base")"
+    printf '  codex:        %s  (codex %s)\n' "$(_powbox_norm_label "$codex")" "$(_powbox_norm_label "$codexver")"
+    printf '  claude/top:   %s  (claude %s)\n' "$(_powbox_norm_label "$claude")" "$(_powbox_norm_label "$claudever")"
+    local head
+    if head="$(git -C "$POWBOX_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
+        [ -n "$(git -C "$POWBOX_ROOT" status --porcelain 2>/dev/null)" ] && head="${head}-dirty"
+        printf '  working tree: %s\n' "$head"
+    fi
+}
+
+# Print image provenance, then offer the skill re-seed, after a successful build.
+_powbox_post_build() {
+    agent-image-info 2>/dev/null || true
+    _powbox_offer_reseed
+}
+
 # Read the machine-readable update table once (one container start reads both
 # baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
 _powbox_agent_porcelain() {
@@ -230,6 +268,11 @@ agent-update() {
     fi
     printf '%s\n' "$report"
 
+    # Provenance: which powbox commit built the current image vs. the working
+    # tree. A current binary set can still sit on an image built from an older
+    # repo — this surfaces that so the user can rebuild for repo changes alone.
+    agent-image-info 2>/dev/null || true
+
     # The report prints the literal "update available" marker for each stale
     # component, so grepping it lets us decide whether to prompt without a second
     # network round-trip. Keep this in sync with commands/check-updates.sh.
@@ -256,7 +299,7 @@ agent-update() {
         echo "Base image is stale — rebuilding base (with --pull) and the agent image on top."
         _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
         local rc=$?
-        [ "$rc" -eq 0 ] && _powbox_offer_reseed
+        [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"
     fi
 
@@ -276,7 +319,7 @@ agent-update() {
     echo "Updating: ${stale// /, } (rebuilding only the affected image layers)."
     _powbox_build_from_table "$table" "$stale" agent "$@"
     local rc=$?
-    [ "$rc" -eq 0 ] && _powbox_offer_reseed
+    [ "$rc" -eq 0 ] && _powbox_post_build
     return "$rc"
 }
 

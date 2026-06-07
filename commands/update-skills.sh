@@ -152,13 +152,28 @@ applied=0 failed=0 kept_conflicts=0 kept_orphans=0
 while IFS=$'\t' read -r verb agent name; do
 	[ -n "${verb:-}" ] || continue
 	case "$verb" in
-	seeded) echo "[$agent] seeded skill: $name"; applied=$((applied + 1)) ;;
-	refreshed) echo "[$agent] refreshed skill: $name"; applied=$((applied + 1)) ;;
-	adopted) echo "[$agent] adopted skill: $name"; applied=$((applied + 1)) ;;
-	pruned) echo "[$agent] pruned obsolete skill: $name"; applied=$((applied + 1)) ;;
+	seeded)
+		echo "[$agent] seeded skill: $name"
+		applied=$((applied + 1))
+		;;
+	refreshed)
+		echo "[$agent] refreshed skill: $name"
+		applied=$((applied + 1))
+		;;
+	adopted)
+		echo "[$agent] adopted skill: $name"
+		applied=$((applied + 1))
+		;;
+	pruned)
+		echo "[$agent] pruned obsolete skill: $name"
+		applied=$((applied + 1))
+		;;
 	conflict) kept_conflicts=$((kept_conflicts + 1)) ;;
 	orphan) kept_orphans=$((kept_orphans + 1)) ;;
-	error) echo "[$agent] WARNING: failed to update skill: $name" >&2; failed=$((failed + 1)) ;;
+	error)
+		echo "[$agent] WARNING: failed to update skill: $name" >&2
+		failed=$((failed + 1))
+		;;
 	esac
 done <<<"$records"
 

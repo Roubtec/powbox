@@ -62,7 +62,8 @@ $rootDir = Split-Path -Parent $scriptDir
 # presence only) this exercises role/db creation, URL percent-encoding, the
 # 127.0.0.1 host binding, and the eval round-trip. Deliberately nasty
 # credentials prove the SQL-quoting and URL-encoding paths. Skip the daemon
-# bring-up (and keep the fast presence-only sweep) with -SkipDb.
+# bring-up with -SkipDb (the Podman stage below still runs unless -SkipPodman is
+# also supplied; pass both for a Stage 1 presence-only run).
 if ($SkipDb) {
   Write-Host "Skipping pg-dev-up functional test (-SkipDb)."
 }

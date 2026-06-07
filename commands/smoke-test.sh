@@ -56,7 +56,8 @@ IMAGE="${1:-powbox-agent:latest}"
 # presence only) this exercises role/db creation, URL percent-encoding, the
 # 127.0.0.1 host binding, and the eval round-trip. Deliberately nasty
 # credentials prove the SQL-quoting and URL-encoding paths. Skip the daemon
-# bring-up (and keep the fast presence-only sweep) with POWBOX_SMOKE_SKIP_DB=1.
+# bring-up with POWBOX_SMOKE_SKIP_DB=1 (Stage 3 below still runs unless
+# POWBOX_SMOKE_SKIP_PODMAN is also set; set both for a Stage 1 presence-only run).
 if [ -n "${POWBOX_SMOKE_SKIP_DB:-}" ]; then
 	echo "Skipping pg-dev-up functional test (POWBOX_SMOKE_SKIP_DB is set)."
 else

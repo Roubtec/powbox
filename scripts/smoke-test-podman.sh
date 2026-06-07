@@ -116,8 +116,11 @@ podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missin
 # 2. Nested run on the default network. This alone proves the seccomp/apparmor
 # profile (crun keyring + pivot_root), /dev/net/tun (slirp4netns/pasta), and the
 # ping_group_range sysctl write (systempaths=unconfined) all work — if any were
-# missing the run would not start.
-out=$(podman run --rm docker.io/library/alpine echo nested_ok 2>&1) || fail "podman run on the default network failed: $out"
+# missing the run would not start. --quiet suppresses the image-pull progress
+# (this throwaway container has an empty graphroot, so Alpine is pulled on first
+# use) so it cannot pollute the output the exact-match grep below checks; a real
+# run error still reaches stderr and is captured by 2>&1 for the failure message.
+out=$(podman run --quiet --rm docker.io/library/alpine echo nested_ok 2>&1) || fail "podman run on the default network failed: $out"
 printf "%s" "$out" | grep -qx nested_ok || fail "unexpected nested-run output: $out"
 
 # 3. Bridge network + published port. A user-defined network is a netavark bridge;
@@ -133,7 +136,7 @@ cleanup() {
 	return 0
 }
 trap cleanup EXIT
-cid=$(podman run -d --network smoke-net -p 127.0.0.1:8099:8099 docker.io/library/alpine sleep 30) || fail "podman run -d -p on a bridge network failed (netavark firewall_driver / route_localnet regression?)"
+cid=$(podman run --quiet -d --network smoke-net -p 127.0.0.1:8099:8099 docker.io/library/alpine sleep 30) || fail "podman run -d -p on a bridge network failed (netavark firewall_driver / route_localnet regression?)"
 sleep 2
 podman ps --filter "id=$cid" --filter status=running -q | grep -q . || fail "published-port container did not stay running: $(podman logs "$cid" 2>&1 | tail -3)"
 

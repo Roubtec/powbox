@@ -53,12 +53,16 @@ process_agent() {
 		[ -n "$name" ] && baked["$name"]=1
 	done < <(seed_skill_names "$src")
 
-	# Classify each baked skill: absent -> seed, marked -> refresh,
-	# unmarked-existing -> conflict (adopt only when explicitly allowed).
+	# Classify each baked skill: absent -> seed, marked directory -> refresh,
+	# unmarked directory or non-directory collision -> conflict (adopt only when
+	# explicitly allowed).
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$dest/$name"
-		if [ ! -d "$target" ]; then
+		# Truly absent only when no entry of any type exists (-e misses dangling
+		# symlinks, so test -L too). A regular file or symlink at a baked skill's
+		# name is a user-owned collision, handled by the conflict branch below.
+		if [ ! -e "$target" ] && [ ! -L "$target" ]; then
 			if [ "$MODE" = classify ]; then
 				emit would-seed "$agent" "$name"
 			elif seed_skill "$src/$name" "$target" "$marker"; then
@@ -67,7 +71,7 @@ process_agent() {
 				emit error "$agent" "$name"
 				rc=1
 			fi
-		elif seed_is_marked "$target"; then
+		elif [ -d "$target" ] && seed_is_marked "$target"; then
 			if [ "$MODE" = classify ]; then
 				emit would-refresh "$agent" "$name"
 			elif seed_skill "$src/$name" "$target" "$marker"; then
@@ -77,8 +81,9 @@ process_agent() {
 				rc=1
 			fi
 		else
-			# Unmarked folder colliding with a baked skill name: ambiguous
-			# (legacy seed vs. user fork). Never overwrite silently.
+			# Unmarked directory, regular file, or symlink colliding with a baked
+			# skill name: ambiguous (legacy seed vs. user fork). Never overwrite
+			# silently.
 			if [ "$MODE" = apply ] && [ "$ADOPT_ALL" = true ]; then
 				if seed_skill "$src/$name" "$target" "$marker"; then
 					emit adopted "$agent" "$name"

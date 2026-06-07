@@ -79,11 +79,12 @@ seed_skill() {
 
 # seed_skills <src_skills_dir> <dest_skills_dir> <noclobber|refresh> [<meta_dir>]
 # Convenience loop used by the entrypoint hooks.
-#   noclobber: place only skills whose destination folder is ABSENT (preserves any
-#              existing copy, marked or not).
-#   refresh:   place absent skills and overwrite skills that carry our marker; an
-#              UNMARKED existing folder is a conflict and is left untouched (the
-#              update-skills worker is what surfaces and resolves those).
+#   noclobber: place only skills whose destination is ABSENT (preserves any existing
+#              entry — directory, file, or symlink — marked or not).
+#   refresh:   place absent skills and overwrite directories that carry our marker; an
+#              unmarked directory, or any non-directory collision, is a conflict and is
+#              left untouched (the update-skills worker is what surfaces and resolves
+#              those).
 # Returns nonzero if any copy failed.
 seed_skills() {
 	local src="$1" dest="$2" mode="$3" meta="${4:-}"
@@ -96,10 +97,15 @@ seed_skills() {
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$dest/$name"
-		if [ -d "$target" ]; then
+		# Any existing entry blocks a blind overwrite — seed_skill rm -rf's the
+		# destination before installing, so we must only reach it for an absent
+		# target or a marked directory. -e misses dangling symlinks, so test -L too.
+		if [ -e "$target" ] || [ -L "$target" ]; then
 			case "$mode" in
 			noclobber) continue ;;
-			refresh) seed_is_marked "$target" || continue ;;
+			# Only a directory we placed (carries the marker) may be refreshed; an
+			# unmarked directory or any non-directory collision is user-owned.
+			refresh) { [ -d "$target" ] && seed_is_marked "$target"; } || continue ;;
 			esac
 		fi
 		seed_skill "$src/$name" "$target" "$marker" || rc=1

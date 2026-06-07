@@ -341,7 +341,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/smoke-test.*` for smoke-testing the unified agent image
 - `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
-- `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `commands/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
+- `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `docker/shared/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
 
 ## Resuming Sessions

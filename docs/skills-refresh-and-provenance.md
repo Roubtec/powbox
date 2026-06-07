@@ -49,7 +49,7 @@ Consequence: a rebuilt image with **updated** skill text does not replace the
 stale copy already on the volume. The existing `commands/update-skills.{sh,ps1}`
 (function `agent-update-skills`) closes that gap by running a throwaway
 `powbox-agent` container with both config volumes mounted and force-copying each
-baked skill over the volume copy (`commands/update-skills-incontainer.sh`).
+baked skill over the volume copy (`docker/shared/update-skills-incontainer.sh`).
 
 ### Path map (mirror points)
 
@@ -80,7 +80,7 @@ reused on a claude-only update.
 
 ### D0 — The `mv` is an atomic swap, not a move of the seed *(clarification only)*
 
-In `update-skills-incontainer.sh` the real data copy is `cp -a` straight from the
+In `docker/shared/update-skills-incontainer.sh` the real data copy is `cp -a` straight from the
 baked seed into a temp dir created **under the destination** (same filesystem);
 the `mv` only renames that fully-staged temp dir into place. The seed is never
 moved (only read). `mv` is used instead of a direct `cp` over the live target to
@@ -262,7 +262,7 @@ offer, kept off this branch to keep the skills diff reviewable.
   for the build-commit; write `build-commit` in the epoch `RUN`.
 - `docker-bake.hcl` + `scripts/build-image.sh` + `scripts/build-image.ps1` — compute
   `git rev-parse HEAD`, pass as bake var → agent `ARG`.
-- `commands/update-skills-incontainer.sh` — source the baked helper; refresh mode;
+- `docker/shared/update-skills-incontainer.sh` — source the baked helper; refresh mode;
   three-way classify; emit machine-readable conflict/orphan lists; honor
   `POWBOX_PRUNE` / `POWBOX_ADOPT_ALL` env from the launcher.
 - `commands/update-skills.sh`, `commands/update-skills.ps1` — `--prune`/`-Prune`,

@@ -33,8 +33,9 @@ $ErrorActionPreference = "Stop"
 # a refreshed skill the next time that skill is invoked; restart it for certainty.
 
 $image = "powbox-agent:latest"
-# $PSScriptRoot is the commands/ directory, where the worker lives alongside it.
-$worker = Join-Path $PSScriptRoot "update-skills-incontainer.sh"
+# The in-container worker lives under docker/shared (with the other scripts that
+# run inside the container); $PSScriptRoot is the commands/ dir, so go up one.
+$worker = Join-Path (Split-Path $PSScriptRoot -Parent) "docker/shared/update-skills-incontainer.sh"
 
 docker info *> $null
 if ($LASTEXITCODE -ne 0) {

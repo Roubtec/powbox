@@ -5,7 +5,7 @@
 # volume. Sourced (not executed) by:
 #   - the agent entrypoint hooks (docker/shared/entrypoint-{claude,codex}-hook.sh)
 #     in `noclobber` mode — seed only skills whose folder is absent, and
-#   - the update-skills worker (commands/update-skills-incontainer.sh), which uses
+#   - the update-skills worker (docker/shared/update-skills-incontainer.sh), which uses
 #     the primitives below to force-refresh, resolve conflicts, and prune.
 #
 # Ownership marker: every skill this code PLACES gets a hidden

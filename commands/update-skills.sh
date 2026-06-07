@@ -28,7 +28,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="powbox-agent:latest"
-WORKER="$ROOT_DIR/commands/update-skills-incontainer.sh"
+WORKER="$ROOT_DIR/docker/shared/update-skills-incontainer.sh"
 
 DRY_RUN=false
 PRUNE=false

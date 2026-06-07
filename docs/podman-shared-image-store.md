@@ -1,9 +1,40 @@
 # Hand-off: shared read-only Podman image store (`additionalimagestores`)
 
-**Status:** wiring **APPLIED** (steps 1–5 below, in the repo now); **not yet
-validated** — the overlay end-to-end needs a freshly **rebuilt** image **with
-`/dev/fuse`**. Pick this up from such a session: confirm the two prerequisites
-below, then run the validation plan, then update the user-facing docs.
+**Status:** image-store wiring **APPLIED** (steps 1–5 below) and the image-store
+overlay path is now **VALIDATED on overlay** (2026-06-07, from a rebuilt
+`/dev/fuse` container). While validating, a separate and more fundamental blocker
+surfaced — nested containers could not **RUN at all** — now **fixed in compose
+(commit `17e42b1`), pending the next base+agent rebuild**. The run path itself
+(`podman run`, networking, compose stacks) is owned by
+[rootless-podman.md](rootless-podman.md); this doc owns the shared image store.
+
+### Current state (2026-06-07)
+
+**Proven working on overlay (exercised live, not via the vfs proxy):**
+- `/dev/fuse` present, driver `overlay`, fuse-overlayfs 1.10; `podman info` exits 0
+  with no `CONTAINERS_CONF` override — Prerequisites 1 and 2 below are both met.
+- Store seeded at `/mnt/podman-imagestore`; `storage.conf` carries
+  `additionalimagestores`. All four curated images resolve **`R/O: true`** in the
+  consumer and nothing copies into the per-container writable `overlay-images/`
+  (only `images.lock` there). That settles open question #1 **and** the read-only
+  sharing model **on overlay**, not just on the vfs proxy.
+
+**Blocker found + fixed (pending rebuild):** nested `podman run` failed for two
+outer-container reasons invisible to `podman info` — (1) `/dev/net/tun` was never
+passed in, so slirp4netns/pasta networking dies on every run; and (2) the host
+runtime's default seccomp profile stacks onto every descendant and blocks the
+syscalls crun needs (`keyctl` and `pivot_root` return EPERM), so even
+`--network=none` died at "create keyring"/"pivot_root". Fixed in commit `17e42b1`:
+`/dev/net/tun` added to `compose.fuse.yml` (same `POWBOX_FUSE` gate as `/dev/fuse`);
+`security_opt: seccomp=unconfined + apparmor=unconfined` added to
+`compose.shared.yml`. See [rootless-podman.md](rootless-podman.md) for the full
+run-path validation this unblocks.
+
+**Next session:** rebuild base+agent at ≥ commit `17e42b1`, relaunch with
+`POWBOX_FUSE=on`, then run the **Validation plan** below (image-store sharing) AND
+the run-path validation prompt in [rootless-podman.md](rootless-podman.md).
+Pick this up from such a session: confirm the two prerequisites below, then run
+both validations, then update the user-facing docs (step 6).
 
 > **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
 > `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`
@@ -200,23 +231,29 @@ alias reseed-images='seed-image-store.sh update'
   `agent-podman-imagestore` is a shared volume; add `POWBOX_IMAGE_STORE_IMAGES`
   to the env-var table if exposed at the launcher level.
 - `docs/rootless-podman.md` Follow-ups: move the `additionalimagestores` bullet
-  from "planned" to "done", linking here.
+  from "planned" to "done", linking here. (That doc's "What changed" table, known
+  risk #2, and its missing-`/dev/net/tun` gap were updated alongside commit
+  `17e42b1` — re-check the validation-prompt results table after rebuild.)
 
 ## Open questions — VALIDATE on the rebuilt host
 
 These are the unverified Podman mechanics. Resolve each by running, not guessing:
 
-1. **Additional-store path.** RESOLVED on vfs (the graph-layer path semantics are
-   driver-independent; re-confirm once on overlay). It wants the **graphroot**
+1. **Additional-store path.** RESOLVED on vfs **and overlay** (2026-06-07): on the
+   rebuilt overlay host the four curated images resolve `R/O: true` from the bare
+   graphroot mount, nothing copied into the writable store. It wants the **graphroot**
    (`/mnt/podman-imagestore`), NOT the driver subdir
    (`/mnt/podman-imagestore/overlay`). Proof: a separate consumer with
    `additionalimagestores = ["<graphroot>"]` in storage.conf resolved a seeded
    image read-only (`ReadOnly=true`); appending `/vfs` or `/vfs-images` resolved
    nothing. So the entrypoint should point at the bare mount dir.
-2. **Seeder invocation.** Is `podman --root "$STORE" --storage-driver overlay pull …`
-   sufficient, or does it need an explicit `--runroot`/`--storage-opt`? Does the
-   resulting layout need anything (e.g. `podman image trust`, perms, a read-only
-   lock file) before a consumer can read it?
+2. **Seeder invocation.** RESOLVED on overlay (2026-06-07): the entrypoint's
+   background seed pulled all four curated images with plain
+   `podman --root "$STORE" --storage-driver overlay pull …` — no explicit
+   `--runroot`/`--storage-opt` needed — and consumers resolve them `R/O: true`
+   with nothing copied down, so the resulting layout needs nothing extra (no
+   `podman image trust`, perms tweak, or lock file) before a read-only consumer
+   can use it.
 3. **vfs consumer + overlay store (driver mismatch).** PARTIALLY RESOLVED. A
    consumer reading `additionalimagestores` from **storage.conf** does not error
    and cleanly uses it *when the store's driver matches* (vfs store + vfs consumer
@@ -230,11 +267,14 @@ These are the unverified Podman mechanics. Resolve each by running, not guessing
    store: does the read-only consumer tolerate it? Seeding is rare (first run +
    explicit update); the flock serializes writers, but a consumer mid-read during
    a seed is the edge to check.
-5. **Background first-run seed.** Confirm the backgrounded seed survives the
-   entrypoint's `exec "$@"` (reparented, keeps pulling) and that an agent pulling
-   the same image concurrently into its own graphroot doesn't deadlock on the
-   store. Worst acceptable case: the image just isn't shared yet and the agent
-   pulls its own copy.
+5. **Background first-run seed.** PARTIALLY RESOLVED on overlay (2026-06-07): on
+   first boot the entrypoint's backgrounded `seed-image-store.sh seed` survived
+   `exec "$@"` and ran to completion — `/tmp/powbox-image-store-seed.log` ends
+   `Image store: 4 pulled, 0 present, 0 failed` and the `.powbox-image-store-seeded`
+   marker was written ~1 min after container start. Still untested: an agent in
+   another container pulling the same image concurrently into its own graphroot
+   while a seed is mid-flight not deadlocking on the store. Worst acceptable case:
+   the image just isn't shared yet and the agent pulls its own copy.
 6. **build-epoch/commit path.** RESOLVED by inspection. Build metadata lands at
    `/home/node/.agent-container/<agent>/build-{epoch,commit}` (written identically
    for every agent by `docker/agent/Dockerfile`), **not** `/usr/local/share/powbox/`
@@ -260,10 +300,18 @@ consuming it from a second graphroot:
 - **Seeder build-meta** (open question #6) — `build_meta_dir` resolves the real
   epoch/commit both via `$AGENT_SEED_DIR` and via the fallback glob.
 
-Still needs the rebuilt overlay host: the overlay happy-path end-to-end, the true
-driver-mismatch case (overlay store + vfs consumer), read-while-write, and the
-backgrounded first-run seed surviving `exec "$@"` (open questions #2, #3-mismatch,
-#4, #5).
+Now also validated **on overlay** (2026-06-07, rebuilt `/dev/fuse` host): the
+overlay image-store happy path end-to-end (seed → consumer resolves all four
+curated images `R/O: true` → nothing copied into the writable graphroot), settling
+open questions #1 and the read-only sharing model on overlay (above).
+
+Still unverified — these need the next rebuild (≥ commit `17e42b1`) because they
+depend on actually **running** a nested container, which only worked after the
+`/dev/net/tun` + seccomp fix: the true driver-mismatch case is now moot (overlay
+everywhere), but read-while-write (#4) and the backgrounded first-run seed
+surviving `exec "$@"` (#5) still want a check, plus the cross-container sharing
+test (Validation plan step 3) and the whole run-path suite in
+[rootless-podman.md](rootless-podman.md).
 
 ## Enabling `/dev/fuse` (WSL2 / Windows 11 host)
 
@@ -308,7 +356,12 @@ gate. Where the device must exist depends on how Docker runs:
 
 ## Validation plan
 
-Run inside a freshly rebuilt container (overlay path, `/dev/fuse` present):
+This plan covers the **shared image store** only. The container-**run** path
+(pull+run, persistent volumes, compose + DNS, firewall inheritance) lives in
+[rootless-podman.md](rootless-podman.md)'s validation prompt — run that too, since
+steps 3–4 below now depend on a working `podman run` (unblocked by commit
+`17e42b1`). Run inside a freshly rebuilt container (overlay, `/dev/fuse` +
+`/dev/net/tun` present, `POWBOX_FUSE=on`):
 
 1. `seed-image-store.sh status` → store mounted, overlay yes, seeded no.
 2. `seed-image-store.sh seed` → pulls the curated set; re-run → all `present`,

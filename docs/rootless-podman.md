@@ -1,6 +1,15 @@
 # Rootless containers inside the sandbox (Podman)
 
-**Status:** implemented. Rebuild the base + agent images and run the validation procedure below before relying on it in a new environment.
+**Status:** implemented. **Update 2026-06-07:** validation found that nested
+containers could pull/build/store images but could not **run** — `/dev/net/tun`
+was not passed in (networking) and the host's default seccomp profile blocked
+`keyctl`/`pivot_root` (crun's keyring + pivot_root). Both are fixed in commit
+`17e42b1` (`compose.fuse.yml` now also passes `/dev/net/tun`; `compose.shared.yml`
+adds `security_opt: seccomp=unconfined + apparmor=unconfined`). Those take effect
+on the next base+agent rebuild — rebuild, relaunch with `POWBOX_FUSE=on`, then run
+the validation procedure below (it could not have passed before this fix). The
+shared read-only image store (see [podman-shared-image-store.md](podman-shared-image-store.md))
+is validated on overlay.
 
 ## Why
 
@@ -34,8 +43,10 @@ emulators, or a non-headless browser. Track that separately.
 |------|--------|
 | `docker/base/Dockerfile` | New apt layer installing `podman`, `podman-docker`, `podman-compose`, `uidmap`, `fuse-overlayfs`, `slirp4netns`, `passt`, `crun`, `netavark`, `aardvark-dns`, `catatonit`; writes `/etc/subuid`+`/etc/subgid` ranges for `node`; `touch /etc/containers/nodocker`. Sets `ENV XDG_RUNTIME_DIR=/home/node/.local/run`. Placed low so it doesn't bust the gh/mssql/pwsh/npm layers. |
 | `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`. |
+| `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` (commit `17e42b1`). The host runtime's default seccomp profile stacks onto every descendant process and blocks the syscalls crun needs to RUN a container (`keyctl`, `pivot_root` → EPERM); unconfining lets nested containers run. Acceptable because this container + its egress firewall ARE the boundary. |
+| `compose.fuse.yml` | Optional device-passthrough overlay added to the `-f` chain by the `POWBOX_FUSE` gate. Carries **both** `/dev/fuse` (overlay storage driver) **and** `/dev/net/tun` (commit `17e42b1`; required for slirp4netns/pasta networking — without it every `podman run` fails). `docker compose run` has no `--device` flag, hence a compose file. |
 | `docker/shared/entrypoint-core.sh` | At startup (guarded by `command -v podman`): create `XDG_RUNTIME_DIR` mode 700; pick storage driver — keep the image default (overlay + fuse-overlayfs) when `/dev/fuse` is present, else write a user `storage.conf` selecting the slower `vfs` driver. |
-| `scripts/launch-agent.sh` | New per-container volume `agent-podman-<agent>-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Passes `--device /dev/fuse` when the host exposes it (override with `POWBOX_FUSE=on\|off`). |
+| `scripts/launch-agent.sh` | New per-container volume `agent-podman-<agent>-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Adds `compose.fuse.yml` to the `-f` chain to attach `/dev/fuse` + `/dev/net/tun` when the host exposes them (override with `POWBOX_FUSE=on\|off`). |
 | `docker/shared/container-agent.md.tmpl` | Documents the capability for the in-container agent (tooling row, filesystem row, network note). |
 
 ### Design decisions / rationale
@@ -101,6 +112,11 @@ since later independent steps still inform us. Clean up at the end.
    - `cat /etc/subuid /etc/subgid` → both contain a `node:` line.
    - `echo "$XDG_RUNTIME_DIR"; ls -ld "$XDG_RUNTIME_DIR"` → exists, mode 700, owned node.
    - `ls -l /dev/fuse` → note present/absent.
+   - `ls -l /dev/net/tun` → MUST be present (else every `podman run` fails at
+     slirp4netns; attached via compose.fuse.yml under POWBOX_FUSE — commit `17e42b1`).
+   - `python3 -c "import ctypes,ctypes.util;l=ctypes.CDLL(ctypes.util.find_library('c'),use_errno=True);print('keyctl ok' if l.syscall(250,1,0)>=0 else 'keyctl EPERM — seccomp still blocking, run will fail')"`
+     → expect `keyctl ok` (proves the seccomp=unconfined fix took; EPERM means the
+     rebuild/relaunch didn't pick up compose.shared.yml).
    - `podman info --format '{{.Host.Security.Rootless}} | {{.Store.GraphDriverName}} | {{.Host.CgroupManager}} | {{.Host.NetworkBackend}} | {{.Store.GraphRoot}}'`
      Expect: `true | overlay | cgroupfs | netavark | /home/node/.local/share/containers/storage`
      (GraphDriverName is `vfs` instead if /dev/fuse was absent — that's an expected fallback, note it.)
@@ -185,13 +201,26 @@ _Fill this in after running the validation prompt so we keep continuity across s
   the host running `cc`; if that host lacks the node but the daemon has it,
   force it: `POWBOX_FUSE=on cc <project> --volatile`. Otherwise it falls back to
   vfs (works, slower).
-- **`mount`/overlay denied by the security profile.** tmpfs shadow mounts already
-  work under our profile, so fuse mounts should too. If Podman complains about
-  mounts or namespaces, the usual escape hatch is adding
-  `--security-opt seccomp=unconfined` (and/or `apparmor=unconfined`) to the run
-  in `launch-agent.sh`. The container is already the boundary and runs
-  `--dangerously-*`, so this is an acceptable loosening *if needed* — but only
-  add it if a test actually requires it.
+- **Run blocked by the host security profile — CONFIRMED + APPLIED (commit
+  `17e42b1`).** This was predicted here as a conditional "if needed" loosening; it
+  turned out to be required. The default seccomp profile the host runtime applies
+  to this container stacks onto every descendant process, including the user
+  namespaces rootless Podman creates to run a nested container, and blocks the
+  syscalls crun needs: `keyctl` (crun's session keyring — needs no capability, yet
+  EPERMs, which is the tell that it's seccomp not caps) and `pivot_root`. Symptom:
+  `podman run` fails at `create keyring … Operation not permitted`, and with
+  `--network=none` it gets one step further to `pivot_root … Operation not
+  permitted`. Fix applied: `security_opt: seccomp=unconfined` (+ `apparmor=unconfined`
+  for hosts that enforce the docker-default apparmor profile) in `compose.shared.yml`.
+  Acceptable because the container + egress firewall ARE the boundary and it already
+  runs `--dangerously-*`.
+- **No nested networking — `/dev/net/tun` missing (CONFIRMED + APPLIED, commit
+  `17e42b1`).** Every `podman run` failed with `slirp4netns … open("/dev/net/tun"):
+  No such file or directory` — the tun device node was never passed into the agent
+  container (the kernel module is present on the host, just not exposed). slirp4netns
+  AND pasta both need it. Fix: `/dev/net/tun` added to `compose.fuse.yml` alongside
+  `/dev/fuse`, gated by the same `POWBOX_FUSE` switch. Caveat: `POWBOX_FUSE=off`
+  therefore also disables nested networking — use `auto`/`on` for working containers.
 - **`newuidmap: write to uid_map failed`.** Means the `/etc/subuid`/`/etc/subgid`
   ranges didn't take; verify the apt layer wrote the `node:` lines and that
   `uidmap` is installed (`which newuidmap`).
@@ -205,7 +234,8 @@ _Fill this in after running the validation prompt so we keep continuity across s
 - **Shared read-only image store** (`additionalimagestores`) layered under each
   per-container writable graphroot, so agents stop re-pulling the same base
   images per container without giving up the per-container store isolation.
-  Planned for this branch as separate work.
+  **Implemented and validated on overlay** (2026-06-07) — see
+  [podman-shared-image-store.md](podman-shared-image-store.md).
 - If/when GUI, emulator, or non-headless-browser needs appear, that's the signal
   to move that workload to a dedicated Ubuntu VM (snapshot-based reset), per the
   original Option B → VM plan.

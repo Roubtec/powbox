@@ -68,6 +68,9 @@ $nodeModulesVolume = "agent-nm-$projectSlug"
 $worktreesVolume = "agent-wt-$projectSlug"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
 $worktreesStoreDir = "/workspace/$projectSlug/.worktrees/.pnpm-store"
+# Per-project rootless Podman storage (images + named volumes) so an in-sandbox
+# agent's containers and their data persist across container restarts.
+$podmanVolume = "agent-podman-$projectSlug"
 
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
@@ -230,6 +233,35 @@ if (-not $Volatile -and $containerExists) {
   }
 }
 
+# Detect whether the existing container predates the per-project Podman storage
+# volume. Such a container was created before rootless-Podman support, so its
+# /home/node/.local/share/containers is ephemeral (no agent-podman-* mount) and
+# it was launched without /dev/fuse — pulled images and podman volumes would not
+# persist, even after the image is rebuilt. Recreate a stopped container that
+# lacks the mount so the new volume + device attach; warn (don't disrupt) if it
+# is currently running.
+if (-not $Volatile -and $containerExists) {
+  $hasPodmanMount = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"/home/node/.local/share/containers`"}}yes{{end}}{{end}}" $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $hasPodmanMount = "" }
+  if ([string]::IsNullOrWhiteSpace($hasPodmanMount)) {
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName predates the per-project Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "Container $containerName predates the per-project Podman storage volume; recreating it so rootless Podman images and volumes persist."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting a missing Podman storage volume mount."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+}
+
 if (-not $Volatile -and $containerExists) {
   if ($containerRunning) {
     if ($Detach) {
@@ -308,8 +340,9 @@ if ($resolvedCtx -ne "") {
 docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
   -v "${nodeModulesVolume}:/mnt/node_modules" `
   -v "${worktreesVolume}:/mnt/worktrees" `
+  -v "${podmanVolume}:/mnt/containers" `
   agent `
-  -lc "mkdir -p /mnt/node_modules /mnt/worktrees && chown node:node /mnt/node_modules /mnt/worktrees"
+  -lc "mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers"
 
 if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
@@ -321,6 +354,20 @@ if ($Detach) {
 }
 elseif ($Volatile -and -not $Persist) {
   $runArgs += "--rm"
+}
+
+# Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
+# Auto-detect on the host; POWBOX_FUSE=on|off overrides. When the device is
+# absent the container falls back to the slower vfs driver (see entrypoint-core.sh),
+# so this is best-effort and never aborts the launch. On a Windows host shell
+# /dev/fuse does not exist, so `auto` resolves to off there; force it with
+# POWBOX_FUSE=on when the Docker Desktop VM exposes the device.
+switch ($env:POWBOX_FUSE) {
+  "on" { $runArgs += @("--device", "/dev/fuse") }
+  "off" { }
+  default {
+    if (Test-Path "/dev/fuse") { $runArgs += @("--device", "/dev/fuse") }
+  }
 }
 
 $continueLabel = if ($Continue) { "true" } else { "false" }
@@ -346,6 +393,7 @@ docker compose @composeArgs run @runArgs `
   @ctxArgs `
   -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
   -v "${worktreesVolume}:${workspaceMount}/.worktrees" `
+  -v "${podmanVolume}:/home/node/.local/share/containers" `
   -w $workspaceMount `
   agent `
   @command

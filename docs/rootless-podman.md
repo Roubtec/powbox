@@ -1,6 +1,6 @@
 # Rootless containers inside the sandbox (Podman)
 
-**Status:** implemented, awaiting first rebuild + validation (2026-06-04, branch `minor-upgrades`).
+**Status:** implemented. Rebuild the base + agent images and run the validation procedure below before relying on it in a new environment.
 
 ## Why
 

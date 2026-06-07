@@ -311,6 +311,31 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Detect whether the existing container predates the per-project Podman storage
+# volume. Such a container was created before rootless-Podman support, so its
+# /home/node/.local/share/containers is ephemeral (no agent-podman-* mount) and
+# it was launched without /dev/fuse — pulled images and podman volumes would not
+# persist, even after the image is rebuilt. Recreate a stopped container that
+# lacks the mount so the new volume + device attach; warn (don't disrupt) if it
+# is currently running.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -z "$HAS_PODMAN_MOUNT" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} predates the per-project Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
+		else
+			echo "Container ${CONTAINER_NAME} predates the per-project Podman storage volume; recreating it so rootless Podman images and volumes persist."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		if [ "$DETACH" = true ]; then

@@ -27,7 +27,8 @@ The per-branch rebase naturally re-stacks them flatly: each rebased branch becom
 - The team **rebases-and-merges** PRs rather than squashing.
   Git's default patch-id detection during rebase will drop commits already present in the new base, which is exactly what we rely on.
   This skill does not implement squash-aware heuristics.
-- Branches in the chain were created sequentially, each from the tip of its predecessor at branch-creation time.
+- Auto-detected branches were created sequentially, each from the tip of its predecessor at branch-creation time.
+  An explicit chain may instead contain independent disposable snapshots; each branch is still replayed onto the freshly rebased predecessor in the supplied order.
 - The user is responsible for fetch/pull hygiene.
   This skill **does not run `git fetch`** and **does not pull**.
   It uses local refs only, so the user has complete control over which commits come into play.
@@ -55,6 +56,21 @@ If neither exists, ask the user for the target branch.
 **When to use the explicit `chain` form**: if auto-detection comes back empty or wrong (most often after a chain branch was merged via rebase-and-merge — see "Detection corner cases" below), the explicit form is the simple, robust answer.
 You list the branches in stacking order, the skill rebases each onto the previous one's new tip, and the patch-id-aware first step still drops commits already on the target.
 
+### Delegated unattended mode
+
+Another skill may invoke `rebase-stack` without an interactive user only when its prompt supplies an explicit chain, explicitly authorizes execution, and states that every chain branch is a disposable snapshot.
+In that mode:
+
+- Validate and print the proposed chain for the record, but treat the parent prompt as confirmation and do not wait for another `go`.
+- Never re-derive, reorder, or drop branches from the chain, and never push or fetch. (This bars dropping a *chain branch*; the `git rebase --skip` used for the "patch already represented in HEAD" trivial subtype is still expected.)
+- Resolve trivial conflicts as usual.
+- On the first non-trivial conflict, abort the current rebase and stop; do not leave conflict markers or an in-progress rebase for the parent agent.
+- If conflict resolution completes but validation cannot be repaired confidently, reset that disposable branch to its pre-rebase ref and stop.
+- Before returning, run `git clean -fd` to remove untracked leftovers (`git rebase --abort` and `git reset --hard` restore tracked files but leave `.orig`/build outputs) and confirm `git status --porcelain` is empty, so the parent can `git worktree remove` without `--force`.
+
+Do not infer this mode merely because the caller is a subagent.
+Without all three guarantees — explicit chain, explicit authorization, and disposable branches — use the normal interactive confirmation and stopping behavior.
+
 ## What the skill does NOT do
 
 - It does not push to origin. Pushing remains a manual step the user controls.
@@ -78,7 +94,8 @@ You list the branches in stacking order, the skill rebases each onto the previou
    Default source is the currently checked-out branch.
    If the user specified a source, locate it; the source need not be checked out yet — the skill will check out branches as it goes.
 4. **Check no rebase is already in progress.**
-   If `.git/rebase-merge` or `.git/rebase-apply` exists, abort with a message asking the user to finish or abort the in-progress rebase first.
+   Use `git rev-parse --git-path rebase-merge` and `git rev-parse --git-path rebase-apply`, which work in both the main checkout and linked worktrees.
+   If either path exists, abort with a message asking the user to finish or abort the in-progress rebase first.
 
 ### Step 2 — Detect the chain
 
@@ -181,7 +198,8 @@ Validation (build/test) will run only after a branch had conflicts to resolve. C
 Confirm with `go` to proceed, or list branches to skip, or supply an explicit chain like `chain b1 -> b2 -> b3`.
 ```
 
-Wait for user reply.
+In normal interactive mode, wait for the user's reply.
+In delegated unattended mode, print the same listing for auditability and proceed immediately; the explicit parent prompt is the confirmation.
 
 If the user provides branches to skip, remove them from the chain and re-display the updated listing for a final confirmation.
 Skipped branches are **left entirely untouched** — they stay on their current commits, are not rebased, are not modified.
@@ -229,12 +247,14 @@ When `git rebase` halts on a conflict:
 3. **Trivial — resolve.** Two paths depending on the trivial subtype:
    - **In-file resolution** (import collisions, whitespace, predecessor-traceable): apply the merge, `git add` the resolved files, `git rebase --continue`. Mention briefly in the running narration ("resolved trivial conflict in `<file>`: kept both imports") so the user can scan after the fact, but don't pause.
    - **Patch already represented in HEAD**: run `git rebase --skip` (do *not* edit files). Narrate one line: "skipped redundant commit `<short-sha>` — content already on rebased base". Do not `git add` or `git rebase --continue` for this subtype; `--skip` advances the rebase by itself.
-4. **Non-trivial → propose and confirm.**
-   Present the conflict, the proposed resolution (with reasoning, including any traceable precedent), and ask the user to confirm before applying.
+4. **Non-trivial → stop unattended, otherwise propose and confirm.**
+   In delegated unattended mode, record the conflicting files, offending commit, and why it is non-trivial; then run `git rebase --abort`, report the branch as the stop point, and return without touching subsequent branches.
+   The current disposable branch is restored to its pre-rebase tip; since `git rebase --abort` leaves untracked files behind, also run `git clean -fd` and confirm `git status --porcelain` is empty before returning (the parent's `git worktree remove` refuses untracked files without `--force`).
+   In normal interactive mode, present the conflict, the proposed resolution (with reasoning, including any traceable precedent), and ask the user to confirm before applying.
    On user "go": apply, `git add`, `git rebase --continue` (or `git rebase --skip` if the proposed resolution is "skip this commit").
    On user "no": stop the skill (see step 7 below).
-5. **If the agent cannot determine a confident resolution at all** — e.g., the conflict involves intent that isn't apparent from the code or history — **stop the skill without aborting the rebase**.
-   Leave the rebase in progress (working tree contains conflict markers, `.git/rebase-merge` exists).
+5. **Normal interactive mode only: if the agent cannot determine a confident resolution at all** — e.g., the conflict involves intent that isn't apparent from the code or history — **stop the skill without aborting the rebase**.
+   Leave the rebase in progress (working tree contains conflict markers and `git rev-parse --git-path rebase-merge` points to the active state).
    Tell the user clearly:
    - Which branch is mid-rebase (`<X>`).
    - Where the pre-rebase ref is saved.
@@ -266,7 +286,8 @@ When validation is required:
    The conflict resolution may have introduced a real issue (e.g., dropped a dependency, misnamed a symbol).
    Read the failure, attempt a focused fix, commit it as a follow-on commit on `<X>` (do not amend the rebased commits), re-run validation.
 4. **If the fix is ambiguous or attempts fail** — stop the skill at this branch.
-   Tell the user:
+   In delegated unattended mode, record the exact failure and attempted fixes, run `git reset --hard <pre-rebase-ref>` on the disposable branch, then `git clean -fd` to drop untracked build/test outputs that `git reset --hard` leaves behind, confirm `git status --porcelain` is empty, and stop without touching subsequent branches.
+   In normal interactive mode, tell the user:
    - The rebase succeeded but validation is failing.
    - The exact failure output.
    - What was attempted, if anything.
@@ -281,11 +302,13 @@ The skill can stop at three points:
 - On non-trivial conflict the user rejects, or one the agent cannot resolve.
 - On validation failure that cannot be auto-fixed.
 
-In all cases:
+In normal interactive mode:
 - Earlier branches that completed are left **rebased and checked-in locally**, not pushed.
 - The current branch is left in whatever state stopped progress (rebase in progress, or rebased-but-failing-validation).
 - Subsequent chain branches are completely untouched.
 - All pre-rebase refs created so far are preserved.
+
+In delegated unattended mode, the current disposable branch is instead restored to its pre-rebase ref and the worktree is left clean; only the completed prefix remains rebased.
 
 **Note on detached HEAD during in-progress rebase**: while a `git rebase` is paused mid-flight, the working tree is on a detached HEAD — `git branch --show-current` returns empty, which can be disorienting. Use `git status` (which reports the in-progress rebase, the branch being rebased, and the conflicted files) for orientation when resuming.
 
@@ -300,6 +323,7 @@ The skill itself is **not re-entrant** in the formal sense — it does not persi
 Output:
 - The chain that was processed, in order, with one-line outcome per branch (`rebased clean`, `rebased with conflicts (resolved silently / with confirmation)`, `rebased + validation passed`, `stopped at this branch`).
 - Any branches that ended up empty (no unique commits relative to their new base) — flagged for the user to delete or close as appropriate.
+  In delegated unattended mode, report emptiness as an integration result only; do not recommend closing a canonical branch without inspection.
 - The list of pre-rebase refs created, with **inspection** and **cleanup** hints. Pre-rebase refs live in a custom git ref namespace (`refs/pre-rebase/...`), not under `refs/heads/`, so they are **invisible to most git GUIs** (GitKraken, GitHub Desktop, Sourcetree). Use the CLI:
   ```sh
   # Inspect — see all pre-rebase refs and the SHAs they preserve:
@@ -350,8 +374,9 @@ The user can clean them up with the one-liner in the final summary.
 - [ ] Chain detected via `EF`-relative topology, or taken verbatim from explicit chain spec.
 - [ ] Confirmation listing produced (with `EF` shown) and approved.
 - [ ] Pre-rebase ref saved before each branch's rebase.
-- [ ] Conflicts classified trivial (in-file resolve OR `--skip` for "patch already represented") vs non-trivial; non-trivial confirmed before applying.
+- [ ] Conflicts classified trivial (in-file resolve OR `--skip` for "patch already represented") vs non-trivial; interactive non-trivial conflicts confirmed before applying, unattended ones recorded and aborted.
 - [ ] Validation only after branches that had conflicts.
-- [ ] Stopping does not auto-abort in-progress rebases.
+- [ ] Interactive stopping does not auto-abort in-progress rebases; delegated unattended stopping aborts/resets cleanly.
+- [ ] Delegated unattended mode used only for an explicit, preauthorized chain of disposable branches; non-trivial stops abort/reset cleanly without waiting.
 - [ ] No pushes, no fetches, no auto-deletion of branches.
 - [ ] Final summary lists outcomes, empty branches, and cleanup hint.

@@ -1,19 +1,37 @@
 # Hand-off: shared read-only Podman image store (`additionalimagestores`)
 
-**Status:** designed + scaffolded; **not wired in, not validated.** Pick this up
-from a session running on a **rebuilt, podman-capable** image. This document is
-the spec; apply the wiring below, then run the validation plan and only then
-update the user-facing docs.
+**Status:** wiring **APPLIED** (steps 1–5 below, in the repo now); **not yet
+validated** — the overlay end-to-end needs a freshly **rebuilt** image **with
+`/dev/fuse`**. Pick this up from such a session: confirm the two prerequisites
+below, then run the validation plan, then update the user-facing docs.
 
-> **Sanity check first — the foundation must be sound.** This repo already
-> contains the `docker/base/Dockerfile` fix that pre-creates
-> `/etc/containers/containers.conf.d` at mode `0755` (without it, `COPY --chmod=644`
+> **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
+> `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`
+> at mode `0755` is correct and verified (without it, `COPY --chmod=644`
 > auto-creates that dir at `0644` — no search bit — and **every** `podman` command
-> fails with `open .../10-powbox.conf: permission denied`). After the rebuild,
-> confirm it took: **`podman info` must exit 0.** If you instead get that
-> permission-denied error, the rebuild didn't pick up the fix — stop and rebuild
-> the base image before doing anything below. (None of the validation here can run
-> while Podman can't read its own config.)
+> fails with `open .../10-powbox.conf: permission denied`; confirmed by
+> `dpkg -S /etc/containers/containers.conf.d` returning nothing, so the COPY itself
+> created the dir). It just needs to be **baked**: a prior session rebuilt only the
+> base and forgot the agent layer, so the running image still came from a pre-fix
+> commit (`build-commit` baked at `/home/node/.agent-container/<agent>/build-commit`
+> lagged the fix commit) and `podman info` kept failing. After rebuilding **both**
+> layers and relaunching, confirm it took: **`podman info` must exit 0** with no
+> `CONTAINERS_CONF` override. If you still get the permission-denied error, the
+> rebuild didn't pick up the fix — stop and rebuild before doing anything below.
+>
+> _Interim unblock (no rebuild):_ `export CONTAINERS_CONF=<repo>/docker/shared/containers.conf`
+> makes `podman` skip the broken system drop-in and run normally — enough to
+> exercise the **driver-independent** parts (seeder logic, prune whitelist, the vfs
+> proxy checks). It cannot exercise the overlay path.
+
+> **Prerequisite 2 — the container must have `/dev/fuse` (overlay), or none of the
+> sharing validation can run.** The shared store is overlay-only by design, and
+> overlay needs `/dev/fuse` + fuse-overlayfs. Without it Podman falls back to vfs,
+> the entrypoint deliberately omits the `additionalimagestores` line, and the store
+> is simply unused — there is nothing overlay-specific to test. `SYS_ADMIN` is
+> already granted in `compose.shared.yml`, so once the device is attached the mounts
+> work; the device is the only host-side gate. See **Enabling `/dev/fuse` (WSL2)** below.
+> Verify after relaunch: `podman info --format '{{.Store.GraphDriverName}}'` → `overlay`.
 
 ## Why
 
@@ -59,7 +77,25 @@ Writable stays per-container; only cached base layers are shared.
   (`seed` / `update` / `list` / `status`). Inert until baked + invoked. Its
   non-podman paths are tested; the `podman --root` calls are marked `VALIDATE`.
 
-## Wiring checklist (do these, then validate)
+## Wiring checklist — APPLIED (kept as the record of what changed)
+
+Steps 1–5 are **done and in the repo** (syntax-checked, shellcheck/PSScriptAnalyzer
+clean; the prune whitelist was behaviorally verified). They take effect on the next
+**base + agent** rebuild. Step 6 (user-facing docs) is still pending validation. The
+diffs below are retained so the next session can see exactly what was wired and where.
+
+- ✅ **1. Seeder baked** — `docker/shared/seed-image-store.sh` added to the
+  `COPY --chmod=755` block in `docker/base/Dockerfile`.
+- ✅ **2. Launcher** — `agent-podman-imagestore` added to the shared-volume array and
+  mounted at `/mnt/podman-imagestore` in both the root pre-run (with mkdir+chown) and
+  the final `run`, in **both** `scripts/launch-agent.sh` and `scripts/launch-agent.ps1`.
+- ✅ **3. Entrypoint** — `docker/shared/entrypoint-core.sh` overlay branch now writes a
+  `storage.conf` with `additionalimagestores` when the store is mounted and kicks the
+  background first-run seed; vfs branch unchanged (store never referenced on vfs).
+- ✅ **4. prune-volumes** — `agent-podman-imagestore` whitelisted as always-expected in
+  both `commands/prune-volumes.sh` and `commands/prune-volumes.ps1`.
+- ✅ **5. zsh alias** — `reseed-images` added to `docker/shared/.zshrc` (safe now that
+  the seeder is baked).
 
 ### 1. Bake the seeder into the image
 `docker/base/Dockerfile`, in the shared-scripts `COPY --chmod=755` block (~line
@@ -228,6 +264,45 @@ Still needs the rebuilt overlay host: the overlay happy-path end-to-end, the tru
 driver-mismatch case (overlay store + vfs consumer), read-while-write, and the
 backgrounded first-run seed surviving `exec "$@"` (open questions #2, #3-mismatch,
 #4, #5).
+
+## Enabling `/dev/fuse` (WSL2 / Windows 11 host)
+
+The launcher attaches `--device /dev/fuse` when `POWBOX_FUSE=on`, or under the
+default `auto` when the **shell that runs the launcher** already has `/dev/fuse`.
+`SYS_ADMIN` is already in `compose.shared.yml`, so the device is the only host-side
+gate. Where the device must exist depends on how Docker runs:
+
+- **Docker Desktop (WSL2 backend)** — the common Windows 11 case. Containers run in
+  Docker Desktop's *own* managed VM, not your distro, and that VM ships `/dev/fuse`.
+  But `auto` checks the launcher's shell (Windows PowerShell has no `/dev`; a WSL2
+  distro's `/dev/fuse` doesn't reflect the Docker VM), so `auto` under-detects and
+  falls back to vfs. **Force it: `POWBOX_FUSE=on`.**
+  - PowerShell: `$env:POWBOX_FUSE='on'; .\scripts\launch-agent.ps1 …`
+  - bash/WSL: `POWBOX_FUSE=on ./scripts/launch-agent.sh …`
+  - If `POWBOX_FUSE=on` hard-fails at `docker … run` with a device error, the Docker
+    VM isn't exposing `/dev/fuse` — update Docker Desktop and run `wsl --update`
+    (Windows) for a current kernel, then retry.
+- **Docker engine native inside a WSL2 distro** (docker-ce in Ubuntu, no Docker
+  Desktop) — containers share the distro kernel + `/dev`, so `/dev/fuse` must exist
+  in that distro:
+  - `ls -l /dev/fuse` — if present, `auto` already passes it (`POWBOX_FUSE=on` also works).
+  - If missing: `sudo modprobe fuse` (Microsoft's WSL2 kernel ships the module);
+    confirm with `grep fuse /proc/filesystems`. Persist with a
+    `/etc/modules-load.d/fuse.conf` containing `fuse`. Keep the kernel current via
+    `wsl --update` + `wsl --shutdown` from Windows.
+
+**After relaunch, verify inside the new container:** `ls -l /dev/fuse` (present) and
+`podman info --format '{{.Store.GraphDriverName}}'` → `overlay`.
+
+> **Gotcha — the per-container driver is pinned on first init.** The persistent
+> `agent-podman-<container>` graphroot records its storage driver
+> (`.powbox-storage-driver`) the first time it's created and the entrypoint **won't
+> silently flip** it (changing drivers needs a clean store). If this project's
+> graphroot was first initialised on vfs, adding `/dev/fuse` later keeps vfs and the
+> entrypoint prints a note. To actually switch to overlay, drop that volume
+> (`docker volume rm agent-podman-<container>`) or run `podman system reset` inside,
+> then relaunch. The new `agent-podman-imagestore` is unaffected (the seeder pulls
+> into it with an explicit `--storage-driver overlay`).
 
 ## Validation plan
 

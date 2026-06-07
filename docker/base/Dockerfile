@@ -231,6 +231,7 @@ COPY --chmod=755 \
     docker/shared/shadow-refresh.sh \
     docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
+    docker/shared/seed-image-store.sh \
     /usr/local/bin/
 
 USER node

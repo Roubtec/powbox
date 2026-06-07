@@ -25,3 +25,6 @@ export EDITOR="nano"
 if [ -n "$CONTAINER_NAME" ]; then
   PROMPT="%{$fg[yellow]%}[$CONTAINER_NAME]%{$reset_color%} $PROMPT"
 fi
+
+# Re-pull the curated set into the shared read-only Podman image store.
+alias reseed-images='seed-image-store.sh update'

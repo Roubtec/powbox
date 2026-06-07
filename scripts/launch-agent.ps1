@@ -84,7 +84,10 @@ $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
 # config volumes are always created/mounted so the non-primary agent can be
 # spun up in-container with its own persistent login and skills.
-$sharedVolumes = @("agent-gh-config", "agent-zsh-history", "claude-config", "codex-config")
+# agent-podman-imagestore is the single GLOBAL read-only image cache shared by
+# every container across all projects (consumed via Podman additionalimagestores).
+# It is infra, like the config volumes — created here, never per-container.
+$sharedVolumes = @("agent-gh-config", "agent-zsh-history", "claude-config", "codex-config", "agent-podman-imagestore")
 foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {
@@ -345,8 +348,9 @@ docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh 
   -v "${nodeModulesVolume}:/mnt/node_modules" `
   -v "${worktreesVolume}:/mnt/worktrees" `
   -v "${podmanVolume}:/mnt/containers" `
+  -v "agent-podman-imagestore:/mnt/podman-imagestore" `
   agent `
-  -lc "mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers"
+  -lc "mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore"
 
 if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
@@ -399,6 +403,7 @@ docker compose @composeArgs run @runArgs `
   -v "${nodeModulesVolume}:${workspaceMount}/node_modules" `
   -v "${worktreesVolume}:${workspaceMount}/.worktrees" `
   -v "${podmanVolume}:/home/node/.local/share/containers" `
+  -v "agent-podman-imagestore:/mnt/podman-imagestore" `
   -w $workspaceMount `
   agent `
   @command

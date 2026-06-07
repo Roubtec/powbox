@@ -24,6 +24,11 @@ while IFS= read -r name; do
 	expected+=("agent-nm-${suffix}" "agent-wt-${suffix}" "agent-podman-${name}")
 done < <(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 
+# The global shared image store is infra shared by every container (like the
+# config volumes), not a per-container store — it matches the agent-podman-*
+# candidate glob below but is never an orphan. Always expect it.
+expected+=("agent-podman-imagestore")
+
 # Find all candidate volumes, plus the deprecated shared store.
 candidates=()
 while IFS= read -r vol; do

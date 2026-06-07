@@ -186,15 +186,37 @@ if command -v podman >/dev/null 2>&1; then
 	printf '%s\n' "$_chosen_driver" >"$_driver_marker" 2>/dev/null || true
 
 	if [ "$_chosen_driver" = "overlay" ]; then
-		# Image default already selects overlay + fuse-overlayfs; drop any stale vfs override.
-		rm -f "$HOME/.config/containers/storage.conf"
+		# Overlay path. The image ships no system storage.conf, so Podman uses its
+		# built-in rootless defaults (overlay + auto-selected fuse-overlayfs). When the
+		# global read-only image store is mounted, write a storage.conf that keeps
+		# overlay AND layers that store on top via additionalimagestores. The store is
+		# only referenced on overlay: its driver must match the consumer's, and a vfs
+		# consumer never sees it (see the vfs branch). Drop any stale override when the
+		# store isn't mounted and fall back to the built-in default.
+		_imgstore="/mnt/podman-imagestore"
+		if [ -d "$_imgstore" ]; then
+			# additionalimagestores wants the graphroot (the bare mount dir), NOT a
+			# driver subdir — verified on vfs; re-confirm on overlay. No mount_program
+			# is set on purpose: rootless Podman auto-selects fuse-overlayfs here just
+			# as it does with the built-in default (the image has no system storage.conf).
+			printf '[storage]\ndriver = "overlay"\n\n[storage.options]\nadditionalimagestores = ["%s"]\n' \
+				"$_imgstore" >"$HOME/.config/containers/storage.conf"
+			# First-run seed in the background so container start isn't blocked on pulls.
+			# Reparented after the entrypoint's `exec "$@"`; the seeder flock serializes
+			# concurrent writers across containers.
+			if [ ! -f "$_imgstore/.powbox-image-store-seeded" ] && command -v seed-image-store.sh >/dev/null 2>&1; then
+				seed-image-store.sh seed >/tmp/powbox-image-store-seed.log 2>&1 &
+			fi
+		else
+			rm -f "$HOME/.config/containers/storage.conf"
+		fi
 	else
 		if [ ! -e /dev/fuse ]; then
 			echo "Note: /dev/fuse not available; Podman will use the slower vfs storage driver. Pass it through with POWBOX_FUSE=on, or it is auto-detected from the host." >&2
 		fi
 		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
 	fi
-	unset _xdg _containers_root _driver_marker _desired_driver _chosen_driver
+	unset _xdg _containers_root _driver_marker _desired_driver _chosen_driver _imgstore
 fi
 
 if [ "$#" -eq 0 ]; then

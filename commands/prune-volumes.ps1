@@ -30,6 +30,11 @@ foreach ($containerName in $containerNames) {
     }
 }
 
+# The global shared image store is infra shared by every container (like the
+# config volumes), not a per-container store — it matches the agent-podman-*
+# candidate glob below but is never an orphan. Always expect it.
+[void]$expectedVolumes.Add("agent-podman-imagestore")
+
 # Candidates: agent-nm-* / agent-wt-* / agent-podman-* plus the deprecated shared
 # store (agent-pnpm-store), which nothing mounts anymore now that the store is
 # per-project inside each agent-wt-* volume.

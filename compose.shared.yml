@@ -7,6 +7,18 @@ services:
       - NET_ADMIN
       - NET_RAW
       - SYS_ADMIN
+    # Rootless Podman nests user namespaces to RUN a container; the host runtime's
+    # default seccomp (and, on apparmor-enforcing hosts, the default apparmor)
+    # profile stacks onto every descendant process and blocks the syscalls crun
+    # needs — confirmed: `keyctl` (needs no capability) and `pivot_root` return
+    # EPERM, so `podman run` fails at "create keyring"/"pivot_root" even with
+    # --network=none. Unconfining these is the standard podman-in-docker fix and is
+    # acceptable here because this container + its egress firewall ARE the security
+    # boundary (it already runs the agent --dangerously-*). Without it Podman can
+    # pull/build/store images but cannot run a single container.
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       GH_CONFIG_DIR: /home/node/.config/gh
       GH_HOST_SEED_DIR: /home/node/.config/gh-host

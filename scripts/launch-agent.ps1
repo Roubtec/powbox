@@ -365,16 +365,17 @@ elseif ($Volatile -and -not $Persist) {
   $runArgs += "--rm"
 }
 
-# Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
-# `docker compose run` has no --device flag (only `docker run` does), so the
-# device is declared in compose.fuse.yml and added to the -f chain here rather
-# than as a CLI flag. Auto-detect on the host; POWBOX_FUSE=on|off overrides. In
-# `auto` (and `off`) this is best-effort: omitting the device just drops the
-# container to the slower vfs driver (see entrypoint-core.sh), never aborting the
-# launch. `on` forces the device, so if the Docker host cannot expose /dev/fuse
-# the run hard-fails. On a Windows host shell /dev/fuse does not exist, so `auto`
-# resolves to off there; force it with POWBOX_FUSE=on only when the Docker
-# Desktop VM exposes the device.
+# Pass the host devices rootless Podman needs (/dev/fuse for the fuse-overlayfs
+# storage driver, /dev/net/tun for nested-container networking) through to the
+# agent. `docker compose run` has no --device flag (only `docker run` does), so
+# both are declared in compose.fuse.yml and added to the -f chain here rather than
+# as CLI flags. Auto-detect on the host; POWBOX_FUSE=on|off overrides. NOTE: the
+# two devices are bundled, so `off` (or `auto` not detecting /dev/fuse) drops BOTH
+# — no overlay driver AND no nested networking (every `podman run` fails on the
+# missing tun). `on` forces them; if the Docker host cannot expose a device the
+# run hard-fails. On a Windows host shell /dev/fuse does not exist, so `auto`
+# resolves to off there; force it with POWBOX_FUSE=on only when the Docker Desktop
+# VM exposes the devices. See compose.fuse.yml for the bundling rationale.
 switch ($env:POWBOX_FUSE) {
   "on" { $composeArgs += @("-f", $composeFuse) }
   "off" { }

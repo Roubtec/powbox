@@ -66,10 +66,15 @@ seed_skill() {
 	mkdir -p "$parent"
 	tmp="$(mktemp -d "$parent/.${name}.tmp.XXXXXX")" || return 1
 	if cp -a "$src"/. "$tmp"/ && printf '%s' "$marker" >"$tmp/$POWBOX_SEED_MARKER"; then
-		# The window between rm and mv is tiny and an agent re-reads SKILL.md at
-		# invoke time; mv is an atomic rename within the same volume.
+		# mv is an atomic rename within the same volume, and an agent re-reads
+		# SKILL.md at invoke time, so it never observes a half-written skill. The
+		# window between rm and mv is tiny but the config volumes are shared, so a
+		# concurrent seed could recreate $dest in it; -T (--no-target-directory)
+		# makes mv replace $dest rather than nest $tmp inside a reappeared
+		# directory, failing loudly into the cleanup below instead of returning a
+		# false success with an orphaned .${name}.tmp.* tree.
 		rm -rf "$dest"
-		if mv "$tmp" "$dest"; then
+		if mv -T "$tmp" "$dest"; then
 			return 0
 		fi
 	fi

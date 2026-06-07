@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Seed/refresh the GLOBAL shared rootless-Podman image store.
 #
-# DRAFT — wired by nobody yet. This script is committed as scaffolding for the
-# `additionalimagestores` follow-up; the entrypoint/launcher wiring, the
-# prune-volumes whitelist, and the storage.conf consumer config are described in
-# docs/podman-shared-image-store.md and are applied + VALIDATED by a session
-# running on a podman-capable rebuilt image. The Podman invocations below are
-# best-effort and marked VALIDATE where the exact mechanism is unverified.
+# Live: the entrypoint (docker/shared/entrypoint-core.sh) runs `seed` once in the
+# background on the first overlay-capable start, the launcher
+# (scripts/launch-agent.{sh,ps1}) mounts the single `agent-podman-imagestore`
+# Docker volume here, prune-volumes keeps that volume, and per-container Podman
+# stores reference it read-only via the storage.conf `additionalimagestores` entry
+# the entrypoint writes. Cross-container sharing and read-while-write were validated
+# on overlay — see docs/podman-shared-image-store.md.
 #
 # What it does: pulls a small CURATED set of common dev backing images into one
 # host-wide containers/storage layout (a Docker volume mounted at
@@ -58,19 +59,19 @@ curated_images() {
 }
 
 # The shared store is only useful on the overlay path: an additional image store
-# must match the consumer's storage driver, and consumers only enable overlay
-# when /dev/fuse is present (else they fall back to vfs and ignore the store).
-# So seeding into an overlay store when /dev/fuse is absent would produce a store
-# nothing can consume — skip cleanly instead. VALIDATE: confirm a vfs consumer
-# indeed ignores (does not error on) an overlay additionalimagestore.
+# must match the consumer's storage driver, and consumers only enable overlay when
+# /dev/fuse is present. On the vfs fallback the entrypoint writes a plain vfs
+# storage.conf with no additionalimagestores entry, so a vfs consumer never
+# references this store at all — seeding it would produce a store nothing consumes,
+# so skip cleanly instead.
 overlay_available() {
 	[ -e /dev/fuse ]
 }
 
 # podman against the shared store as a PRIMARY root (this is the writer path).
-# VALIDATE: confirm --root alone (default runroot under XDG_RUNTIME_DIR) is the
-# right invocation, and whether additionalimagestores consumers want STORE or
-# STORE/<driver> as their path.
+# Validated on overlay: --root with the default runroot under XDG_RUNTIME_DIR is the
+# right invocation, and consumers point additionalimagestores at STORE (the bare
+# graphroot), not STORE/<driver> — see docs/podman-shared-image-store.md.
 store_podman() {
 	podman --root "$STORE" --storage-driver overlay "$@"
 }
@@ -137,23 +138,36 @@ cmd_seed() {
 		fi
 	done < <(curated_images)
 
-	# Record the marker (best-effort) so first-run auto-seed is one-shot.
-	local meta
-	meta="$(build_meta_dir || true)"
-	{
-		echo "epoch=$(cat "${meta}/build-epoch" 2>/dev/null || echo 0)"
-		echo "commit=$(cat "${meta}/build-commit" 2>/dev/null || echo unknown)"
-	} >"$MARKER" 2>/dev/null || true
+	# Record the marker so first-run auto-seed is one-shot — but ONLY when every
+	# curated image landed. A transient registry blip on first run must not write the
+	# marker, or the entrypoint's one-shot guard would skip the seed forever and leave
+	# the store permanently missing those images. Leaving the marker absent makes the
+	# next launch retry. (`update` ignores the marker, so a manual refresh re-pulls
+	# regardless.)
+	if [ "$failed" -eq 0 ]; then
+		local meta
+		meta="$(build_meta_dir || true)"
+		{
+			echo "epoch=$(cat "${meta}/build-epoch" 2>/dev/null || echo 0)"
+			echo "commit=$(cat "${meta}/build-commit" 2>/dev/null || echo unknown)"
+		} >"$MARKER" 2>/dev/null || true
+	fi
 
 	echo "Image store: ${pulled} pulled, ${skipped} present, ${failed} failed."
 	[ "$failed" -eq 0 ]
 }
 
 cmd_list() {
-	local img mark
+	local img mark store_ready=false
+	# Only probe the store when it is actually mounted. Otherwise `podman --root
+	# "$STORE" ...` (via image_present) would create a stray graphroot at $STORE on
+	# the container's own filesystem and report misleading "present"/"absent" results.
+	if overlay_available && [ -d "$STORE" ]; then
+		store_ready=true
+	fi
 	while IFS= read -r img; do
 		[ -n "$img" ] || continue
-		if overlay_available && image_present "$img"; then
+		if [ "$store_ready" = true ] && image_present "$img"; then
 			mark="present"
 		else
 			mark="absent"

@@ -264,6 +264,25 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Resolve which host devices rootless Podman will receive this launch into a
+# normalised set string ("fuse,tun" / "fuse" / "tun" / "none"). The device list is
+# frozen at container creation — `docker start` can't add /dev/fuse or /dev/net/tun
+# to an existing container — so this is recorded as a label and a change recreates a
+# stopped container (mirrors the /ctx and --continue handling). 'auto' resolves
+# against the launcher host's /dev here, so the same host yields a stable value;
+# 'on' forces both devices, 'off' neither. The compose-file selection below derives
+# from the same value, so the label and the actual attach never disagree.
+case "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" in
+on) PODMAN_DEVICE_MODE="fuse,tun" ;;
+off) PODMAN_DEVICE_MODE="none" ;;
+*)
+	PODMAN_DEVICE_MODE=""
+	[ -e /dev/fuse ] && PODMAN_DEVICE_MODE="fuse"
+	[ -e /dev/net/tun ] && PODMAN_DEVICE_MODE="${PODMAN_DEVICE_MODE:+${PODMAN_DEVICE_MODE},}tun"
+	[ -n "$PODMAN_DEVICE_MODE" ] || PODMAN_DEVICE_MODE="none"
+	;;
+esac
+
 # Detect whether the --continue flag state differs from what the container was created with.
 # The CMD is frozen at container creation, so a flag change only takes effect after recreation.
 # Missing label on an existing container predates this flag — treat it as "true" so the old
@@ -329,9 +348,37 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_PODMAN_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and /dev/fuse isn't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
+			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
 		else
 			echo "Container ${CONTAINER_NAME} predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
+# Detect whether the existing container was created with a different rootless-Podman
+# device set than this launch resolves (POWBOX_PODMAN changed, or the host's /dev
+# visibility changed under `auto`). The device list is frozen at creation, so a
+# stopped container first created with POWBOX_PODMAN=off — or under `auto` on a host
+# that couldn't see the devices — can't gain /dev/fuse or /dev/net/tun on `docker
+# start`: nested Podman would stay on vfs with no default networking. Recreate a
+# stopped mismatch so the new device set attaches; warn (don't disrupt) a running
+# one. A container with no recorded label predates this check — leave it alone, since
+# we can't know what it was created with and the storage-mount check above already
+# recreates truly pre-Podman containers.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	EXISTING_PODMAN_DEVICES="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.podman-devices"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -n "$EXISTING_PODMAN_DEVICES" ] && [ "$EXISTING_PODMAN_DEVICES" != "$PODMAN_DEVICE_MODE" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} is running with Podman devices '${EXISTING_PODMAN_DEVICES}'; this launch resolves to '${PODMAN_DEVICE_MODE}'. The device set is fixed at container creation — stop it and relaunch (or use --volatile) to apply the change." >&2
+		else
+			echo "Podman device set changed (was '${EXISTING_PODMAN_DEVICES}', now '${PODMAN_DEVICE_MODE}'); recreating container."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
@@ -444,19 +491,13 @@ fi
 if [ -z "${POWBOX_PODMAN:-}" ] && [ -n "${POWBOX_FUSE:-}" ]; then
 	echo "Note: POWBOX_FUSE is deprecated; use POWBOX_PODMAN (it now gates both /dev/fuse and /dev/net/tun)." >&2
 fi
-case "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" in
-on)
-	COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml" -f "${ROOT_DIR}/compose.netdev.yml")
-	;;
-off) ;;
-*)
-	if [ -e /dev/fuse ]; then
-		COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml")
-	fi
-	if [ -e /dev/net/tun ]; then
-		COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.netdev.yml")
-	fi
-	;;
+# Attach each compose overlay from the already-resolved PODMAN_DEVICE_MODE so the
+# devices actually passed match the powbox.podman-devices label recorded below.
+case ",${PODMAN_DEVICE_MODE}," in
+*,fuse,*) COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml") ;;
+esac
+case ",${PODMAN_DEVICE_MODE}," in
+*,tun,*) COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.netdev.yml") ;;
 esac
 
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
@@ -482,6 +523,7 @@ fi
 docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
+	--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
 	"${EXTRA_ENV[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \

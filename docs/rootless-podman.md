@@ -25,8 +25,8 @@ results in **Results** below.
 **Update 2026-06-07:** validation found that nested
 containers could pull/build/store images but could not **run** — `/dev/net/tun`
 was not passed in (networking) and the host's default seccomp profile blocked
-`keyctl`/`pivot_root` (crun's keyring + pivot_root). Both are fixed in commit
-`17e42b1` plus a follow-up device split: `/dev/net/tun` rides its own
+`keyctl`/`pivot_root` (crun's keyring + pivot_root). Both are fixed by the run-path
+changes, with the two devices split across overlays: `/dev/net/tun` rides its own
 `compose.netdev.yml`, `/dev/fuse` stays in `compose.fuse.yml`, both gated by the
 single `POWBOX_PODMAN` switch (`POWBOX_FUSE` is the deprecated alias);
 `compose.shared.yml` adds `security_opt: seccomp=unconfined + apparmor=unconfined`.
@@ -93,9 +93,9 @@ emulators, or a non-headless browser. Track that separately.
 |------|--------|
 | `docker/base/Dockerfile` | New apt layer installing `podman`, `podman-docker`, `podman-compose`, `uidmap`, `fuse-overlayfs`, `slirp4netns`, `passt`, `crun`, `netavark`, `aardvark-dns`, `catatonit`; writes `/etc/subuid`+`/etc/subgid` ranges for `node`; `touch /etc/containers/nodocker`. Sets `ENV XDG_RUNTIME_DIR=/home/node/.local/run`. Placed low so it doesn't bust the gh/mssql/pwsh/npm layers. |
 | `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`, **`firewall_driver=iptables`** (2026-06-07 — Podman 5.x netavark defaults to nftables, which needs an `nft` binary the image lacks; we already ship `iptables`/nf_tables for the egress firewall, so netavark reuses it). |
-| `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` (commit `17e42b1`) **plus `systempaths=unconfined`** (2026-06-07). seccomp/apparmor unblock the syscalls crun needs to RUN (`keyctl`, `pivot_root` → EPERM); `systempaths=unconfined` makes the Docker-masked read-only `/proc/sys` writable so crun can set `ping_group_range` (every run) and netavark can set `route_localnet` (published ports on bridge networks) — without it both EPERM. Acceptable because this container + its egress firewall ARE the boundary. |
+| `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` **plus `systempaths=unconfined`** (2026-06-07). seccomp/apparmor unblock the syscalls crun needs to RUN (`keyctl`, `pivot_root` → EPERM); `systempaths=unconfined` makes the Docker-masked read-only `/proc/sys` writable so crun can set `ping_group_range` (every run) and netavark can set `route_localnet` (published ports on bridge networks) — without it both EPERM. Acceptable because this container + its egress firewall ARE the boundary. |
 | `compose.fuse.yml` | Optional overlay (added to the `-f` chain by the `POWBOX_PODMAN` gate) carrying `/dev/fuse` for the overlay storage driver; absent → vfs fallback. `docker compose run` has no `--device` flag, hence a compose file. |
-| `compose.netdev.yml` | Optional overlay carrying `/dev/net/tun` for nested-container networking (slirp4netns/pasta; without it every default `podman run` fails). Same `POWBOX_PODMAN` gate as `compose.fuse.yml`, but a separate file so the two devices attach independently under `auto` (commit `17e42b1` + the device split). |
+| `compose.netdev.yml` | Optional overlay carrying `/dev/net/tun` for nested-container networking (slirp4netns/pasta; without it every default `podman run` fails). Same `POWBOX_PODMAN` gate as `compose.fuse.yml`, but a separate file so the two devices attach independently under `auto`. |
 | `docker/shared/entrypoint-core.sh` | At startup (guarded by `command -v podman`): create `XDG_RUNTIME_DIR` mode 700; pick storage driver — keep the image default (overlay + fuse-overlayfs) when `/dev/fuse` is present, else write a user `storage.conf` selecting the slower `vfs` driver. |
 | `scripts/launch-agent.sh` | New per-container volume `agent-podman-<agent>-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Adds `compose.fuse.yml` + `compose.netdev.yml` to the `-f` chain to attach `/dev/fuse` + `/dev/net/tun` per the `POWBOX_PODMAN` gate (`on` forces both, `auto` detects each, `off` neither; `POWBOX_FUSE` is the deprecated alias). |
 | `docker/shared/container-agent.md.tmpl` | Documents the capability for the in-container agent (tooling row, filesystem row, network note). |
@@ -274,8 +274,8 @@ read-while-write — the last open items — also **PASS** (see
 
 ---
 
-_Run 2026-06-07 (Claude), inside a container rebuilt at ≥ commit `3bf4e98` with
-`POWBOX_PODMAN=on`. This is the first container that could attempt a real `podman
+_Run 2026-06-07 (Claude), inside a container rebuilt with the device-passthrough
+split (`POWBOX_PODMAN`) and `POWBOX_PODMAN=on`. This is the first container that could attempt a real `podman
 run` — and doing so surfaced a third sysctl blocker (read-only `/proc/sys`) below._
 
 | Step | PASS/FAIL | Notes |
@@ -321,8 +321,8 @@ hands-free:**
   the host running `cc`; if that host lacks the node but the daemon has it,
   force it: `POWBOX_PODMAN=on cc <project> --volatile`. Otherwise it falls back to
   vfs (works, slower).
-- **Run blocked by the host security profile — CONFIRMED + APPLIED (commit
-  `17e42b1`).** This was predicted here as a conditional "if needed" loosening; it
+- **Run blocked by the host security profile — CONFIRMED + APPLIED
+  (`compose.shared.yml` `security_opt`).** This was predicted here as a conditional "if needed" loosening; it
   turned out to be required. The default seccomp profile the host runtime applies
   to this container stacks onto every descendant process, including the user
   namespaces rootless Podman creates to run a nested container, and blocks the
@@ -334,8 +334,8 @@ hands-free:**
   for hosts that enforce the docker-default apparmor profile) in `compose.shared.yml`.
   Acceptable because the container + egress firewall ARE the boundary and it already
   runs `--dangerously-*`.
-- **No nested networking — `/dev/net/tun` missing (CONFIRMED + APPLIED, commit
-  `17e42b1`).** Every `podman run` failed with `slirp4netns … open("/dev/net/tun"):
+- **No nested networking — `/dev/net/tun` missing (CONFIRMED + APPLIED via
+  `compose.netdev.yml`).** Every `podman run` failed with `slirp4netns … open("/dev/net/tun"):
   No such file or directory` — the tun device node was never passed into the agent
   container (the kernel module is present on the host, just not exposed). slirp4netns
   AND pasta both need it. Fix: `/dev/net/tun` added in its own `compose.netdev.yml`,

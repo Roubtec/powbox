@@ -35,7 +35,7 @@ passed in, so slirp4netns/pasta networking dies on every run; and (2) the host
 runtime's default seccomp profile stacks onto every descendant and blocks the
 syscalls crun needs (`keyctl` and `pivot_root` return EPERM), so even
 `--network=none` died at "create keyring"/"pivot_root". Fixed: `security_opt:
-seccomp=unconfined + apparmor=unconfined` in `compose.shared.yml` (commit `17e42b1`),
+seccomp=unconfined + apparmor=unconfined` in `compose.shared.yml`,
 and the two host devices each in their own overlay — `/dev/fuse` in
 `compose.fuse.yml`, `/dev/net/tun` in `compose.netdev.yml` — both gated by the
 single `POWBOX_PODMAN` switch (`POWBOX_FUSE` is the deprecated alias). See
@@ -264,7 +264,7 @@ alias reseed-images='seed-image-store.sh update'
   not exposed at the launcher level.
 - ✅ `docs/rootless-podman.md` Follow-ups: the `additionalimagestores` bullet is now
   "implemented and fully validated". (That doc's "What changed" table, known risk #2,
-  and its missing-`/dev/net/tun` gap were updated alongside commit `17e42b1`; the
+  and its missing-`/dev/net/tun` gap were updated alongside the run-path fix; the
   results table is filled in post-rebuild.)
 - ✅ `docker/shared/container-agent.md.tmpl` Containers row: notes compose multi-service
   stacks, service-name DNS within a stack, and the pre-cached common images.
@@ -416,8 +416,8 @@ remaining host-side gate. Where they must exist depends on how Docker runs:
 This plan covers the **shared image store** only. The container-**run** path
 (pull+run, persistent volumes, compose + DNS, firewall inheritance) lives in
 [rootless-podman.md](rootless-podman.md)'s validation prompt — run that too, since
-steps 3–4 below now depend on a working `podman run` (unblocked by commit
-`17e42b1`). Run inside a freshly rebuilt container (overlay, `/dev/fuse` +
+steps 3–4 below now depend on a working `podman run` (unblocked by the run-path fix:
+`compose.shared.yml` `security_opt` + the `/dev/net/tun` overlay). Run inside a freshly rebuilt container (overlay, `/dev/fuse` +
 `/dev/net/tun` present, `POWBOX_PODMAN=on`):
 
 1. `seed-image-store.sh status` → store mounted, overlay yes, seeded no.

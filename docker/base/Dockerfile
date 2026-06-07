@@ -206,11 +206,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && { grep -q '^node:' /etc/subuid 2>/dev/null || echo 'node:100000:65536' >> /etc/subuid; } \
     && { grep -q '^node:' /etc/subgid 2>/dev/null || echo 'node:100000:65536' >> /etc/subgid; } \
-    && touch /etc/containers/nodocker
+    && touch /etc/containers/nodocker \
+    && mkdir -p -m 0755 /etc/containers/containers.conf.d
 
 # Engine defaults for running Podman inside a container without systemd:
 # cgroupfs (no systemd cgroup delegation available), the file event logger
 # (no journald), and the netavark backend + aardvark-dns for container DNS.
+#
+# The drop-in dir is pre-created 0755 in the RUN above on purpose: if this COPY
+# were left to auto-create it, BuildKit would apply its own --chmod=644 to the
+# new directory too, dropping the search bit and making Podman fail to read its
+# system config ("open .../10-powbox.conf: permission denied").
 COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d/10-powbox.conf
 
 # Copy the substrate startup scripts shared by every agent while still root.

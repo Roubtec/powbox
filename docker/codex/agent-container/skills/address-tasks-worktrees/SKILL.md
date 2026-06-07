@@ -1,6 +1,6 @@
 ---
 name: address-tasks-worktrees
-description: Execute a batch of pre-planned task files in parallel using one git worktree per task — schedule independent tasks concurrently, run a sequential implement→review→fix loop inside each task's isolated worktree, push commits as durability backup, and open PRs against the resolved base. Trigger when the user asks to address tasks in parallel, work a task batch with worktrees, or fan out implementation across independent tasks. Do not trigger for one-off coding requests, for planning new tasks, or when strictly sequential single-branch execution is wanted (use `address-tasks` for that).
+description: Execute a batch of pre-planned task files in parallel using one git worktree per task — schedule independent tasks concurrently, run a sequential implement→review→fix loop inside each task's isolated worktree, open PRs, then create an unpushed local review stack without rewriting the PR branches. Trigger when the user asks to address tasks in parallel, work a task batch with worktrees, or fan out implementation across independent tasks. Do not trigger for one-off coding requests, for planning new tasks, or when strictly sequential single-branch execution is wanted (use `address-tasks` for that).
 ---
 
 Implement a set of pre-planned task files using a **parallel, worktree-isolated** delegated subagent workflow.
@@ -34,7 +34,7 @@ Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs
 **Committed work therefore survives container recycle even without pushing** — only uncommitted changes are lost.
 The operating discipline that follows:
 
-- **Commit early and often**, and **push after every commit** (a worktree's working tree is more volatile than committed `.git`, and pushing also lets the host sync via `git pull`).
+- **Commit early and often**, and **push after every commit** (a worktree's working tree is more volatile than committed `.git`, and pushing provides remote durability and keeps the PR current).
 - On recycle, the `.worktrees` **volume persists** (so the pnpm store — the efficiency win — survives), but the per-worktree git metadata in the tmpfs `.git/worktrees` does **not**. A leftover `.worktrees/$CONTAINER_NAME/<task>` working dir from a crashed prior session is therefore orphaned (its `.git` pointer dangles); the Bootstrap prunes such orphans while preserving `.pnpm-store`. Worktrees remain disposable — push committed work.
 - **The `.worktrees` volume is project-keyed, so this project's Claude and Codex containers share it** — but each container's `.git/worktrees` metadata is its own tmpfs, so a *peer* container's live worktree has no metadata here and looks exactly like an orphan. To never delete a peer's in-progress work, **each container creates and prunes its worktrees under its own `.worktrees/$CONTAINER_NAME/` subdir** (`$CONTAINER_NAME` = `<agent>-<project>`, Docker-unique and stable across recycle). The prune then only ever reaps *this* container's own crashed-session orphans; a peer's subdir is never scanned. The shared `.pnpm-store` stays at the volume root.
 
@@ -115,7 +115,7 @@ Your responsibilities:
 4. For each wave, create one worktree per task on the right base branch, then drive each task's implement→review→fix loop — fanning the loop's same-phase subagents out **concurrently** across the wave's tasks.
 5. Push branches, open PRs against the resolved base, and track progress.
 6. Clean up finished worktrees.
-7. Restack the batch's mergeable branches into a **local merge-order guide** — delegated to the `rebase-stack` skill in a subagent, never pushed (see Post-batch restack).
+7. Build a **local review stack** from disposable copies of the mergeable branches — delegated to the `rebase-stack` skill in a subagent, never pushed and never rewriting the PR branches (see Post-batch restack).
 8. Produce the final batch summary.
 
 **Trivial-task escape hatch:** for a genuinely trivial task (single obvious change, unambiguous criteria) you may implement it directly in its worktree without an implementer subagent — but still spawn a fresh reviewer.
@@ -246,7 +246,7 @@ Default behavior, matching the existing workflow: each task that passes review g
 
    - Reference the task file for context. Include reviewer-relevant caveats (tradeoffs, intentional divergences, uncertainties).
    - For stacked PRs, note in the body which branch it stacks on, so reviewers understand the base.
-3. If pushing/PR creation is unavailable (no remote auth — see Bootstrap step 2), fall back to **local reviewed branches**: the work still persists in `.git`, and the host can `git pull` once a remote is reachable. Note the fallback in the final summary.
+3. If pushing/PR creation is unavailable (no remote auth — see Bootstrap step 2), fall back to **local reviewed branches**: the work persists in the shared `.git` and is available to the host directly. Note in the final summary which branches still need to be pushed once a remote is reachable.
 
 After the PR is open, `git worktree remove "<absolute worktree path>"` to reclaim storage.
 Do not delete the branch — the PR and any dependents need it.
@@ -257,42 +257,55 @@ Do not delete the branch — the PR and any dependents need it.
 - Because `.git/worktrees` is tmpfs-shadowed, you do **not** need `git worktree prune` for host hygiene — the metadata never reaches the host. Prune only if a removed worktree leaves a stale registration *within the live session*.
 - Removing a worktree does not delete its branch; future dependent waves can still branch from that ref after the worktree is gone.
 
-## Post-batch restack: a local merge-order guide (never pushed)
+## Post-batch restack: a local review stack (never pushed)
 
-After Delivery and Cleanup, do one final orchestration step.
-Replay the batch's mergeable branches into a single linear **local** stack whose order is the sequence you would recommend merging them in.
-This is guidance for whoever lands the work — it is **never pushed**.
-The PRs already hold each task's canonical pushed state; this restack only rewrites local refs, which persist in the host's un-shadowed `.git` (commit objects and `.git/refs/heads/...` are not shadowed — see Durability), so the maintainer sees the stack from their own local branches.
+After Delivery and Cleanup, build one linear **local** stack in the order you recommend reviewing and merging the PRs.
+This is an integration check and merge-order guide; it is **never pushed**.
 
-**Why:** a fan-out batch leaves several branches each PR'd against `main` in parallel, and nothing in that picture tells the maintainer which to merge first or whether two of them collide.
-Replaying them as one chain — dependencies first, each branch rebased onto the previous — makes the merge order explicit and surfaces cross-branch conflicts now, while context is fresh, instead of at merge time.
+Do **not** rebase the task/PR branch names themselves.
+Those local refs should continue to match the pushed PR heads; rewriting them locally creates misleading ahead/behind state and makes later pull/push operations error-prone.
+Instead, create disposable `review-stack/...` branches that snapshot the canonical task branches, then rebase only those guide branches.
+The guide refs persist in the host's un-shadowed `.git`, while the PR branches and remote PRs remain unchanged.
 
 **Skip it when** the batch produced **0 or 1** mergeable branch.
-Exclude any branch that **failed review** at the 3-round cap or that the user asked to skip; stack only branches that passed.
-If the batch was already a linear dependency chain the branches are largely stacked already, so this is close to a no-op, but it still normalizes them onto the current base — cheap and idempotent, so still run it.
+Exclude branches that failed review or that the user asked to skip.
+If the batch was already a linear dependency chain, still build the guide stack: it verifies the chain against the current local base without risking the PR refs.
 
-**Compute the order yourself** — small, mechanical, prerequisite work, like building an integration branch.
-Reuse the dependency graph you built for waves and emit a **topological order**: every dependency precedes its dependents (so stacked children sit above their parents).
-Break ties between mutually-independent branches with a stable heuristic — keep same-area branches adjacent for a coherent sequence, then fall back to task number.
-The result is an explicit chain `b1 → b2 → … → bN` rooted at the chosen base (default `main`), where `b1` is the one to merge first.
+**Compute the order yourself.**
+Reuse the dependency graph and emit a topological order: every dependency precedes its dependents.
+Break ties between independent branches deterministically: keep closely related areas adjacent, then fall back to task number.
+Record the order using the canonical task branches as `b1 → b2 → … → bN`, rooted at the chosen local base, where `b1` is the recommended first merge.
+Dependency edges are binding; the relative order of independent branches is only a stable review recommendation, not a newly invented dependency.
 
-**Delegate the restack to one fresh `worker` subagent that invokes the `rebase-stack` skill** (`$rebase-stack`), handing it the **explicit `chain` form** you computed.
-Use the explicit form — never auto-detection — because these branches typically all fork from `main`, where `rebase-stack`'s topology auto-detection has no stack to find.
-`rebase-stack` resolves trivial conflicts itself and reasons across the chain (that conflict-awareness is the reason to use it rather than a hand-rolled loop).
-Since no interactive user exists inside the subagent, the orchestrator's prompt *is* the confirmation.
-Prompt contract:
+Before creating guide branches, inspect each canonical branch's unique history relative to its recorded PR base for merge commits.
+If the batch used a synthetic multi-parent integration branch, or `git rev-list --merges <pr-base>..<branch>` is non-empty, do not automatically rebase that branch or any dependent suffix: plain `rebase-stack` intentionally linearizes history and could discard merge-only conflict resolutions.
+Build and report the safe prefix, then report the remaining canonical order as not integration-checked and include the integration-branch merge advice already recorded during Scheduling.
 
-- Preconditions you guarantee before spawning: the **main working tree is clean** (worktrees removed, nothing staged/modified) and every chain branch exists locally — `rebase-stack` aborts on a dirty tree.
-- "Invoke `$rebase-stack` with exactly this chain onto `<base>`: `chain <b1> -> <b2> -> ... -> <bN> onto <base>`. Treat this instruction as the up-front `go` confirmation — do not pause for it. The chain is authoritative: do not re-derive or reorder it."
-- "**Do not push and do not fetch.** This stack is local guidance only." (`rebase-stack` never does either on its own; state it anyway so the subagent doesn't improvise.)
-- Conflict policy: "Resolve trivial conflicts silently per the skill. For a non-trivial conflict you cannot resolve with confidence, do **not** guess and do **not** wait for input — stop at that branch via the skill's clean-stop path, leaving earlier branches rebased. A partial stack is still useful guidance."
-- "Report back: the final order, each branch's outcome (rebased clean / with conflicts / stopped), any branch that came out **empty** after rebase (its commits were already represented upstream — a strong hint it can merge first or is redundant), and the `refs/pre-rebase/...` snapshots created."
+Create collision-free guide branch names such as `review-stack/<batch>-<UTC timestamp>/01-<task-slug>`.
+Point each guide branch `gN` at the captured tip of its canonical branch `bN`; do not check out or move any `bN`.
+Create a dedicated worktree under `"$WT_BASE/_review-stack-<batch>-<timestamp>"`, initially checked out at `g1`.
+Running the restack there keeps the user's main checkout and current branch untouched.
 
-Close the subagent thread once it returns.
-Do not push anything.
-The main checkout is left on the top of the recommended stack; that is fine.
-Carry the result into the Final Output: the recommended merge order, any branch that stacked with conflicts or stopped (needs manual restacking), and any empty branches.
-If the restack stopped partway, the order up to the stop point is still the recommendation — note the remainder needs manual restacking.
+Delegate the restack to one fresh `worker` subagent in that dedicated worktree and have it invoke `$rebase-stack` with the explicit guide chain.
+Use the explicit form because independently created branches have no topology from which to infer the intended order.
+The prompt contract is:
+
+- Start with the usual worktree contract: `cd` to the exact dedicated worktree, verify `git rev-parse --show-toplevel`, and operate only there.
+- "Invoke `$rebase-stack` in its delegated unattended mode with exactly: `chain <g1> <g2> ... <gN> onto <base>`. This explicit chain and prompt are the up-front authorization; do not re-derive, reorder, or wait for confirmation."
+- "Every `gN` is a disposable local snapshot created only for this integration check. The canonical task branches `b1 ... bN` and all remote refs are read-only."
+- "Do not push and do not fetch. Resolve only conflicts the skill classifies as trivial. On the first non-trivial conflict or unrecoverable validation failure, use the unattended clean-stop behavior: restore the current guide branch, leave the worktree clean, and stop without waiting for input."
+- "Report the canonical merge order, the `bN → gN` mapping, each guide branch outcome, any stop point, every conflict's files/offending commit/resolution or abort reason, any guide branch with no unique commits relative to its new base, and the exact `refs/pre-rebase/...` snapshots created."
+
+Close the subagent after it returns.
+Verify the canonical `bN` tips still equal the SHAs captured before creating the guide branches, verify the dedicated worktree is clean with no rebase in progress, then remove only that worktree.
+If the subagent unexpectedly returns with a rebase in progress or dirty files, use the disposable branch's reported pre-rebase ref to abort/reset it cleanly before removal; never force-remove unresolved state.
+Delete only the exact `refs/pre-rebase/...` snapshots the subagent created for these disposable guide branches; the unchanged canonical `bN` refs are their recovery source.
+Never bulk-delete unrelated pre-rebase refs.
+Do not delete or push the guide branches; they are the local artifact the maintainer can inspect.
+The main checkout must remain on the branch and commit where it started.
+
+An empty guide branch means that canonical branch contributes no unique patch after the earlier recommended branches; flag it as potentially redundant or already subsumed, not as a reason to merge it first.
+If the restack stops partway, the canonical order remains the review recommendation, but only the completed prefix was integration-checked; report the first unstacked branch and the remaining suffix.
 
 ## Final Output
 
@@ -301,5 +314,5 @@ After the batch, provide a concise summary:
 - Each task: its PR link (or "local branch only" if PRs were skipped) and which wave it ran in.
 - How many review rounds each task needed, and any task that hit the 3-round cap without passing (with its outstanding findings).
 - The dependency/wave structure actually used, and any base-branch/stacking choices worth flagging.
-- The **recommended merge order** from the post-batch restack — the chain `b1 → … → bN`, merge `b1` first — plus any branch that stacked with conflicts, stopped mid-restack (needs manual restacking), or came out empty. Make clear this stack is **local only and not pushed**: the PRs hold the canonical state and should be merged in this order.
-- Any blockers, host-sync notes (branches to `git pull` on the host), or uncertainties that remain.
+- The **recommended merge order** using canonical PR branch names — `b1 → … → bN`, merge `b1` first — plus the corresponding local `review-stack/...` guide refs, the integration-checked prefix, any stop point or merge-history guard, reproducible conflict notes, and any empty guide branch. Make clear the guide stack is local only and not pushed; the canonical PR branches were not rewritten, and independent-branch tie ordering is advisory.
+- Any blockers, local branches that still need pushing, or uncertainties that remain.

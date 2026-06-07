@@ -18,6 +18,12 @@ variable "BASE_SOURCE_DIGEST" {
   default = ""
 }
 
+# Powbox git commit that built the agent image's top layers; baked into the
+# skill ownership marker for provenance. Supplied by scripts/build-image.{sh,ps1}.
+variable "POWBOX_COMMIT" {
+  default = "unknown"
+}
+
 target "_common" {
   context = "."
   output = ["type=docker"]
@@ -41,6 +47,7 @@ target "agent" {
     BASE_IMAGE = BASE_IMAGE
     CLAUDE_CODE_VERSION = CLAUDE_CODE_VERSION
     CODEX_VERSION = CODEX_VERSION
+    POWBOX_COMMIT = POWBOX_COMMIT
   }
 }
 

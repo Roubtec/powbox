@@ -20,6 +20,19 @@ try {
   $script:BaseSourceImage = if ($baseFrom) { $baseFrom.Matches[0].Groups[1].Value } else { "node:24-slim" }
   $script:BaseSourceDigest = ""
 
+  # Powbox commit that built this image, baked into the agent's top layers and
+  # the skill ownership marker for provenance. A `-dirty` suffix flags an
+  # uncommitted worktree; falls back to "unknown" outside a git checkout.
+  function Get-PowboxCommit {
+    $sha = git -C $rootDir rev-parse --short HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { return "unknown" }
+    $sha = $sha.Trim()
+    $dirty = git -C $rootDir status --porcelain 2>$null
+    if ($LASTEXITCODE -eq 0 -and $dirty) { $sha = "$sha-dirty" }
+    return $sha
+  }
+  $script:PowboxCommit = Get-PowboxCommit
+
   function Get-RegistryBaseDigest {
     $digest = docker buildx imagetools inspect $script:BaseSourceImage --format '{{.Manifest.Digest}}' 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $digest) { return "" }
@@ -75,11 +88,12 @@ try {
 
     $docker_args += $Targets
 
-    Write-Host "Running: CLAUDE_CODE_VERSION=$ClaudeVersion CODEX_VERSION=$CodexVersion docker $($docker_args -join ' ')"
+    Write-Host "Running: CLAUDE_CODE_VERSION=$ClaudeVersion CODEX_VERSION=$CodexVersion POWBOX_COMMIT=$($script:PowboxCommit) docker $($docker_args -join ' ')"
     $env:CLAUDE_CODE_VERSION = $ClaudeVersion
     $env:CODEX_VERSION = $CodexVersion
     $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
     $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
+    $env:POWBOX_COMMIT = $script:PowboxCommit
     docker @docker_args
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE
@@ -104,6 +118,7 @@ try {
     $env:CODEX_VERSION = $CodexVersion
     $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
     $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
+    $env:POWBOX_COMMIT = $script:PowboxCommit
     docker buildx bake --file (Join-Path $rootDir "docker-bake.hcl") base
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE

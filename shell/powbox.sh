@@ -121,6 +121,29 @@ agent-reset-claude-history() {
     "$POWBOX_ROOT/commands/reset-claude-history.sh" "$@"
 }
 
+# Re-seed the image-baked skills onto the claude-config/codex-config volumes,
+# overriding the startup no-clobber so updated skill text in a rebuilt image
+# replaces the stale copies left on the volumes. Forwards flags:
+# --dry-run (preview), --prune (drop obsolete seeds), --adopt-all (take baked
+# versions of unmarked name-collisions).
+agent-update-skills() {
+    "$POWBOX_ROOT/commands/update-skills.sh" "$@"
+}
+
+# After a successful image rebuild, offer to re-seed skills from the fresh image
+# in the same flow. update-skills.sh itself prompts about conflicts/obsolete
+# skills, so this only needs the top-level yes/no. Skipped when non-interactive.
+_powbox_offer_reseed() {
+    [ -t 0 ] || return 0
+    local reply
+    printf 'Re-seed skills from the freshly built image onto the config volumes now? [y/N] '
+    read -r reply
+    case "$reply" in
+        [yY]|[yY][eE][sS]) "$POWBOX_ROOT/commands/update-skills.sh" ;;
+        *) echo "Skipped skill re-seed. Run 'agent-update-skills' later to refresh." ;;
+    esac
+}
+
 # Read the machine-readable update table once (one container start reads both
 # baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
 _powbox_agent_porcelain() {
@@ -232,7 +255,9 @@ agent-update() {
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
         echo "Base image is stale — rebuilding base (with --pull) and the agent image on top."
         _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
-        return $?
+        local rc=$?
+        [ "$rc" -eq 0 ] && _powbox_offer_reseed
+        return "$rc"
     fi
 
     local name status rest stale=""
@@ -250,6 +275,9 @@ agent-update() {
 
     echo "Updating: ${stale// /, } (rebuilding only the affected image layers)."
     _powbox_build_from_table "$table" "$stale" agent "$@"
+    local rc=$?
+    [ "$rc" -eq 0 ] && _powbox_offer_reseed
+    return "$rc"
 }
 
 cc-list() {

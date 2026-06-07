@@ -41,7 +41,17 @@ COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-c
 COPY --chown=node:node docker/claude/agent-container/ /home/node/.agent-container/claude/
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/codex/agent.md.tmpl
 COPY --chown=node:node docker/codex/agent-container/ /home/node/.agent-container/codex/
-RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.agent-container/codex/build-epoch >/dev/null
+# build-epoch is a monotonic stamp that gates instruction/skill re-seeding.
+# build-commit records the powbox commit that built these top (asset/claude)
+# layers; the .powbox-seeded skill marker copies it so a seeded skill can be
+# traced back to its source. Referencing POWBOX_COMMIT here busts only this
+# metadata layer (and the cheap entrypoint COPY below it) when the commit
+# changes — the expensive Codex/Claude install layers sit ABOVE and are never
+# affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
+# default keeps standalone `docker build` working.
+ARG POWBOX_COMMIT=unknown
+RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.agent-container/codex/build-epoch >/dev/null \
+    && printf '%s\n' "${POWBOX_COMMIT}" | tee /home/node/.agent-container/claude/build-commit /home/node/.agent-container/codex/build-commit >/dev/null
 
 # --- Entrypoint + every agent's setup hook -----------------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
@@ -50,6 +60,7 @@ COPY --chmod=755 \
     docker/shared/entrypoint-agent.sh \
     docker/shared/entrypoint-claude-hook.sh \
     docker/shared/entrypoint-codex-hook.sh \
+    docker/shared/seed-skills.sh \
     /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-agent.sh"]

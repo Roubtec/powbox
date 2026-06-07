@@ -51,6 +51,23 @@ esac
 BASE_SOURCE_IMAGE="$(sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "${ROOT_DIR}/docker/base/Dockerfile" | head -1)"
 BASE_SOURCE_DIGEST=""
 
+# Powbox commit that built this image, baked into the agent's top layers and the
+# skill ownership marker for provenance. A `-dirty` suffix flags an uncommitted
+# worktree so a stamped commit is never silently misleading. Falls back to
+# "unknown" outside a git checkout.
+powbox_commit() {
+	local sha
+	sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null)" || {
+		echo unknown
+		return
+	}
+	if [ -n "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null)" ]; then
+		sha="${sha}-dirty"
+	fi
+	echo "$sha"
+}
+POWBOX_COMMIT="$(powbox_commit)"
+
 registry_base_digest() {
 	docker buildx imagetools inspect "$BASE_SOURCE_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null || true
 }
@@ -97,11 +114,12 @@ run_bake() {
 
 	cmd+=("${target_args[@]}")
 
-	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} ${cmd[*]}"
+	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} ${cmd[*]}"
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
+		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		"${cmd[@]}"
 }
 
@@ -122,6 +140,7 @@ ensure_base_image() {
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
+		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
 }
 

@@ -116,6 +116,28 @@ function agent-reset-claude-history {
     & "$env:POWBOX_ROOT\commands\reset-claude-history.ps1" @args
 }
 
+# Re-seed the image-baked skills onto the claude-config/codex-config volumes,
+# overriding the startup no-clobber so updated skill text in a rebuilt image
+# replaces the stale copies left on the volumes. Forwards flags:
+# -DryRun (preview), -Prune (drop obsolete seeds), -AdoptAll (take baked
+# versions of unmarked name-collisions).
+function agent-update-skills {
+    & "$env:POWBOX_ROOT\commands\update-skills.ps1" @args
+}
+
+# After a successful image rebuild, offer to re-seed skills from the fresh image
+# in the same flow. update-skills.ps1 itself prompts about conflicts/obsolete
+# skills, so this only needs the top-level yes/no. Skipped when non-interactive.
+function _Powbox-OfferReseed {
+    if ([System.Console]::IsInputRedirected) { return }
+    $reply = Read-Host 'Re-seed skills from the freshly built image onto the config volumes now? [y/N]'
+    if ($reply -match '^(y|yes)$') {
+        & "$env:POWBOX_ROOT\commands\update-skills.ps1"
+    } else {
+        Write-Host "Skipped skill re-seed. Run 'agent-update-skills' later to refresh."
+    }
+}
+
 # Read the machine-readable update table once (one container start reads both
 # baked agent versions). Each row is: name<TAB>status<TAB>baked<TAB>latest.
 function _Powbox-AgentPorcelain {
@@ -292,6 +314,7 @@ function agent-update {
     if ($baseStale) {
         Write-Host "Base image is stale — rebuilding base (with -Pull) and the agent image on top."
         _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        if ($LASTEXITCODE -eq 0) { _Powbox-OfferReseed }
         return
     }
 
@@ -302,6 +325,7 @@ function agent-update {
 
     Write-Host "Updating: $($stale -join ', ') (rebuilding only the affected image layers)."
     _Powbox-BuildFromTable -Table $table -Force $stale @args
+    if ($LASTEXITCODE -eq 0) { _Powbox-OfferReseed }
 }
 
 function cc-list {

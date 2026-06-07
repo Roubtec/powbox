@@ -177,6 +177,13 @@ WT_VOLUME="agent-wt-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
+# Per-container rootless Podman storage (images + named volumes) so an in-sandbox
+# agent's containers and their data persist across restarts. Keyed by the OUTER
+# container (agent + project), NOT just the project: a project's Claude and Codex
+# containers can run concurrently, and two Podman instances with separate
+# runroots/namespaces sharing one graphroot corrupt each other's metadata and
+# lifecycle state. A shared image cache is a separate concern (additionalimagestores).
+PODMAN_VOLUME="agent-podman-${CONTAINER_NAME}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
@@ -184,7 +191,10 @@ COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/comp
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
 # config volumes are always created/mounted so the non-primary agent can be
 # spun up in-container with its own persistent login and skills.
-SHARED_VOLUMES=(agent-gh-config agent-zsh-history claude-config codex-config)
+# agent-podman-imagestore is the single GLOBAL read-only image cache shared by
+# every container across all projects (consumed via Podman additionalimagestores).
+# It is infra, like the config volumes — created here, never per-container.
+SHARED_VOLUMES=(agent-gh-config agent-zsh-history claude-config codex-config agent-podman-imagestore)
 for vol in "${SHARED_VOLUMES[@]}"; do
 	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
 		docker volume create "$vol" >/dev/null
@@ -254,6 +264,25 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
+# Resolve which host devices rootless Podman will receive this launch into a
+# normalised set string ("fuse,tun" / "fuse" / "tun" / "none"). The device list is
+# frozen at container creation — `docker start` can't add /dev/fuse or /dev/net/tun
+# to an existing container — so this is recorded as a label and a change recreates a
+# stopped container (mirrors the /ctx and --continue handling). 'auto' resolves
+# against the launcher host's /dev here, so the same host yields a stable value;
+# 'on' forces both devices, 'off' neither. The compose-file selection below derives
+# from the same value, so the label and the actual attach never disagree.
+case "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" in
+on) PODMAN_DEVICE_MODE="fuse,tun" ;;
+off) PODMAN_DEVICE_MODE="none" ;;
+*)
+	PODMAN_DEVICE_MODE=""
+	[ -e /dev/fuse ] && PODMAN_DEVICE_MODE="fuse"
+	[ -e /dev/net/tun ] && PODMAN_DEVICE_MODE="${PODMAN_DEVICE_MODE:+${PODMAN_DEVICE_MODE},}tun"
+	[ -n "$PODMAN_DEVICE_MODE" ] || PODMAN_DEVICE_MODE="none"
+	;;
+esac
+
 # Detect whether the --continue flag state differs from what the container was created with.
 # The CMD is frozen at container creation, so a flag change only takes effect after recreation.
 # Missing label on an existing container predates this flag — treat it as "true" so the old
@@ -297,6 +326,59 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 			echo "Note: container ${CONTAINER_NAME} predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to enable hardlinked worktree node_modules." >&2
 		else
 			echo "Container ${CONTAINER_NAME} predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
+# Detect whether the existing container predates the per-container Podman storage
+# volume. Such a container was created before rootless-Podman support, so its
+# /home/node/.local/share/containers is ephemeral (no agent-podman-* mount) and
+# it was launched without /dev/fuse — pulled images and podman volumes would not
+# persist, even after the image is rebuilt. Recreate a stopped container that
+# lacks the mount so the new volume + device attach; warn (don't disrupt) if it
+# is currently running.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -z "$HAS_PODMAN_MOUNT" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
+		else
+			echo "Container ${CONTAINER_NAME} predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+fi
+
+# Detect whether the existing container was created with a different rootless-Podman
+# device set than this launch resolves (POWBOX_PODMAN changed, or the host's /dev
+# visibility changed under `auto`). The device list is frozen at creation, so a
+# stopped container first created with POWBOX_PODMAN=off — or under `auto` on a host
+# that couldn't see the devices — can't gain /dev/fuse or /dev/net/tun on `docker
+# start`: nested Podman would stay on vfs with no default networking. Recreate a
+# stopped mismatch so the new device set attaches; warn (don't disrupt) a running
+# one. A container with no recorded label predates this check — leave it alone, since
+# we can't know what it was created with and the storage-mount check above already
+# recreates truly pre-Podman containers.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	EXISTING_PODMAN_DEVICES="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.podman-devices"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ -n "$EXISTING_PODMAN_DEVICES" ] && [ "$EXISTING_PODMAN_DEVICES" != "$PODMAN_DEVICE_MODE" ]; then
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} is running with Podman devices '${EXISTING_PODMAN_DEVICES}'; this launch resolves to '${PODMAN_DEVICE_MODE}'. The device set is fixed at container creation — stop it and relaunch (or use --volatile) to apply the change." >&2
+		else
+			echo "Podman device set changed (was '${EXISTING_PODMAN_DEVICES}', now '${PODMAN_DEVICE_MODE}'); recreating container."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
@@ -376,8 +458,10 @@ fi
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 	-v "${NM_VOLUME}:/mnt/node_modules" \
 	-v "${WT_VOLUME}:/mnt/worktrees" \
+	-v "${PODMAN_VOLUME}:/mnt/containers" \
+	-v "agent-podman-imagestore:/mnt/podman-imagestore" \
 	agent \
-	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees && chown node:node /mnt/node_modules /mnt/worktrees'
+	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
 
 RUN_ARGS=()
 if [ "$DETACH" = true ]; then
@@ -385,6 +469,36 @@ if [ "$DETACH" = true ]; then
 elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 	RUN_ARGS+=(--rm)
 fi
+
+# Pass the host devices rootless Podman needs through to the agent, each in its
+# own compose overlay (`docker compose run` has no --device flag, only `docker
+# run` does, so a device must be declared in a compose file added to the -f chain):
+#   compose.fuse.yml   -> /dev/fuse    (fuse-overlayfs overlay storage driver;
+#                                       absence just falls back to the vfs driver)
+#   compose.netdev.yml -> /dev/net/tun (slirp4netns/pasta nested networking;
+#                                       absence breaks every default `podman run`)
+# POWBOX_PODMAN gates both (POWBOX_FUSE is the deprecated alias):
+#   on   -> force both. Use on Docker Desktop / WSL2, where the devices live in the
+#          Docker VM and the launcher's host shell cannot see them to auto-detect.
+#          If the Docker host cannot expose a forced device the run hard-fails —
+#          intentional for callers who demand a working nested runtime.
+#   off  -> neither (Podman still runs: vfs storage, networking only via
+#          --network=host/none).
+#   auto -> attach each device independently when the launcher's host shell can see
+#          it (reliable where /dev is shared, e.g. native Linux / WSL; under-detects
+#          on Docker Desktop — use `on` there). The two are detected separately so a
+#          host exposing /dev/net/tun but not /dev/fuse still gets networking on vfs.
+if [ -z "${POWBOX_PODMAN:-}" ] && [ -n "${POWBOX_FUSE:-}" ]; then
+	echo "Note: POWBOX_FUSE is deprecated; use POWBOX_PODMAN (it now gates both /dev/fuse and /dev/net/tun)." >&2
+fi
+# Attach each compose overlay from the already-resolved PODMAN_DEVICE_MODE so the
+# devices actually passed match the powbox.podman-devices label recorded below.
+case ",${PODMAN_DEVICE_MODE}," in
+*,fuse,*) COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml") ;;
+esac
+case ",${PODMAN_DEVICE_MODE}," in
+*,tun,*) COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.netdev.yml") ;;
+esac
 
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
@@ -406,15 +520,46 @@ if [ "$CONTINUE" = true ]; then
 	CONTINUE_LABEL="true"
 fi
 
+# Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED
+# writer — the ONLY container that mounts agent-podman-imagestore read-write. The
+# agent container below mounts the same volume read-only, so a runaway process in
+# one project can't poison the cache every other project resolves images from.
+# Detached so the launch never blocks on pulls; idempotent and quick once
+# populated (seed-image-store.sh skips images already present, and its flock
+# serializes concurrent writers). Only meaningful on the overlay path — an
+# additionalimagestores entry must match the consumer's driver, and consumers
+# only enable overlay when /dev/fuse is present — so gate it on the resolved fuse
+# device. Best-effort: a writer that can't start must never abort the agent launch.
+case ",${PODMAN_DEVICE_MODE}," in
+*,fuse,*)
+	# Go straight to entrypoint-core.sh (firewall + XDG + the writer-role Podman
+	# setup) instead of the default entrypoint-agent.sh, so the writer skips the
+	# per-agent skill/config seeding and stays lean — it only needs egress and a
+	# Podman that can pull. AGENT_CONFIG_DIR is required by core but unused here, so
+	# point it at a throwaway path; AGENT_SETUP_HOOK is cleared so no agent hook runs.
+	docker compose "${COMPOSE_ARGS[@]}" run --rm -d --no-deps \
+		--entrypoint /usr/local/bin/entrypoint-core.sh \
+		-e POWBOX_IMAGE_STORE_ROLE=writer \
+		-e AGENT_CONFIG_DIR=/tmp/powbox-imgstore-writer \
+		-e AGENT_SETUP_HOOK= \
+		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		agent \
+		seed-image-store.sh seed >/dev/null 2>&1 || true
+	;;
+esac
+
 docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
+	--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
 	"${EXTRA_ENV[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \
 	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
 	-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees" \
+	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
+	-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \
 	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

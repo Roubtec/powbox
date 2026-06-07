@@ -217,6 +217,20 @@ This is intended for delegated sub-tasks such as asking the other agent for an i
 The peer runs against its own seeded config (login, skills, instruction file) and shares the same `/workspace` bind mount, so it sees the same files.
 The in-container instruction file (`CLAUDE.md` for Claude, `AGENTS.md` for Codex) renders a "Delegating to another agent" section listing each peer's executable and autonomy flag (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`).
 
+## Nested Containers (rootless Podman)
+
+The image ships **rootless [Podman](https://podman.io/)** so an in-sandbox agent can build, run, and orchestrate its own containers — databases, Adminer, whole service stacks — for projects whose dev workflow depends on them. A `docker` shim and `podman compose` mean `docker` / `docker compose` commands and project scripts work unchanged.
+
+This is deliberately **not** Docker-in-Docker or a mounted host socket — both of which would hand a runaway agent the keys to the host. Podman runs as the unprivileged `node` user through a user namespace, so the blast radius stays inside the container: no privileged daemon, no host socket. As a bonus, rootless Podman NATs nested containers' outbound traffic through this container's network namespace, so they **inherit the egress firewall** — nested containers reach the public internet but not your LAN or host, just like the agent.
+
+- **Persistence:** a per-container `agent-podman-<agent>-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts. It's keyed per outer container (agent + project), not just per project, so a project's Claude and Codex containers can run concurrently without two Podman instances sharing — and corrupting — one graphroot.
+- **Shared image cache:** a single global `agent-podman-imagestore` volume (layered under every per-container graphroot via Podman's `additionalimagestores`) holds a small curated set of common dev images — `postgres`, `redis`, `mariadb`, `adminer` — so they resolve instantly without a per-container pull. Agent containers mount it **read-only**; it is populated by a dedicated, short-lived writer the launcher spawns on each launch (the only context that mounts it read-write), so a runaway agent in one project can't poison the cache every other project reads. Seeding is idempotent and quick once populated. Override the curated set with `POWBOX_IMAGE_STORE_IMAGES`; to force a refresh, remove the `agent-podman-imagestore` volume and relaunch.
+- **Access pattern:** reach a nested service from the agent via its **published port on `localhost`**; container-to-container (e.g. within a compose stack) uses service names over netavark/aardvark-dns.
+- **Storage driver:** fuse-overlayfs when `/dev/fuse` is available, otherwise the slower `vfs` driver. The driver is **pinned per `agent-podman-*` volume on first init** (recorded on the volume) and honoured on every later launch — it is not re-chosen each start, so a store first initialised on `vfs` (or moved to a host without `/dev/fuse`) won't silently flip; switching needs a clean store (`podman system reset` or dropping the volume).
+- **Devices:** rootless Podman needs two host devices — `/dev/fuse` (overlay storage driver) and `/dev/net/tun` (nested-container networking; without it default `podman run` can't bring up its network). Both are passed through under the single `POWBOX_PODMAN` gate: `auto` attaches each when the host exposes it, `on` forces both (Docker Desktop), `off` skips both.
+
+The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal to move that workload to a dedicated VM. See [docs/rootless-podman.md](docs/rootless-podman.md) for design notes and a validation procedure.
+
 ## Per-Project Workspace Paths
 
 Each project is mounted at `/workspace/<project>-<hash>` inside the container instead of a shared `/workspace` path.
@@ -350,7 +364,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/smoke-test.*` for smoke-testing the unified agent image
-- `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
+- `commands/prune-volumes.*` for orphaned `agent-nm-*` / `agent-wt-*` / `agent-podman-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `docker/shared/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
@@ -416,7 +430,7 @@ Functions exposed by both libraries:
 - `cc-list`, `cx-list`, `agent-list` — list agent containers
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
-- `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-slim` registry digest
+- `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-trixie-slim` registry digest
 - `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet. After a successful rebuild it offers (on a TTY) to re-seed skills from the fresh image via `agent-update-skills`.
 - `agent-update-claude`, `agent-update-codex` — rebuild the unified image bumping just that agent to its latest release, pinning the other binary to its baked version so only the affected layers rebuild (no `--no-cache`)
 - `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
@@ -432,6 +446,7 @@ Both libraries honour the same variables:
 |---|---|---|
 | `POWBOX_ROOT` | auto-detected from the script's location | Path to your PowBox checkout. Only needed if auto-detection fails. |
 | `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
+| `POWBOX_PODMAN` | `auto` | Whether to pass the host devices rootless Podman needs into the agent: `/dev/fuse` (fuse-overlayfs `overlay` storage driver; absence falls back to the slower `vfs`) and `/dev/net/tun` (nested-container networking; absence breaks default `podman run`). `auto` attaches each device when the launcher's host shell can see it; `on` forces both (use when the Docker daemon/VM has them but the host shell doesn't, e.g. Docker Desktop); `off` skips both. (`POWBOX_FUSE` is a deprecated alias for this variable.) |
 
 Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.
 
@@ -610,7 +625,7 @@ Smoke test the built image with:
 
 This runs two stages: a fast presence sweep over every expected CLI, then a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't). Skip the second stage for a tools-only run with `POWBOX_SMOKE_SKIP_DB=1 ./commands/smoke-test.sh` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb`).
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check
 

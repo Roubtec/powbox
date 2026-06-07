@@ -1,0 +1,22 @@
+# Optional overlay: expose /dev/net/tun to the agent container for rootless
+# Podman's nested-container networking. slirp4netns and pasta (the rootless
+# network uplink) both create a TAP interface via /dev/net/tun; without it EVERY
+# `podman run` that uses the default network fails at
+#   slirp4netns ... open("/dev/net/tun"): No such file or directory
+# regardless of storage driver. (Only `--network=none` / `--network=host`, which
+# don't bring up the rootless netns, run without it — neither is useful for
+# reachable services.) Networking is independent of the storage driver: a vfs
+# container needs this device exactly as much as an overlay one does.
+#
+# `docker compose run` has no `--device` flag, so the device rides in via this
+# compose file, added to the `-f` chain by the POWBOX_PODMAN gate (POWBOX_FUSE is
+# the deprecated alias): `on` forces it, `auto` (default) attaches it when the
+# launcher's host shell can see /dev/net/tun, `off` skips it. The tun kernel
+# module must be present on the Docker host (WSL2's Microsoft kernel and Docker
+# Desktop's VM both ship it). Kept separate from compose.fuse.yml so the two
+# devices are gated independently under one flag — a host with tun but no fuse
+# still gets networking.
+services:
+  agent:
+    devices:
+      - /dev/net/tun:/dev/net/tun

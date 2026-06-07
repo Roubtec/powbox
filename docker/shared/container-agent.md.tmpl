@@ -24,6 +24,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Headless browser | `chromium` — used by `marp` and `mmdc`, but also available for web automation: E2E/visual tests, smoke-testing a local dev server, screenshots, Lighthouse audits, HTML→PDF/PNG. Puppeteer-based tools work out of the box (`PUPPETEER_EXECUTABLE_PATH` and `CHROME_NO_SANDBOX` are pre-set); for Playwright either run `npx playwright install chromium` or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium`. |
 | Editors | `nano`, `vim` |
 | Sandbox | `bubblewrap` (`bwrap`) |
+| Containers | `podman`, `podman compose`, and a `docker` shim (→ `podman`) run **rootless** here — build images and spin up multi-service stacks (databases, Adminer, etc.) with `docker compose` / `podman compose`, no privileged daemon and no host Docker socket. Common dev images (`postgres`, `redis`, `mariadb`, `adminer`) are pre-cached in a shared read-only store, so they start without a pull. Storage is otherwise per-agent and persistent: pulled images and `podman volume`s (e.g. a database's data) survive container restarts, and each agent (Claude, Codex) keeps its own store for the same repo so concurrent agents never clobber each other. Reach a nested service from here via its **published port on `localhost`**; within a compose stack, containers reach each other by **service name**. Nested containers inherit this container's egress firewall. Uses `/dev/fuse` when the host exposes it, else the slower `vfs` driver. |
 
 ## Delegating to another agent
 
@@ -54,10 +55,13 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 | `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
 | `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-project pnpm store (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
+| `/home/node/.local/share/containers` | Per-container rootless Podman storage, keyed by agent + project (Claude and Codex get separate stores for the same repo) — images and named volumes persist here (Docker volume) |
 
 ## Network
 
 Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+
+Containers you start with Podman route their outbound traffic through this container, so they inherit the same firewall: they can pull images and reach the public internet, but not your LAN or host. Talk to a nested service from this container (or from a sibling container) via its **published port on `localhost`** rather than its in-container IP.
 
 ## Local PostgreSQL
 

@@ -1,0 +1,16 @@
+# Optional overlay: expose /dev/fuse to the agent container for rootless Podman's
+# fuse-overlayfs storage driver (the `overlay` graph driver). Without it Podman
+# falls back to the slower `vfs` driver, which still works — so this device is a
+# best-effort accelerator, not a hard requirement.
+#
+# `docker compose run` has no `--device` flag (only `docker run` does), so the
+# device must be declared in a compose file. The launchers add this file to the
+# `-f` chain via the POWBOX_PODMAN gate (POWBOX_FUSE is the deprecated alias):
+# `on` forces it, `auto` (default) attaches it when the launcher's host shell can
+# see /dev/fuse, `off` skips it. Networking lives in its own overlay
+# (compose.netdev.yml, /dev/net/tun) so a host that can expose tun but not fuse
+# still gets nested networking on the vfs fallback.
+services:
+  agent:
+    devices:
+      - /dev/fuse:/dev/fuse

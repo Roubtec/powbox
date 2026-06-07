@@ -25,3 +25,8 @@ export EDITOR="nano"
 if [ -n "$CONTAINER_NAME" ]; then
   PROMPT="%{$fg[yellow]%}[$CONTAINER_NAME]%{$reset_color%} $PROMPT"
 fi
+
+# Note: the shared image store is mounted READ-ONLY in agent containers, so it
+# can't be seeded from inside here (the launcher seeds it from a dedicated writer
+# on each launch). `seed-image-store.sh status` still works (file checks only);
+# use `podman images` to see which cached images resolve via additionalimagestores.

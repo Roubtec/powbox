@@ -19,26 +19,47 @@ foreach ($containerName in $containerNames) {
     }
 
     if ($projectSuffix) {
-        # Each container expects both an nm (node_modules) and a wt (worktrees +
-        # pnpm store) volume for its project.
+        # Each container expects an nm (node_modules) and a wt (worktrees + pnpm
+        # store) volume for its project (project-keyed, shared between the
+        # project's two agents) plus its own agent-podman-* store, keyed by the
+        # FULL container name so a project's concurrently-running Claude and Codex
+        # containers never share one Podman graphroot.
         [void]$expectedVolumes.Add("agent-nm-$projectSuffix")
         [void]$expectedVolumes.Add("agent-wt-$projectSuffix")
+        [void]$expectedVolumes.Add("agent-podman-$containerName")
     }
 }
 
-# Per-project candidates (agent-nm-* / agent-wt-*) plus the deprecated shared
+# The global shared image store is infra shared by every container (like the
+# config volumes), not a per-container store — it matches the agent-podman-*
+# candidate glob below but is never an orphan. Always expect it.
+[void]$expectedVolumes.Add("agent-podman-imagestore")
+
+# Candidates: agent-nm-* / agent-wt-* / agent-podman-* plus the deprecated shared
 # store (agent-pnpm-store), which nothing mounts anymore now that the store is
 # per-project inside each agent-wt-* volume.
-$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -eq 'agent-pnpm-store' })
+$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -like 'agent-podman-*' -or $_ -eq 'agent-pnpm-store' })
 $pruneCandidates = @($candidateVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
 
 if ($pruneCandidates.Count -eq 0) {
-    Write-Host 'No orphaned agent-nm-*/agent-wt-* (or deprecated agent-pnpm-store) volumes found.'
+    Write-Host 'No orphaned agent-nm-*/agent-wt-*/agent-podman-* (or deprecated agent-pnpm-store) volumes found.'
     return
 }
 
 Write-Host 'Prune candidates:'
 $pruneCandidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+# Confirm once for the whole batch, mirroring prune-volumes.sh. Skip the prompt
+# when -WhatIf is in effect (the ShouldProcess call below previews each removal
+# instead) or when -Confirm was passed explicitly (ShouldProcess then prompts
+# per volume, so a batch prompt would just double up).
+if (-not $WhatIfPreference -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+    $answer = Read-Host "`nRemove these volumes? [y/N]"
+    if ($answer -notmatch '^[yY]') {
+        Write-Host 'Aborted.'
+        return
+    }
+}
 
 $removedCount = 0
 $skippedCount = 0
@@ -61,7 +82,9 @@ foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
     }
 }
 
-if ($removedCount -gt 0) {
+# Print the removed-count summary unconditionally after a confirmed run (matches
+# prune-volumes.sh), but not during a -WhatIf preview where nothing was touched.
+if (-not $WhatIfPreference) {
     Write-Host "Removed $removedCount orphaned volume(s)."
 }
 if ($skippedCount -gt 0) {

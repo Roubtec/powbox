@@ -17,7 +17,7 @@ try {
   # label (see docker/base/Dockerfile) so agent-check-updates can detect a
   # newer base.
   $baseFrom = Select-String -Path (Join-Path $rootDir "docker/base/Dockerfile") -Pattern '^FROM\s+(\S+)' | Select-Object -First 1
-  $script:BaseSourceImage = if ($baseFrom) { $baseFrom.Matches[0].Groups[1].Value } else { "node:24-slim" }
+  $script:BaseSourceImage = if ($baseFrom) { $baseFrom.Matches[0].Groups[1].Value } else { "node:24-trixie-slim" }
   $script:BaseSourceDigest = ""
 
   # Powbox commit that built this image, baked into the agent's top layers and

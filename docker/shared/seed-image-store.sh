@@ -86,6 +86,25 @@ ensure_store() {
 	fi
 }
 
+# Resolve the seed dir that holds build-epoch/build-commit. The real provenance
+# lives per-agent under /home/node/.agent-container/<agent>/, written identically
+# for every agent in the same build (docker/agent/Dockerfile). Prefer the running
+# agent's dir ($AGENT_SEED_DIR, exported by entrypoint-agent.sh), else any agent's.
+# Prints nothing (returns 1) when no metadata is present, so callers fall back.
+build_meta_dir() {
+	if [ -n "${AGENT_SEED_DIR:-}" ] && [ -f "${AGENT_SEED_DIR}/build-epoch" ]; then
+		printf '%s\n' "$AGENT_SEED_DIR"
+		return 0
+	fi
+	local d
+	for d in /home/node/.agent-container/*/; do
+		[ -f "${d}build-epoch" ] || continue
+		printf '%s\n' "${d%/}"
+		return 0
+	done
+	return 1
+}
+
 cmd_seed() {
 	local force="${1:-false}" img pulled=0 skipped=0 failed=0
 	if ! overlay_available; then
@@ -119,9 +138,11 @@ cmd_seed() {
 	done < <(curated_images)
 
 	# Record the marker (best-effort) so first-run auto-seed is one-shot.
+	local meta
+	meta="$(build_meta_dir || true)"
 	{
-		echo "epoch=$(cat /usr/local/share/powbox/build-epoch 2>/dev/null || echo 0)"
-		echo "commit=$(cat /usr/local/share/powbox/build-commit 2>/dev/null || echo unknown)"
+		echo "epoch=$(cat "${meta}/build-epoch" 2>/dev/null || echo 0)"
+		echo "commit=$(cat "${meta}/build-commit" 2>/dev/null || echo unknown)"
 	} >"$MARKER" 2>/dev/null || true
 
 	echo "Image store: ${pulled} pulled, ${skipped} present, ${failed} failed."

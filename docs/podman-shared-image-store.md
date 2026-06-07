@@ -5,11 +5,21 @@ from a session running on a **rebuilt, podman-capable** image. This document is
 the spec; apply the wiring below, then run the validation plan and only then
 update the user-facing docs.
 
+> **Sanity check first — the foundation must be sound.** This repo already
+> contains the `docker/base/Dockerfile` fix that pre-creates
+> `/etc/containers/containers.conf.d` at mode `0755` (without it, `COPY --chmod=644`
+> auto-creates that dir at `0644` — no search bit — and **every** `podman` command
+> fails with `open .../10-powbox.conf: permission denied`). After the rebuild,
+> confirm it took: **`podman info` must exit 0.** If you instead get that
+> permission-denied error, the rebuild didn't pick up the fix — stop and rebuild
+> the base image before doing anything below. (None of the validation here can run
+> while Podman can't read its own config.)
+
 ## Why
 
-PR #40 gives every outer container its **own writable Podman graphroot**
-(`agent-podman-<agent>-<project>`, keyed per container so concurrent Claude +
-Codex don't corrupt a shared store). The cost of that isolation is that each
+The rootless-Podman work gives every outer container its **own writable Podman
+graphroot** (`agent-podman-<container>`, keyed per container so concurrent Claude
++ Codex don't corrupt a shared store). The cost of that isolation is that each
 container re-pulls the same base images — now **2× per project** (Claude and
 Codex each pull `postgres`, `adminer`, …). This feature removes that waste by
 sharing only the **read path**: one global, read-only image store that every
@@ -21,8 +31,8 @@ Writable stays per-container; only cached base layers are shared.
 - **Seeded shared volume**, not baked-into-base and not a dynamic shared-writable
   store. Rationale: forward-compatible with the broader "move heavier installed
   deps into shared volumes" direction; avoids base-image bloat; a dynamic
-  writable store would reintroduce the concurrent-writer corruption PR #40 just
-  fixed.
+  writable store would reintroduce the concurrent-writer corruption the
+  per-container graphroot keying just fixed.
 - **Single GLOBAL store**, one `agent-podman-imagestore` volume shared by every
   container across all projects (the curated base images are identical
   everywhere → max dedup). Writable graphroots remain per-container.
@@ -30,15 +40,21 @@ Writable stays per-container; only cached base layers are shared.
   (`docker/shared/seed-image-store.sh`), no host `.sh`/`.ps1` wrappers until
   there's a real host-trigger use case. Seeding is a podman/Linux operation that
   only makes sense inside the container. An optional zsh alias is fine.
-- **Overlay-only.** An additional image store must match the consumer's storage
-  driver, and consumers only use overlay when `/dev/fuse` is present; on the vfs
-  fallback the store is simply not referenced.
+- **Overlay-only (a scoping choice, not a vfs limitation).** An additional image
+  store must match the consumer's storage driver. vfs *can* consume one too — a
+  vfs store + vfs consumer resolves images fine via storage.conf (verified, see
+  "Validation already done" below) — but a single GLOBAL store can only hold one
+  driver, so we share on the common overlay path (`/dev/fuse` present) and simply
+  don't reference the store on the vfs fallback. A future vfs-variant store for
+  fuse-less hosts is possible but out of scope.
 
-## Already committed
+## Already in the repo
 
-- Per-container graphroot keying + prune support — PR #40, commits `b8bb07f`
-  (PowerShell parity, driver stability, XDG export) and `8f31d87` (per-container
-  `agent-podman-<agent>-<project>` + `agent-podman-*` pruning).
+- Per-container graphroot keying + prune support: `scripts/launch-agent.{sh,ps1}`
+  key the writable store `agent-podman-<container>` (agent + project) and the
+  PowerShell launcher mirrors the bash one; `docker/shared/entrypoint-core.sh`
+  records the chosen storage driver per volume (no silent overlay↔vfs flips); and
+  `commands/prune-volumes.{sh,ps1}` discover and prune the `agent-podman-*` family.
 - **`docker/shared/seed-image-store.sh`** — the in-container seeder worker
   (`seed` / `update` / `list` / `status`). Inert until baked + invoked. Its
   non-podman paths are tested; the `podman --root` calls are marked `VALIDATE`.
@@ -47,7 +63,7 @@ Writable stays per-container; only cached base layers are shared.
 
 ### 1. Bake the seeder into the image
 `docker/base/Dockerfile`, in the shared-scripts `COPY --chmod=755` block (~line
-220):
+226):
 
 ```diff
  COPY --chmod=755 \
@@ -66,9 +82,9 @@ Writable stays per-container; only cached base layers are shared.
 The store is a **shared** volume (like `agent-gh-config`), not per-project.
 
 `scripts/launch-agent.sh`:
-- Add `agent-podman-imagestore` to the `SHARED_VOLUMES` array (~line 190) so it
+- Add `agent-podman-imagestore` to the `SHARED_VOLUMES` array (~line 194) so it
   is auto-created.
-- In the root pre-run (`docker compose … run --user root …`, ~line 379), add a
+- In the root pre-run (`docker compose … run --user root …`, ~line 408), add a
   mount + chown so `node` owns it:
   ```diff
        -v "${PODMAN_VOLUME}:/mnt/containers" \
@@ -77,7 +93,7 @@ The store is a **shared** volume (like `agent-gh-config`), not per-project.
   -    -lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers'
   +    -lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
   ```
-- In the final agent `run` (~line 429), add the mount **read-write** (Podman
+- In the final agent `run` (~line 469), add the mount **read-write** (Podman
   treats it read-only via `additionalimagestores` regardless; the seeder needs
   write):
   ```diff
@@ -99,7 +115,8 @@ unmarked:
 # (overlay branch) — replace the bare `rm -f storage.conf`
 _imgstore="/mnt/podman-imagestore"
 if [ -d "$_imgstore" ]; then
-    # VALIDATE: exact TOML + whether the path is $_imgstore or $_imgstore/<driver>.
+    # Path is the graphroot ($_imgstore), NOT $_imgstore/<driver> — verified on vfs
+    # (graph-layer path semantics are driver-independent). Re-confirm once on overlay.
     printf '[storage]\ndriver = "overlay"\n\n[storage.options]\nadditionalimagestores = ["%s"]\n' \
         "$_imgstore" >"$HOME/.config/containers/storage.conf"
     # First-run seed in the background so container start isn't blocked on pulls.
@@ -117,9 +134,10 @@ fi
 > per-volume driver marker behaviour intact.
 
 ### 4. prune-volumes: never prune the global store
-The global store matches the `agent-podman-*` candidate family added in
-`8f31d87`, but no container is named `imagestore`, so it would be flagged as
-orphan. Whitelist it as always-expected (shared infra).
+The global store matches the `agent-podman-*` candidate family that
+`commands/prune-volumes.{sh,ps1}` already discover, but no container is named
+`imagestore`, so it would be flagged as an orphan. Whitelist it as
+always-expected (shared infra).
 
 `commands/prune-volumes.sh` — before the candidate loop:
 ```diff
@@ -152,16 +170,26 @@ alias reseed-images='seed-image-store.sh update'
 
 These are the unverified Podman mechanics. Resolve each by running, not guessing:
 
-1. **Additional-store path.** Does `additionalimagestores` want the graphroot dir
-   (`/mnt/podman-imagestore`) or the driver subdir (`/mnt/podman-imagestore/overlay`)?
-   Confirm a consumer actually resolves a seeded image from it.
+1. **Additional-store path.** RESOLVED on vfs (the graph-layer path semantics are
+   driver-independent; re-confirm once on overlay). It wants the **graphroot**
+   (`/mnt/podman-imagestore`), NOT the driver subdir
+   (`/mnt/podman-imagestore/overlay`). Proof: a separate consumer with
+   `additionalimagestores = ["<graphroot>"]` in storage.conf resolved a seeded
+   image read-only (`ReadOnly=true`); appending `/vfs` or `/vfs-images` resolved
+   nothing. So the entrypoint should point at the bare mount dir.
 2. **Seeder invocation.** Is `podman --root "$STORE" --storage-driver overlay pull …`
    sufficient, or does it need an explicit `--runroot`/`--storage-opt`? Does the
    resulting layout need anything (e.g. `podman image trust`, perms, a read-only
    lock file) before a consumer can read it?
-3. **vfs consumer + overlay store.** Confirm a vfs-driver consumer cleanly
-   **ignores** an overlay `additionalimagestores` entry rather than erroring.
-   (If it errors, gate the storage.conf line strictly on the chosen driver.)
+3. **vfs consumer + overlay store (driver mismatch).** PARTIALLY RESOLVED. A
+   consumer reading `additionalimagestores` from **storage.conf** does not error
+   and cleanly uses it *when the store's driver matches* (vfs store + vfs consumer
+   verified). Passing it instead as a `--storage-opt` driver option DOES hard-error
+   (`vfs driver does not support additionalimagestores options`) — so never wire it
+   that way; storage.conf only. Still unverified: a true driver MISMATCH (overlay
+   store + vfs consumer), which needs `/dev/fuse` to set up. Mitigation already in
+   the design: the entrypoint writes the `additionalimagestores` line ONLY on the
+   overlay branch, so a vfs consumer never sees the overlay store in the first place.
 4. **Read-while-write.** Seed (writer) running while another container reads the
    store: does the read-only consumer tolerate it? Seeding is rare (first run +
    explicit update); the flock serializes writers, but a consumer mid-read during
@@ -171,10 +199,35 @@ These are the unverified Podman mechanics. Resolve each by running, not guessing
    the same image concurrently into its own graphroot doesn't deadlock on the
    store. Worst acceptable case: the image just isn't shared yet and the agent
    pulls its own copy.
-6. **build-epoch/commit path.** The seeder writes a marker reading
-   `/usr/local/share/powbox/build-epoch|build-commit`. Confirm that's where the
-   build metadata lands (seed-skills.sh reads epoch/commit from a seed meta dir —
-   reuse the real path).
+6. **build-epoch/commit path.** RESOLVED by inspection. Build metadata lands at
+   `/home/node/.agent-container/<agent>/build-{epoch,commit}` (written identically
+   for every agent by `docker/agent/Dockerfile`), **not** `/usr/local/share/powbox/`
+   — that path doesn't exist, so the old marker always degraded to `0`/`unknown`.
+   The seeder now resolves it via `$AGENT_SEED_DIR` (exported by
+   `entrypoint-agent.sh`), falling back to any agent's dir.
+
+## Validation already done (vfs proxy, no `/dev/fuse`)
+
+Done from a vfs-only container by pointing `CONTAINERS_CONF` at the repo's
+`docker/shared/containers.conf` to step past the broken drop-in (see prerequisite
+above), then pulling `alpine:3.19` into a throwaway "shared" graphroot and
+consuming it from a second graphroot:
+
+- **`additionalimagestores` path = the graphroot** (open question #1) — confirmed.
+  The driver subdir and `vfs-images` variants resolve nothing.
+- **Read-only sharing model** — the consumer sees the image with `ReadOnly=true`
+  and nothing is copied into its own (empty) graphroot.
+- **storage.conf vs `--storage-opt`** (open question #3) — a consumer honours
+  `[storage.options] additionalimagestores` from storage.conf without error;
+  passing the same as a `--storage-opt` driver option hard-errors on vfs. Wire it
+  via storage.conf only.
+- **Seeder build-meta** (open question #6) — `build_meta_dir` resolves the real
+  epoch/commit both via `$AGENT_SEED_DIR` and via the fallback glob.
+
+Still needs the rebuilt overlay host: the overlay happy-path end-to-end, the true
+driver-mismatch case (overlay store + vfs consumer), read-while-write, and the
+backgrounded first-run seed surviving `exec "$@"` (open questions #2, #3-mismatch,
+#4, #5).
 
 ## Validation plan
 

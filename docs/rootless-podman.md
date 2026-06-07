@@ -35,18 +35,25 @@ emulators, or a non-headless browser. Track that separately.
 | `docker/base/Dockerfile` | New apt layer installing `podman`, `podman-docker`, `podman-compose`, `uidmap`, `fuse-overlayfs`, `slirp4netns`, `passt`, `crun`, `netavark`, `aardvark-dns`, `catatonit`; writes `/etc/subuid`+`/etc/subgid` ranges for `node`; `touch /etc/containers/nodocker`. Sets `ENV XDG_RUNTIME_DIR=/home/node/.local/run`. Placed low so it doesn't bust the gh/mssql/pwsh/npm layers. |
 | `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`. |
 | `docker/shared/entrypoint-core.sh` | At startup (guarded by `command -v podman`): create `XDG_RUNTIME_DIR` mode 700; pick storage driver — keep the image default (overlay + fuse-overlayfs) when `/dev/fuse` is present, else write a user `storage.conf` selecting the slower `vfs` driver. |
-| `scripts/launch-agent.sh` | New per-project volume `agent-podman-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Passes `--device /dev/fuse` when the host exposes it (override with `POWBOX_FUSE=on\|off`). |
+| `scripts/launch-agent.sh` | New per-container volume `agent-podman-<agent>-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Passes `--device /dev/fuse` when the host exposes it (override with `POWBOX_FUSE=on\|off`). |
 | `docker/shared/container-agent.md.tmpl` | Documents the capability for the in-container agent (tooling row, filesystem row, network note). |
 
 ### Design decisions / rationale
 
 - **Rootless, not rootful.** Preserves the sandbox boundary. SYS_ADMIN is
   already granted (for the tmpfs shadow mounts), which also helps Podman mount.
-- **Per-project storage volume** (`agent-podman-<project>`), mirroring
-  `agent-nm-<project>`. Isolates each project's images and DB data, and persists
-  both across container recreation. Trade-off: images re-pull per project. If
-  that becomes painful, switch to a shared image store later
-  (`additionalimagestores`).
+- **Per-container storage volume** (`agent-podman-<agent>-<project>`). Persists
+  each container's images and DB data across recreation. Keyed by the OUTER
+  container (agent + project), not just the project: a project's Claude and Codex
+  containers can run concurrently, and a Podman graphroot is a single locked
+  layer+metadata store — two Podman instances with separate runroots/namespaces
+  pointing at one graphroot cause name conflicts, cross-instance stale-state
+  cleanup, and failed lifecycle ops. (Sharing the graphroot would not even let
+  the two outer containers collaborate: they have separate network namespaces, so
+  a nested service started by one is unreachable from the other.) Trade-off:
+  images re-pull per container. The fix for that is a shared *read-only* image
+  store (`additionalimagestores`) layered under each per-container writable
+  graphroot — see Follow-ups.
 - **fuse-overlayfs with vfs fallback.** fuse-overlayfs needs `/dev/fuse`; the
   launcher passes it when present. If it's missing (or `POWBOX_FUSE=off`),
   entrypoint-core drops a user `storage.conf` selecting `vfs` so Podman still
@@ -195,7 +202,10 @@ _Fill this in after running the validation prompt so we keep continuity across s
 
 ## Follow-ups
 
-- Decide shared vs per-project image store if re-pulling per project gets old.
+- **Shared read-only image store** (`additionalimagestores`) layered under each
+  per-container writable graphroot, so agents stop re-pulling the same base
+  images per container without giving up the per-container store isolation.
+  Planned for this branch as separate work.
 - If/when GUI, emulator, or non-headless-browser needs appear, that's the signal
   to move that workload to a dedicated Ubuntu VM (snapshot-based reset), per the
   original Option B → VM plan.

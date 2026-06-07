@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Remove orphaned per-project Docker volumes that no longer belong to any
-# existing container: agent-nm-* (node_modules) and agent-wt-* (worktrees +
-# pnpm store). Also offers the deprecated shared agent-pnpm-store volume (the
-# store is now per-project inside each agent-wt-* volume). This is the
-# Linux/macOS counterpart of prune-volumes.ps1.
+# existing container: agent-nm-* (node_modules), agent-wt-* (worktrees + pnpm
+# store), and agent-podman-* (rootless Podman storage). Also offers the
+# deprecated shared agent-pnpm-store volume (the store is now per-project inside
+# each agent-wt-* volume). This is the Linux/macOS counterpart of
+# prune-volumes.ps1.
 set -euo pipefail
 
-# Collect expected per-project volumes from all existing claude-*/codex-*
-# containers. Each container expects both an nm and a wt volume for its project.
+# Collect expected volumes from all existing claude-*/codex-* containers. Each
+# container expects an nm and a wt volume for its project (project-keyed, shared
+# between the project's two agents) plus its own agent-podman-* store, which is
+# keyed by the FULL container name so a project's concurrently-running Claude and
+# Codex containers never share one Podman graphroot.
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
@@ -16,15 +20,15 @@ while IFS= read -r name; do
 	codex-*) suffix="${name#codex-}" ;;
 	*) continue ;;
 	esac
-	expected+=("agent-nm-${suffix}" "agent-wt-${suffix}")
+	expected+=("agent-nm-${suffix}" "agent-wt-${suffix}" "agent-podman-${name}")
 done < <(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 
-# Find all per-project candidate volumes, plus the deprecated shared store.
+# Find all candidate volumes, plus the deprecated shared store.
 candidates=()
 while IFS= read -r vol; do
 	[ -z "$vol" ] && continue
 	candidates+=("$vol")
-done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt)-|^agent-pnpm-store$')
+done < <(docker volume ls --format "{{.Name}}" | grep -E '^agent-(nm|wt|podman)-|^agent-pnpm-store$')
 
 # Determine which volumes are orphaned. agent-pnpm-store is never "expected", so it
 # is always a candidate when present — but if a pre-change container still mounts it,
@@ -44,7 +48,7 @@ for vol in "${candidates[@]}"; do
 done
 
 if [ "${#prune[@]}" -eq 0 ]; then
-	echo "No orphaned agent-nm-*/agent-wt-* (or deprecated agent-pnpm-store) volumes found."
+	echo "No orphaned agent-nm-*/agent-wt-*/agent-podman-* (or deprecated agent-pnpm-store) volumes found."
 	exit 0
 fi
 

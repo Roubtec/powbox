@@ -223,7 +223,7 @@ The image ships **rootless [Podman](https://podman.io/)** so an in-sandbox agent
 
 This is deliberately **not** Docker-in-Docker or a mounted host socket — both of which would hand a runaway agent the keys to the host. Podman runs as the unprivileged `node` user through a user namespace, so the blast radius stays inside the container: no privileged daemon, no host socket. As a bonus, rootless Podman NATs nested containers' outbound traffic through this container's network namespace, so they **inherit the egress firewall** — nested containers reach the public internet but not your LAN or host, just like the agent.
 
-- **Persistence:** a per-project `agent-podman-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts.
+- **Persistence:** a per-container `agent-podman-<agent>-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts. It's keyed per outer container (agent + project), not just per project, so a project's Claude and Codex containers can run concurrently without two Podman instances sharing — and corrupting — one graphroot.
 - **Access pattern:** reach a nested service from the agent via its **published port on `localhost`**; container-to-container uses service names over netavark/aardvark-dns.
 - **Storage driver:** fuse-overlayfs when `/dev/fuse` is available (passed through automatically when the host exposes it; force with `POWBOX_FUSE=on`), otherwise the slower `vfs` driver.
 
@@ -362,7 +362,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/smoke-test.*` for smoke-testing the unified agent image
-- `commands/prune-volumes.ps1` for orphaned `agent-nm-*` cleanup
+- `commands/prune-volumes.*` for orphaned `agent-nm-*` / `agent-wt-*` / `agent-podman-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `docker/shared/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
@@ -623,7 +623,7 @@ Smoke test the built image with:
 
 This runs two stages: a fast presence sweep over every expected CLI, then a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't). Skip the second stage for a tools-only run with `POWBOX_SMOKE_SKIP_DB=1 ./commands/smoke-test.sh` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb`).
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check
 

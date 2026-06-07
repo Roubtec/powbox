@@ -68,9 +68,13 @@ $nodeModulesVolume = "agent-nm-$projectSlug"
 $worktreesVolume = "agent-wt-$projectSlug"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
 $worktreesStoreDir = "/workspace/$projectSlug/.worktrees/.pnpm-store"
-# Per-project rootless Podman storage (images + named volumes) so an in-sandbox
-# agent's containers and their data persist across container restarts.
-$podmanVolume = "agent-podman-$projectSlug"
+# Per-container rootless Podman storage (images + named volumes) so an in-sandbox
+# agent's containers and their data persist across restarts. Keyed by the OUTER
+# container (agent + project), NOT just the project: a project's Claude and Codex
+# containers can run concurrently, and two Podman instances with separate
+# runroots/namespaces sharing one graphroot corrupt each other's metadata and
+# lifecycle state. A shared image cache is a separate concern (additionalimagestores).
+$podmanVolume = "agent-podman-$containerName"
 
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"

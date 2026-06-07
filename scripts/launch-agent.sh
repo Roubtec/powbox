@@ -177,9 +177,13 @@ WT_VOLUME="agent-wt-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
-# Per-project rootless Podman storage (images + named volumes) so an in-sandbox
-# agent's containers and their data persist across container restarts.
-PODMAN_VOLUME="agent-podman-${PROJECT_NAME}"
+# Per-container rootless Podman storage (images + named volumes) so an in-sandbox
+# agent's containers and their data persist across restarts. Keyed by the OUTER
+# container (agent + project), NOT just the project: a project's Claude and Codex
+# containers can run concurrently, and two Podman instances with separate
+# runroots/namespaces sharing one graphroot corrupt each other's metadata and
+# lifecycle state. A shared image cache is a separate concern (additionalimagestores).
+PODMAN_VOLUME="agent-podman-${CONTAINER_NAME}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")

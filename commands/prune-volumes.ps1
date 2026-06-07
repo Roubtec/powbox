@@ -19,21 +19,25 @@ foreach ($containerName in $containerNames) {
     }
 
     if ($projectSuffix) {
-        # Each container expects both an nm (node_modules) and a wt (worktrees +
-        # pnpm store) volume for its project.
+        # Each container expects an nm (node_modules) and a wt (worktrees + pnpm
+        # store) volume for its project (project-keyed, shared between the
+        # project's two agents) plus its own agent-podman-* store, keyed by the
+        # FULL container name so a project's concurrently-running Claude and Codex
+        # containers never share one Podman graphroot.
         [void]$expectedVolumes.Add("agent-nm-$projectSuffix")
         [void]$expectedVolumes.Add("agent-wt-$projectSuffix")
+        [void]$expectedVolumes.Add("agent-podman-$containerName")
     }
 }
 
-# Per-project candidates (agent-nm-* / agent-wt-*) plus the deprecated shared
+# Candidates: agent-nm-* / agent-wt-* / agent-podman-* plus the deprecated shared
 # store (agent-pnpm-store), which nothing mounts anymore now that the store is
 # per-project inside each agent-wt-* volume.
-$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -eq 'agent-pnpm-store' })
+$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -like 'agent-podman-*' -or $_ -eq 'agent-pnpm-store' })
 $pruneCandidates = @($candidateVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
 
 if ($pruneCandidates.Count -eq 0) {
-    Write-Host 'No orphaned agent-nm-*/agent-wt-* (or deprecated agent-pnpm-store) volumes found.'
+    Write-Host 'No orphaned agent-nm-*/agent-wt-*/agent-podman-* (or deprecated agent-pnpm-store) volumes found.'
     return
 }
 

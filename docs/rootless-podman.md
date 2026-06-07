@@ -450,12 +450,14 @@ prompt's step 3 can now use `docker compose`/`podman compose` again.
 > **PASS** (see the post-rebuild Results table) — plus one new fix
 > (`firewall_driver=iptables`). Step 6 (Results) is filled in. **Step 5
 > (image-store cross-container check) is also complete:** a freshly-rebuilt *second*
-> container on a different project ran [podman-test.md](podman-test.md)'s reader role
-> against a live seed here — cross-container sharing, read-while-write (#4), and
+> container on a different project ran the reader role of a scratch two-container
+> writer/reader harness (run out-of-tree) against a live seed here — cross-container
+> sharing, read-while-write (#4), and
 > concurrent same-image pull (#5) all PASS. That second container carried the
 > `firewall_driver=iptables` bake natively (no user override needed), so the baked
-> drop-in is confirmed too. The only remaining follow-up is the user-facing docs
-> (image-store wiring-checklist step 6).
+> drop-in is confirmed too. The user-facing docs (image-store wiring-checklist step 6
+> — README, this doc's Follow-ups, the agent template) are done as well, so **all
+> rootless-Podman + image-store work on this branch is complete.**
 
 Everything below was **applied in the repo on this branch and needed a host-side
 rebuild + relaunch to take effect** (the launcher and base image both changed). The
@@ -493,7 +495,8 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
    step 3 + open questions #4/#5): a *second* container on a different project saw the
    curated images `RO=true` pre-pull (sharing), did 18 reads with 0 errors/0 deadlocks
    across a live seed (#4), and pulled all 6 actively-seeded images into its own
-   graphroot without hanging (#5). Harness: [podman-test.md](podman-test.md).
+   graphroot without hanging (#5). Driven by a scratch two-container writer/reader
+   harness, run out-of-tree.
 6. ✅ **Results table filled in** for the post-rebuild run; status header updated.
 
 ## Follow-ups
@@ -501,7 +504,8 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
 - **Shared read-only image store** (`additionalimagestores`) layered under each
   per-container writable graphroot, so agents stop re-pulling the same base
   images per container without giving up the per-container store isolation.
-  **Implemented and validated on overlay** (2026-06-07) — see
+  **Implemented and fully validated** (2026-06-07) — overlay path, plus
+  cross-container sharing and read-while-write from a second container. See
   [podman-shared-image-store.md](podman-shared-image-store.md).
 - If/when GUI, emulator, or non-headless-browser needs appear, that's the signal
   to move that workload to a dedicated Ubuntu VM (snapshot-based reset), per the

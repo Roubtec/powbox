@@ -11,11 +11,12 @@ stacks) is owned by [rootless-podman.md](rootless-podman.md) and is now fully gr
 post-rebuild (one new fix there: `firewall_driver=iptables`); this doc owns the
 shared image store. **Cross-container validation COMPLETE (2026-06-07):** a second
 container on a different project (rebuilt with the baked `firewall_driver=iptables`)
-ran the reader role from [podman-test.md](podman-test.md) against a live seed in this
+ran the reader role of a scratch two-container writer/reader harness (run out-of-tree)
+against a live seed in this
 container — cross-container sharing (Validation plan step 3), read-while-write (open
 question #4), and concurrent same-image pull into its own graphroot (open question #5)
-all **PASS** (see Validation plan / open questions below). The only remaining follow-up
-is the user-facing docs (wiring-checklist step 6).
+all **PASS** (see Validation plan / open questions below). User-facing docs
+(wiring-checklist step 6) are now done too — **this feature is complete.**
 
 ### Current state (2026-06-07)
 
@@ -54,14 +55,16 @@ green (see [rootless-podman.md](rootless-podman.md)). Image-store checks done th
    writable store — overlay path semantics re-confirmed on the new version.
 3. ✅ **DONE (2026-06-07)** — Validation plan step 3 (cross-container sharing) and open
    questions #4 (read-while-write) + #5 (concurrent same-image pull) all ran from a
-   *second* container (different project) via [podman-test.md](podman-test.md) and
+   *second* container (different project) via a scratch two-container writer/reader
+   harness (run out-of-tree) and
    PASS. Evidence: that container's fresh empty graphroot saw the 4 curated images
    `RO=true` pre-pull (sharing); during a live 6-image seed from this container it did
    18 reads (`podman images`, curated pulls, `podman run` from store, plus pulls of the
    actively-seeded set) with **0 errors, 0 deadlocks** (#4); and it pulled all 6
    actively-seeded images into its own graphroot (`RO=false` copies) with none erroring
    or hanging (#5).
-4. ⏳ Step 6 user-facing docs still pending (now the only remaining follow-up).
+4. ✅ Step 6 user-facing docs done (README shared-image-cache bullet, rootless-podman
+   Follow-ups flipped, agent template Containers row) — feature complete.
 
 > **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
 > `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`
@@ -138,9 +141,9 @@ Writable stays per-container; only cached base layers are shared.
 ## Wiring checklist — APPLIED (kept as the record of what changed)
 
 Steps 1–5 are **done and in the repo** (syntax-checked, shellcheck/PSScriptAnalyzer
-clean; the prune whitelist was behaviorally verified). They take effect on the next
-**base + agent** rebuild. Step 6 (user-facing docs) is still pending validation. The
-diffs below are retained so the next session can see exactly what was wired and where.
+clean; the prune whitelist was behaviorally verified), and now validated on the rebuilt
+trixie base. Step 6 (user-facing docs) is **also done** (2026-06-07). The diffs below
+are retained so a later session can see exactly what was wired and where.
 
 - ✅ **1. Seeder baked** — `docker/shared/seed-image-store.sh` added to the
   `COPY --chmod=755` block in `docker/base/Dockerfile`.
@@ -253,14 +256,18 @@ baked so it never points at a missing command:
 alias reseed-images='seed-image-store.sh update'
 ```
 
-### 6. Docs (after validation passes)
-- `README.md` "Nested Containers": note the shared read-only image cache and that
-  `agent-podman-imagestore` is a shared volume; add `POWBOX_IMAGE_STORE_IMAGES`
-  to the env-var table if exposed at the launcher level.
-- `docs/rootless-podman.md` Follow-ups: move the `additionalimagestores` bullet
-  from "planned" to "done", linking here. (That doc's "What changed" table, known
-  risk #2, and its missing-`/dev/net/tun` gap were updated alongside commit
-  `17e42b1` — re-check the validation-prompt results table after rebuild.)
+### 6. Docs — ✅ DONE (2026-06-07)
+- ✅ `README.md` "Nested Containers": added a **Shared image cache** bullet
+  (curated read-only `agent-podman-imagestore`, the `additionalimagestores` model,
+  `POWBOX_IMAGE_STORE_IMAGES` override, `reseed-images`). Not added to the launcher
+  env-var table — `POWBOX_IMAGE_STORE_IMAGES` is a seeder (in-container) variable,
+  not exposed at the launcher level.
+- ✅ `docs/rootless-podman.md` Follow-ups: the `additionalimagestores` bullet is now
+  "implemented and fully validated". (That doc's "What changed" table, known risk #2,
+  and its missing-`/dev/net/tun` gap were updated alongside commit `17e42b1`; the
+  results table is filled in post-rebuild.)
+- ✅ `docker/shared/container-agent.md.tmpl` Containers row: notes compose multi-service
+  stacks, service-name DNS within a stack, and the pre-cached common images.
 
 ## Open questions — VALIDATE on the rebuilt host
 
@@ -340,7 +347,8 @@ All verified as of 2026-06-07: the true driver-mismatch case is moot (overlay
 everywhere); read-while-write (#4), the backgrounded first-run seed surviving
 `exec "$@"` (#5), and the cross-container sharing test (Validation plan step 3) all
 PASS — the first via this container, the last three via a second container running
-[podman-test.md](podman-test.md)'s reader role against a live seed here. The whole
+the reader role of a scratch two-container harness (run out-of-tree) against a live
+seed here. The whole
 run-path suite is green too (see [rootless-podman.md](rootless-podman.md)).
 
 **Update 2026-06-07 (run validation, Claude):** the run path was exercised for the
@@ -415,7 +423,7 @@ steps 3–4 below now depend on a working `podman run` (unblocked by commit
 1. `seed-image-store.sh status` → store mounted, overlay yes, seeded no.
 2. `seed-image-store.sh seed` → pulls the curated set; re-run → all `present`,
    nothing re-pulled. `seed-image-store.sh list` → all `present`.
-3. **Sharing works:** ✅ DONE (2026-06-07, see [podman-test.md](podman-test.md)). In a
+3. **Sharing works:** ✅ DONE (2026-06-07). In a
    *second* container for a different project, the 4 curated images were visible
    `RO=true` in a fresh empty graphroot **before pulling anything** — that pre-pull
    visibility is the proof of sharing. (Note: do NOT judge this by `grep 'Copying

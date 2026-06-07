@@ -28,6 +28,17 @@ inter-container DNS. Still open: published ports on bridge/compose networks (the
 `podman compose`/`docker compose` subcommand (only `podman-compose` works); see
 **Compose command compatibility**. Filled-in results in **Results** below.
 
+**Update 2026-06-07 (compose-tooling resolution + base upgrade, Claude):** the
+Podman-4.3.1 compose gap is fixed by moving the base from bookworm to **Debian 13
+(`node:24-slim` → `node:24-trixie-slim`) → Podman 5.4.2**, applied to
+`docker/base/Dockerfile` on this branch (validated in a nested `debian:trixie`
+container; staying on Node 24 LTS — the Node version doesn't affect Podman). This
+is a base-OS bump, so it **must be rebuilt + relaunched** before anything else —
+**start the next session at [How to resume after the rebuild](#how-to-resume-after-the-rebuild-next-session)**, which lists the rebuild, the post-rebuild
+environment checks (`podman --version` → 5.4.2, `/proc/sys` now `rw`), and the two
+validations to re-run (compose + published ports, and `podman build` RUN). See
+**Compose command compatibility** for the migration details.
+
 ## Why
 
 Some projects need Dockerized backing services (databases, Adminer, service
@@ -153,7 +164,7 @@ since later independent steps still inform us. Clean up at the end.
    - Write data: `podman exec probe-pg psql -U postgres -c \
         "create table probe(x int); insert into probe values (42);"`
    - Reach it from THIS container over the published port (validates the loopback path
-     through the firewall; php8.2-pgsql is preinstalled):
+     through the firewall; php8.4-pgsql is preinstalled):
      `php -r '$c=@pg_connect("host=127.0.0.1 port=5432 user=postgres password=secret dbname=postgres");
         if(!$c){fwrite(STDERR,"connect failed\n");exit(1);}
         echo pg_fetch_result(pg_query($c,"select x from probe"),0,0),"\n";'`
@@ -238,7 +249,9 @@ hands-free:**
    fail with "unrecognized command", and there is no `docker-compose` binary. Only
    `podman-compose` (Python, v1.0.3) works. This contradicts the base Dockerfile
    comment and the agent-facing docs, and breaks project scripts that call
-   `docker compose`. See **Compose command compatibility** below.
+   `docker compose`. **RESOLVED on this branch** by moving the base to Debian 13
+   (`node:24-trixie-slim` → Podman 5.4.2, which has the native subcommand) — pending
+   the rebuild. See **Compose command compatibility** below.
 
 ## Known risks & likely fixes (if validation fails)
 
@@ -310,40 +323,88 @@ hands-free:**
 - **First run after upgrading an existing project container.** Recreate it
   (`cc … --volatile`) so the new device + storage volume attach.
 
-## Compose command compatibility (Podman 4.3.1)
+## Compose command compatibility — RESOLVED by moving the base to Debian 13 (trixie)
 
-The base image installs Debian bookworm's **Podman 4.3.1**, which predates the
-built-in `podman compose` delegating subcommand (added in 4.7). Measured inside the
-rebuilt container:
+**Decision (2026-06-07):** upgrade Podman by moving the base image to Debian 13
+(`node:24-slim` → `node:24-trixie-slim`), which ships **Podman 5.4.2** — applied on
+this branch, **pending the base+agent rebuild**. This replaces the
+old-Podman-4.3.1 limitation below.
 
-| Command | Works? | Why |
-|---------|--------|-----|
-| `podman-compose …` | ✅ | Standalone Python tool (v1.0.3), installed and on PATH. |
-| `podman compose …` | ❌ | No `compose` subcommand in 4.3.1 (`unrecognized command`). |
-| `docker compose …` | ❌ | `docker` shim is `exec podman "$@"` → same `unrecognized command`. |
-| `docker-compose …` | ❌ | No such binary (podman-docker ships only the `docker` shim). |
+The problem (as measured on the bookworm Podman 4.3.1 container): the built-in
+`podman compose` delegating subcommand only exists in Podman ≥ 4.7, so on 4.3.1
+**only** the standalone `podman-compose` (Python) worked — `podman compose …`,
+`docker compose …` (the `docker` shim is `exec podman "$@"`), and `docker-compose`
+all failed. That broke `docker compose` muscle memory and project scripts.
 
-So compose **functionality** is available, but only under the `podman-compose`
-name — `docker compose`/`docker-compose` muscle memory and project scripts that
-shell out to them break. Three ways to close this (decision pending — see the
-question raised in the session summary):
+Why the **trixie base** and not the alternatives:
+- **Podman is a Debian package, not a Node one** — its version is set by the OS
+  release, *not* the Node tag. Bookworm = 4.3.1; trixie = 5.4.2. So the fix is the
+  OS bump; the Node major version (24 vs 26) is orthogonal and buys nothing here.
+  We stay on **Node 24 (Active LTS)** → zero Node breaking changes. (Node 26 is
+  "Current", not LTS until 2026-10-28; revisit independently if a newer Node is
+  wanted for its own sake — it's a one-line `FROM` change.)
+- **Not apt-pinning trixie's Podman onto bookworm** — trixie's podman needs the
+  t64/newer-glibc (2.41 vs bookworm 2.36) library set; pinning it would be a
+  broken "frankendebian". Podman is *not* in bookworm-backports either.
+- **Not just compat shims on 4.3.1** — podman-compose v1 isn't fully compose-v2
+  compatible; the engine upgrade is the real fix and brings newer
+  crun/netavark/pasta too.
 
-1. **Compatibility shims (no engine change).** Add `/usr/local/bin/docker-compose`
-   → `podman-compose`, and replace the `docker` shim so `docker compose …` routes
-   to `podman-compose` while everything else still goes to `podman`. Lowest risk;
-   keeps 4.3.1; podman-compose v1 covers most compose-v1 files but isn't 100%
-   compose-v2 compatible.
-2. **Upgrade Podman to ≥ 4.7 / 5.x.** Gets the native `podman compose` (and thus
-   `docker compose` via the shim) delegating to a real provider. Bookworm has no
-   such package, so this means an external/backports source or building — heavier,
-   more moving parts to keep current.
-3. **Document-only.** Tell agents/users to call `podman-compose` and fix the base
-   Dockerfile comment + agent docs to stop promising `docker compose`. Cheapest,
-   but leaves existing `docker compose` scripts broken.
+On trixie (Podman 5.4.2) all four forms work: `podman compose …` (native
+subcommand) and `docker compose …` (via the shim) both delegate to
+`podman-compose` (now v1.3.0), and `podman-compose`/`docker-compose` work directly.
 
-Whichever is chosen, fix the now-inaccurate `docker compose` / `podman compose`
-claims in `docker/base/Dockerfile` (line ~187), `docker/shared/container-agent.md.tmpl`,
-and the validation prompt above (its step 3 should call `podman-compose`).
+Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
+container before committing — all candidates resolve): `FROM node:24-trixie-slim`;
+`php8.2-*` → `php8.4-*`; **Microsoft repo via the official
+`packages-microsoft-prod.deb` for `debian/13`** (trixie's strict `sqv` verifier
+rejects the legacy `microsoft.asc` — it's signed by a rotated key; the config deb
+ships the correct `microsoft-prod.gpg`); PGDG `bookworm-pgdg` → `trixie-pgdg`;
+dropped `postgresql-contrib-16` (its modules now ship inside `postgresql-16`);
+`BASE_SOURCE_IMAGE` + script/README/`reset-claude-history.{sh,ps1}` fallbacks bumped
+to `node:24-trixie-slim`. `docker/shared/container-agent.md.tmpl` and the validation
+prompt's step 3 can now use `docker compose`/`podman compose` again.
+
+## How to resume after the rebuild (next session)
+
+Everything below is **applied in the repo on this branch but needs a host-side
+rebuild + relaunch to take effect** (the launcher and base image both changed). The
+running container that produced these findings is bookworm/Podman-4.3.1 and cannot
+self-rebuild.
+
+1. **Rebuild base + agent** (base changed → both): from the powbox repo on this
+   branch, `./build.sh base && ./build.sh agent` (or `./build.sh all`). Confirm the
+   trixie migration baked: the build must succeed through the MS + PGDG layers (the
+   highest-risk steps; package availability was pre-validated but the full image
+   build is the real proof).
+2. **Relaunch** a throwaway probe project with both devices forced:
+   `POWBOX_PODMAN=on cc /tmp/podman-probe --volatile` (recreate so the new base +
+   `/dev/fuse` + `/dev/net/tun` + storage volume attach).
+3. **Confirm the environment took** inside the new container:
+   - `podman --version` → **5.4.2** (proves the trixie base; `podman compose version`
+     should now work too).
+   - `cat /proc/mounts | grep '/proc/sys '` → should be **`rw`** now (proves
+     `systempaths=unconfined` took; it was `ro` before). Also
+     `podman run --rm docker.io/library/alpine echo ok` must print `ok` with **no**
+     `ping_group_range` error.
+   - `ls -l /dev/fuse /dev/net/tun` both present; `podman info` → `overlay | cgroupfs
+     | netavark`.
+4. **Re-run the two validations that were blocked**, which should now PASS:
+   - **Step 3 of the Validation prompt above** (compose + published ports + DNS) —
+     use `podman compose up -d` *and* `docker compose up -d` to confirm both the
+     native subcommand and the shim route correctly on 5.4.2; `curl
+     http://localhost:8080` should return Adminer HTML (the netavark `route_localnet`
+     write now succeeds on the writable `/proc/sys`).
+   - **`podman build` with a networked RUN step** (the case that failed on read-only
+     `/proc/sys`): a `Containerfile` whose `RUN apk add …` needs the network.
+   - Re-confirm Step 4 (firewall: `PUBLIC_OK` / `LAN_BLOCKED`) still holds.
+5. **Image-store cross-container check** (see
+   [podman-shared-image-store.md](podman-shared-image-store.md) Validation plan
+   step 3 + open questions #4/#5): launch a *second* container for a different
+   project and confirm a curated image resolves from the shared store with no layer
+   pull, while a seed is/ isn't mid-flight.
+6. **Fill in the Results table above** for the post-rebuild run and flip the
+   remaining PARTIAL rows; update the status header.
 
 ## Follow-ups
 

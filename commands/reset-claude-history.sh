@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Prefers powbox-agent-base:latest (guaranteed present whenever claude-config
 # has content) so the helper stays offline-friendly and inherits whatever
-# base image docker/base/Dockerfile declares. Falls back to node:24-slim if
+# base image docker/base/Dockerfile declares. Falls back to node:24-trixie-slim if
 # the base image has not been built yet.
 
 VOLUME_NAME="claude-config"
@@ -54,7 +54,7 @@ fi
 if docker image inspect powbox-agent-base:latest >/dev/null 2>&1; then
 	HELPER_IMAGE="powbox-agent-base:latest"
 else
-	HELPER_IMAGE="node:24-slim"
+	HELPER_IMAGE="node:24-trixie-slim"
 	echo "powbox-agent-base:latest not found; falling back to $HELPER_IMAGE." >&2
 fi
 

@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 #
 # Prefers powbox-agent-base:latest (guaranteed present whenever claude-config
 # has content) so the helper stays offline-friendly and inherits whatever
-# base image docker/base/Dockerfile declares. Falls back to node:24-slim if
+# base image docker/base/Dockerfile declares. Falls back to node:24-trixie-slim if
 # the base image has not been built yet.
 
 $volumeName = "claude-config"
@@ -38,7 +38,7 @@ docker image inspect powbox-agent-base:latest *> $null
 if ($LASTEXITCODE -eq 0) {
   $helperImage = "powbox-agent-base:latest"
 } else {
-  $helperImage = "node:24-slim"
+  $helperImage = "node:24-trixie-slim"
   Write-Host "powbox-agent-base:latest not found; falling back to $helperImage." -ForegroundColor Yellow
 }
 

@@ -1,4 +1,4 @@
-FROM node:24-slim
+FROM node:24-trixie-slim
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -51,16 +51,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zsh \
     zstd \
     poppler-utils \
-    php8.2-cli \
-    php8.2-xml \
-    php8.2-mbstring \
-    php8.2-curl \
-    php8.2-zip \
-    php8.2-intl \
-    php8.2-sqlite3 \
-    php8.2-bcmath \
-    php8.2-mysql \
-    php8.2-pgsql \
+    php8.4-cli \
+    php8.4-xml \
+    php8.4-mbstring \
+    php8.4-curl \
+    php8.4-zip \
+    php8.4-intl \
+    php8.4-sqlite3 \
+    php8.4-bcmath \
+    php8.4-mysql \
+    php8.4-pgsql \
     composer \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && ln -sf /usr/bin/batcat /usr/local/bin/bat \
@@ -76,31 +76,41 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 # Install Microsoft-repo tooling: sqlcmd/bcp (mssql-tools18, for Azure SQL
 # workflows) and PowerShell (pwsh, so agents can run and lint .ps1 scripts).
-RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-    | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
-    > /etc/apt/sources.list.d/microsoft-prod.list \
+#
+# Use Microsoft's official `packages-microsoft-prod.deb` config package rather
+# than hand-writing the key + sources.list. On Debian 13 (trixie) apt verifies
+# signatures with sequoia (`sqv`), which is stricter, and Microsoft signs the
+# trixie repo with a rotated key that the legacy `microsoft.asc` bundle does NOT
+# contain (apt fails: "Missing key EE4D7792F748182B"). The config deb installs
+# the correct rotated keyring (microsoft-prod.gpg) and the matching trixie repo
+# line, so it tracks Microsoft's key rotations for us.
+RUN curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+        https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/packages-microsoft-prod.deb \
+    && rm -f /tmp/packages-microsoft-prod.deb \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends mssql-tools18 powershell \
     && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
     && ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PostgreSQL 16 (server + client + contrib) from the official PGDG apt
-# repo so the major version matches what projects pin (e.g. postgres:16.x) and
-# avoids the silent behavior drift Debian's stock 15 would introduce. No daemon
-# is started at build or runtime; the baked `pg-dev-up` helper stands up a
-# throwaway loopback cluster on demand for integration suites (prisma migrate,
-# `test:db`, etc.) — see docker/shared/pg-dev-up.
+# Install PostgreSQL 16 (server + client) from the official PGDG apt repo so the
+# major version matches what projects pin (e.g. postgres:16.x) and avoids the
+# silent behavior drift Debian trixie's stock 17 would introduce. The contrib
+# modules (pg_stat_statements, uuid-ossp, hstore, pgcrypto, …) ship inside the
+# `postgresql-16` package on PGDG trixie — there is no separate
+# `postgresql-contrib-16` anymore. No daemon is started at build or runtime; the
+# baked `pg-dev-up` helper stands up a throwaway loopback cluster on demand for
+# integration suites (prisma migrate, `test:db`, etc.) — see docker/shared/pg-dev-up.
 RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         postgresql-16 \
         postgresql-client-16 \
-        postgresql-contrib-16 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PSScriptAnalyzer (the PowerShell linter — shellcheck cannot lint
@@ -184,7 +194,10 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
 # without Docker-in-Docker. Podman runs as the unprivileged `node` user through
 # a user namespace, so the blast radius stays inside this container: no
 # privileged daemon, no host Docker socket. `podman-docker` provides a `docker`
-# command shim and `podman-compose` backs `docker compose` / `podman compose`.
+# command shim; on Debian 13's Podman 5.x the `podman compose` subcommand exists
+# and delegates to `podman-compose`, so `podman compose …` and `docker compose …`
+# (via the shim) both work — unlike bookworm's Podman 4.3.1, which had no
+# `compose` subcommand at all (only the standalone `podman-compose` binary).
 # fuse-overlayfs is the rootless storage driver (needs /dev/fuse, passed through
 # by launch-agent.sh; entrypoint-core.sh falls back to vfs when it is absent);
 # slirp4netns/passt give rootless networking and netavark + aardvark-dns provide
@@ -278,7 +291,7 @@ WORKDIR /home/node
 # scripts/build-image.{sh,ps1}; the defaults are sane fallbacks when the image
 # is built outside that script. Declared last so changing the digest only
 # rebuilds this trivial metadata layer, never the substrate layers above.
-ARG BASE_SOURCE_IMAGE="node:24-slim"
+ARG BASE_SOURCE_IMAGE="node:24-trixie-slim"
 ARG BASE_SOURCE_DIGEST=""
 # Powbox commit that built this base image. Recorded both as an inheritable
 # label (child agent images don't override powbox.commit.base, so they expose

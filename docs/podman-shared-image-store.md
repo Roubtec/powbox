@@ -32,11 +32,24 @@ single `POWBOX_PODMAN` switch (`POWBOX_FUSE` is the deprecated alias). See
 [rootless-podman.md](rootless-podman.md) for the full run-path validation this
 unblocks.
 
-**Next session:** rebuild base+agent at ≥ the device-split commit, relaunch with
-`POWBOX_PODMAN=on`, then run the **Validation plan** below (image-store sharing) AND
-the run-path validation prompt in [rootless-podman.md](rootless-podman.md).
-Pick this up from such a session: confirm the two prerequisites below, then run
-both validations, then update the user-facing docs (step 6).
+**Next session — how to resume after the rebuild:** the base image was bumped from
+Debian bookworm to **Debian 13 (`node:24-trixie-slim`, Podman 5.4.2)** on this
+branch (to fix the Podman-4.3.1 compose-subcommand gap — see
+[rootless-podman.md](rootless-podman.md) → "Compose command compatibility" and "How
+to resume after the rebuild"). So this is a **base-OS upgrade**, not just a compose
+tweak — rebuild **base + agent** and relaunch with `POWBOX_PODMAN=on` first. Then:
+1. Follow the run-path resume checklist in
+   [rootless-podman.md](rootless-podman.md#how-to-resume-after-the-rebuild-next-session)
+   (confirm `podman --version` → 5.4.2, `/proc/sys` now `rw`, devices present).
+2. Confirm the two prerequisites below still hold on the trixie image
+   (`podman info` exits 0, driver `overlay`) — fuse-overlayfs is now **1.14** on
+   trixie, so re-confirm overlay + `additionalimagestores` resolve `R/O: true` once
+   (the path semantics are driver-independent but the version changed).
+3. Run the **Validation plan** below — the still-open items need a *second*
+   container (cross-container sharing, step 3) which couldn't be exercised from
+   inside the single running container: open question #4 (read-while-write) and #5
+   (concurrent cross-container pull during a seed).
+4. Update the user-facing docs (step 6).
 
 > **Prerequisite 1 — rebuild BOTH the base AND the agent image.** The
 > `docker/base/Dockerfile` fix that pre-creates `/etc/containers/containers.conf.d`

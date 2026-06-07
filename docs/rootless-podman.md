@@ -14,6 +14,20 @@ the validation procedure below (it could not have passed before this fix). The
 shared read-only image store (see [podman-shared-image-store.md](podman-shared-image-store.md))
 is validated on overlay.
 
+**Update 2026-06-07 (run validation, Claude):** ran the validation procedure in
+the first container rebuilt with the seccomp + tun fixes — they work (containers
+**run** now). Doing so surfaced a **third sysctl blocker**: the host masks
+`/proc/sys` read-only, so crun's `ping_group_range` (every run) and netavark's
+`route_localnet` (published ports on a bridge → every compose stack) EPERM. Fixed
+by adding `systempaths=unconfined` to `compose.shared.yml` — **pending the next
+rebuild + relaunch** (couldn't be tested in-place). Validated PASS this round:
+engine sanity, image pull, default-network run, persistent named volumes,
+published ports on the default network, egress-firewall inheritance, and aardvark
+inter-container DNS. Still open: published ports on bridge/compose networks (the
+`systempaths` fix, pending relaunch) and a tooling gap — Podman 4.3.1 has no
+`podman compose`/`docker compose` subcommand (only `podman-compose` works); see
+**Compose command compatibility**. Filled-in results in **Results** below.
+
 ## Why
 
 Some projects need Dockerized backing services (databases, Adminer, service
@@ -46,7 +60,7 @@ emulators, or a non-headless browser. Track that separately.
 |------|--------|
 | `docker/base/Dockerfile` | New apt layer installing `podman`, `podman-docker`, `podman-compose`, `uidmap`, `fuse-overlayfs`, `slirp4netns`, `passt`, `crun`, `netavark`, `aardvark-dns`, `catatonit`; writes `/etc/subuid`+`/etc/subgid` ranges for `node`; `touch /etc/containers/nodocker`. Sets `ENV XDG_RUNTIME_DIR=/home/node/.local/run`. Placed low so it doesn't bust the gh/mssql/pwsh/npm layers. |
 | `docker/shared/containers.conf` | New engine drop-in → `/etc/containers/containers.conf.d/10-powbox.conf`: `cgroup_manager=cgroupfs`, `events_logger=file` (no systemd/journald in-container), `network_backend=netavark`. |
-| `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` (commit `17e42b1`). The host runtime's default seccomp profile stacks onto every descendant process and blocks the syscalls crun needs to RUN a container (`keyctl`, `pivot_root` → EPERM); unconfining lets nested containers run. Acceptable because this container + its egress firewall ARE the boundary. |
+| `compose.shared.yml` | `security_opt: seccomp=unconfined` + `apparmor=unconfined` (commit `17e42b1`) **plus `systempaths=unconfined`** (2026-06-07). seccomp/apparmor unblock the syscalls crun needs to RUN (`keyctl`, `pivot_root` → EPERM); `systempaths=unconfined` makes the Docker-masked read-only `/proc/sys` writable so crun can set `ping_group_range` (every run) and netavark can set `route_localnet` (published ports on bridge networks) — without it both EPERM. Acceptable because this container + its egress firewall ARE the boundary. |
 | `compose.fuse.yml` | Optional overlay (added to the `-f` chain by the `POWBOX_PODMAN` gate) carrying `/dev/fuse` for the overlay storage driver; absent → vfs fallback. `docker compose run` has no `--device` flag, hence a compose file. |
 | `compose.netdev.yml` | Optional overlay carrying `/dev/net/tun` for nested-container networking (slirp4netns/pasta; without it every default `podman run` fails). Same `POWBOX_PODMAN` gate as `compose.fuse.yml`, but a separate file so the two devices attach independently under `auto` (commit `17e42b1` + the device split). |
 | `docker/shared/entrypoint-core.sh` | At startup (guarded by `command -v podman`): create `XDG_RUNTIME_DIR` mode 700; pick storage driver — keep the image default (overlay + fuse-overlayfs) when `/dev/fuse` is present, else write a user `storage.conf` selecting the slower `vfs` driver. |
@@ -187,17 +201,44 @@ is rootless Podman usable for hands-free dev here, and did any step need a worka
 
 _Fill this in after running the validation prompt so we keep continuity across sessions._
 
+_Run 2026-06-07 (Claude), inside a container rebuilt at ≥ commit `3bf4e98` with
+`POWBOX_PODMAN=on`. This is the first container that could attempt a real `podman
+run` — and doing so surfaced a third sysctl blocker (read-only `/proc/sys`) below._
+
 | Step | PASS/FAIL | Notes |
 |------|-----------|-------|
-| 0. Engine sanity | | |
-| 1. Pull + run | | |
-| 2. Persistent volume | | |
-| 3. Compose + DNS | | |
-| 4. Firewall inheritance | | |
+| 0. Engine sanity | **PASS** | uid=1000(node); podman/docker/podman-compose present; subuid/subgid `node:` lines OK; `XDG_RUNTIME_DIR` 700; **both `/dev/fuse` and `/dev/net/tun` present**; `keyctl ok` (seccomp=unconfined fix took); `podman info` → `true \| overlay \| cgroupfs \| netavark \| …/storage`. |
+| 1. Pull + run | **PASS\*** | Pull over the firewall + image-store wiring fine. \*Raw `podman run` **FAILED** on `crun: open /proc/sys/net/ipv4/ping_group_range: Read-only file system`; PASS after neutralising that sysctl (see blocker below — real fix `systempaths=unconfined`, pending relaunch). |
+| 2. Persistent volume | **PASS** | postgres:16-alpine on `probe-pgdata`; reached over published `127.0.0.1:5432` from this container (got `42`); data survived `rm -f` + re-run (count `1`). Default-network `-p` works (rootlessport handler). |
+| 3. Compose + DNS | **PARTIAL** | Inter-container DNS via aardvark **PASS** (`db` → `10.89.1.2`); bridge networking **PASS**. **Published ports on a bridge/compose network FAIL**: `netavark: Sysctl error: … Read-only file system` (route_localnet) — same `/proc/sys` root cause. Also: **`podman compose` / `docker compose` don't exist on Podman 4.3.1** — only `podman-compose` (Python) works (see tooling gap below). |
+| 4. Firewall inheritance | **PASS** | Nested container: `PUBLIC_OK` + `LAN_BLOCKED` — egress firewall inherited, LAN/host still blocked. |
 
-**Host:** (WSL2 / native Linux / Docker Desktop) — **/dev/fuse present:** (y/n) — **storage driver:** (overlay/vfs)
+**Host:** WSL2 (Docker Desktop backend; `/proc/sys` masked read-only) — **/dev/fuse present:** y — **storage driver:** overlay
 
-**Verdict:**
+**Verdict:** Rootless Podman genuinely **runs** nested containers here now (the
+seccomp + `/dev/net/tun` fixes work): images pull, default-network containers run,
+named volumes persist, published ports on the **default** network are reachable
+over loopback, the egress firewall is inherited, and aardvark inter-container DNS
+resolves. **Two gaps remain before compose stacks with published ports work
+hands-free:**
+
+1. **Read-only `/proc/sys`** (Docker masks it) blocks two sysctl writes Podman
+   needs: crun's default `ping_group_range` on *every* run (including `podman build`
+   RUN steps — so image builds with a networked RUN fail too), and netavark's
+   `route_localnet` whenever a **bridge network publishes a port** (i.e. nearly
+   every compose stack). Fixed by adding `systempaths=unconfined` to
+   `compose.shared.yml` (commit on this branch) — **needs a base+agent rebuild +
+   relaunch to validate** (could not be tested in-place: `node` has no caps to
+   remount `/proc/sys`). A confirmed in-container *workaround* for the crun half
+   only is `~/.config/containers/containers.conf` with `[containers]
+   default_sysctls = []`, but that doesn't fix the netavark/published-port half and
+   disables container `ping` — `systempaths=unconfined` is the real fix.
+2. **Podman 4.3.1** (Debian bookworm) has **no `compose` subcommand** — so
+   `podman compose …` and `docker compose …` (the shim is `exec podman "$@"`) both
+   fail with "unrecognized command", and there is no `docker-compose` binary. Only
+   `podman-compose` (Python, v1.0.3) works. This contradicts the base Dockerfile
+   comment and the agent-facing docs, and breaks project scripts that call
+   `docker compose`. See **Compose command compatibility** below.
 
 ## Known risks & likely fixes (if validation fails)
 
@@ -227,13 +268,82 @@ _Fill this in after running the validation prompt so we keep continuity across s
   It's a separate file from `compose.fuse.yml` so the two devices attach
   independently under `auto` — a host with tun but not fuse still gets networking on
   vfs. Caveat: `POWBOX_PODMAN=off` skips both devices (no overlay, no networking).
+- **Sysctl writes fail — read-only `/proc/sys` (CONFIRMED 2026-06-07; FIX APPLIED
+  in compose, PENDING relaunch).** Surfaced only once a container could actually
+  `podman run` (after the seccomp + tun fixes). The host runtime mounts `/proc/sys`
+  **read-only** (Docker's default `ReadonlyPaths`), but Podman must *write* sysctls
+  to start a container, and two writes EPERM:
+  - crun sets the default `net.ipv4.ping_group_range` on **every** run →
+    `crun: open /proc/sys/net/ipv4/ping_group_range: Read-only file system`. So
+    every default-network `podman run` failed (`hello-world`, `alpine echo`).
+  - netavark sets `net.ipv4.conf.<bridge>.route_localnet` (+ forwarding) whenever a
+    **bridge network publishes a port** → `netavark: Sysctl error: … Read-only file
+    system`. So `-p` on a custom network and essentially every compose stack failed.
+    (The rootless **default** network + `-p` survives — it uses the rootlessport
+    handler, not a netavark bridge — which is why single `podman run -p` on the
+    default net works but compose does not. Bridge networking *without* a published
+    port and aardvark DNS both work.)
+
+  Fix applied: add `systempaths=unconfined` to `security_opt` in
+  `compose.shared.yml`, which unmasks `/proc/sys` (and Docker's other masked `/proc`
+  paths) so both writes succeed. Same boundary rationale as seccomp/apparmor.
+  **Takes effect on the next base+agent rebuild + relaunch** — it could not be
+  tested in-place (`node` holds no caps; remounting `/proc/sys` rw or `sudo` both
+  refused). Narrow interim workaround for the `podman run` default-network half
+  only: `printf '[containers]\ndefault_sysctls = []\n' > ~/.config/containers/containers.conf`
+  — but it disables container `ping`, does **not** fix published ports, and (tested)
+  does **not** fix `podman build` RUN steps either (buildah re-applies the sysctl,
+  so `podman build` with a networked `RUN` still fails `open …/ping_group_range:
+  Read-only file system`). `systempaths=unconfined` is the only fix that covers all
+  three (default run, published ports, build RUN).
 - **`newuidmap: write to uid_map failed`.** Means the `/etc/subuid`/`/etc/subgid`
   ranges didn't take; verify the apt layer wrote the `node:` lines and that
   `uidmap` is installed (`which newuidmap`).
-- **`podman compose` can't find a provider.** Confirm `podman-compose` is on PATH;
-  `podman compose version` should print the podman-compose banner.
+- **`podman compose` / `docker compose` say "unrecognized command" (CONFIRMED
+  2026-06-07).** Podman 4.3.1 (Debian bookworm) has **no `compose` subcommand** —
+  that delegating wrapper only exists in Podman ≥ 4.7. The `docker` shim is
+  `exec podman "$@"`, so `docker compose …` hits the same wall, and there is no
+  `docker-compose` binary. **Only `podman-compose` (Python, v1.0.3) works** today.
+  This contradicts the base Dockerfile comment ("`podman-compose` backs
+  `docker compose` / `podman compose`") and the agent-facing docs. See **Compose
+  command compatibility** below for the fix options.
 - **First run after upgrading an existing project container.** Recreate it
   (`cc … --volatile`) so the new device + storage volume attach.
+
+## Compose command compatibility (Podman 4.3.1)
+
+The base image installs Debian bookworm's **Podman 4.3.1**, which predates the
+built-in `podman compose` delegating subcommand (added in 4.7). Measured inside the
+rebuilt container:
+
+| Command | Works? | Why |
+|---------|--------|-----|
+| `podman-compose …` | ✅ | Standalone Python tool (v1.0.3), installed and on PATH. |
+| `podman compose …` | ❌ | No `compose` subcommand in 4.3.1 (`unrecognized command`). |
+| `docker compose …` | ❌ | `docker` shim is `exec podman "$@"` → same `unrecognized command`. |
+| `docker-compose …` | ❌ | No such binary (podman-docker ships only the `docker` shim). |
+
+So compose **functionality** is available, but only under the `podman-compose`
+name — `docker compose`/`docker-compose` muscle memory and project scripts that
+shell out to them break. Three ways to close this (decision pending — see the
+question raised in the session summary):
+
+1. **Compatibility shims (no engine change).** Add `/usr/local/bin/docker-compose`
+   → `podman-compose`, and replace the `docker` shim so `docker compose …` routes
+   to `podman-compose` while everything else still goes to `podman`. Lowest risk;
+   keeps 4.3.1; podman-compose v1 covers most compose-v1 files but isn't 100%
+   compose-v2 compatible.
+2. **Upgrade Podman to ≥ 4.7 / 5.x.** Gets the native `podman compose` (and thus
+   `docker compose` via the shim) delegating to a real provider. Bookworm has no
+   such package, so this means an external/backports source or building — heavier,
+   more moving parts to keep current.
+3. **Document-only.** Tell agents/users to call `podman-compose` and fix the base
+   Dockerfile comment + agent docs to stop promising `docker compose`. Cheapest,
+   but leaves existing `docker compose` scripts broken.
+
+Whichever is chosen, fix the now-inaccurate `docker compose` / `podman compose`
+claims in `docker/base/Dockerfile` (line ~187), `docker/shared/container-agent.md.tmpl`,
+and the validation prompt above (its step 3 should call `podman-compose`).
 
 ## Follow-ups
 

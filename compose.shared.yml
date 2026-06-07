@@ -16,9 +16,27 @@ services:
     # acceptable here because this container + its egress firewall ARE the security
     # boundary (it already runs the agent --dangerously-*). Without it Podman can
     # pull/build/store images but cannot run a single container.
+    #
+    # systempaths=unconfined: the host runtime masks /proc/sys read-only (Docker's
+    # default ReadonlyPaths). crun and netavark must *write* sysctls to bring a
+    # nested container up, and both EPERM on the read-only mount:
+    #   * crun sets the default net.ipv4.ping_group_range on EVERY run →
+    #     `crun: open /proc/sys/net/ipv4/ping_group_range: Read-only file system`;
+    #   * netavark sets net.ipv4.conf.<bridge>.route_localnet (+ forwarding) when a
+    #     bridge network publishes a port → `netavark: Sysctl error: ... Read-only
+    #     file system`, which breaks essentially every compose stack (published
+    #     ports) and any `-p` on a custom network.
+    # (The rootless default network + `-p` survives because it uses the rootlessport
+    # handler, not a netavark bridge — which is why a single `podman run -p` on the
+    # default net works but compose does not.) Unconfining system paths makes
+    # /proc/sys writable so both succeed. Same boundary rationale as above; it also
+    # unmasks the rest of Docker's masked /proc paths, an accepted trade-off inside
+    # an already seccomp/apparmor-unconfined, SYS_ADMIN sandbox. Takes effect on the
+    # next base+agent rebuild + relaunch.
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+      - systempaths=unconfined
     environment:
       GH_CONFIG_DIR: /home/node/.config/gh
       GH_HOST_SEED_DIR: /home/node/.config/gh-host

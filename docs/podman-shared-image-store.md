@@ -315,6 +315,18 @@ surviving `exec "$@"` (#5) still want a check, plus the cross-container sharing
 test (Validation plan step 3) and the whole run-path suite in
 [rootless-podman.md](rootless-podman.md).
 
+**Update 2026-06-07 (run validation, Claude):** the run path was exercised for the
+first time. The shared store is now confirmed **consumed by a real `podman run`**,
+not just by inspection — `podman images --all` shows all four curated images
+`R/O=true`, the step-2 postgres started from the shared copy with no layer pull,
+and only the non-curated probe images (`alpine`, `hello-world`) landed in the
+writable per-container graphroot (`overlay-images/`), so write isolation holds.
+Cross-**container** sharing (Validation plan step 3) and read-while-write (#4)
+still need a second container, which can't be launched from inside. The run-path
+suite itself surfaced a new sysctl blocker (read-only `/proc/sys`, fixed via
+`systempaths=unconfined` in `compose.shared.yml`, pending relaunch) and a Podman
+4.3.1 compose-subcommand gap — both owned by [rootless-podman.md](rootless-podman.md).
+
 ## Enabling the Podman devices (`/dev/fuse` + `/dev/net/tun`) (WSL2 / Windows 11 host)
 
 The launcher attaches the two devices rootless Podman needs — `/dev/fuse` (overlay

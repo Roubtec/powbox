@@ -1,0 +1,11 @@
+# Optional overlay: expose /dev/fuse to the agent container for rootless Podman's
+# fuse-overlayfs storage driver. `docker compose run` has no `--device` flag (only
+# `docker run` does), so the device must be declared in a compose file. The
+# launchers add this file to the `-f` chain only when fuse is requested
+# (POWBOX_FUSE=on, or `auto` when the host shell already has /dev/fuse). When it
+# is included and the Docker host cannot expose /dev/fuse, the run hard-fails —
+# intentional for callers who explicitly demand the overlay driver.
+services:
+  agent:
+    devices:
+      - /dev/fuse:/dev/fuse

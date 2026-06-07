@@ -79,6 +79,7 @@ $podmanVolume = "agent-podman-$containerName"
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.agent.yml"
+$composeFuse = Join-Path $rootDir "compose.fuse.yml"
 $composeArgs = @("-p", "powbox", "-f", $composeShared, "-f", $composeOverlay)
 
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
@@ -365,17 +366,20 @@ elseif ($Volatile -and -not $Persist) {
 }
 
 # Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
-# Auto-detect on the host; POWBOX_FUSE=on|off overrides. In `auto` (and `off`)
-# this is best-effort: a missing device just drops the container to the slower vfs
-# driver (see entrypoint-core.sh), never aborting the launch. `on` forces the
-# device, so if the Docker host cannot expose /dev/fuse the run hard-fails. On a
-# Windows host shell /dev/fuse does not exist, so `auto` resolves to off there;
-# force it with POWBOX_FUSE=on only when the Docker Desktop VM exposes the device.
+# `docker compose run` has no --device flag (only `docker run` does), so the
+# device is declared in compose.fuse.yml and added to the -f chain here rather
+# than as a CLI flag. Auto-detect on the host; POWBOX_FUSE=on|off overrides. In
+# `auto` (and `off`) this is best-effort: omitting the device just drops the
+# container to the slower vfs driver (see entrypoint-core.sh), never aborting the
+# launch. `on` forces the device, so if the Docker host cannot expose /dev/fuse
+# the run hard-fails. On a Windows host shell /dev/fuse does not exist, so `auto`
+# resolves to off there; force it with POWBOX_FUSE=on only when the Docker
+# Desktop VM exposes the device.
 switch ($env:POWBOX_FUSE) {
-  "on" { $runArgs += @("--device", "/dev/fuse") }
+  "on" { $composeArgs += @("-f", $composeFuse) }
   "off" { }
   default {
-    if (Test-Path "/dev/fuse") { $runArgs += @("--device", "/dev/fuse") }
+    if (Test-Path "/dev/fuse") { $composeArgs += @("-f", $composeFuse) }
   }
 }
 

@@ -267,8 +267,10 @@ backgrounded first-run seed surviving `exec "$@"` (open questions #2, #3-mismatc
 
 ## Enabling `/dev/fuse` (WSL2 / Windows 11 host)
 
-The launcher attaches `--device /dev/fuse` when `POWBOX_FUSE=on`, or under the
-default `auto` when the **shell that runs the launcher** already has `/dev/fuse`.
+The launcher attaches `/dev/fuse` (by adding `compose.fuse.yml` to the `-f` chain
+— `docker compose run` has no `--device` flag, only `docker run` does) when
+`POWBOX_FUSE=on`, or under the default `auto` when the **shell that runs the
+launcher** already has `/dev/fuse`.
 `SYS_ADMIN` is already in `compose.shared.yml`, so the device is the only host-side
 gate. Where the device must exist depends on how Docker runs:
 

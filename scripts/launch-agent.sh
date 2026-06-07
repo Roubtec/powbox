@@ -424,19 +424,22 @@ elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 fi
 
 # Pass /dev/fuse through for rootless Podman's fuse-overlayfs storage driver.
-# Auto-detect from the host; POWBOX_FUSE=on|off overrides. In `auto` (and `off`)
-# this is best-effort: a missing device just drops the container to the slower vfs
-# driver (see entrypoint-core.sh), never aborting the launch. `on` forces the
-# device, so if the Docker host cannot expose /dev/fuse the run hard-fails — that
-# is intentional for callers who explicitly demand the overlay driver.
+# `docker compose run` has no --device flag (only `docker run` does), so the
+# device is declared in compose.fuse.yml and added to the -f chain here rather
+# than as a CLI flag. Auto-detect from the host; POWBOX_FUSE=on|off overrides. In
+# `auto` (and `off`) this is best-effort: omitting the device just drops the
+# container to the slower vfs driver (see entrypoint-core.sh), never aborting the
+# launch. `on` forces the device, so if the Docker host cannot expose /dev/fuse
+# the run hard-fails — that is intentional for callers who explicitly demand the
+# overlay driver.
 case "${POWBOX_FUSE:-auto}" in
 on)
-	RUN_ARGS+=(--device /dev/fuse)
+	COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml")
 	;;
 off) ;;
 *)
 	if [ -e /dev/fuse ]; then
-		RUN_ARGS+=(--device /dev/fuse)
+		COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.fuse.yml")
 	fi
 	;;
 esac

@@ -285,6 +285,7 @@ Create collision-free guide branch names such as `review-stack/<batch>-<UTC time
 Point each guide branch `gN` at the captured tip of its canonical branch `bN`; do not check out or move any `bN`.
 Create a dedicated worktree under `"$WT_BASE/_review-stack-<batch>-<timestamp>"`, initially checked out at `g1`.
 Running the restack there keeps the user's main checkout and current branch untouched.
+A fresh worktree has no installed dependencies, so if `rebase-stack`'s post-conflict validation would need a build, install the project's dependencies in this worktree first (cheap on the hardlinked store) — otherwise a resolved trivial conflict that triggers validation false-stops the guide on missing modules rather than a real failure.
 
 Delegate the restack to one fresh `worker` subagent in that dedicated worktree and have it invoke `$rebase-stack` with the explicit guide chain.
 Use the explicit form because independently created branches have no topology from which to infer the intended order.

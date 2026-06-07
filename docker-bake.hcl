@@ -11,7 +11,7 @@ variable "CODEX_VERSION" {
 }
 
 variable "BASE_SOURCE_IMAGE" {
-  default = "node:24-slim"
+  default = "node:24-trixie-slim"
 }
 
 variable "BASE_SOURCE_DIGEST" {

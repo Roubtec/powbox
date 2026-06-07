@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Seed/refresh the GLOBAL shared rootless-Podman image store.
 #
-# Live: the entrypoint (docker/shared/entrypoint-core.sh) runs `seed` once in the
-# background on the first overlay-capable start, the launcher
-# (scripts/launch-agent.{sh,ps1}) mounts the single `agent-podman-imagestore`
-# Docker volume here, prune-volumes keeps that volume, and per-container Podman
-# stores reference it read-only via the storage.conf `additionalimagestores` entry
-# the entrypoint writes. Cross-container sharing and read-while-write were validated
-# on overlay — see docs/podman-shared-image-store.md.
+# Live: the launcher (scripts/launch-agent.{sh,ps1}) runs this `seed` from a
+# short-lived, DETACHED writer container (POWBOX_IMAGE_STORE_ROLE=writer) on each
+# new overlay-capable launch — the only context that mounts the single
+# `agent-podman-imagestore` Docker volume READ-WRITE. Agent containers mount the
+# same volume READ-ONLY and reference it via the storage.conf `additionalimagestores`
+# entry the entrypoint writes, so nothing in a normal agent can mutate the shared
+# store. prune-volumes keeps the volume. Cross-container sharing and read-while-write
+# (a writer seeding while consumers read) were validated on overlay — see
+# docs/podman-shared-image-store.md.
 #
 # What it does: pulls a small CURATED set of common dev backing images into one
 # host-wide containers/storage layout (a Docker volume mounted at
@@ -32,8 +34,10 @@ set -euo pipefail
 # the seeder; consumers reference the same path read-only via storage.conf).
 STORE="${POWBOX_IMAGE_STORE_DIR:-/mnt/podman-imagestore}"
 LOCK="${STORE}/.powbox-seed.lock"
-# Marker mirrors the seed-skills.sh idiom: its presence means first-run auto-seed
-# already ran, so the entrypoint can skip it. `update` ignores the marker.
+# Marker records that a FULL seed once completed (every curated image landed) and
+# carries build provenance; `status` surfaces it as "seeded". It is no longer a
+# gate — the launcher re-runs `seed` (idempotent) from its detached writer on every
+# launch — so it is informational only. `update` ignores it.
 MARKER="${STORE}/.powbox-image-store-seeded"
 
 # Curated set. Override with POWBOX_IMAGE_STORE_IMAGES (whitespace/newline
@@ -138,18 +142,24 @@ cmd_seed() {
 		fi
 	done < <(curated_images)
 
-	# Record the marker so first-run auto-seed is one-shot — but ONLY when every
-	# curated image landed. A transient registry blip on first run must not write the
-	# marker, or the entrypoint's one-shot guard would skip the seed forever and leave
-	# the store permanently missing those images. Leaving the marker absent makes the
-	# next launch retry. (`update` ignores the marker, so a manual refresh re-pulls
-	# regardless.)
+	# Record the "seeded" marker (+ build provenance) ONLY when every curated image
+	# landed, so a transient registry blip doesn't leave a misleading "seeded" signal.
+	# The marker is informational (surfaced by `status`), not a gate: the launcher's
+	# detached writer re-runs this idempotent `seed` on every launch, pulling only
+	# what's missing. (`update` re-pulls everything regardless.)
 	if [ "$failed" -eq 0 ]; then
-		local meta
+		local meta epoch="0" commit="unknown"
 		meta="$(build_meta_dir || true)"
+		# Only read provenance when a metadata dir was actually resolved; an empty
+		# $meta would turn these into absolute-path reads ("/build-epoch") that could
+		# pick up unrelated files. Fall back to the defaults otherwise.
+		if [ -n "$meta" ]; then
+			epoch="$(cat "${meta}/build-epoch" 2>/dev/null || echo 0)"
+			commit="$(cat "${meta}/build-commit" 2>/dev/null || echo unknown)"
+		fi
 		{
-			echo "epoch=$(cat "${meta}/build-epoch" 2>/dev/null || echo 0)"
-			echo "commit=$(cat "${meta}/build-commit" 2>/dev/null || echo unknown)"
+			echo "epoch=${epoch}"
+			echo "commit=${commit}"
 		} >"$MARKER" 2>/dev/null || true
 	fi
 

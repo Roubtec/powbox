@@ -148,6 +148,20 @@ if command -v podman >/dev/null 2>&1; then
 	fi
 	mkdir -p "$HOME/.config/containers"
 
+	# Dedicated image-store seeder (launch-agent.{sh,ps1} runs a short-lived,
+	# detached writer container with POWBOX_IMAGE_STORE_ROLE=writer). It runs
+	# seed-image-store.sh against the shared store as its PRIMARY `--root`, so
+	# listing that same path under additionalimagestores would be circular. Use
+	# Podman's built-in overlay default (no storage.conf) and skip the consumer
+	# driver-pinning dance entirely; the seeder script forces the overlay driver.
+	if [ "${POWBOX_IMAGE_STORE_ROLE:-}" = "writer" ]; then
+		rm -f "$HOME/.config/containers/storage.conf"
+		if [ "$#" -eq 0 ]; then
+			exec zsh
+		fi
+		exec "$@"
+	fi
+
 	# Storage driver: fuse-overlayfs needs /dev/fuse; without it Podman uses the
 	# slower vfs driver. The driver is baked into the persistent graphroot on
 	# first use, and Podman requires `podman system reset` before changing
@@ -174,7 +188,15 @@ if command -v podman >/dev/null 2>&1; then
 	case "$_chosen_driver" in
 	overlay | vfs)
 		if [ "$_chosen_driver" != "$_desired_driver" ]; then
-			echo "Note: Podman storage was initialised with the '$_chosen_driver' driver; keeping it (current /dev/fuse state would pick '$_desired_driver'). Changing drivers needs a clean store — run 'podman system reset' (or drop this project's agent-podman-* volume) and relaunch to switch to '$_desired_driver'." >&2
+			if [ "$_chosen_driver" = "overlay" ] && [ ! -e /dev/fuse ]; then
+				# Overlay was pinned but /dev/fuse is now gone (moved host,
+				# POWBOX_PODMAN=off, outer container recreated). Overlay needs
+				# fuse-overlayfs, so Podman is NON-FUNCTIONAL until the store is
+				# reset — flag it loudly rather than implying a mere slowdown.
+				echo "Warning: Podman storage was initialised with the 'overlay' driver but /dev/fuse is not available now, so rootless Podman will FAIL until the store is reset. Run 'podman system reset' (or drop this project's agent-podman-* volume) and relaunch to reinitialise on 'vfs' — or restore /dev/fuse (POWBOX_PODMAN=on)." >&2
+			else
+				echo "Note: Podman storage was initialised with the '$_chosen_driver' driver; keeping it (current /dev/fuse state would pick '$_desired_driver'). Changing drivers needs a clean store — run 'podman system reset' (or drop this project's agent-podman-* volume) and relaunch to switch to '$_desired_driver'." >&2
+			fi
 		fi
 		;;
 	*)
@@ -186,27 +208,24 @@ if command -v podman >/dev/null 2>&1; then
 	printf '%s\n' "$_chosen_driver" >"$_driver_marker" 2>/dev/null || true
 
 	if [ "$_chosen_driver" = "overlay" ]; then
-		# Overlay path. The image ships no system storage.conf, so Podman uses its
-		# built-in rootless defaults (overlay + auto-selected fuse-overlayfs). When the
-		# global read-only image store is mounted, write a storage.conf that keeps
-		# overlay AND layers that store on top via additionalimagestores. The store is
-		# only referenced on overlay: its driver must match the consumer's, and a vfs
-		# consumer never sees it (see the vfs branch). Drop any stale override when the
-		# store isn't mounted and fall back to the built-in default.
+		# Overlay path — the CONSUMER (read) side. The image ships no system
+		# storage.conf, so Podman uses its built-in rootless defaults (overlay +
+		# auto-selected fuse-overlayfs). When the global image store is mounted
+		# (READ-ONLY here — a dedicated detached writer is what populates it), write a
+		# storage.conf that keeps overlay AND layers that store on top via
+		# additionalimagestores. The store is only referenced on overlay: its driver
+		# must match the consumer's, and a vfs consumer never sees it (see the vfs
+		# branch). Drop any stale override when the store isn't mounted and fall back
+		# to the built-in default.
 		_imgstore="/mnt/podman-imagestore"
 		if [ -d "$_imgstore" ]; then
 			# additionalimagestores wants the graphroot (the bare mount dir), NOT a
-			# driver subdir — verified on vfs; re-confirm on overlay. No mount_program
-			# is set on purpose: rootless Podman auto-selects fuse-overlayfs here just
-			# as it does with the built-in default (the image has no system storage.conf).
+			# driver subdir — verified on overlay and vfs (see
+			# docs/podman-shared-image-store.md). No mount_program is set on purpose:
+			# rootless Podman auto-selects fuse-overlayfs here just as it does with
+			# the built-in default (the image has no system storage.conf).
 			printf '[storage]\ndriver = "overlay"\n\n[storage.options]\nadditionalimagestores = ["%s"]\n' \
 				"$_imgstore" >"$HOME/.config/containers/storage.conf"
-			# First-run seed in the background so container start isn't blocked on pulls.
-			# Reparented after the entrypoint's `exec "$@"`; the seeder flock serializes
-			# concurrent writers across containers.
-			if [ ! -f "$_imgstore/.powbox-image-store-seeded" ] && command -v seed-image-store.sh >/dev/null 2>&1; then
-				seed-image-store.sh seed >/tmp/powbox-image-store-seed.log 2>&1 &
-			fi
 		else
 			rm -f "$HOME/.config/containers/storage.conf"
 		fi

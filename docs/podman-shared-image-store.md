@@ -115,10 +115,15 @@ Writable stays per-container; only cached base layers are shared.
 - **Single GLOBAL store**, one `agent-podman-imagestore` volume shared by every
   container across all projects (the curated base images are identical
   everywhere → max dedup). Writable graphroots remain per-container.
-- **In-container re-seed only** — a single bash worker
-  (`docker/shared/seed-image-store.sh`), no host `.sh`/`.ps1` wrappers until
-  there's a real host-trigger use case. Seeding is a podman/Linux operation that
-  only makes sense inside the container. An optional zsh alias is fine.
+- **Seeded by a dedicated writer, consumed read-only** (REVISED — see the
+  callout under "Wiring checklist"). A single bash worker
+  (`docker/shared/seed-image-store.sh`) does the seeding, but it runs in a
+  short-lived, detached **writer container** the launcher spawns — the only
+  context that mounts the store read-write. Agent containers mount it read-only,
+  so nothing in a normal agent can mutate the shared store. (The earlier plan ran
+  the seed in-agent in the background with a `reseed-images` zsh alias; both were
+  dropped once the consumer mount became read-only — an in-agent process can no
+  longer write the store.)
 - **Overlay-only (a scoping choice, not a vfs limitation).** An additional image
   store must match the consumer's storage driver. vfs *can* consume one too — a
   vfs store + vfs consumer resolves images fine via storage.conf (verified, see
@@ -145,18 +150,33 @@ clean; the prune whitelist was behaviorally verified), and now validated on the 
 trixie base. Step 6 (user-facing docs) is **also done** (2026-06-07). The diffs below
 are retained so a later session can see exactly what was wired and where.
 
+> **REVISED (read-only consumer mounts + dedicated writer).** A later review round
+> hardened the isolation: the **final agent `run` now mounts the store `:ro`** (step 2),
+> the **in-agent background first-run seed was removed** (step 3), and the
+> **`reseed-images` zsh alias was dropped** (step 5). Seeding moved to a short-lived,
+> **detached writer container** the launcher spawns on each overlay-capable launch
+> (`POWBOX_IMAGE_STORE_ROLE=writer` → the entrypoint skips `additionalimagestores`,
+> since the store is the writer's primary `--root`, and execs `seed-image-store.sh seed`).
+> The diff blocks below show the original wiring; the bullets note the deltas.
+
 - ✅ **1. Seeder baked** — `docker/shared/seed-image-store.sh` added to the
   `COPY --chmod=755` block in `docker/base/Dockerfile`.
 - ✅ **2. Launcher** — `agent-podman-imagestore` added to the shared-volume array and
-  mounted at `/mnt/podman-imagestore` in both the root pre-run (with mkdir+chown) and
-  the final `run`, in **both** `scripts/launch-agent.sh` and `scripts/launch-agent.ps1`.
-- ✅ **3. Entrypoint** — `docker/shared/entrypoint-core.sh` overlay branch now writes a
-  `storage.conf` with `additionalimagestores` when the store is mounted and kicks the
-  background first-run seed; vfs branch unchanged (store never referenced on vfs).
+  mounted at `/mnt/podman-imagestore` in **both** `scripts/launch-agent.sh` and
+  `scripts/launch-agent.ps1`: read-write in the root pre-run (mkdir+chown) and in the
+  detached writer, **read-only (`:ro`) in the final agent `run`** (REVISED).
+- ✅ **3. Entrypoint** — `docker/shared/entrypoint-core.sh` overlay (consumer) branch
+  writes a `storage.conf` with `additionalimagestores` when the store is mounted; the
+  writer-role branch skips it. The in-agent background first-run seed was **removed**
+  (REVISED) — the launcher's detached writer does the seeding. vfs branch unchanged
+  (store never referenced on vfs).
 - ✅ **4. prune-volumes** — `agent-podman-imagestore` whitelisted as always-expected in
   both `commands/prune-volumes.sh` and `commands/prune-volumes.ps1`.
-- ✅ **5. zsh alias** — `reseed-images` added to `docker/shared/.zshrc` (safe now that
-  the seeder is baked).
+- ✅ **5. zsh alias** — **dropped** (REVISED). `reseed-images` (`seed-image-store.sh
+  update`) can't write the now read-only in-agent mount. `seed-image-store.sh status`
+  still works (file checks only); `list`/`seed`/`update` use `podman --root`, which
+  needs a writable store, so they only work in the writer. Refresh by removing the
+  `agent-podman-imagestore` volume and relaunching.
 
 ### 1. Bake the seeder into the image
 `docker/base/Dockerfile`, in the shared-scripts `COPY --chmod=755` block (~line

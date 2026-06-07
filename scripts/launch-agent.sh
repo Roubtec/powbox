@@ -520,6 +520,34 @@ if [ "$CONTINUE" = true ]; then
 	CONTINUE_LABEL="true"
 fi
 
+# Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED
+# writer — the ONLY container that mounts agent-podman-imagestore read-write. The
+# agent container below mounts the same volume read-only, so a runaway process in
+# one project can't poison the cache every other project resolves images from.
+# Detached so the launch never blocks on pulls; idempotent and quick once
+# populated (seed-image-store.sh skips images already present, and its flock
+# serializes concurrent writers). Only meaningful on the overlay path — an
+# additionalimagestores entry must match the consumer's driver, and consumers
+# only enable overlay when /dev/fuse is present — so gate it on the resolved fuse
+# device. Best-effort: a writer that can't start must never abort the agent launch.
+case ",${PODMAN_DEVICE_MODE}," in
+*,fuse,*)
+	# Go straight to entrypoint-core.sh (firewall + XDG + the writer-role Podman
+	# setup) instead of the default entrypoint-agent.sh, so the writer skips the
+	# per-agent skill/config seeding and stays lean — it only needs egress and a
+	# Podman that can pull. AGENT_CONFIG_DIR is required by core but unused here, so
+	# point it at a throwaway path; AGENT_SETUP_HOOK is cleared so no agent hook runs.
+	docker compose "${COMPOSE_ARGS[@]}" run --rm -d --no-deps \
+		--entrypoint /usr/local/bin/entrypoint-core.sh \
+		-e POWBOX_IMAGE_STORE_ROLE=writer \
+		-e AGENT_CONFIG_DIR=/tmp/powbox-imgstore-writer \
+		-e AGENT_SETUP_HOOK= \
+		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		agent \
+		seed-image-store.sh seed >/dev/null 2>&1 || true
+	;;
+esac
+
 docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
@@ -531,7 +559,7 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
 	-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees" \
 	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
-	-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+	-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \
 	-w "${WORKSPACE_MOUNT}" \
 	agent \
 	"${CMD[@]}"

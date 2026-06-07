@@ -113,16 +113,19 @@ local_base_digest() {
 }
 
 resolve_base_source_digest() {
-	# Usage: resolve_base_source_digest <with_pull>. With --pull the build uses
-	# the registry-latest base, so stamp the registry digest. Otherwise the build
-	# reuses whatever base is cached locally; stamp that, falling back to the
-	# registry digest when the base is not present locally (buildx will pull it).
+	# Usage: resolve_base_source_digest <with_pull>. --pull refreshes the upstream
+	# tag in the LOCAL IMAGE STORE via `docker pull`. buildx's own --pull only
+	# updates BuildKit's separate build cache, leaving the `docker images` entry
+	# stale; pulling into the store means this bake builds FROM the refreshed image
+	# AND the next no-pull rebuild reuses it, so the stamped digest always matches
+	# what we actually built from. Read it back from the store afterwards, falling
+	# back to the registry digest only when the base is absent locally (e.g. the
+	# pull failed offline) — buildx pulls it at bake time.
 	if [ "$1" = true ]; then
-		BASE_SOURCE_DIGEST="$(registry_base_digest)"
-	else
-		BASE_SOURCE_DIGEST="$(local_base_digest)"
-		[ -n "$BASE_SOURCE_DIGEST" ] || BASE_SOURCE_DIGEST="$(registry_base_digest)"
+		docker pull "$BASE_SOURCE_IMAGE" >/dev/null 2>&1 || true
 	fi
+	BASE_SOURCE_DIGEST="$(local_base_digest)"
+	[ -n "$BASE_SOURCE_DIGEST" ] || BASE_SOURCE_DIGEST="$(registry_base_digest)"
 }
 
 run_bake() {
@@ -139,10 +142,10 @@ run_bake() {
 
 	local cmd=(docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl")
 
-	if [ "$with_pull" = true ]; then
-		cmd+=(--pull)
-	fi
-
+	# No --pull here: resolve_base_source_digest already pulled the upstream base
+	# into the local image store when --pull was requested, and this bake builds
+	# FROM that store image. A bake --pull would re-resolve from the registry into
+	# BuildKit's cache instead, re-introducing the store/cache split.
 	if [ "$with_no_cache" = true ]; then
 		cmd+=(--no-cache)
 	fi
@@ -182,12 +185,12 @@ ensure_base_image() {
 }
 
 # --pull only makes sense for the base image (whose FROM is an upstream
-# registry image). The agent image's only FROM is the locally-built
-# powbox-agent-base, so passing --pull to its bake invocation would make
-# buildx try to resolve it from a registry and fail. When the user requests
-# --pull on the agent target, refresh the base first (cascading any digest
-# change into the agent layers automatically) and then build the agent
-# without --pull.
+# registry image); it re-pulls that upstream tag into the local image store
+# (see resolve_base_source_digest). The agent image's only FROM is the
+# locally-built powbox-agent-base, which is not a registry image, so when the
+# user requests --pull on the agent target we refresh the base first (cascading
+# any digest change into the agent layers automatically) and then build the
+# agent.
 case "$TARGET" in
 all)
 	run_bake "$PULL" "$NO_CACHE" base

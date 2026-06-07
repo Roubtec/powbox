@@ -82,17 +82,18 @@ try {
 
   function Resolve-BaseSourceDigest {
     param([bool]$WithPull)
-    # With -Pull the build uses the registry-latest base, so stamp the registry
-    # digest. Otherwise the build reuses whatever base is cached locally; stamp
-    # that, falling back to the registry digest when the base is not present
-    # locally (buildx will pull it).
-    if ($WithPull) {
+    # -Pull refreshes the upstream tag in the LOCAL IMAGE STORE via `docker pull`.
+    # buildx's own --pull only updates BuildKit's separate build cache, leaving
+    # the `docker images` entry stale; pulling into the store means this bake
+    # builds FROM the refreshed image AND the next no-pull rebuild reuses it, so
+    # the stamped digest always matches what we actually built from. Read it back
+    # from the store afterwards, falling back to the registry digest only when the
+    # base is absent locally (e.g. the pull failed offline); buildx pulls it at
+    # bake time.
+    if ($WithPull) { docker pull $script:BaseSourceImage *> $null }
+    $script:BaseSourceDigest = Get-LocalBaseDigest
+    if (-not $script:BaseSourceDigest) {
       $script:BaseSourceDigest = Get-RegistryBaseDigest
-    } else {
-      $script:BaseSourceDigest = Get-LocalBaseDigest
-      if (-not $script:BaseSourceDigest) {
-        $script:BaseSourceDigest = Get-RegistryBaseDigest
-      }
     }
   }
 
@@ -110,10 +111,10 @@ try {
 
     $docker_args = @("buildx", "bake", "--file", (Join-Path $rootDir "docker-bake.hcl"))
 
-    if ($WithPull) {
-      $docker_args += "--pull"
-    }
-
+    # No --pull here: Resolve-BaseSourceDigest already pulled the upstream base
+    # into the local image store when -Pull was requested, and this bake builds
+    # FROM that store image. A bake --pull would re-resolve from the registry
+    # into BuildKit's cache instead, re-introducing the store/cache split.
     if ($WithNoCache) {
       $docker_args += "--no-cache"
     }
@@ -160,12 +161,12 @@ try {
   }
 
   # -Pull only makes sense for the base image (whose FROM is an upstream
-  # registry image). The agent image's only FROM is the locally-built
-  # powbox-agent-base, so passing --pull to its bake invocation would make
-  # buildx try to resolve it from a registry and fail. When the user requests
-  # -Pull on the agent target, refresh the base first (cascading any digest
-  # change into the agent layers automatically) and then build the agent
-  # without --pull.
+  # registry image); it re-pulls that upstream tag into the local image store
+  # (see Resolve-BaseSourceDigest). The agent image's only FROM is the
+  # locally-built powbox-agent-base, which is not a registry image, so when the
+  # user requests -Pull on the agent target we refresh the base first (cascading
+  # any digest change into the agent layers automatically) and then build the
+  # agent.
   switch ($Target) {
     "all" {
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache

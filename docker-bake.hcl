@@ -33,6 +33,15 @@ variable "POWBOX_COMMIT_CODEX" {
   default = "unknown"
 }
 
+# Content ID of the base image this agent is built FROM, recorded in the top
+# metadata layer. The Codex install layer's parent is the base, so the build
+# script compares this against the current base to decide whether a separate
+# base rebuild busts that layer (and thus whether POWBOX_COMMIT_CODEX can be
+# carried forward). Supplied by scripts/build-image.{sh,ps1}.
+variable "POWBOX_BASE_IMAGE_ID" {
+  default = ""
+}
+
 target "_common" {
   context = "."
   output = ["type=docker"]
@@ -59,6 +68,7 @@ target "agent" {
     CODEX_VERSION = CODEX_VERSION
     POWBOX_COMMIT = POWBOX_COMMIT
     POWBOX_COMMIT_CODEX = POWBOX_COMMIT_CODEX
+    POWBOX_BASE_IMAGE_ID = POWBOX_BASE_IMAGE_ID
   }
 }
 

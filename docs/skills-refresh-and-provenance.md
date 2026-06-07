@@ -207,7 +207,7 @@ Reality: a piecemeal-updated stack can carry up to **three** distinct powbox com
 | Anchor | Changes when | Recorded where |
 |---|---|---|
 | **base** | base rebuild only (separate image, own parent) | label + file on the base image |
-| **codex** | codex layer rebuilt (reused on claude-only update) | label + file on agent image, via **read-back** |
+| **codex** | codex layer rebuilt — a codex version bump, or a base rebuild that re-parents it (reused on a claude-only update over the same base) | label + file on agent image, via **read-back** |
 | **claude / top** | every agent build | label + file on agent image (current HEAD) |
 
 **Cache-safety crux:** codex's commit **cannot** be stamped inside the codex install
@@ -215,16 +215,35 @@ layer. We pass the current HEAD on every build, so any `RUN` referencing a commi
 `ARG` in that layer would bust the codex layer on every commit — destroying the
 layer-reuse the "codex below claude" ordering exists to preserve. Therefore codex's
 commit is computed in `build-image.sh`:
-- codex rebuilt this run (codex forced to latest, or `base`/`all`/`--no-cache`, or
-  no existing image) → `powbox.commit.codex = HEAD`;
-- codex pinned/reused → read the prior `powbox.commit.codex` off the existing
-  `powbox-agent:latest` and **carry it forward unchanged**.
+- codex rebuilt this run (codex forced to latest, or `base`/`all`/`--no-cache`, no
+  existing image, **or the base image changed** since the previous agent was built)
+  → `powbox.commit.codex = HEAD`;
+- codex pinned/reused on the *same* base → read the prior `powbox.commit.codex` off
+  the existing `powbox-agent:latest` and **carry it forward unchanged**.
 
-`build-image.sh` distinguishes the cases by also recording a `powbox.codex.version`
-label and comparing it to the requested `CODEX_VERSION` — which aligns with the
-`agent-update` orchestration (claude-only update passes the same baked codex version
-→ carry forward; codex update passes a new one → HEAD). Degrades gracefully to HEAD
-for ad-hoc builds; acceptable because **no logic flows off these hashes** (introspection only).
+`build-image.{sh,ps1}` distinguishes the cases by mirroring Docker's cache key for the
+codex layer — its **parent** (the base image) and its **install instruction**
+(`CODEX_VERSION`). It records `powbox.base.image.id` and `powbox.codex.version` on the
+agent and carries the codex commit forward only when *both* the current base image ID
+and the requested `CODEX_VERSION` match what the previous `powbox-agent:latest` recorded;
+otherwise the layer rebuilds at HEAD. The version half aligns with the `agent-update`
+orchestration (claude-only update passes the same baked codex version → carry forward;
+codex update passes a new one → HEAD); the base half catches a separately rebuilt base
+(`build.sh base` then `build.sh agent`) that re-parents and thus rebuilds the codex
+layer. Degrades gracefully to HEAD for ad-hoc builds; acceptable because **no logic
+flows off these hashes** (introspection only).
+
+**Known limitation (accepted):** the codex commit is resolved *before* the build, so it
+predicts Docker's cache decision rather than observing it. Two residual cases can still
+attribute the codex layer to a carried-forward commit when it was actually rebuilt:
+(a) the BuildKit build cache is evicted between runs (e.g. `docker builder prune`), which
+the host cannot detect without running the build; and (b) a Dockerfile instruction *at or
+above* the codex layer is edited without bumping `CODEX_VERSION`. Both require either
+external cache surgery or a source edit (which carries its own commit), and in the worst
+case `powbox-provenance` shows a codex commit slightly behind HEAD — never wrong in a way
+any runtime logic depends on. Fully closing them would require observing per-layer cache
+hits from the build output (or relabelling after the build), which is disproportionate for
+an introspection-only surface.
 
 **Surface via both:**
 - **Labels** `powbox.commit.{base,codex,claude}` → host-side `docker inspect` /

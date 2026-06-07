@@ -40,24 +40,42 @@ try {
     return $v.Trim()
   }
 
+  # Content ID of the local base image (empty when it is absent). This is the
+  # parent half of the Codex layer's cache key, so it is both stamped onto the
+  # agent (powbox.base.image.id) and compared against the previous agent's
+  # recorded value to tell whether a separate base rebuild will bust that layer.
+  function Get-BaseImageId {
+    $id = docker image inspect "powbox-agent-base:latest" --format '{{.Id}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $id) { return "" }
+    return $id.Trim()
+  }
+
   # Commit that built the Codex install layer. Stamping it inside that layer
   # would bust its cache on every commit (defeating the Codex-below-Claude
   # ordering), so resolve it here: HEAD when the layer rebuilds this run,
-  # otherwise carry the existing image's recorded value forward. The version
-  # comparison mirrors Docker's own cache key (CodexVersion is part of the
-  # install instruction). See docs/skills-refresh-and-provenance.md.
+  # otherwise carry the existing image's recorded value forward. The reuse test
+  # mirrors Docker's cache key for that layer: its parent (the base image) AND
+  # the install instruction (CodexVersion). See docs/skills-refresh-and-provenance.md.
   function Get-CodexCommit {
     if ($NoCache -or $Pull) { return $script:PowboxCommit }
     if ($Target -eq 'base' -or $Target -eq 'all') { return $script:PowboxCommit }
     docker image inspect "powbox-agent:latest" *> $null
     if ($LASTEXITCODE -ne 0) { return $script:PowboxCommit }
+    # The Codex layer's parent is the base image, so a base that differs from the
+    # one the previous agent was built on (e.g. a separate `build.ps1 base`)
+    # rebuilds the Codex layer regardless of version. Only an identical base ID
+    # means the layer can be reused; an absent base (about to be built) or a
+    # previous agent with no recorded base ID counts as changed -> HEAD.
+    $curBaseId = Get-BaseImageId
+    $prevBaseId = Get-ImageLabel "powbox-agent:latest" "powbox.base.image.id"
+    if (-not $curBaseId -or $curBaseId -ne $prevBaseId) { return $script:PowboxCommit }
     $prevVer = Get-ImageLabel "powbox-agent:latest" "powbox.codex.version"
     $prevCommit = Get-ImageLabel "powbox-agent:latest" "powbox.commit.codex"
-    # Same Codex version (with a base we are not rebuilding) => layer reused, so
-    # carry its recorded commit forward. An image built before provenance
-    # labelling has none to carry, and we cannot know which commit built the
-    # reused layer, so record "unknown" rather than misattributing HEAD. A
-    # differing version rebuilds the layer at HEAD (returned below).
+    # Same base and same Codex version => layer reused, so carry its recorded
+    # commit forward. An image built before provenance labelling has none to
+    # carry, and we cannot know which commit built the reused layer, so record
+    # "unknown" rather than misattributing HEAD. A differing version rebuilds the
+    # layer at HEAD (returned below).
     if ($prevVer -eq $CodexVersion) {
       if ($prevCommit) { return $prevCommit } else { return "unknown" }
     }
@@ -128,6 +146,9 @@ try {
     $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
     $env:POWBOX_COMMIT = $script:PowboxCommit
     $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
+    # Resolved here (not at script top) so the agent target records the base it
+    # actually builds FROM, including a base just rebuilt earlier this run.
+    $env:POWBOX_BASE_IMAGE_ID = Get-BaseImageId
     docker @docker_args
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE

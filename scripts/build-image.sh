@@ -76,27 +76,44 @@ image_label() {
 	printf '%s' "$v"
 }
 
+base_image_id() {
+	# Content ID of the local base image (empty when absent). The parent half of
+	# the Codex layer's cache key: stamped onto the agent (powbox.base.image.id)
+	# and compared against the previous agent's recorded value to tell whether a
+	# separate base rebuild will bust that layer.
+	docker image inspect powbox-agent-base:latest --format '{{.Id}}' 2>/dev/null || true
+}
+
 # Commit that built the Codex install layer. Stamping it inside that layer would
 # bust its cache on every commit (defeating the Codex-below-Claude ordering), so
 # resolve it here: use HEAD when the layer will rebuild this run, otherwise carry
-# the existing image's recorded value forward. The version-label comparison
-# mirrors Docker's own cache key (CODEX_VERSION is part of the install
-# instruction). See docs/skills-refresh-and-provenance.md.
+# the existing image's recorded value forward. The reuse test mirrors Docker's
+# cache key for that layer: its parent (the base image) AND the install
+# instruction (CODEX_VERSION). See docs/skills-refresh-and-provenance.md.
 POWBOX_COMMIT_CODEX="$POWBOX_COMMIT"
 resolve_codex_commit() {
 	# Any of these rebuild the Codex layer, so it was built at HEAD.
-	[ "$NO_CACHE" = true ] && return
-	[ "$PULL" = true ] && return
-	case "$TARGET" in base | all) return ;; esac
-	docker image inspect powbox-agent:latest >/dev/null 2>&1 || return
+	[ "$NO_CACHE" = true ] && return 0
+	[ "$PULL" = true ] && return 0
+	case "$TARGET" in base | all) return 0 ;; esac
+	docker image inspect powbox-agent:latest >/dev/null 2>&1 || return 0
+	# The Codex layer's parent is the base image, so a base that differs from the
+	# one the previous agent was built on (e.g. a separate `build.sh base`)
+	# rebuilds the Codex layer regardless of version. Only an identical base ID
+	# means the layer can be reused; an absent base (about to be built) or a
+	# previous agent with no recorded base ID counts as changed -> HEAD.
+	local cur_base_id prev_base_id
+	cur_base_id="$(base_image_id)"
+	prev_base_id="$(image_label powbox-agent:latest powbox.base.image.id)"
+	[ -n "$cur_base_id" ] && [ "$cur_base_id" = "$prev_base_id" ] || return 0
 	local prev_ver prev_commit
 	prev_ver="$(image_label powbox-agent:latest powbox.codex.version)"
 	prev_commit="$(image_label powbox-agent:latest powbox.commit.codex)"
-	# Same Codex version (with a base we are not rebuilding) => layer reused, so
-	# carry its recorded commit forward. An image built before provenance
-	# labelling has none to carry, and we cannot know which commit built the
-	# reused layer, so record "unknown" rather than misattributing this build's
-	# HEAD to it. A differing version rebuilds the layer at HEAD (the default).
+	# Same base and same Codex version => layer reused, so carry its recorded
+	# commit forward. An image built before provenance labelling has none to
+	# carry, and we cannot know which commit built the reused layer, so record
+	# "unknown" rather than misattributing this build's HEAD to it. A differing
+	# version rebuilds the layer at HEAD (the default).
 	if [ "$prev_ver" = "$CODEX_VERSION" ]; then
 		POWBOX_COMMIT_CODEX="${prev_commit:-unknown}"
 	fi
@@ -159,6 +176,7 @@ run_bake() {
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
+		POWBOX_BASE_IMAGE_ID="$(base_image_id)" \
 		"${cmd[@]}"
 }
 

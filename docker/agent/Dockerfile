@@ -77,12 +77,16 @@ COPY --chmod=755 \
 
 # --- Provenance labels -------------------------------------------------------
 # Host-side introspection surface (docker image inspect / docker inspect). The
-# base commit is inherited from the base image's powbox.commit.base label. The
-# Codex/Claude versions let the build script tell whether the Codex install
-# layer will be reused (same version) and thus whether to carry its commit
-# forward. Declared last so they only rebuild this trivial metadata layer.
+# base commit is inherited from the base image's powbox.commit.base label.
+# powbox.base.image.id records the exact base this image was built FROM: the
+# Codex install layer's parent, so the build script compares it against the
+# current base to tell whether that layer will be reused (same base AND same
+# Codex version) and thus whether to carry its commit forward. Declared last so
+# they only rebuild this trivial metadata layer.
+ARG POWBOX_BASE_IMAGE_ID=""
 LABEL powbox.commit.claude="${POWBOX_COMMIT}" \
       powbox.commit.codex="${POWBOX_COMMIT_CODEX}" \
+      powbox.base.image.id="${POWBOX_BASE_IMAGE_ID}" \
       powbox.codex.version="${CODEX_VERSION}" \
       powbox.claude.version="${CLAUDE_CODE_VERSION}"
 

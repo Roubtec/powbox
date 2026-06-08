@@ -87,9 +87,11 @@ fi
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in,
 # a Podman without the `compose` subcommand, a nested run that no longer starts) is
 # caught here. The helper runs the image with the launch-time device + security
-# wiring the launcher normally supplies via the compose overlays, and auto-skips on
-# a host that cannot expose /dev/net/tun. Skip it explicitly with
-# POWBOX_SMOKE_SKIP_PODMAN=1; see scripts/smoke-test-podman.sh for what it covers.
+# wiring the launcher normally supplies via the compose overlays. On a host that
+# cannot expose /dev/net/tun it still validates the static engine wiring and skips
+# only the nested-run checks; a genuinely broken image fails on any host. Skip the
+# whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1; see
+# scripts/smoke-test-podman.sh for what it covers.
 if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
 else

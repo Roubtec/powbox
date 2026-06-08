@@ -522,8 +522,15 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
   (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), and a bridge
   network with a published port (proves the iptables firewall driver + the
   `route_localnet` sysctl `systempaths=unconfined` unblocks). It mirrors the
-  launcher's `POWBOX_PODMAN` gate and **auto-skips** (rather than failing) on a host
-  that cannot expose `/dev/net/tun` — e.g. the Docker Desktop VM under the default
-  `auto`, where `POWBOX_PODMAN=on` forces it. The full validation prompt above stays
-  the deeper manual check (postgres on a named volume, compose + adminer,
-  firewall-inheritance `LAN_BLOCKED`); the smoke test is the fast automated guard.
+  launcher's `POWBOX_PODMAN` gate. The probe has two halves: the device-free
+  engine-wiring checks (engine present, the drop-in, `podman info`, the `compose`
+  subcommand) run on **every** host, and the nested-run/published-port checks
+  **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
+  default `auto`, where `POWBOX_PODMAN=on` forces the full run. So an environment
+  that simply cannot do nested networking is not failed, but a genuinely broken
+  image (missing engine, dropped drop-in) **fails** the stage on any host — a
+  missing engine is a real regression, not a skip (use `POWBOX_SMOKE_SKIP_PODMAN=1`
+  / `POWBOX_PODMAN=off` to skip a legacy pre-Podman image on purpose). The full
+  validation prompt above stays the deeper manual check (postgres on a named volume,
+  compose + adminer, firewall-inheritance `LAN_BLOCKED`); the smoke test is the fast
+  automated guard.

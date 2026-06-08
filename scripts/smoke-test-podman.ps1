@@ -16,12 +16,21 @@ param(
 # seccomp/apparmor/systempaths=unconfined + SYS_ADMIN/NET_ADMIN/NET_RAW
 # (compose.shared.yml) - without which crun/netavark EPERM and nothing runs.
 #
-# Device selection mirrors the launcher's POWBOX_PODMAN gate (POWBOX_FUSE is the
-# deprecated alias): `on` forces both, `off` skips the whole stage, `auto` (default)
-# attaches what the host exposes. /dev/net/tun is mandatory, so when it is absent
-# the stage SKIPS rather than failing - a host that cannot do nested networking
-# (e.g. Docker Desktop's VM, where the Windows host cannot see the device under
-# `auto`) is not a Podman regression; force it with POWBOX_PODMAN=on if it exists.
+# The probe has two halves. The engine-wiring checks (podman present, the
+# containers.conf drop-in, `podman info`, the `podman compose` subcommand) need no
+# devices and run on EVERY host. The nested-run + published-port checks need
+# /dev/net/tun, so they self-skip when it is absent (e.g. Docker Desktop's VM under
+# `auto`, where the Windows host cannot see the device) - a host that cannot do
+# nested networking still validates the baked engine wiring instead of skipping
+# blind, and is not treated as a regression. Device selection mirrors the launcher's
+# POWBOX_PODMAN gate (POWBOX_FUSE is the deprecated alias): `on` forces both
+# devices, `off` skips the whole stage, `auto` (default) attaches what the host
+# exposes.
+#
+# A missing podman/podman-compose/etc. IS one of the regressions this stage exists
+# to catch, so it FAILS rather than skipping: a current image must ship the engine.
+# To run the smoke test against a legacy pre-Podman image on purpose, skip the
+# whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1 (or POWBOX_PODMAN=off).
 
 $ErrorActionPreference = "Stop"
 
@@ -40,11 +49,9 @@ switch ($podmanRequest) {
   }
 }
 
-if (-not $haveTun) {
-  Write-Host "Skipping Podman smoke test: /dev/net/tun is not available to this host, so nested-container networking cannot be exercised. Force it with POWBOX_PODMAN=on if the device exists (e.g. the Docker Desktop VM)."
-  return
-}
-
+# The storage + networking devices the host exposes. The engine-wiring checks need
+# neither; only the nested-run + published-port checks need /dev/net/tun, and they
+# self-skip inside the container when it is absent.
 $runArgs = @(
   "run", "--rm",
   "--cap-add", "SYS_ADMIN",
@@ -52,26 +59,33 @@ $runArgs = @(
   "--cap-add", "NET_RAW",
   "--security-opt", "seccomp=unconfined",
   "--security-opt", "apparmor=unconfined",
-  "--security-opt", "systempaths=unconfined",
-  "--device", "/dev/net/tun:/dev/net/tun"
+  "--security-opt", "systempaths=unconfined"
 )
 $fuseNote = "vfs storage (no /dev/fuse)"
 if ($haveFuse) {
   $runArgs += @("--device", "/dev/fuse:/dev/fuse")
   $fuseNote = "overlay storage (/dev/fuse)"
 }
+if ($haveTun) {
+  $runArgs += @("--device", "/dev/net/tun:/dev/net/tun")
+  $tunNote = "/dev/net/tun"
+}
+else {
+  $tunNote = "no /dev/net/tun (nested-run checks will be skipped)"
+}
 
-Write-Host "Podman smoke test against $Image - devices: /dev/net/tun + $fuseNote."
+Write-Host "Podman smoke test against $Image - $tunNote, $fuseNote."
 
 # The in-container probe, built with explicit LF joins (single-quoted lines so
 # PowerShell leaves the shell $vars alone; a here-string would inherit this file's
-# CRLF endings and the stray ^M would break /bin/sh -lc). Exit 97 is the "image
-# predates Podman support" sentinel the caller turns into a skip; any other
-# non-zero is a failure. The lines must contain no single quotes.
+# CRLF endings and the stray ^M would break /bin/sh -lc). A non-zero exit is a
+# failure: there is no skip sentinel - a missing engine is a real regression (use
+# POWBOX_SMOKE_SKIP_PODMAN=1 to skip the stage for a legacy image on purpose). The
+# lines must contain no single quotes.
 $script = @(
   'set -eu'
   'fail() { echo "FAIL: $*" >&2; exit 1; }'
-  'command -v podman >/dev/null 2>&1 || exit 97'
+  'command -v podman >/dev/null 2>&1 || fail "podman is not installed in this image"'
   '_xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"'
   'mkdir -p "$_xdg" && chmod 700 "$_xdg"'
   'export XDG_RUNTIME_DIR="$_xdg"'
@@ -88,6 +102,10 @@ $script = @(
   '[ "$info" = "true|cgroupfs|netavark" ] || fail "podman info = [$info], want [true|cgroupfs|netavark]"'
   'grep -Eqr "firewall_driver.*iptables" /etc/containers/containers.conf.d/ || fail "firewall_driver=iptables drop-in missing (netavark would try nft)"'
   'podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missing (Podman < 4.7?)"'
+  'if [ "${SMOKE_HAVE_TUN:-false}" != true ]; then'
+  '  echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port checks: /dev/net/tun was not attached on this host."'
+  '  exit 0'
+  'fi'
   'out=$(podman run --quiet --rm docker.io/library/alpine echo nested_ok 2>&1) || fail "podman run on the default network failed: $out"'
   'printf "%s" "$out" | grep -qx nested_ok || fail "unexpected nested-run output: $out"'
   'podman network create smoke-net >/dev/null || fail "podman network create failed"'
@@ -102,6 +120,7 @@ $script = @(
 
 $runArgs += @(
   "-e", "SMOKE_HAVE_FUSE=$($haveFuse.ToString().ToLower())",
+  "-e", "SMOKE_HAVE_TUN=$($haveTun.ToString().ToLower())",
   "--entrypoint", "/bin/sh", $Image, "-lc", $script
 )
 
@@ -110,9 +129,6 @@ $rc = $LASTEXITCODE
 
 if ($rc -eq 0) {
   Write-Host "Smoke test (podman) passed."
-}
-elseif ($rc -eq 97) {
-  Write-Host "Skipping Podman smoke test: '$Image' does not contain podman (image predates rootless-Podman support)."
 }
 else {
   throw "Podman smoke test failed (exit $rc). See container output above."

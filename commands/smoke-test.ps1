@@ -105,10 +105,12 @@ if ($LASTEXITCODE -ne 0) {
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in, a
 # Podman without the `compose` subcommand, a nested run that no longer starts) is
 # caught here. The helper runs the image with the launch-time device + security
-# wiring the launcher normally supplies via the compose overlays, and auto-skips on
-# a host that cannot expose /dev/net/tun. Skip it explicitly with -SkipPodman; see
-# scripts/smoke-test-podman.ps1 for what it covers. The helper throws on failure, so
-# $ErrorActionPreference = "Stop" propagates that up.
+# wiring the launcher normally supplies via the compose overlays. On a host that
+# cannot expose /dev/net/tun it still validates the static engine wiring and skips
+# only the nested-run checks; a genuinely broken image fails on any host. Skip the
+# whole stage explicitly with -SkipPodman; see scripts/smoke-test-podman.ps1 for
+# what it covers. The helper throws on failure, so $ErrorActionPreference = "Stop"
+# propagates that up.
 if ($SkipPodman) {
   Write-Host "Skipping Podman smoke test (-SkipPodman)."
 }

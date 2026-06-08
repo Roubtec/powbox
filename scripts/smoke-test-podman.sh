@@ -16,12 +16,22 @@ set -euo pipefail
 #   * seccomp/apparmor/systempaths=unconfined + SYS_ADMIN/NET_ADMIN/NET_RAW
 #       (compose.shared.yml) — without these crun/netavark EPERM and nothing runs.
 #
-# Device selection mirrors the launcher's POWBOX_PODMAN gate (POWBOX_FUSE is the
-# deprecated alias): `on` forces both, `off` skips the whole stage, `auto` (default)
-# attaches what the host exposes. /dev/net/tun is mandatory for a meaningful test,
-# so when it is absent the stage SKIPS (exit 0) with a note rather than failing — a
-# host that cannot do nested networking (e.g. Docker Desktop's VM under `auto`) is
-# not a Podman regression; force it with POWBOX_PODMAN=on if the device exists.
+# The probe has two halves. The engine-wiring checks (podman present, the
+# containers.conf drop-in, `podman info`, the `podman compose` subcommand) need no
+# devices and run on EVERY host. The nested-run + published-port checks need
+# /dev/net/tun, so they self-skip when it is absent (e.g. Docker Desktop's VM under
+# `auto`, where the device is not exposed) — a host that cannot do nested
+# networking still validates the baked engine wiring instead of skipping blind, and
+# is not treated as a regression. Device selection mirrors the launcher's
+# POWBOX_PODMAN gate (POWBOX_FUSE is the deprecated alias): `on` forces both
+# devices, `off` skips the whole stage, `auto` (default) attaches what the host
+# exposes.
+#
+# A missing podman/podman-compose/etc. IS one of the regressions this stage exists
+# to catch, so it FAILS rather than skipping: a current image must ship the engine.
+# To run the smoke test against a legacy pre-Podman image on purpose, skip the
+# whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1 (or POWBOX_PODMAN=off)
+# rather than let a silent pass hide a real regression.
 
 IMAGE="${1:-powbox-agent:latest}"
 
@@ -42,11 +52,6 @@ off)
 	;;
 esac
 
-if [ "$have_tun" != true ]; then
-	echo "Skipping Podman smoke test: /dev/net/tun is not available to this host, so nested-container networking cannot be exercised. Force it with POWBOX_PODMAN=on if the device exists (e.g. the Docker Desktop VM)." >&2
-	exit 0
-fi
-
 run_args=(
 	--rm
 	--cap-add SYS_ADMIN
@@ -55,37 +60,47 @@ run_args=(
 	--security-opt seccomp=unconfined
 	--security-opt apparmor=unconfined
 	--security-opt systempaths=unconfined
-	--device /dev/net/tun:/dev/net/tun
 )
+# Attach the storage + networking devices the host exposes. The engine-wiring
+# checks need neither; only the nested-run + published-port checks need
+# /dev/net/tun, and they self-skip inside the container when it is absent.
 fuse_note="vfs storage (no /dev/fuse)"
 if [ "$have_fuse" = true ]; then
 	run_args+=(--device /dev/fuse:/dev/fuse)
 	fuse_note="overlay storage (/dev/fuse)"
 fi
+if [ "$have_tun" = true ]; then
+	run_args+=(--device /dev/net/tun:/dev/net/tun)
+	tun_note="/dev/net/tun"
+else
+	tun_note="no /dev/net/tun (nested-run checks will be skipped)"
+fi
 
-echo "Podman smoke test against $IMAGE — devices: /dev/net/tun + ${fuse_note}."
+echo "Podman smoke test against $IMAGE — ${tun_note}, ${fuse_note}."
 
 # The in-container probe. Single-quoted so the host shell leaves its $vars alone;
-# it must therefore contain no single quotes. Exit 97 is the "image predates Podman
-# support" sentinel the caller turns into a skip; any other non-zero is a failure.
+# it must therefore contain no single quotes. A non-zero exit is a failure: there
+# is no skip sentinel — a missing engine is a real regression (use
+# POWBOX_SMOKE_SKIP_PODMAN=1 to skip the stage for a legacy image on purpose).
 set +e
 docker run "${run_args[@]}" \
 	-e SMOKE_HAVE_FUSE="$have_fuse" \
+	-e SMOKE_HAVE_TUN="$have_tun" \
 	--entrypoint /bin/sh "$IMAGE" -lc '
 set -eu
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# An image built before rootless-Podman support has no podman at all. Treat that as
-# a skip (sentinel 97), not a failure — this test simply does not apply to it.
-command -v podman >/dev/null 2>&1 || exit 97
+# Engine presence is itself one of the regressions this stage exists to catch, so a
+# missing podman FAILS rather than skipping — a current image must ship it.
+command -v podman >/dev/null 2>&1 || fail "podman is not installed in this image"
 
 # Entrypoint prep we bypass with --entrypoint: mirror the two things
-# entrypoint-core.sh does for Podman — a private runtime dir, and (only when
-# /dev/fuse is absent) a vfs storage.conf, since the overlay default needs
-# fuse-overlayfs. No shared image store is mounted into this throwaway container, so
-# the graphroot starts empty and the additionalimagestores wiring in
-# entrypoint-core.sh is irrelevant here.
+# entrypoint-core.sh does for Podman — a private runtime dir (created, locked to
+# 700, and exported), and (only when /dev/fuse is absent) a vfs storage.conf, since
+# the overlay default needs fuse-overlayfs. No shared image store is mounted into
+# this throwaway container, so the graphroot starts empty and the
+# additionalimagestores wiring in entrypoint-core.sh is irrelevant here.
 _xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"
 mkdir -p "$_xdg" && chmod 700 "$_xdg"
 export XDG_RUNTIME_DIR="$_xdg"
@@ -94,8 +109,9 @@ if [ "${SMOKE_HAVE_FUSE:-false}" != true ]; then
 	printf "[storage]\ndriver = \"vfs\"\n" >"$HOME/.config/containers/storage.conf"
 fi
 
-# 1. Engine sanity (no network). The cgroup manager + network backend come from the
-# baked containers.conf drop-in; a base bump that drops or overrides it changes
+# 1. Engine sanity + static wiring (no network — runs on every host, including one
+# that cannot expose /dev/net/tun). The cgroup manager + network backend come from
+# the baked containers.conf drop-in; a base bump that drops or overrides it changes
 # these. Rootless must be true.
 [ "$(id -u)" -eq 1000 ] || fail "not running as uid 1000 (node)"
 command -v podman-compose >/dev/null 2>&1 || fail "podman-compose missing"
@@ -113,6 +129,14 @@ grep -Eqr "firewall_driver.*iptables" /etc/containers/containers.conf.d/ || fail
 # The compose subcommand (the reason for the trixie/Podman-5 base bump; absent on
 # Podman < 4.7) must exist, or "podman compose" / "docker compose" both break.
 podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missing (Podman < 4.7?)"
+
+# The remaining checks start nested containers, which need /dev/net/tun. When it was
+# not attached (the host could not expose it), skip just these — the engine wiring
+# above is already validated — rather than fail on an environment limitation.
+if [ "${SMOKE_HAVE_TUN:-false}" != true ]; then
+	echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port checks: /dev/net/tun was not attached on this host."
+	exit 0
+fi
 
 # 2. Nested run on the default network. This alone proves the seccomp/apparmor
 # profile (crun keyring + pivot_root), /dev/net/tun (slirp4netns/pasta), and the
@@ -146,15 +170,8 @@ echo "Podman engine OK: rootless nested run, bridge published port, and the comp
 rc=$?
 set -e
 
-case "$rc" in
-0)
-	echo "Smoke test (podman) passed."
-	;;
-97)
-	echo "Skipping Podman smoke test: '$IMAGE' does not contain podman (image predates rootless-Podman support)." >&2
-	;;
-*)
+if [ "$rc" -ne 0 ]; then
 	echo "Podman smoke test FAILED (exit $rc). See container output above." >&2
 	exit "$rc"
-	;;
-esac
+fi
+echo "Smoke test (podman) passed."

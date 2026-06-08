@@ -510,5 +510,27 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
 - If/when GUI, emulator, or non-headless-browser needs appear, that's the signal
   to move that workload to a dedicated Ubuntu VM (snapshot-based reset), per the
   original Option B → VM plan.
-- Consider a smoke-test addition (`scripts/smoke-test-image.sh`) once the manual
-  validation passes, so future base bumps catch Podman regressions automatically.
+- **Smoke test — DONE** (`scripts/smoke-test-podman.{sh,ps1}`, wired as stage 3 of
+  `commands/smoke-test.{sh,ps1}`). Future base/Podman bumps now catch engine
+  regressions automatically: it runs the built image with the launch-time wiring
+  the launcher supplies via the compose overlays (`/dev/net/tun`, optional
+  `/dev/fuse`, and `seccomp/apparmor/systempaths=unconfined` +
+  `SYS_ADMIN/NET_ADMIN/NET_RAW`) and asserts the high-signal subset of the manual
+  validation prompt above: engine sanity (rootless, `cgroupfs`, `netavark`, the
+  `firewall_driver=iptables` drop-in, subuid/subgid, the `podman compose`
+  subcommand that the trixie bump exists for), a nested run on the default network
+  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), and a bridge
+  network with a published port (proves the iptables firewall driver + the
+  `route_localnet` sysctl `systempaths=unconfined` unblocks). It mirrors the
+  launcher's `POWBOX_PODMAN` gate. The probe has two halves: the device-free
+  engine-wiring checks (engine present, the drop-in, `podman info`, the `compose`
+  subcommand) run on **every** host, and the nested-run/published-port checks
+  **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
+  default `auto`, where `POWBOX_PODMAN=on` forces the full run. So an environment
+  that simply cannot do nested networking is not failed, but a genuinely broken
+  image (missing engine, dropped drop-in) **fails** the stage on any host — a
+  missing engine is a real regression, not a skip (use `POWBOX_SMOKE_SKIP_PODMAN=1`
+  / `POWBOX_PODMAN=off` to skip a legacy pre-Podman image on purpose). The full
+  validation prompt above stays the deeper manual check (postgres on a named volume,
+  compose + adminer, firewall-inheritance `LAN_BLOCKED`); the smoke test is the fast
+  automated guard.

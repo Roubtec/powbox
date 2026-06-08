@@ -1,6 +1,7 @@
 param(
   [string]$Image = "powbox-agent:latest",
-  [switch]$SkipDb
+  [switch]$SkipDb,
+  [switch]$SkipPodman
 )
 
 # The agent image is unified: both claude and codex (and codex's bwrap sandbox)
@@ -61,13 +62,13 @@ $rootDir = Split-Path -Parent $scriptDir
 # presence only) this exercises role/db creation, URL percent-encoding, the
 # 127.0.0.1 host binding, and the eval round-trip. Deliberately nasty
 # credentials prove the SQL-quoting and URL-encoding paths. Skip the daemon
-# bring-up (and keep the fast presence-only sweep) with -SkipDb.
+# bring-up with -SkipDb (the Podman stage below still runs unless -SkipPodman is
+# also supplied; pass both for a Stage 1 presence-only run).
 if ($SkipDb) {
   Write-Host "Skipping pg-dev-up functional test (-SkipDb)."
-  return
 }
-
-Write-Host "Running pg-dev-up functional test against $Image ..."
+else {
+  Write-Host "Running pg-dev-up functional test against $Image ..."
 # Build the in-container script with explicit LF joins (single-quoted lines so
 # PowerShell leaves the shell $vars alone). A here-string would inherit this
 # file's CRLF endings (.gitattributes pins *.ps1 to eol=crlf), and the stray
@@ -96,4 +97,25 @@ if ($LASTEXITCODE -ne 0) {
   throw "pg-dev-up functional test failed. See container output above."
 }
 
-Write-Host "Smoke test (tools + pg-dev-up) passed."
+  Write-Host "pg-dev-up functional test passed."
+}
+
+# Stage 3 - rootless Podman engine: the agent image bakes podman + a docker shim
+# (docs/rootless-podman.md). This is the automated guard that follow-up asked for -
+# a base/Podman bump that regresses the engine (a dropped containers.conf drop-in, a
+# Podman without the `compose` subcommand, a nested run that no longer starts) is
+# caught here. The helper runs the image with the launch-time device + security
+# wiring the launcher normally supplies via the compose overlays. On a host that
+# cannot expose /dev/net/tun it still validates the static engine wiring and skips
+# only the nested-run checks; a genuinely broken image fails on any host. Skip the
+# whole stage explicitly with -SkipPodman; see scripts/smoke-test-podman.ps1 for
+# what it covers. The helper throws on failure, so $ErrorActionPreference = "Stop"
+# propagates that up.
+if ($SkipPodman) {
+  Write-Host "Skipping Podman smoke test (-SkipPodman)."
+}
+else {
+  & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+}
+
+Write-Host "Smoke test complete."

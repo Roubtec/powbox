@@ -59,6 +59,7 @@ Identical to `address-tasks-worktrees` → "Session Bootstrap" — run that proc
 1. **Verify the worktree roots are container-local and prune this container's orphans.** Confirm `.worktrees` is a mountpoint on a container-local fs (not the host bind mount) and that `.claude/worktrees` + `.git/worktrees` are tmpfs; if a check fails, stop and run `enable-worktrees` (or rebuild/relaunch) before continuing. Then prune only **this** container's orphaned worktree dirs under `.worktrees/$CONTAINER_NAME/` (scanning the whole volume would delete a peer container's live work). Use the exact command blocks from the sibling skill's Bootstrap.
 2. **Ensure pushes work without rewriting the host remote.** If `origin` is SSH, add the container-local `url."https://github.com/".insteadOf "git@github.com:"` rewrite, then confirm `git ls-remote --heads origin >/dev/null`. If auth fails and the batch needs `push`/`ping-*`, stop and report — unlike `address-tasks-worktrees`, there is no "local branches only" fallback that still delivers value here, because the whole point of `push`/`ping` is updating the existing PRs.
 3. **`git fetch origin`** to refresh remote-tracking refs. This updates `origin/*` only — it never moves a local branch or rewrites a worktree — so it is safe for branch entries (which work the local ref regardless) and is what makes a later `--force-with-lease` push compare against the true current remote tip. It also lets a PR-number entry whose head you lack locally check out the current `origin` head.
+4. **Record the main checkout's starting branch** (`git -C "$ROOT" branch --show-current`). A branch can be checked out in only one place at a time, so any entry branch the **main checkout currently occupies** must be freed before its worktree is created. The orchestrator does this on demand by detaching the main `HEAD` (see "Resolving and checking out each entry"), which needs the main tree clean — so you do **not** have to start from a particular branch. The simplest way to avoid the dance at all, though, is to launch from a branch **not** in the batch: `main` is ideal, since you never address review on `main`.
 
 ## Orchestrator responsibilities
 
@@ -94,8 +95,9 @@ The local-control path (the rebased-locally / stale-origin case). The branch mus
    - Zero → skip-and-record: with no PR there are no review threads to address.
    - More than one → skip-and-record as ambiguous (or, interactive, ask which).
 2. **Check out the local ref as-is** — never `origin`, never a reset:
-   - Not checked out elsewhere → `git worktree add "$WT_BASE/<slug>" <branch>`.
-   - Already checked out (e.g. the main tree sits on it) → skip-and-record; a branch can't live in two worktrees. (Move the main tree off it and re-run, or pass the PR number.)
+   - Not checked out anywhere → `git worktree add "$WT_BASE/<slug>" <branch>`.
+   - Occupied by the **main checkout** (it's the orchestrator's current branch) → free it by detaching the main `HEAD` (`git -C "$ROOT" switch --detach`) **when the main tree is clean**, then `git worktree add`; the starting branch recorded in Bootstrap is restored in Cleanup. If the main tree is *dirty*, skip-and-record (commit/stash or move the main checkout off it first).
+   - Occupied by **another worktree** (a sibling entry, or the same branch listed twice) → skip-and-record; a branch can't live in two worktrees.
 3. **Set the push target** so a later `--force-with-lease` is clean and accurate: `git -C "$WT_BASE/<slug>" branch --set-upstream-to=origin/<branch>` (origin's head ref for the paired PR, refreshed by Bootstrap's fetch). The push then rewrites the stale `origin/<branch>` to your local tip, and `--force-if-includes` still guards against clobbering a remote commit you never saw.
 
 ### PR-number entry — work the PR head
@@ -104,9 +106,9 @@ The canonical path. Resolve the PR, then prefer a same-named local branch if you
 
 1. **Resolve and sanity-check:** `gh pr view N --json number,state,headRefName,headRepositoryOwner,baseRefName,url,title`. If `state` is not `OPEN`, skip-and-record. Note `headRefName` and whether `headRepositoryOwner` matches `origin`'s owner (same-repo) or differs (fork).
 2. **Same-repo:**
-   - Local `<headRefName>` exists and not checked out elsewhere → `git worktree add "$WT_BASE/pr-<N>" <headRefName>` (use the local tip; **record any divergence from `origin/<headRefName>`** in the summary, since a force-push would rewrite the PR to your local state).
+   - Local `<headRefName>` exists and is free → `git worktree add "$WT_BASE/pr-<N>" <headRefName>` (use the local tip; **record any divergence from `origin/<headRefName>`** in the summary, since a force-push would rewrite the PR to your local state).
    - No local `<headRefName>` → `git worktree add --track -b <headRefName> "$WT_BASE/pr-<N>" origin/<headRefName>`.
-   - Already checked out elsewhere → skip-and-record.
+   - Local `<headRefName>` is occupied → handle exactly as the Branch-entry case: detach the clean main `HEAD` to free it (and restore in Cleanup), or skip-and-record if it's held by another worktree or the main tree is dirty.
 3. **Fork PR** — let `gh` wire up the fork remote and tracking inside a detached worktree:
    ```bash
    git worktree add --detach "$WT_BASE/pr-<N>"
@@ -142,6 +144,7 @@ One amplifier specific to this skill: **each per-PR subagent runs a full `addres
 
 - `git worktree remove "<path>"` once a PR's subagent has returned and its work is committed (and pushed, on push runs). The branch and commits persist in `.git` and on the remote.
 - **Never delete the branch** — it is the PR's head. (This is the opposite of nothing-to-lose task branches: deleting it would orphan the PR.)
+- **Restore the main checkout** if an entry's setup detached its `HEAD` to free a branch: after that branch's worktree is removed, `git -C "$ROOT" switch <starting-branch>` (recorded in Bootstrap) returns the main tree to where it began — now pointing at the addressed, possibly force-pushed tip. Note the restore in the summary so the user knows their branch advanced.
 - Because `.git/worktrees` is tmpfs-shadowed, host hygiene needs no `git worktree prune`; prune only to clear a stale registration within the live session.
 
 ## After the batch
@@ -168,5 +171,5 @@ Aggregate the per-PR `address-review` reports into one batch summary:
 - [ ] Each entry resolved to a `(branch, PR#)` pair and checked out on the right ref — **branch entries use the local ref, never `origin`**; PR-number entries prefer a same-named local branch, else `origin` head; worktrees under `.worktrees/$CONTAINER_NAME/`; un-setup-able / PR-less entries skipped-and-recorded.
 - [ ] One subagent per entry, each running `/address-review #N hands-off …` with the PR# as the authoritative pairing; fanned out concurrently but throttled (in-flight count conservative due to nested fixer/reviewer agents).
 - [ ] No new branches created, no `gh pr create`, no restack performed.
-- [ ] Worktrees removed after each subagent returns; **no PR branch deleted**.
+- [ ] Worktrees removed after each subagent returns; **no PR branch deleted**; main checkout restored to its starting branch if its `HEAD` was detached to free an entry.
 - [ ] Batch summary aggregates outcomes, hands-off blockers (prominently), push-backs, no-push disposition maps, throttling notes, and the `rebase-stack` follow-up pointer.

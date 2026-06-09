@@ -84,14 +84,20 @@ if [ -f "$AGENT_TMPL" ]; then
 		# next container start. Per-repo `.claude/workflows/` still wins at invoke
 		# time. (Refresh parity with `agent-update-skills` is a follow-up.)
 		WF_SRC="$AGENT_SEED_DIR/workflows"
-		if [ -d "$WF_SRC" ]; then
-			mkdir -p "$AGENT_CONFIG_DIR/workflows"
+		WF_DEST="$AGENT_CONFIG_DIR/workflows"
+		# Best-effort like the rest of seeding: if the destination cannot be created
+		# (a pre-existing regular file, dangling mount, or unwritable dir on the
+		# volume), warn and skip rather than let `set -e` abort the whole entrypoint
+		# over an optional experimental feature.
+		if [ -d "$WF_SRC" ] && { [ -d "$WF_DEST" ] || mkdir -p "$WF_DEST"; }; then
 			for wf in "$WF_SRC"/*.js; do
 				[ -e "$wf" ] || continue
-				dest="$AGENT_CONFIG_DIR/workflows/$(basename "$wf")"
+				dest="$WF_DEST/$(basename "$wf")"
 				[ -e "$dest" ] || cp "$wf" "$dest" ||
 					echo "Warning: failed to seed Claude workflow $(basename "$wf"); continuing." >&2
 			done
+		elif [ -d "$WF_SRC" ]; then
+			echo "Warning: cannot create $WF_DEST; skipping Claude workflow seeding." >&2
 		fi
 
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"

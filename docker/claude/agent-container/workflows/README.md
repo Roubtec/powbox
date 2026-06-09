@@ -13,12 +13,42 @@ place of — the existing skills. See the open questions at the bottom.
 ## Why these, and what the workflow shape buys us
 
 A dynamic workflow turns the *control flow* a skill describes in prose into real
-code, and — crucially — hands each spawned agent its own git worktree
-(`isolation: "worktree"`). The orchestration primitives are `agent(prompt, opts)`,
-`parallel(thunks)`, `pipeline(items, ...stages)`, `phase()`, `log()`, and the
-`args` global. The script itself does no file/shell/git work and takes no
-mid-run user input — every side effect happens inside an agent, and a blocker is
-returned, never prompted.
+code. The orchestration primitives are `agent(prompt, opts)`, `parallel(thunks)`,
+`pipeline(items, ...stages)`, `phase()`, `log()`, and the `args` global. The
+script itself does no file/shell/git work and takes no mid-run user input —
+every side effect happens inside an agent, and a blocker is returned, never
+prompted.
+
+### Worktrees: explicit convention, not runtime `isolation`
+
+The runtime offers `agent(..., { isolation: "worktree" })`, but these workflows
+deliberately **do not use it**. Per the
+[worktrees docs](https://code.claude.com/docs/en/worktrees) it creates a fresh
+temporary worktree per agent at a runtime-chosen path (default
+`.claude/worktrees/`), started from the repository's **default branch**, with no
+documented `agent()` option, env var, or setting to redirect it. That breaks two
+things powbox needs:
+
+1. **It cannot honor the `.worktrees/$CONTAINER_NAME/<slug>` convention** — the
+   per-container subdir on the persistent project volume that carries the pnpm
+   hardlink store and lets a Claude and a Codex container share one repo without
+   a peer's prune reaping live work. Runtime worktrees would land in the
+   tmpfs-shadowed `.claude/worktrees/` (full package copies, a shared ~2 GB cap).
+2. **A separate worktree per agent, started from the default branch, hides an
+   implementer's commits from its reviewer.**
+
+So `address-tasks.js` manages worktrees itself, exactly like the
+`address-tasks-worktrees` skill: a bootstrap agent verifies the roots and prunes
+this container's orphans, then each task gets **one** explicit worktree under
+`.worktrees/$CONTAINER_NAME/<slug>`, created by its first implementer and reused
+by that task's reviewer and every later round. Cross-task parallelism comes from
+`parallel()` over distinct worktrees; cross-stage commit visibility comes from
+sharing the on-disk worktree, not the remote.
+
+`address-review.js` is a single-PR, strictly sequential pipeline with no
+fan-out, so it needs no worktree at all — every stage runs on the PR branch in
+the one working tree, which is the simplest way to keep the fixer's commits
+visible to the reviewer and publisher.
 
 ### `address-tasks.js` — supersedes two skills at once
 
@@ -58,11 +88,13 @@ would want to call it.
    `/address-tasks`. These keep the canonical names for a faithful comparison;
    when promoting, we'd likely retire the Claude skill copies (the Codex skills
    stay).
-2. **Runtime worktree semantics.** The conversions assume `isolation: "worktree"`
-   plus push-every-commit makes branches/commits durable across the runtime's
-   worktree lifecycle, and that a reviewer agent checking out a pushed branch
-   sees the implementer's commits. Validate against the live runtime — these are
-   the load-bearing assumptions.
+2. **Agent worktree management under the runtime.** `address-tasks.js` has its
+   agents run `git worktree add` / `cd` themselves (see "Worktrees" above)
+   rather than using runtime isolation. The load-bearing assumption is that a
+   workflow-spawned agent runs in the repo working directory with a shared
+   filesystem — so one agent's explicit worktree persists for the next agent of
+   the same task to `cd` into. That matches how `Agent`-tool subagents behave in
+   the same container, but should be confirmed against the live workflow runtime.
 3. **Refresh parity.** Seeding is a simple no-clobber file copy (delete the file
    to re-seed). It does not yet participate in `agent-update-skills`' marker /
    refresh / prune flow; wiring that in is the obvious follow-up if the shape

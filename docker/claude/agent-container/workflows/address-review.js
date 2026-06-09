@@ -22,14 +22,25 @@
  * A non-trivial rebase conflict (when `rebase on top of` is supplied) is aborted
  * cleanly and stops the run, as in the skill.
  *
+ * Worktree model
+ * --------------
+ * This is a SINGLE-PR, strictly SEQUENTIAL pipeline (gather -> fix -> review ->
+ * publish) with no fan-out, so the agents deliberately do NOT use
+ * `isolation: "worktree"`. They all run in the one working tree on the PR
+ * branch, so the fixer's commits are directly visible to the reviewer and the
+ * publisher. (Runtime isolation gives each agent a *separate* temporary worktree
+ * started from the default branch, which would hide the fixer's commits from the
+ * reviewer — the failure the original draft had. The batch front-end role —
+ * many PRs at once — is where per-PR isolation belongs, and that must use the
+ * explicit `.worktrees/$CONTAINER_NAME/` convention, not runtime isolation; see
+ * address-tasks.js and the directory README.)
+ *
  * Runtime notes:
  *  - The script cannot run git/gh/file IO; the gather/fix/review/publish agents
  *    do all of it and hand structured packets back as plain data.
  *  - Fixes are done by a single fixer agent (not fanned out per thread): review
  *    fixes routinely touch the same files, so parallel per-thread fixers would
- *    contend. The fan-out unit here is the verify loop's fresh reviewer, and —
- *    if extended — one workflow run per PR across a batch (the role the
- *    `address-reviews-worktrees` skill plays today).
+ *    contend.
  */
 
 const MAX_ROUNDS = 3;
@@ -41,35 +52,37 @@ const PACKET_SCHEMA = {
     blocker: { type: "string", description: "Why the run stopped: unidentifiable/unrelated PR, dirty tree, rebase in progress, non-trivial rebase conflict, auth failure. Empty when ok." },
     pr: {
       type: "object",
+      description: "Required whenever ok is true. The downstream phases dereference these fields, so populate them all.",
       properties: {
         number: { type: "integer" },
         url: { type: "string" },
         branch: { type: "string", description: "headRefName." },
         base: { type: "string", description: "Effective review base — the rebase target if a rebase ran, else baseRefName." },
-        headOid: { type: "string", description: "Expected remote head OID, for the publication lease." },
+        headOid: { type: "string", description: "Expected remote head OID, for the publication lease. Populate from the PR's headRefOid." },
         rebased: { type: "boolean", description: "True if a rebase rewrote the branch tip (publish must use --force-with-lease)." },
       },
-      required: ["number", "branch", "base"],
+      required: ["number", "url", "branch", "base", "headOid"],
     },
-    threads: {
+    items: {
       type: "array",
-      description: "Every UNRESOLVED review thread plus any explicitly-included standalone item, verbatim.",
+      description: "Every UNRESOLVED review thread plus any explicitly-included standalone item (issue comment / review summary), verbatim.",
       items: {
         type: "object",
         properties: {
-          threadId: { type: "string", description: "GraphQL node id (for resolve)." },
-          commentId: { type: "string", description: "Top comment databaseId (for the reply)." },
+          type: { type: "string", description: "`review-thread` (resolvable, threaded) or `standalone` (a top-level issue/review comment with no resolve state)." },
+          threadId: { type: "string", description: "GraphQL review-thread node id — REQUIRED for type `review-thread` (used to resolve). Absent/empty for `standalone`." },
+          commentId: { type: "string", description: "Top comment databaseId — REQUIRED for type `review-thread` (used to thread the reply). Absent/empty for `standalone`." },
           path: { type: "string" },
           line: { type: "integer" },
           author: { type: "string" },
           body: { type: "string", description: "Comment text, verbatim." },
-          url: { type: "string" },
+          url: { type: "string", description: "Permalink to the comment (the stable reference for a standalone item, which has no threadId)." },
         },
-        required: ["body"],
+        required: ["type", "body"],
       },
     },
   },
-  required: ["ok", "threads"],
+  required: ["ok", "items"],
 };
 
 const DISPOSITION_SCHEMA = {
@@ -80,12 +93,15 @@ const DISPOSITION_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          threadId: { type: "string" },
-          ref: { type: "string", description: "file:line + author, a stable human reference." },
+          type: { type: "string", description: "`review-thread` or `standalone`, echoed from the gathered item." },
+          threadId: { type: "string", description: "The review-thread node id for type `review-thread`; omit for `standalone`." },
+          commentId: { type: "string", description: "The comment databaseId for type `review-thread`; omit for `standalone`." },
+          url: { type: "string", description: "Permalink — the stable reference, especially for `standalone` items." },
+          ref: { type: "string", description: "file:line + author, a human-readable reference." },
           kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | ambiguous-skipped" },
           detail: { type: "string", description: "For fixed: the one-line summary + commit sha. For already-addressed: where it's handled. For push-back: the rationale. For ambiguous: what decision is needed." },
         },
-        required: ["threadId", "kind", "detail"],
+        required: ["type", "kind", "detail"],
       },
     },
     proactiveFixes: { type: "string", description: "Same-pattern fixes made beyond the literal comments, or empty." },
@@ -115,6 +131,30 @@ const VERDICT_SCHEMA = {
   required: ["pass", "issues"],
 };
 
+const PUBLISH_SCHEMA = {
+  type: "object",
+  properties: {
+    published: { type: "boolean", description: "True only if the push AND every required reply/resolve/summary/ping step succeeded. False if any guard (moved head, unmatched remote, rejected lease, failed comment) aborted publication." },
+    aborted: { type: "string", description: "Why publication stopped, when published is false (e.g. `head moved`, `lease rejected`, `push remote unmatched`). Empty when published." },
+    pushed: { type: "boolean", description: "Whether the branch was actually pushed." },
+    threadOutcomes: {
+      type: "array",
+      description: "Per item: its stable reference and what was done (replied/resolved/left-open).",
+      items: {
+        type: "object",
+        properties: {
+          ref: { type: "string" },
+          outcome: { type: "string" },
+        },
+        required: ["ref", "outcome"],
+      },
+    },
+    summaryCommentUrl: { type: "string", description: "URL of the posted Summary of Review Fixes, or empty if not posted." },
+    pings: { type: "string", description: "Which ping comments were posted, or empty." },
+  },
+  required: ["published"],
+};
+
 function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
@@ -126,13 +166,15 @@ Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 2. No rebase already in progress.
 3. \`gh auth status\` succeeds.
 
-Resolve the PR: explicit PR# wins (but sanity-check it shares history with the current branch — if genuinely unrelated, blocker and stop); else auto-detect via \`gh pr view\`. Record number, url, headRefName, baseRefName, headRefOid.
+Resolve the PR: explicit PR# wins (but sanity-check it shares history with the current branch — if genuinely unrelated, blocker and stop); else auto-detect via \`gh pr view\`. When \`ok\` is true you MUST populate the whole \`pr\` object: \`number\`, \`url\`, \`branch\` (headRefName), \`base\`, \`headOid\` (the PR's headRefOid — the publish phase needs it for a safe \`--force-with-lease\`), and \`rebased\`.
 
-If \`rebase on top of <branch>\` was given: save \`refs/pre-rebase/<branch>/<ts>\`, then \`git rebase <target>\`. Resolve only TRIVIAL conflicts (imports/whitespace/pure additions/already-represented patches → in-file resolve or \`git rebase --skip\`). On the FIRST non-trivial conflict, \`git rebase --abort\`, confirm a clean tree, set \`blocker\` and stop. After a conflicted rebase, run the build to confirm. Set \`pr.rebased\` true if the tip was rewritten, and \`pr.base\` to the rebase target; otherwise \`pr.base = baseRefName\`.
+If \`rebase on top of <branch>\` was given: save \`refs/pre-rebase/<branch>/<ts>\`, then \`git rebase <target>\`. Resolve only TRIVIAL conflicts (imports/whitespace/pure additions/already-represented patches → in-file resolve or \`git rebase --skip\`). On the FIRST non-trivial conflict, \`git rebase --abort\`, confirm a clean tree, set \`blocker\` and stop. After a conflicted rebase, run the build to confirm. Set \`pr.rebased\` true if the tip was rewritten and \`pr.base\` to the rebase target; otherwise \`pr.base = baseRefName\` and \`pr.rebased = false\`. (When rebased, \`pr.headOid\` is still the *remote* tip you will replace — read it before the rebase.)
 
-Gather feedback: fetch UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`; for each capture threadId, top comment databaseId, path, line, author, body verbatim, url). Read top-level reviews and issue comments for context — a maintainer reply on an unresolved thread is authoritative. Include a standalone item only if the request explicitly identifies it as outstanding.
+Gather feedback into \`items\` (each verbatim):
+- UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`). Emit each as \`type: "review-thread"\` with \`threadId\` (node id), \`commentId\` (top comment databaseId), \`path\`, \`line\`, \`author\`, \`body\`, \`url\`. \`threadId\` and \`commentId\` are mandatory for these — they are how publication resolves and replies.
+- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context.
 
-If there are no unresolved threads and no included standalone item, return \`ok: true\` with an empty \`threads\` array — the caller will exit as a successful no-op.
+If there are no unresolved threads and no included standalone item, return \`ok: true\` with an empty \`items\` array — the caller will exit as a successful no-op.
 
 Edit NO files here; this is gather-only.`;
 }
@@ -141,17 +183,17 @@ function fixPrompt(packet, findings) {
   const fixup = findings
     ? `\n## Reviewer findings to address\n\nThe previous fix round did not fully pass. Address each finding, then re-confirm every disposition:\n\n${JSON.stringify(findings, null, 2)}\n`
     : "";
-  return `You are addressing review feedback on PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). Read \`AGENTS.md\` / \`CLAUDE.md\` first.
+  return `You are addressing review feedback on PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). You are already on the PR branch in the working tree — confirm with \`git branch --show-current\` and do not switch branches. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
-This run is unattended (hands-off): decide low-stakes ambiguity best-effort and record it; for high-stakes ambiguity that needs an authoritative decision, do NOT guess — mark the thread \`ambiguous-skipped\` and leave it open.
+This run is unattended (hands-off): decide low-stakes ambiguity best-effort and record it; for high-stakes ambiguity that needs an authoritative decision, do NOT guess — mark the item \`ambiguous-skipped\` and leave it open.
 
-## Unresolved threads (verbatim)
+## Items to address (verbatim)
 
-${JSON.stringify(packet.threads, null, 2)}
+${JSON.stringify(packet.items, null, 2)}
 ${fixup}
 ## Instructions
 
-Triage each thread into exactly one kind and act:
+Triage each item into exactly one kind and act:
 - \`actionable-fixed\` — implement the fix. Commit at logical milestones.
 - \`already-addressed\` — current code already satisfies it; note where.
 - \`push-back\` (should be rare) — the comment is wrong/misunderstands context. Do NOT implement; draft a respectful, specific rationale. Never implement a fix you believe is wrong just to clear a comment.
@@ -163,21 +205,21 @@ Triage each thread into exactly one kind and act:
 - Do NOT push, reply, resolve, or comment on the PR — publication is a separate, later step.
 - Do NOT use the \`TaskCreate\`/\`TaskUpdate\`/\`TaskList\` tools.
 
-Return the structured dispositions.`;
+For each disposition, echo the item's \`type\` and carry its identifiers: for \`review-thread\` items include \`threadId\` and \`commentId\`; for \`standalone\` items include \`url\`. Return the structured dispositions.`;
 }
 
 function reviewPrompt(packet, dispositions) {
-  return `You are an independent fresh-eyes reviewer for PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). Verify every proposed disposition against the committed code. Edit NOTHING. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
+  return `You are an independent fresh-eyes reviewer for PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). You are on the PR branch with the fixer's commits already in the working tree. Verify every proposed disposition against the committed code. Edit NOTHING. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
-You are given the unresolved threads and the proposed dispositions — but NOT the fixer's reasoning. Independently confirm each:
+You are given the unresolved items and the proposed dispositions — but NOT the fixer's reasoning. Independently confirm each:
 - \`actionable-fixed\` / \`already-addressed\` claims must actually hold in the committed code.
 - \`push-back\` must be technically justified, not a convenient dismissal.
 - \`ambiguous-skipped\` must genuinely require an authoritative decision.
 You may reclassify any item.
 
-## Threads
+## Items
 
-${JSON.stringify(packet.threads, null, 2)}
+${JSON.stringify(packet.items, null, 2)}
 
 ## Proposed dispositions
 
@@ -196,23 +238,27 @@ function publishPrompt(packet, dispositions, flags) {
 
 Flags for this publication: ${JSON.stringify(flags)}.
 
-1. Re-check before publication: clean worktree, no rebase in progress; re-fetch the PR and confirm it is still open and still points at the expected head repo/ref. Resolve the branch's exact push remote/ref and verify it matches the PR head (never assume \`origin\`, especially for forks). Expected head OID to replace: \`${packet.pr.headOid || "(re-derive)"}\`. If the head moved or the target can't be matched, STOP and report — do not guess.
-2. Push: if the expected tip is an ancestor of HEAD, normal push (\`git push <remote> HEAD:refs/heads/${packet.pr.branch}\`). If history was rewritten (rebased: ${packet.pr.rebased ? "yes" : "no"}), use an exact lease: \`git push <remote> --force-with-lease=refs/heads/${packet.pr.branch}:<expected-oid> HEAD:refs/heads/${packet.pr.branch}\`. If the lease is rejected, NEVER escalate to bare \`--force\`; stop and report.
+Report a STRUCTURED result: set \`published: true\` ONLY if the push and every required reply/resolve/summary/ping below succeeded. If any guard aborts you, set \`published: false\` and \`aborted: "<reason>"\` and report what (if anything) was pushed — never claim success on an aborted publication.
+
+1. Re-check before publication: clean worktree, no rebase in progress; re-fetch the PR and confirm it is still open and still points at the expected head repo/ref. Resolve the branch's exact push remote/ref and verify it matches the PR head (never assume \`origin\`, especially for forks). Expected head OID to replace: \`${packet.pr.headOid}\`. If the head moved or the target can't be matched, set \`published: false\`, \`aborted\`, and STOP — do not guess.
+2. Push: if the expected tip is an ancestor of HEAD, normal push (\`git push <remote> HEAD:refs/heads/${packet.pr.branch}\`). If history was rewritten (rebased: ${packet.pr.rebased ? "yes" : "no"}), use an exact lease: \`git push <remote> --force-with-lease=refs/heads/${packet.pr.branch}:${packet.pr.headOid} HEAD:refs/heads/${packet.pr.branch}\`. If the lease is rejected, NEVER escalate to bare \`--force\`; set \`published: false\`, \`aborted: "lease rejected"\`, and stop.
 3. Re-read unresolved threads after the push. Do not mutate newly-arrived feedback that was not triaged this run — leave it open and call it out.
-4. Per-thread hygiene for each triaged thread still unresolved (reply via REST \`pulls/.../comments/<databaseId>/replies\`, resolve via GraphQL \`resolveReviewThread\`):
-   - actionable-fixed → reply \`Fixed in <sha>: <one line>\` AND resolve.
-   - already-addressed → reply pointing to where it's handled AND resolve.
-   - push-back → reply with the rationale; resolve a BOT-authored thread, but leave a HUMAN-authored thread open unless explicitly authorized.
-   - ambiguous-skipped → leave open.
+4. Per-item hygiene for each disposition:
+   - \`review-thread\` items: reply via REST \`pulls/.../comments/<commentId>/replies\`, resolve via GraphQL \`resolveReviewThread\` on \`threadId\`:
+     - actionable-fixed → reply \`Fixed in <sha>: <one line>\` AND resolve.
+     - already-addressed → reply pointing to where it's handled AND resolve.
+     - push-back → reply with the rationale; resolve a BOT-authored thread, but leave a HUMAN-authored thread open unless explicitly authorized.
+     - ambiguous-skipped → leave open.
+   - \`standalone\` items (no thread to resolve): address them only in the Summary comment below; do NOT call \`resolveReviewThread\`. Record their outcome by \`url\`.
    Avoid duplicate replies (check for an equivalent prior reply by the authed user); resolve only after the reply succeeds.
-5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review.
+5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
 6. Pings (only after push + summary succeeded): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${!flags.pingCodex && !flags.pingClaude ? "none." : "If both, post two separate comments."}
 
 ## Dispositions to publish
 
 ${JSON.stringify(dispositions, null, 2)}
 
-Report each thread's final disposition with a stable reference (file:line, author, threadId, permalink), the push/ping outcome, and anything left open.`;
+Record each item's outcome with its stable reference (file:line, author, threadId or url) in \`threadOutcomes\`.`;
 }
 
 // --- Flag parsing (the only logic the script does itself; no shell needed) ---
@@ -231,9 +277,15 @@ if (!packet) {
   return { error: "Gather phase failed (agent returned nothing)." };
 }
 if (!packet.ok) {
-  return { error: "Stopped before any change.", blocker: packet.blocker, pr: packet.pr };
+  return { error: "Stopped before any change.", blocker: packet.blocker || "(unspecified)", pr: packet.pr };
 }
-if (!packet.threads || packet.threads.length === 0) {
+// The schema requires `pr` fields, but a schema-valid agent can still omit the
+// object; validate before any phase dereferences packet.pr.* so an incomplete
+// response is a reported failure, not a thrown crash.
+if (!packet.pr || packet.pr.number == null || !packet.pr.branch || !packet.pr.base) {
+  return { error: "Gather succeeded but returned incomplete PR metadata (need number, branch, base, headOid).", pr: packet.pr || null };
+}
+if (!packet.items || packet.items.length === 0) {
   return { status: "no-op", detail: "No unresolved threads and no included standalone item — nothing to address.", pr: packet.pr };
 }
 
@@ -246,10 +298,11 @@ let findings = null;
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   rounds = round;
 
+  // No worktree isolation: the fixer commits on the PR branch in the shared
+  // working tree, so the reviewer below sees those commits directly.
   const fixResult = await agent(fixPrompt(packet, findings), {
     label: `fix#${round}`,
     schema: DISPOSITION_SCHEMA,
-    isolation: "worktree",
   });
   if (!fixResult) {
     return { error: `Fixer failed on round ${round}.`, pr: packet.pr, rounds };
@@ -263,7 +316,6 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   verdict = await agent(reviewPrompt(packet, dispositions.dispositions), {
     label: `review#${round}`,
     schema: VERDICT_SCHEMA,
-    isolation: "worktree",
   });
   if (!verdict) {
     return { error: `Reviewer failed on round ${round}.`, pr: packet.pr, rounds, dispositions: dispositions.dispositions };
@@ -306,16 +358,18 @@ if (!passed) {
 phase("Publish");
 const publishReport = await agent(publishPrompt(packet, dispositions.dispositions, flags), {
   label: "publish",
-  isolation: "worktree",
+  schema: PUBLISH_SCHEMA,
 });
 
 phase("Summary");
+const published = !!(publishReport && publishReport.published);
 return {
-  status: "fixed-published",
+  status: published ? "fixed-published" : "fixed-publish-failed",
   pr: packet.pr,
   rounds,
   flags,
   dispositions: dispositions.dispositions,
   proactiveFixes: dispositions.proactiveFixes,
-  publishReport,
+  publishReport: publishReport || { published: false, aborted: "publisher returned nothing" },
+  note: published ? undefined : "Fixes passed review but publication did not fully complete — see publishReport.aborted; nothing may have been pushed.",
 };

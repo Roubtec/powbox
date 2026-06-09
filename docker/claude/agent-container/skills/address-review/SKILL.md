@@ -1,6 +1,6 @@
 ---
 name: address-review
-description: Address the maintainer-vetted review feedback on one pull request — optionally rebase the branch onto a target first, fix or push back on each unresolved review thread, verify the fixes with a fresh-eyes reviewer subagent, then (when asked) force-push with lease, reply/resolve the threads, post a "Summary of Review Fixes" comment, and request fresh bot reviews. Trigger when the user asks to address review comments, action a reviewed PR, work through review feedback, or run address-review. Do not trigger for planning, for implementing new task files (use address-tasks), or for rebasing a whole stacked chain (use rebase-stack).
+description: Address the maintainer-vetted review feedback on one pull request — optionally rebase the branch onto a target first, fix or push back on each unresolved review thread, verify every disposition with a fresh-eyes reviewer, then (when asked) push with exact lease protection, reply/resolve the threads, post a "Summary of Review Fixes" comment, and request fresh bot reviews. Trigger when the user asks to address review comments, action a reviewed PR, work through review feedback, or run address-review. Do not trigger for planning, for implementing new task files (use address-tasks), or for rebasing a whole stacked chain (use rebase-stack).
 ---
 
 Address the review feedback on a single pull request, end to end.
@@ -21,42 +21,51 @@ All arguments are optional and parsing is **lenient** — accept commas, `&`, an
 | Argument | Meaning |
 |---|---|
 | `PR#` (e.g. `#38`) | The PR to address. Takes precedence over auto-detection — useful when the current branch is a local off-shoot of a merge-pending branch or otherwise disjoint from the PR head. Always sanity-check that it really relates to this branch. |
-| `rebase on top of <branch>` | Rebase the **current branch** onto `<branch>` before doing anything else (Procedure step 2). Single-branch rebase only. |
-| `push` | When done, push the branch to origin and perform all PR-side communication (replies, resolves, summary comment). Force-pushes are expected and frequent (especially after a rebase) — always `--force-with-lease`. |
+| `rebase on top of <branch>` | Rebase the **current branch** onto `<branch>` before gathering or fixing review feedback (Procedure step 2). Single-branch rebase only. |
+| `push` | When done, push the branch to the PR's actual head repository/ref and perform all PR-side communication (replies, resolves, summary comment). Use a normal push for a fast-forward; use an explicit `--force-with-lease=<ref>:<expected-oid>` only when history was rewritten. |
 | `hands-off` | Run with no user interaction — best-effort to completion, documenting every skipped/blocked item in the final report. See "Hands-off mode". Typically how a parallel review orchestrator invokes this skill in a subagent. |
 | `ping-codex` | After pushing, post a dedicated top-level `@codex review` comment to summon a fresh review round. **Implies `push`** (nothing to re-review unpushed). |
 | `ping-claude` | After pushing, post a dedicated top-level `@claude review` comment. **Implies `push`.** |
 
 ### Flag interactions
 
-- **`ping-*` implies `push`.** If `ping-codex` or `ping-claude` is present without `push`, push anyway — a re-review of unpushed work is meaningless. `push + ping-claude` is technically redundant; resolve it gracefully as "push, then ask Claude for a fresh review."
+- **`ping-*` implies `push`.** If `ping-codex` or `ping-claude` is present without `push`, push anyway — a re-review of unpushed work is meaningless.
 - **Both pings present** → two separate comments, one per bot (never a single comment mentioning both). They are also separate from the Summary comment.
 - **`hands-off` + `rebase`** is uncommon and the riskiest combination: a non-trivial rebase conflict has no one to consult, so you abort cleanly and stop rather than guess (see "Hands-off mode" and step 2).
 - **No `push` and no `ping`** → a local-only run. Make commits, but **do not mutate the PR at all** (no replies, no resolves, no summary comment). The final report captures every disposition so a later "push now" turn can replay it.
 
 ## Architecture
 
-You address the feedback **inline** in your own context for ordinary comments, and **delegate to a subagent only for large or independent rework**.
-Then you always hand verification to a **fresh, independent reviewer subagent**.
-This skill is frequently invoked *as* a subagent by a parallel review orchestrator, so keep nesting shallow — do not stand up a full orchestrator/implementer/reviewer tree like `address-tasks`; spawn helpers only when the work genuinely warrants it.
+At top level, address ordinary feedback **inline** and delegate only large or independent rework.
+Then hand verification to a **fresh, independent reviewer subagent**.
 
-Two subagent roles, both spawned via the `Agent` tool with `subagent_type: "general-purpose"`:
+Two top-level subagent roles, both spawned via the `Agent` tool with `subagent_type: "general-purpose"`:
 
 - **Fixer** (optional) — handles a large, multi-file, or exploratory fix for one or more related comments. Skip it for small surgical fixes you can do directly.
-- **Reviewer** (default before any push) — a fresh-eyes agent that receives the **review comments verbatim** (the "what must change") but **not** your implementation reasoning, and confirms each is genuinely resolved in the committed code, plus a quality pass on the changed files. This is the `address-tasks` reviewer pattern.
+- **Reviewer** (default before any push) — a fresh-eyes agent that receives every unresolved thread and explicitly included standalone item verbatim, plus the proposed disposition labels, but **not** your implementation reasoning; it independently confirms that each disposition is sound in the committed code and performs a quality pass on the changed files. This is the `address-tasks` reviewer pattern.
 
 > **Critical — one checkout-dependent agent at a time; subagents share your working tree.**
 > Every subagent operates on your single checked-out branch — they are not isolated copies. Never spawn two checkout-dependent agents in the same turn or parallel tool block, and never spawn the reviewer until the fixer's commits have landed on disk. A reviewer racing an unfinished fixer scopes its diff against a half-written branch, sees nothing, and falsely reports "no changes" — shipping the work unverified. Spawn one, await its result, then the next. This overrides the harness's general "batch independent calls" guidance: these calls are not independent.
 
 > **Fix-ups and re-reviews always use a fresh `Agent` spawn**, never a "continued" prior agent. If an `Agent` result prints a `SendMessage`/continuation footer, ignore it — this harness does not expose that tool. A fresh reviewer with no attachment to the fix is the whole point.
 
-**Trivial escape hatch:** for a single obvious comment with an unambiguous fix, you may fix it directly and skip the reviewer subagent — but if you are about to `push`/`ping` (i.e. summon fresh bot reviews), prefer to run the reviewer anyway. You do not want to invite a new review round on top of a fix that does not hold.
+**Trivial escape hatch:** only on a local, no-push run with one obvious actionable comment may you skip the reviewer. Never skip review before publishing, and never skip it for a push-back disposition.
+
+### Delegated modes for the worktree orchestrator
+
+Claude subagents must not be assumed to spawn nested subagents.
+`address-reviews-worktrees` therefore uses this skill in two internal modes; these are orchestrator controls, not normal user flags:
+
+- **`delegated-fix`** — run steps 0–5 directly in the assigned worktree, without spawning helpers, then stop before review/publication and return a complete review packet: PR/head metadata, starting/final SHAs, every item verbatim with stable refs and proposed disposition, validation run, and any blocker.
+- **`publish-reviewed`** — receive that packet plus a fresh external reviewer's Pass verdict, verify the packet still matches the clean committed `HEAD`, then run only step 7 and return step 8's report. Refuse to edit code, re-triage, or publish without the packet and Pass verdict.
+
+The worktree orchestrator owns the fresh reviewer and any fix-up rounds between these modes.
 
 ## Procedure
 
 ### Step 0 — Preflight
 
-1. **Working tree must be clean** (`git status --porcelain`). If anything is staged/modified/untracked-and-conflicting, stop and ask the user to commit/stash/clean (hands-off: document and stop). Do not auto-stash.
+1. **Working tree must be completely clean** (`git status --porcelain`). If it prints anything (staged, modified, or untracked), stop and ask the user to commit/stash/clean it (hands-off: document and stop). Do not auto-stash or discard files.
 2. **No rebase already in progress** — check `git rev-parse --git-path rebase-merge` and `--git-path rebase-apply`. If either exists, stop and ask the user to finish or abort it first.
 3. **Confirm `gh` is authenticated** (`gh auth status`). Without it you cannot read threads, reply, resolve, or comment.
 4. **Record the starting branch and tip SHA** so you can describe exactly what changed in the final report and recover if needed.
@@ -69,19 +78,19 @@ Precedence for identifying the PR:
 2. **Auto-detect** — `gh pr view --json number,headRefName,baseRefName,url,title,state` resolves the PR for the current branch; `gh pr list --head <branch>` is the fallback.
 3. **Ambiguous or none found** — ask the user which PR (hands-off: stop and document the blocker; do not guess).
 
-Record `owner`, `repo`, PR `number`, `baseRefName`, and `headRefName` for the API calls below.
+Record `owner`, `repo`, PR `number`, `baseRefName`, `headRefName`, `headRefOid`, and the head repository owner/name for the API calls and publication guard below.
 
 ### Step 2 — Rebase first (only if `rebase on top of <branch>` was given)
 
-Rule 0: rebasing brings the branch close to its final merged state, so you address the feedback against the geometry the work will actually land in (essential when several stacked PRs are being fixed at once).
+Rebasing brings the branch close to its final merged state, so address the feedback against the geometry the work will actually land in (essential when several stacked PRs are being fixed at once).
 This is a **single-branch** rebase. To restack a whole chain of dependent branches, that is the separate `rebase-stack` skill — mention it if the user seems to want chain-wide restacking.
 
 1. Verify the target branch ref exists locally.
-2. Save a recovery ref: `git update-ref refs/pre-rebase/<branch>/<YYYYMMDD-HHMMSS> <branch>`.
+2. Save the branch being rewritten, not the target: `current_branch="$(git branch --show-current)"`, require it to be non-empty, set `ts="$(date -u +%Y%m%d-%H%M%S)"`, then `git update-ref "refs/pre-rebase/$current_branch/$ts" HEAD`.
 3. `git rebase <target>`. Git's patch-id detection drops commits already present on the target.
 4. **Conflicts:**
    - **Trivial** (import/whitespace/formatting collisions, pure additions, or a patch already represented on the new base) → resolve in-file and `git add` + `git rebase --continue`, or `git rebase --skip` for an already-represented commit. Narrate one line each; don't pause.
-   - **Non-trivial** (a genuine semantic dilemma) → **interactive:** present the conflict, your proposed resolution and reasoning, and confirm before applying — loop the user in as many times as needed rather than guessing. **Hands-off:** `git rebase --abort`, `git clean -fd`, confirm `git status --porcelain` is empty, and **stop the whole run** — addressing review on a wrong/stale base then force-pushing is worse than not running. Document the conflict (files, offending commit, why) as the blocker.
+   - **Non-trivial** (a genuine semantic dilemma) → **interactive:** present the conflict, your proposed resolution and reasoning, and confirm before applying — loop the user in as many times as needed rather than guessing. **Hands-off:** `git rebase --abort`, confirm `git status --porcelain` is empty, and **stop the whole run** — addressing review on a wrong/stale base then force-pushing is worse than not running. If abort leaves unexpected files, preserve and report them rather than deleting blindly. Document the conflict (files, offending commit, why) as the blocker.
 5. After a conflicted rebase, run the project's build/lint (discover via `AGENTS.md`/`CLAUDE.md`, then `package.json` scripts, then ecosystem signals) to confirm the resolution is sound before proceeding. A clean rebase needs no validation.
 
 If the rebase changed the branch tip, expect the eventual push to be a force-push (`--force-with-lease`).
@@ -90,19 +99,21 @@ If the rebase changed the branch tip, expect the eventual push to be a force-pus
 
 Fetch the **unresolved** review threads and enough context to judge them (see "GitHub API recipes"):
 
-- **Review threads** (inline comments) via GraphQL `reviewThreads` — keep only `isResolved == false`. For each, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, `author.login`, `body`, and `diffHunk`.
-- **Top-level review summaries** (`gh pr view --json reviews`) and **issue comments** (`gh api repos/{owner}/{repo}/issues/{number}/comments`) — read for context, especially **maintainer replies/push-backs** that override or qualify a bot's original comment.
+- **Review threads** (inline comments) via GraphQL `reviewThreads` — paginate past 100 threads, keep only `isResolved == false`, and detect unexpectedly truncated comment lists. For each, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, author login/type, `body`, `diffHunk`, and `url`.
+- **Top-level review summaries** (`gh pr view --json reviews`) and **issue comments** (`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`) — read for context, especially **maintainer replies/push-backs** that override or qualify a bot's original comment. They are not automatically actionable because they have no resolved/unresolved state; include a standalone item only when the maintainer explicitly identifies it as outstanding in the request or discussion.
 
 A maintainer reply on an unresolved thread is **authoritative**: if they said "skip this" or "do X instead," follow the maintainer over the original reviewer.
+Treat `isOutdated` as context, not a disposition: inspect the current code and re-locate the concern rather than auto-dismissing an outdated thread.
+If there are no unresolved threads and no explicitly included standalone items, stop as a successful no-op: make no commits, do not push or ping, do not post a summary comment, and report that nothing actionable remains.
 
-### Step 4 — Triage every unresolved thread
+### Step 4 — Triage every review item
 
 Classify each into one of:
 
 - **Actionable** — a real issue; implement the fix.
 - **Already addressed** — the current code (possibly thanks to the rebase or an earlier commit) already satisfies it. Note where.
-- **Push-back** (rule 2 — should be **rare**) — the comment is wrong, misunderstands context, or points in the wrong direction. Do **not** implement it; draft a respectful, specific rationale instead. Lean on judgment; never implement a fix you believe is wrong just to clear a comment.
-- **Ambiguous** — the right fix needs an authoritative decision you cannot make from the code/history. **Interactive:** ask the user. **Hands-off:** make a best-effort call only when stakes are low; otherwise skip and document it (rule 3) — do not guess where an authoritative determination is required.
+- **Push-back** (should be **rare**) — the comment is wrong, misunderstands context, or points in the wrong direction. Do **not** implement it; draft a respectful, specific rationale instead. Lean on judgment; never implement a fix you believe is wrong just to clear a comment.
+- **Ambiguous** — the right fix needs an authoritative decision you cannot make from the code/history. **Interactive:** ask the user. **Hands-off:** make a best-effort call only when stakes are low; otherwise skip and document it — do not guess where an authoritative determination is required.
 
 ### Step 5 — Fix
 
@@ -110,23 +121,28 @@ For the actionable items:
 
 - **Small/surgical** → fix directly in your own context, committing at logical milestones.
 - **Large/multi-file/exploratory** → spawn a **Fixer** subagent (see Architecture and the prompt sketch below). One at a time; await its commits before moving on.
-- **Preclude repeat comments (rule 4):** for each pattern you fix, grep the PR's changed files and closely related code for the **same offending pattern** and fix those too, so the next review round doesn't re-raise it. Mention these proactive fixes in the summary.
+- **Preclude repeat comments:** for each pattern you fix, grep the PR's changed files and closely related code for the **same offending pattern** and fix those too, so the next review round doesn't re-raise it. Mention these proactive fixes in the summary.
 - Keep commits buildable where practical; run the build/lint before declaring done.
+- Before review, require `git status --porcelain` to be empty. Inspect and commit every intended change; if a fixer leaves partial or unexplained changes, resolve that state or stop rather than letting the reviewer inspect only the committed subset.
 
-Fixer subagent prompt should include: the relevant review comment(s) **verbatim**, the file/line locations, the branch name (and "verify you are on it"), an instruction to read `AGENTS.md` first, the rule-4 sweep instruction, commit/validation instructions, an instruction **not** to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools (their entries leak into your task view), and a request to report what it changed, any tradeoffs, and anything uncertain. Do **not** give it unrelated context.
+Fixer subagent prompt should include: the relevant review comment(s) **verbatim**, the file/line locations, the branch name (and "verify you are on it"), an instruction to read `AGENTS.md` first, the same-pattern sweep instruction, commit/validation instructions, an instruction **not** to use the `TaskCreate`/`TaskUpdate`/`TaskList` tools (their entries leak into your task view), and a request to report what it changed, any tradeoffs, and anything uncertain. Do **not** give it unrelated context.
+
+In `delegated-fix` mode, do not spawn a Fixer or Reviewer.
+Perform the fixes directly, leave the worktree clean with all intended changes committed, return the review packet defined above, and stop here.
 
 ### Step 6 — Verify with a fresh reviewer
 
-Once fixes are committed, spawn **one fresh Reviewer subagent** (never concurrently with a fixer; only after commits land):
+Once fixes are committed and the worktree is clean, spawn **one fresh Reviewer subagent** (never concurrently with a fixer; only after commits land):
 
-Give it: the actionable review comments **verbatim**, the PR base branch (`baseRefName`) for scoping, and the current branch. Do **not** give it your implementation reasoning or the fixer's report. Tell it to:
+Give it: every unresolved thread and explicitly included standalone item verbatim, each proposed disposition label (actionable-fixed / already-addressed / push-back / ambiguous), the effective review base, and the current branch. The effective review base is the requested rebase target when step 2 ran; otherwise it is `baseRefName`. Do **not** give it your implementation reasoning, drafted rationale, or the fixer's report. Tell it to:
 
-- Verify each comment is genuinely resolved in the committed code (read the actual files; if `git diff --name-only <base>...HEAD` looks empty, say so as a likely race/wrong-branch flag rather than reviewing nothing).
+- Independently verify every disposition: fixes and already-addressed claims must hold in the committed code; push-backs must be technically justified rather than convenient dismissals; ambiguous items must genuinely require an authoritative decision. It may reclassify any item.
+- Read the actual files; if `git diff --name-only <base>...HEAD` looks empty despite claimed fixes, report a likely race/wrong-branch flag rather than reviewing nothing.
 - Run the build/typecheck; a failure is an automatic blocker.
-- Do a quality pass on the changed files (logic correctness, error handling, edge cases, dead code, consistency, duplication, type safety) and check the rule-4 sweep didn't miss a sibling occurrence.
+- Do a quality pass on the changed files (logic correctness, error handling, edge cases, dead code, consistency, duplication, type safety) and check the same-pattern sweep did not miss a sibling occurrence.
 - Report **Pass** or a numbered, actionable **Issues** list. Edit nothing; touch no task-tracker tools.
 
-If the reviewer finds material gaps, loop: a fresh **Fixer** spawn with the verbatim findings, then a fresh Reviewer, **cap at 3 iterations**. If issues persist past the cap, stop iterating, do **not** push, and surface the outstanding findings in the final report (and to the user if interactive).
+If the reviewer finds material gaps, re-triage the affected comments, then loop: a fresh **Fixer** spawn with the verbatim findings when code must change, followed by a fresh Reviewer. Allow at most **3 reviewer rounds total**, including the initial review. If issues persist after round 3, stop iterating, do **not** push, and surface the outstanding findings in the final report (and to the user if interactive).
 
 ### Step 7 — Publish (only on `push` / `ping-*` runs)
 
@@ -134,14 +150,19 @@ If neither `push` nor a `ping` is set, **skip this entire step** — do not touc
 
 Otherwise:
 
-1. **Push:** `git push --force-with-lease --force-if-includes`. If the lease is rejected, the remote moved under you — **do not** escalate to a bare `--force`; stop and report (hands-off: document the blocker), because someone/some bot pushed a commit you'd clobber.
-2. **Per-thread hygiene** — for each thread (recipes below):
+In `publish-reviewed` mode, first require the supplied review packet, a fresh external reviewer Pass, and a clean committed `HEAD` equal to the packet's final SHA. If any differ, stop; do not re-triage or publish stale work.
+
+1. **Re-check before publication:** require a clean worktree and no rebase in progress; re-fetch the PR and confirm it is still open, still points to the recorded head repository/ref, and its current `headRefOid` is the expected remote tip you are prepared to replace. Resolve the current branch's exact push remote/ref, verify they match that PR head, and fetch that exact head ref without moving the local branch so the expected commit object is available for the ancestry test — never assume `origin`, especially for fork PRs. If the PR head moved, the push target cannot be matched, or the branch has no usable push permission, stop and report instead of guessing.
+2. **Push:** if the expected remote tip is an ancestor of `HEAD`, use a normal explicit push (`git push <remote> HEAD:refs/heads/<headRefName>`). If history was rewritten, use an exact lease (`git push <remote> --force-with-lease=refs/heads/<headRefName>:<expected-head-oid> HEAD:refs/heads/<headRefName>`). If the lease is rejected, **never** escalate to bare `--force`; stop and report because the remote moved under you.
+3. **Re-read unresolved threads after the push.** This catches comments resolved or added while fixes were in progress. Do not mutate newly-added feedback that was not triaged and reviewed in this run; leave it open and call it out for the next pass.
+4. **Per-thread hygiene** — for each triaged thread still unresolved (recipes below):
    - *Actionable-fixed* → reply (`Fixed in <sha>: <one line>`) **and resolve**.
    - *Already-addressed* → reply pointing to where it's handled **and resolve**.
-   - *Push-back* → reply with the rationale **and resolve**, and flag it prominently in the summary (see below). Resolving keeps the unresolved set clean; the maintainer re-opens if they disagree.
+   - *Push-back* → reply with the rationale and flag it prominently in the summary. Resolve a bot-authored thread after independent review validates the push-back. Leave a human-authored thread unresolved unless the maintainer explicitly authorized resolving it, so unattended runs do not silently close a person's objection.
    - *Ambiguous/skipped* → **leave open**, list it in the summary as needing a decision.
-3. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with the proactive rule-4 sweeps called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, any ambiguous/skipped items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
-4. **Pings** — `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments.
+   Before replying, inspect the thread for an equivalent prior reply from the authenticated user (for example, a previous run replied but failed to resolve) and avoid posting duplicates. Resolve only after the reply succeeds; record any communication failure and leave that thread open.
+5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
+6. **Pings** — only after the push and summary succeeded: `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments.
 
 ### Step 8 — Final report
 
@@ -150,7 +171,7 @@ Always produce a report (this is the only output of a no-push run, and it double
 - The PR, the branch, before/after tip SHAs, and whether a rebase happened (and how conflicts went).
 - Each addressed comment with a **stable reference** — file:line, comment author, the thread's GraphQL node id, and the comment permalink — and its disposition (fixed / already-addressed / pushed-back / skipped). On a **no-push** run this mapping is essential: a later "push now" turn uses it to replay the exact replies/resolves without re-deriving everything.
 - Push-backs, prominently, with rationale.
-- Proactive rule-4 fixes made beyond the literal comments.
+- Proactive same-pattern fixes made beyond the literal comments.
 - Reviewer outcome and how many iterations it took (and whether it hit the cap).
 - Anything blocked or skipped for lack of an authoritative decision, with what's needed to unblock.
 
@@ -162,23 +183,26 @@ Purpose: run inside a parallelized agent that has no direct line to the user (e.
 - High-stakes/authoritative ambiguity → skip, do not guess, document precisely what's needed.
 - Non-trivial rebase conflict → abort cleanly and stop the run (step 2).
 - Lease-rejected push, unidentifiable/unrelated PR, or reviewer cap hit → stop and document; do not force or guess your way past it.
-- Subagents (fixer, reviewer) are still fine — they need no user. Every skipped/blocked item must appear in the final report (and the Summary comment if pushing) so the user learns of it and can act later.
+- At top level, fixer/reviewer subagents are still fine. In `delegated-fix` mode, do not attempt nested delegation; return the packet to the orchestrator. Every skipped/blocked item must appear in the final report (and the Summary comment if pushing) so the user learns of it and can act later.
 
 ## GitHub API recipes
 
 `gh api` expands `{owner}`/`{repo}` to the current repo. For GraphQL, pass real values (`gh repo view --json owner,name`).
 
-**List unresolved review threads** (id for resolve, comment `databaseId` for replies):
+**List unresolved review threads** (id for resolve, comment `databaseId` for replies). `--paginate` follows `reviewThreads.pageInfo`; if a thread's nested `comments.pageInfo.hasNextPage` is true, fetch that thread's remaining comments before triage:
 
 ```sh
-gh api graphql -f query='
-query($owner:String!,$repo:String!,$pr:Int!){
+gh api graphql --paginate -f query='
+query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){
   repository(owner:$owner,name:$repo){
     pullRequest(number:$pr){
-      reviewThreads(first:100){ nodes{
+      reviewThreads(first:100,after:$endCursor){ nodes{
         id isResolved isOutdated path line
-        comments(first:50){ nodes{ databaseId author{login} body diffHunk url } }
-      }}
+        comments(first:100){
+          nodes{ databaseId author{ login __typename } body diffHunk url }
+          pageInfo{ hasNextPage endCursor }
+        }
+      } pageInfo{ hasNextPage endCursor }}
     }
   }
 }' -F owner=OWNER -F repo=REPO -F pr=NUMBER
@@ -204,17 +228,18 @@ gh pr comment NUMBER --body '@codex review'
 gh pr comment NUMBER --body '@claude review'
 ```
 
-**Read context:** `gh pr view NUMBER --json reviews,comments,headRefName,baseRefName,url,state` and `gh api repos/{owner}/{repo}/issues/NUMBER/comments`.
+**Read context:** `gh pr view NUMBER --json reviews,comments,headRefName,headRefOid,headRepositoryOwner,baseRefName,url,state` and `gh api --paginate repos/{owner}/{repo}/issues/NUMBER/comments`.
 
 ## Checklist
 
 - [ ] Working tree clean; no rebase in progress; `gh` authenticated.
 - [ ] PR resolved (explicit `PR#` precedence) and sanity-checked against the current branch.
 - [ ] If requested, single-branch rebase done first; non-trivial conflict handled (interactive loop-in / hands-off abort+stop); validated when conflicted.
-- [ ] All **unresolved** threads gathered; resolved ones ignored; maintainer replies treated as authoritative.
+- [ ] All **unresolved** threads gathered with pagination; resolved ones ignored; maintainer replies treated as authoritative; a zero-actionable run exits without push/comment/ping.
 - [ ] Each thread triaged: actionable / already-addressed / push-back / ambiguous.
-- [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); rule-4 sweep for the same pattern in changed/related code.
-- [ ] Fresh independent reviewer ran after commits landed; feedback loop capped at 3.
-- [ ] Push run: `--force-with-lease` (never bare `--force`); replies + resolves applied; push-backs resolved and flagged; ambiguous items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments.
+- [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); same-pattern sweep done in changed/related code.
+- [ ] Worktree clean and every intended change committed before review and publication.
+- [ ] Fresh independent reviewer checked every disposition after commits landed; feedback loop capped at 3 reviewer rounds.
+- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success.
 - [ ] No-push run: zero PR mutations; final report maps every thread to its disposition for a later push turn.
 - [ ] Final report covers rebase outcome, dispositions with stable refs, push-backs, proactive fixes, reviewer result, and blocked/skipped items.

@@ -115,8 +115,8 @@ The local-control path (the rebased-locally / stale-origin case). Normalize an e
    - More than one → skip-and-record as ambiguous (or, interactive, ask which).
    - If the PR head is a fork, skip-and-record this branch-form entry and tell the user to pass the PR number instead; the unconditional `origin/<branch>` upstream used below is valid only for same-repository heads.
 2. **Check out the verified local ref as-is** — never `origin`, never a reset:
-   - Not checked out anywhere → `git worktree add --no-guess-remote "$WT_BASE/<slug>" <branch>`.
-   - Occupied by the **main checkout** (it's the orchestrator's current branch) → free it by detaching the main `HEAD` (`git -C "$ROOT" switch --detach`) **when the main tree is clean**, then `git worktree add --no-guess-remote`; the starting checkout mode recorded in Bootstrap is restored in Cleanup. If the main tree is *dirty*, skip-and-record (commit/stash or move the main checkout off it first). If setup fails after detaching and no later entry needs that branch free, restore immediately before continuing.
+   - Not checked out anywhere → `git worktree add "$WT_BASE/<slug>" <branch>`.
+   - Occupied by the **main checkout** (it's the orchestrator's current branch) → free it by detaching the main `HEAD` (`git -C "$ROOT" switch --detach`) **when the main tree is clean**, then `git worktree add` it; the starting checkout mode recorded in Bootstrap is restored in Cleanup. If the main tree is *dirty*, skip-and-record (commit/stash or move the main checkout off it first). If setup fails after detaching and no later entry needs that branch free, restore immediately before continuing.
    - Occupied by **another worktree** (a sibling entry, or the same branch listed twice) → skip-and-record; a branch can't live in two worktrees.
 3. **Set the push target:** `git -C "$WT_BASE/<slug>" branch --set-upstream-to=origin/<branch>` (origin's head ref for the paired same-repository PR, refreshed by Bootstrap's fetch). `address-review` still verifies the exact PR head and uses an expected-OID lease before any rewrite.
 
@@ -127,7 +127,7 @@ The canonical path. Resolve the PR, then prefer a same-named local branch if you
 1. **Resolve and sanity-check:** `gh pr view N --json number,state,headRefName,headRepositoryOwner,baseRefName,url,title`. If `state` is not `OPEN`, skip-and-record. Note `headRefName` and whether `headRepositoryOwner` matches `origin`'s owner (same-repo) or differs (fork).
 2. **Same-repo:**
    - If local `<headRefName>` exists, compare it with `origin/<headRefName>` **before** considering checkout occupancy. If it is strictly behind with no unique local commits, skip-and-record rather than force-rewriting newer remote work; ask the user to fast-forward it or explicitly pass the branch if they truly intend the stale local state.
-   - A usable local `<headRefName>` that is free → `git worktree add --no-guess-remote "$WT_BASE/pr-<N>" <headRefName>` and **record any ahead/diverged state** in the summary.
+   - A usable local `<headRefName>` that is free → `git worktree add "$WT_BASE/pr-<N>" <headRefName>` and **record any ahead/diverged state** in the summary.
    - A usable local `<headRefName>` occupied by the main checkout → detach the clean main `HEAD` and add the worktree as in the Branch-entry case; if held by another worktree or the main tree is dirty, skip-and-record.
    - No local `<headRefName>` → `git worktree add --track -b <headRefName> "$WT_BASE/pr-<N>" origin/<headRefName>`.
 3. **Fork PR** — let `gh` wire up the fork remote and tracking inside a detached worktree:

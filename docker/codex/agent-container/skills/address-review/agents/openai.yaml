@@ -1,0 +1,4 @@
+interface:
+  display_name: "Address Review"
+  short_description: "Address one PR review end to end"
+  default_prompt: "Use $address-review to address the unresolved review feedback on the current pull request."

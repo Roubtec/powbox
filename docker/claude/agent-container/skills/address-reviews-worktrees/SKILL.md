@@ -1,14 +1,15 @@
 ---
 name: address-reviews-worktrees
-description: Address maintainer-vetted review feedback on several pull requests in parallel, one git worktree per PR — each worktree checks out an existing PR head branch and runs the address-review skill in hands-off mode, with push/ping flags passed through, so many PRs are fixed concurrently without cross-talk. Trigger when the user asks to address reviews on multiple PRs at once, fix review comments across many PRs in parallel, or fan out review-addressing with worktrees. Do not trigger for a single PR (use address-review), for implementing new task files (use address-tasks-worktrees), or for rebasing a stack (use rebase-stack).
+description: Address maintainer-vetted review feedback on several pull requests in parallel, one git worktree per entry — supply the batch as PR numbers and/or local branch names; each worktree checks out the chosen branch (your local ref when you name a branch, the PR head when you give a number) and runs the address-review skill in hands-off mode, with push/ping flags passed through, so many PRs are fixed concurrently without cross-talk. Trigger when the user asks to address reviews on multiple PRs or branches at once, fix review comments across many PRs in parallel, or fan out review-addressing with worktrees. Do not trigger for a single PR (use address-review), for implementing new task files (use address-tasks-worktrees), or for rebasing a stack (use rebase-stack).
 ---
 
 Address the review feedback on **several pull requests at once**, fanning each PR out into its own git worktree so they progress concurrently without polluting each other.
 
-**Arguments:** `<PR numbers> [push] [ping-codex] [ping-claude]`
+**Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude]`
 
 This skill is the parallel batch front-end for `address-review`.
-It does **not** re-implement review-addressing — it sets up one isolated worktree per PR and runs the `address-review` skill inside each, `hands-off`, then aggregates the results.
+It does **not** re-implement review-addressing — it sets up one isolated worktree per entry and runs the `address-review` skill inside each, `hands-off`, then aggregates the results.
+Each batch entry is either a **PR number** (work the PR head from `origin`) or a **local branch name** (work *your* local ref exactly as it stands) — see "Resolving and checking out each entry" for the local-first rule that keeps a locally-rebased branch from being silently replaced by a stale `origin` copy.
 It borrows its worktree machinery (isolation model, Session Bootstrap, adaptive throttling, cleanup) wholesale from `address-tasks-worktrees` — **read that skill for the rationale behind those pieces**; only the deltas are spelled out here.
 
 ## How this differs from address-tasks-worktrees
@@ -26,10 +27,14 @@ Parsing is **lenient** — accept commas, `&`, `#` prefixes, and free word order
 
 | Argument | Meaning |
 |---|---|
-| `<PR numbers>` | The batch: one or more PRs (`#38 #231 #6`, `38,231,6`, …). Each becomes one worktree + one `address-review` run. This is the only required argument. |
-| `push` | Passed through to every PR's `address-review`: push the fixed branch (force-with-lease) and do the PR-side communication (replies, resolves, Summary comment). |
+| `<PRs and/or branches>` | The batch: one or more entries, each a **PR number** (`#38`, `38`) or a **local branch name** (`task/088`). May be mixed (`#38 task/084 6`). Each becomes one worktree + one `address-review` run. This is the only required argument. |
+| `push` | Passed through to every entry's `address-review`: push the fixed branch (force-with-lease) and do the PR-side communication (replies, resolves, Summary comment). |
 | `ping-codex` | Passed through: after pushing, post a dedicated `@codex review` comment on that PR. Implies `push`. |
 | `ping-claude` | Passed through: after pushing, post a dedicated `@claude review` comment on that PR. Implies `push`. |
+
+**Classifying each entry:** a bare integer or `#`-prefixed integer is a **PR number**; anything else (contains a `/`, letters, etc.) is a **branch name**. A branch literally named like an integer is the one ambiguous case — name it with an explicit `refs/heads/` prefix or just pass its PR number instead.
+
+**Local-first guarantee.** When you supply a branch name, the worktree is checked out from **your local ref, never from `origin`** — so a branch you rebased locally while `origin` is stale is worked exactly as it stands on disk. More broadly, this skill checks out `origin` for an entry **only when there is no local branch to use** (a PR number whose head branch you don't have locally). It never silently swaps your local copy for a stale remote one. The `git fetch origin` in Bootstrap updates **remote-tracking refs only** (`origin/*`); it never moves a local branch or changes which commits a branch-entry worktree operates on — it just makes the later force-with-lease accurate.
 
 **Always force-injected into each subagent (not a user argument):** `hands-off`.
 A parallel subagent has no line back to the user, so it must run `address-review` `hands-off` — best-effort, documenting every skipped/blocked item in its report.
@@ -53,57 +58,63 @@ Identical to `address-tasks-worktrees` → "Session Bootstrap" — run that proc
 
 1. **Verify the worktree roots are container-local and prune this container's orphans.** Confirm `.worktrees` is a mountpoint on a container-local fs (not the host bind mount) and that `.claude/worktrees` + `.git/worktrees` are tmpfs; if a check fails, stop and run `enable-worktrees` (or rebuild/relaunch) before continuing. Then prune only **this** container's orphaned worktree dirs under `.worktrees/$CONTAINER_NAME/` (scanning the whole volume would delete a peer container's live work). Use the exact command blocks from the sibling skill's Bootstrap.
 2. **Ensure pushes work without rewriting the host remote.** If `origin` is SSH, add the container-local `url."https://github.com/".insteadOf "git@github.com:"` rewrite, then confirm `git ls-remote --heads origin >/dev/null`. If auth fails and the batch needs `push`/`ping-*`, stop and report — unlike `address-tasks-worktrees`, there is no "local branches only" fallback that still delivers value here, because the whole point of `push`/`ping` is updating the existing PRs.
-3. **`git fetch origin`** so PR head branches resolve to their current remote tips before you check them out.
+3. **`git fetch origin`** to refresh remote-tracking refs. This updates `origin/*` only — it never moves a local branch or rewrites a worktree — so it is safe for branch entries (which work the local ref regardless) and is what makes a later `--force-with-lease` push compare against the true current remote tip. It also lets a PR-number entry whose head you lack locally check out the current `origin` head.
 
 ## Orchestrator responsibilities
 
 You are the orchestrator. You do **not** address reviews yourself — `address-review` does, one instance per PR. Your job:
 
-1. Resolve `<PR numbers>` to a concrete list of PRs; capture the pass-through flag set.
+1. Parse the batch into a list of entries, classifying each as a PR number or a branch name (see Arguments); capture the pass-through flag set.
 2. Run the **Session Bootstrap**.
-3. For each PR, **resolve and sanity-check it, then create a worktree checked out on its existing head branch** (see next section). Skip-and-record any PR that cannot be set up (closed/merged, branch checked out elsewhere, fork edge cases you choose not to handle).
+3. For each entry, **resolve it to a `(local-or-origin branch, PR number)` pair, sanity-check it, then create a worktree on the right ref** (see next section). Skip-and-record any entry that cannot be set up (closed/merged or PR-less, branch checked out elsewhere, fork edge cases you choose not to handle).
 4. **Spawn one subagent per PR, fanned out concurrently** (throttled — see below), each running `address-review` `hands-off` with the pass-through flags. Wait for the in-flight set to return.
 5. **Clean up** each worktree once its subagent returns (never delete the PR branch).
 6. **Aggregate** every subagent's `address-review` final report into one batch summary, surfacing the hands-off blockers prominently.
 
-## Per-PR worktree on an existing PR branch
+## Resolving and checking out each entry
 
-This is the part that differs most from the task-file skills: you check out a branch that **already exists** (locally or only on `origin`, occasionally on a fork) rather than creating one.
+This is the part that differs most from the task-file skills: you check out a branch that **already exists** (your local ref, or `origin`'s, occasionally a fork's) rather than creating one. Each entry resolves to a `(branch-to-check-out, PR-number)` pair; the pair drives the worktree and the subagent.
 
-For each PR `#N`, from the main tree:
+Shared setup, from the main tree:
 
-1. **Resolve and sanity-check** the PR:
+```bash
+ROOT="$(git rev-parse --show-toplevel)"
+WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+mkdir -p "$WT_BASE"
+```
 
-   ```bash
-   gh pr view N --json number,state,headRefName,headRepositoryOwner,baseRefName,url,title
-   ```
+These git calls are safe to run while other entries' subagents are active — they touch only their own worktrees and the lock-protected refs. Use a stable, collision-free slug per entry (e.g. `pr-<N>` or a sanitized branch name).
 
-   - If `state` is not `OPEN`, skip and record it — there is no live PR to address.
-   - Note `headRefName` (the branch) and whether `headRepositoryOwner` matches `origin`'s owner (same-repo PR) or differs (fork PR).
+### Branch entry — work your local ref
 
-2. **Create the worktree on the PR head branch**, under this container's own subdir so a peer's prune never reaps it:
+The local-control path (the rebased-locally / stale-origin case). The branch must exist locally, and **pairs to its PR by head name** — i.e. the local branch name equals the PR's `headRefName` (which is the norm: a local rebase keeps the branch name). If your local copy has a *different* name than the PR head, this auto-pairing can't see it; use that PR's number with `address-review` directly, or rename to match.
 
-   ```bash
-   ROOT="$(git rev-parse --show-toplevel)"
-   WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
-   mkdir -p "$WT_BASE"
-   ```
+1. **Pair to the PR by head:** `gh pr list --head <branch> --state open --json number,url,headRepositoryOwner`.
+   - Exactly one open PR → that's the pairing.
+   - Zero → skip-and-record: with no PR there are no review threads to address.
+   - More than one → skip-and-record as ambiguous (or, interactive, ask which).
+2. **Check out the local ref as-is** — never `origin`, never a reset:
+   - Not checked out elsewhere → `git worktree add "$WT_BASE/<slug>" <branch>`.
+   - Already checked out (e.g. the main tree sits on it) → skip-and-record; a branch can't live in two worktrees. (Move the main tree off it and re-run, or pass the PR number.)
+3. **Set the push target** so a later `--force-with-lease` is clean and accurate: `git -C "$WT_BASE/<slug>" branch --set-upstream-to=origin/<branch>` (origin's head ref for the paired PR, refreshed by Bootstrap's fetch). The push then rewrites the stale `origin/<branch>` to your local tip, and `--force-if-includes` still guards against clobbering a remote commit you never saw.
 
-   **Same-repo PR** (the common case) — track the remote head:
-   - If no local branch `<headRefName>` exists: `git worktree add --track -b <headRefName> "$WT_BASE/pr-<N>" origin/<headRefName>`.
-   - If a local `<headRefName>` exists and is **not** checked out in another worktree: `git worktree add "$WT_BASE/pr-<N>" <headRefName>`. Do **not** silently reset it to `origin/<headRefName>`; if it diverges from origin, record that in the summary (a force-push would rewrite the PR), and let `address-review` work from the actual tip.
-   - If `<headRefName>` is already checked out elsewhere (e.g. the main tree is sitting on it): skip-and-record — a branch cannot be checked out in two worktrees at once.
+### PR-number entry — work the PR head
 
-   **Fork PR** — let `gh` wire up the fork remote and tracking inside a detached worktree:
+The canonical path. Resolve the PR, then prefer a same-named local branch if you have one (so we still never bypass your local copy), else check out `origin`'s head.
+
+1. **Resolve and sanity-check:** `gh pr view N --json number,state,headRefName,headRepositoryOwner,baseRefName,url,title`. If `state` is not `OPEN`, skip-and-record. Note `headRefName` and whether `headRepositoryOwner` matches `origin`'s owner (same-repo) or differs (fork).
+2. **Same-repo:**
+   - Local `<headRefName>` exists and not checked out elsewhere → `git worktree add "$WT_BASE/pr-<N>" <headRefName>` (use the local tip; **record any divergence from `origin/<headRefName>`** in the summary, since a force-push would rewrite the PR to your local state).
+   - No local `<headRefName>` → `git worktree add --track -b <headRefName> "$WT_BASE/pr-<N>" origin/<headRefName>`.
+   - Already checked out elsewhere → skip-and-record.
+3. **Fork PR** — let `gh` wire up the fork remote and tracking inside a detached worktree:
    ```bash
    git worktree add --detach "$WT_BASE/pr-<N>"
    ( cd "$WT_BASE/pr-<N>" && gh pr checkout N )
    ```
-   `gh pr checkout` also works for same-repo PRs, so it is a fine uniform fallback whenever the explicit `git worktree add` path above is awkward.
+   `gh pr checkout` also works for same-repo PRs, so it is a fine uniform fallback whenever the explicit `git worktree add` path is awkward.
 
-3. The absolute path `"$WT_BASE/pr-<N>"`, the branch name, and `#N` are what you hand that PR's subagent.
-
-These git calls are safe to run while other PRs' subagents are active — they touch only their own worktrees and the lock-protected refs.
+The absolute worktree path, the checked-out branch name, the **paired PR number**, and (for branch entries) the note "this is your local ref" are what you hand that entry's subagent.
 
 ## Per-PR subagent
 
@@ -112,7 +123,7 @@ Spawn one `general-purpose` `Agent` per PR. Each runs the entire `address-review
 The prompt contract for each subagent:
 
 - **WORKTREE CONTRACT first:** "Your worktree is `<absolute path>`. Before anything else, `cd` into it and verify `git rev-parse --show-toplevel` prints exactly that path; if not, STOP and report. Do all work inside this worktree only — never `cd` to the repo root or touch sibling worktrees. Other agents are working in other worktrees concurrently; stay in yours."
-- **The assignment:** "You are on branch `<headRefName>`, the head of PR #N. Confirm with `git branch --show-current` and `gh pr view N`."
+- **The assignment:** "You are on branch `<branch>`, paired with PR #N. Confirm the branch with `git branch --show-current`. PR #N is the **authoritative pairing** — treat the supplied number as correct and do not re-derive it. This branch may be a local, possibly-rebased copy of the PR head, so its SHAs can differ from `origin`'s; that is expected, not a wrong-PR signal." (For a branch entry, add: "This is *your local ref*; work it exactly as it stands — do not reset or pull from `origin`.")
 - **The action:** "Invoke the `address-review` skill with exactly: `/address-review #N hands-off <push?> <ping-codex?> <ping-claude?>` (a user-level seeded skill). If you cannot invoke a skill in your context, read and follow `address-review`'s `SKILL.md` from your skills directory and execute its procedure with those same arguments. `hands-off` is mandatory — you have no line to the user; make best-effort low-stakes calls and document everything else."
 - **Repo context:** "Read `AGENTS.md` / `CLAUDE.md` first for conventions."
 - **Validation in a worktree:** "If verifying fixes needs a build, install dependencies in this worktree first — cheap on the hardlinked pnpm store. Point Playwright at `/usr/bin/chromium` if used. App-server / `next build` e2e may not run from a nested worktree path; defer it per `address-tasks-worktrees`'s app-server caveat and note that in your report rather than forcing it."
@@ -143,7 +154,7 @@ If the user wants them integrated into a linear, mergeable order, point them at 
 
 Aggregate the per-PR `address-review` reports into one batch summary:
 
-- **Per PR:** its URL, the branch, whether it was pushed and/or pinged, and a one-line outcome (`fixed & pushed`, `fixed, not pushed`, `skipped — <reason>`, `blocked — <reason>`).
+- **Per entry:** its PR URL, the branch, **which ref was worked** (your local ref — and how far it diverged from `origin` — vs. the `origin` head), whether it was pushed and/or pinged, and a one-line outcome (`fixed & pushed`, `fixed, not pushed`, `skipped — <reason>`, `blocked — <reason>`). Call out divergence explicitly: it tells the user a push rewrote `origin` to their local state.
 - **Hands-off blockers, surfaced prominently** — every item any subagent skipped for lack of an authoritative decision, gathered across all PRs so the user can act on them in one place. This is the main value of an unattended batch: nothing silently dropped.
 - **Push-backs** made across the batch, with their rationale.
 - **No-push runs:** include each PR's per-thread disposition map (from its `address-review` report) so a later "push now" pass can replay replies/resolves precisely.
@@ -153,9 +164,9 @@ Aggregate the per-PR `address-review` reports into one batch summary:
 ## Checklist
 
 - [ ] Session Bootstrap ran: worktree roots verified container-local, this container's orphans pruned, push auth confirmed, `git fetch origin` done.
-- [ ] `<PR numbers>` resolved; pass-through flag set (`push`/`ping-*`) captured; `hands-off` force-injected into every subagent.
-- [ ] Each PR sanity-checked (open?), worktree created on its **existing** head branch under `.worktrees/$CONTAINER_NAME/`; un-setup-able PRs skipped-and-recorded.
-- [ ] One subagent per PR, each running `/address-review #N hands-off …`; fanned out concurrently but throttled (PRs-in-flight conservative due to nested fixer/reviewer agents).
+- [ ] Batch parsed into entries (each classified PR-number vs branch-name); pass-through flag set (`push`/`ping-*`) captured; `hands-off` force-injected into every subagent.
+- [ ] Each entry resolved to a `(branch, PR#)` pair and checked out on the right ref — **branch entries use the local ref, never `origin`**; PR-number entries prefer a same-named local branch, else `origin` head; worktrees under `.worktrees/$CONTAINER_NAME/`; un-setup-able / PR-less entries skipped-and-recorded.
+- [ ] One subagent per entry, each running `/address-review #N hands-off …` with the PR# as the authoritative pairing; fanned out concurrently but throttled (in-flight count conservative due to nested fixer/reviewer agents).
 - [ ] No new branches created, no `gh pr create`, no restack performed.
 - [ ] Worktrees removed after each subagent returns; **no PR branch deleted**.
 - [ ] Batch summary aggregates outcomes, hands-off blockers (prominently), push-backs, no-push disposition maps, throttling notes, and the `rebase-stack` follow-up pointer.

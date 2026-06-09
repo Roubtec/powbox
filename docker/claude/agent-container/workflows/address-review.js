@@ -56,12 +56,13 @@ const PACKET_SCHEMA = {
       properties: {
         number: { type: "integer" },
         url: { type: "string" },
-        branch: { type: "string", description: "headRefName." },
+        branch: { type: "string", description: "The PR's remote head ref (headRefName) — publication metadata, the push target. May differ from what is checked out." },
+        workingBranch: { type: "string", description: "The branch actually checked out in the working tree right now (`git branch --show-current`). Usually equals branch, but for a supported local-offshoot of a merge-pending PR it differs — the fixer edits THIS branch, not the remote head ref." },
         base: { type: "string", description: "Effective review base — the rebase target if a rebase ran, else baseRefName." },
         headOid: { type: "string", description: "Expected remote head OID, for the publication lease. Populate from the PR's headRefOid." },
         rebased: { type: "boolean", description: "True if a rebase rewrote the branch tip (publish must use --force-with-lease)." },
       },
-      required: ["number", "url", "branch", "base", "headOid"],
+      required: ["number", "url", "branch", "workingBranch", "base", "headOid"],
     },
     items: {
       type: "array",
@@ -74,7 +75,8 @@ const PACKET_SCHEMA = {
           commentId: { type: "string", description: "Top comment databaseId — REQUIRED for type `review-thread` (used to thread the reply). Absent/empty for `standalone`." },
           path: { type: "string" },
           line: { type: "integer" },
-          author: { type: "string" },
+          author: { type: "string", description: "Comment author login." },
+          authorIsBot: { type: "boolean", description: "True if the comment author is a bot / GitHub App. Derive from GraphQL author `__typename` (`Bot`) — NOT from guessing the login. Drives whether a push-back thread may be auto-resolved." },
           body: { type: "string", description: "Comment text, verbatim." },
           url: { type: "string", description: "Permalink to the comment (the stable reference for a standalone item, which has no threadId)." },
         },
@@ -94,8 +96,9 @@ const DISPOSITION_SCHEMA = {
         type: "object",
         properties: {
           type: { type: "string", description: "`review-thread` or `standalone`, echoed from the gathered item." },
-          threadId: { type: "string", description: "The review-thread node id for type `review-thread`; omit for `standalone`." },
-          commentId: { type: "string", description: "The comment databaseId for type `review-thread`; omit for `standalone`." },
+          threadId: { type: "string", description: "The review-thread node id — REQUIRED for type `review-thread` (publication resolves it); omit for `standalone`." },
+          commentId: { type: "string", description: "The comment databaseId — REQUIRED for type `review-thread` (publication replies to it); omit for `standalone`." },
+          authorIsBot: { type: "boolean", description: "Echoed from the gathered item; lets publication decide whether a push-back thread may be auto-resolved (bot) or must stay open (human)." },
           url: { type: "string", description: "Permalink — the stable reference, especially for `standalone` items." },
           ref: { type: "string", description: "file:line + author, a human-readable reference." },
           kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | ambiguous-skipped" },
@@ -166,13 +169,13 @@ Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 2. No rebase already in progress.
 3. \`gh auth status\` succeeds.
 
-Resolve the PR: explicit PR# wins (but sanity-check it shares history with the current branch — if genuinely unrelated, blocker and stop); else auto-detect via \`gh pr view\`. When \`ok\` is true you MUST populate the whole \`pr\` object: \`number\`, \`url\`, \`branch\` (headRefName), \`base\`, \`headOid\` (the PR's headRefOid — the publish phase needs it for a safe \`--force-with-lease\`), and \`rebased\`.
+Resolve the PR: explicit PR# wins (but sanity-check it shares history with the current branch — if genuinely unrelated, blocker and stop); else auto-detect via \`gh pr view\`. When \`ok\` is true you MUST populate the whole \`pr\` object: \`number\`, \`url\`, \`branch\` (the PR's remote headRefName — the push target), \`workingBranch\` (the branch actually checked out now, from \`git branch --show-current\`), \`base\`, \`headOid\` (the PR's headRefOid — the publish phase needs it for a safe \`--force-with-lease\`), and \`rebased\`. Do NOT switch branches: \`workingBranch\` is whatever is checked out. It usually equals \`branch\`, but for a supported local off-shoot of a merge-pending PR it differs — downstream fixes must edit \`workingBranch\`, while \`branch\`/\`headOid\` remain publication metadata for the push.
 
 If \`rebase on top of <branch>\` was given: save \`refs/pre-rebase/<branch>/<ts>\`, then \`git rebase <target>\`. Resolve only TRIVIAL conflicts (imports/whitespace/pure additions/already-represented patches → in-file resolve or \`git rebase --skip\`). On the FIRST non-trivial conflict, \`git rebase --abort\`, confirm a clean tree, set \`blocker\` and stop. After a conflicted rebase, run the build to confirm. Set \`pr.rebased\` true if the tip was rewritten and \`pr.base\` to the rebase target; otherwise \`pr.base = baseRefName\` and \`pr.rebased = false\`. (When rebased, \`pr.headOid\` is still the *remote* tip you will replace — read it before the rebase.)
 
 Gather feedback into \`items\` (each verbatim):
-- UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`). Emit each as \`type: "review-thread"\` with \`threadId\` (node id), \`commentId\` (top comment databaseId), \`path\`, \`line\`, \`author\`, \`body\`, \`url\`. \`threadId\` and \`commentId\` are mandatory for these — they are how publication resolves and replies.
-- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context.
+- UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`). Emit each as \`type: "review-thread"\` with \`threadId\` (node id), \`commentId\` (top comment databaseId), \`path\`, \`line\`, \`author\` (login), \`authorIsBot\` (true when the comment's GraphQL \`author.__typename\` is \`Bot\` — query \`author{ login __typename }\`; do not guess from the login), \`body\`, \`url\`. \`threadId\` and \`commentId\` are mandatory for these — they are how publication resolves and replies.
+- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`authorIsBot\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context.
 
 If there are no unresolved threads and no included standalone item, return \`ok: true\` with an empty \`items\` array — the caller will exit as a successful no-op.
 
@@ -183,7 +186,7 @@ function fixPrompt(packet, findings) {
   const fixup = findings
     ? `\n## Reviewer findings to address\n\nThe previous fix round did not fully pass. Address each finding, then re-confirm every disposition:\n\n${JSON.stringify(findings, null, 2)}\n`
     : "";
-  return `You are addressing review feedback on PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). You are already on the PR branch in the working tree — confirm with \`git branch --show-current\` and do not switch branches. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
+  return `You are addressing review feedback on PR #${packet.pr.number} (base \`${packet.pr.base}\`). You are on branch \`${packet.pr.workingBranch}\` in the working tree — confirm with \`git branch --show-current\` and do NOT switch branches. (The PR's remote head ref is \`${packet.pr.branch}\`; that is the push target, which may be a different name for a local off-shoot — edit the checked-out \`${packet.pr.workingBranch}\`, not the remote ref name.) Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 This run is unattended (hands-off): decide low-stakes ambiguity best-effort and record it; for high-stakes ambiguity that needs an authoritative decision, do NOT guess — mark the item \`ambiguous-skipped\` and leave it open.
 
@@ -205,11 +208,11 @@ Triage each item into exactly one kind and act:
 - Do NOT push, reply, resolve, or comment on the PR — publication is a separate, later step.
 - Do NOT use the \`TaskCreate\`/\`TaskUpdate\`/\`TaskList\` tools.
 
-For each disposition, echo the item's \`type\` and carry its identifiers: for \`review-thread\` items include \`threadId\` and \`commentId\`; for \`standalone\` items include \`url\`. Return the structured dispositions.`;
+For each disposition, echo the item's \`type\` and \`authorIsBot\`, and carry its identifiers: for \`review-thread\` items \`threadId\` and \`commentId\` are MANDATORY (publication cannot reply/resolve without them); for \`standalone\` items include \`url\`. Return the structured dispositions.`;
 }
 
 function reviewPrompt(packet, dispositions) {
-  return `You are an independent fresh-eyes reviewer for PR #${packet.pr.number} (branch \`${packet.pr.branch}\`, base \`${packet.pr.base}\`). You are on the PR branch with the fixer's commits already in the working tree. Verify every proposed disposition against the committed code. Edit NOTHING. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
+  return `You are an independent fresh-eyes reviewer for PR #${packet.pr.number} (branch \`${packet.pr.workingBranch}\`, base \`${packet.pr.base}\`). You are on that branch with the fixer's commits already in the working tree. Verify every proposed disposition against the committed code. Edit NOTHING. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 You are given the unresolved items and the proposed dispositions — but NOT the fixer's reasoning. Independently confirm each:
 - \`actionable-fixed\` / \`already-addressed\` claims must actually hold in the committed code.
@@ -247,7 +250,7 @@ Report a STRUCTURED result: set \`published: true\` ONLY if the push and every r
    - \`review-thread\` items: reply via REST \`pulls/.../comments/<commentId>/replies\`, resolve via GraphQL \`resolveReviewThread\` on \`threadId\`:
      - actionable-fixed → reply \`Fixed in <sha>: <one line>\` AND resolve.
      - already-addressed → reply pointing to where it's handled AND resolve.
-     - push-back → reply with the rationale; resolve a BOT-authored thread, but leave a HUMAN-authored thread open unless explicitly authorized.
+     - push-back → reply with the rationale; resolve ONLY when the disposition's \`authorIsBot\` is true (a bot thread), and leave a thread with \`authorIsBot\` false (human) open unless explicitly authorized. Use that flag, not a guess from the author login.
      - ambiguous-skipped → leave open.
    - \`standalone\` items (no thread to resolve): address them only in the Summary comment below; do NOT call \`resolveReviewThread\`. Record their outcome by \`url\`.
    Avoid duplicate replies (check for an equivalent prior reply by the authed user); resolve only after the reply succeeds.
@@ -262,7 +265,18 @@ Record each item's outcome with its stable reference (file:line, author, threadI
 }
 
 // --- Flag parsing (the only logic the script does itself; no shell needed) ---
-const raw = typeof args === "string" ? args : Array.isArray(args) ? args.join(" ") : "";
+// `args` may arrive as a string OR, per the workflow docs, as structured data
+// (array / object). Flatten any shape into the words it contains so `push` /
+// `ping-codex` / `ping-claude` survive `Run /address-review on #38 with push`
+// being delivered as an object — `String(args)` would yield "[object Object]".
+function flattenArgs(a) {
+  if (a == null) return "";
+  if (typeof a === "string") return a;
+  if (Array.isArray(a)) return a.map(flattenArgs).join(" ");
+  if (typeof a === "object") return Object.values(a).map(flattenArgs).join(" ");
+  return String(a);
+}
+const raw = flattenArgs(args);
 const lower = raw.toLowerCase();
 const wantPush = /\bpush\b/.test(lower) || /\bping-?codex\b/.test(lower) || /\bping-?claude\b/.test(lower);
 const flags = {
@@ -282,8 +296,15 @@ if (!packet.ok) {
 // The schema requires `pr` fields, but a schema-valid agent can still omit the
 // object; validate before any phase dereferences packet.pr.* so an incomplete
 // response is a reported failure, not a thrown crash.
-if (!packet.pr || packet.pr.number == null || !packet.pr.branch || !packet.pr.base) {
-  return { error: "Gather succeeded but returned incomplete PR metadata (need number, branch, base, headOid).", pr: packet.pr || null };
+if (!packet.pr || packet.pr.number == null || !packet.pr.branch || !packet.pr.workingBranch || !packet.pr.base) {
+  return { error: "Gather succeeded but returned incomplete PR metadata (need number, branch, workingBranch, base).", pr: packet.pr || null };
+}
+// headOid is only consumed by the publish lease, so require it specifically when
+// a push is requested — its absence would otherwise interpolate `undefined` into
+// the expected-head check and the --force-with-lease, defeating remote-movement
+// protection only AFTER fixes were made. Catch it before any work starts.
+if (flags.push && !packet.pr.headOid) {
+  return { error: "Push requested but gather returned no pr.headOid; refusing to proceed without the expected-head OID needed for a safe --force-with-lease.", pr: packet.pr };
 }
 if (!packet.items || packet.items.length === 0) {
   return { status: "no-op", detail: "No unresolved threads and no included standalone item — nothing to address.", pr: packet.pr };
@@ -352,6 +373,24 @@ if (!passed) {
     dispositions: dispositions.dispositions,
     outstanding: verdict ? verdict.issues : null,
     note: `Hit the ${MAX_ROUNDS}-round cap without a passing review; nothing was pushed.`,
+  };
+}
+
+// Guard before any publication side effect: a `review-thread` disposition with
+// no threadId/commentId cannot be replied to or resolved, and the JSON schema
+// cannot make those conditionally required. Catch it here so we never push and
+// then fail mid-publish on a missing id (nothing has been pushed yet on a push
+// run — the publisher does the push — so aborting now leaves the remote clean).
+const badDisp = dispositions.dispositions.find(
+  (d) => d.type === "review-thread" && (!d.threadId || !d.commentId)
+);
+if (badDisp) {
+  return {
+    status: "publish-aborted-incomplete-dispositions",
+    pr: packet.pr,
+    rounds,
+    dispositions: dispositions.dispositions,
+    note: `Review-thread disposition "${badDisp.ref || badDisp.kind}" is missing threadId/commentId; nothing was pushed. Re-run so every review thread carries its identifiers.`,
   };
 }
 

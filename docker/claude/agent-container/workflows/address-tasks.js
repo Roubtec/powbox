@@ -157,8 +157,10 @@ function worktreeContract(task) {
   return `## WORKTREE CONTRACT (do this before anything else)
 
 Your worktree is \`$(git rev-parse --show-toplevel)/.worktrees/\${CONTAINER_NAME:?CONTAINER_NAME must be set}/${task.slug}\` (call it WT).
-- If WT does not exist yet: \`git worktree add "$WT" -b ${task.branch} ${task.base}\` (create the branch off its base).
 - If WT already exists (a prior round/stage of this same task created it): just \`cd "$WT"\` — it is already on \`${task.branch}\` with the prior commits. Do NOT \`git worktree add\` again and do NOT \`git switch\` to a branch that may be checked out elsewhere.
+- If WT does not exist yet, create it, choosing by whether the branch already exists (a rerun after cleanup, or an interrupted prior run, can leave the branch without its worktree):
+  - branch \`${task.branch}\` does NOT exist → \`git worktree add "$WT" -b ${task.branch} ${task.base}\` (create it off its base).
+  - branch \`${task.branch}\` already exists → \`git worktree add "$WT" ${task.branch}\` (attach the existing branch; do NOT pass \`-b\`, which errors on an existing branch).
 Then \`cd "$WT"\` and verify \`git rev-parse --show-toplevel\` prints exactly WT and \`git branch --show-current\` prints \`${task.branch}\`. If either is wrong, STOP and report.
 Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.`;
 }
@@ -318,12 +320,17 @@ for (let w = 0; w < plan.waves.length; w++) {
   const wave = plan.waves[w];
   if (!Array.isArray(wave) || wave.length === 0) continue;
 
-  // Dependency gating: a task whose in-batch dependency did not finish `done`
-  // must NOT run — it would branch from a missing/partial/rejected prerequisite.
+  // Dependency gating: a task whose in-batch dependency did not finish
+  // successfully must NOT run — it would branch from a missing/partial/rejected
+  // prerequisite. A dependency is "succeeded" if it landed a PR (`done`) OR, on a
+  // no-remote run, was implemented and reviewed locally (`local-only`): its base
+  // branch and commits persist in the shared `.git`, so dependents can still
+  // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr` do not unlock.
+  const succeeded = (s) => s === "done" || s === "local-only";
   const runnable = [];
   for (const task of wave) {
     const deps = Array.isArray(task.dependsOn) ? task.dependsOn : [];
-    const failedDep = deps.find((d) => statusBySlug.get(d) !== "done");
+    const failedDep = deps.find((d) => !succeeded(statusBySlug.get(d)));
     if (failedDep) {
       const r = { slug: task.slug, branch: task.branch, status: "skipped-dep", blockedBy: failedDep, depStatus: statusBySlug.get(failedDep) || "missing" };
       statusBySlug.set(task.slug, "skipped-dep");

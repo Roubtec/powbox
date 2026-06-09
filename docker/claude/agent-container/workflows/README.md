@@ -50,17 +50,24 @@ fan-out, so it needs no worktree at all — every stage runs on the PR branch in
 the one working tree, which is the simplest way to keep the fixer's commits
 visible to the reviewer and publisher.
 
-### `address-tasks.js` — supersedes two skills at once
+### `address-tasks.js` — the fan-out implement/review loop
 
 The `address-tasks` skill's dominant constraint is that every subagent shares
 the orchestrator's one working tree, which forces strict one-at-a-time
-sequencing and is the entire reason `address-tasks-worktrees` exists (≈150 lines
-of shadow-mount/worktree bootstrap to claw parallelism back). The runtime's
-per-agent worktree isolation removes that constraint structurally, so a single
-workflow covers **both** skills: independent tasks run concurrently, the
-implementer-finishes-before-its-reviewer rule is just a sequential `await`
-inside a per-task function, and the dependency waves / 3-round loop are ordinary
-JavaScript.
+sequencing; `address-tasks-worktrees` exists to claw parallelism back with its
+own worktree-per-task bootstrap. This workflow folds both into one: it runs the
+same explicit `.worktrees/$CONTAINER_NAME/<slug>` worktree-per-task model (see
+"Worktrees" above), but expresses the orchestration — dependency waves gated on
+their prerequisites, the 3-round implement→review→fix loop, "implementer
+finishes before its reviewer" — as deterministic JavaScript rather than prose.
+Independent tasks run concurrently via `parallel()` over distinct worktrees.
+
+**It does not yet fully supersede `address-tasks-worktrees`.** This conversion
+stops after per-task PR creation; it omits that skill's post-batch
+`review-stack/...` construction — the integration-conflict check and recommended
+merge-order artifact for batches with two or more mergeable branches. Adding
+that final phase (it would delegate to `rebase-stack` in a subagent) is tracked
+as follow-up work before this could replace the skill outright.
 
 ### `address-review.js` — the verify-loop + conditional publish
 

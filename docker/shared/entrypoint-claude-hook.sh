@@ -76,6 +76,24 @@ if [ -f "$AGENT_TMPL" ]; then
 		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/skills" noclobber "$AGENT_SEED_DIR" ||
 			echo "Warning: one or more Claude skills failed to seed; continuing." >&2
 
+		# Seed image-baked dynamic workflows (Claude-only — Codex has no workflow
+		# runtime). Workflows are flat `.js` files under ~/.claude/workflows/, so
+		# unlike skills (folders with a `.powbox-seeded` marker) this is a simple
+		# no-clobber file copy: an existing file on the volume is preserved, so
+		# user edits survive; delete the file to pick up the image version on the
+		# next container start. Per-repo `.claude/workflows/` still wins at invoke
+		# time. (Refresh parity with `agent-update-skills` is a follow-up.)
+		WF_SRC="$AGENT_SEED_DIR/workflows"
+		if [ -d "$WF_SRC" ]; then
+			mkdir -p "$AGENT_CONFIG_DIR/workflows"
+			for wf in "$WF_SRC"/*.js; do
+				[ -e "$wf" ] || continue
+				dest="$AGENT_CONFIG_DIR/workflows/$(basename "$wf")"
+				[ -e "$dest" ] || cp "$wf" "$dest" ||
+					echo "Warning: failed to seed Claude workflow $(basename "$wf"); continuing." >&2
+			done
+		fi
+
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi

@@ -132,6 +132,10 @@ User-added skills in the same volume directory are unaffected by image rebuilds.
 
 Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`).
 
+#### Claude Dynamic Workflows (experimental)
+
+`docker/claude/agent-container/workflows/` holds Claude-only [dynamic workflows](https://code.claude.com/docs/en/workflows) — JavaScript orchestration scripts that the runtime executes in the background, spawning and sequencing subagents at scale. They are a testing-batch reimagining of the orchestration-heavy skills (`address-tasks`, `address-review`): the control flow becomes code and each spawned agent gets its own git worktree (`isolation: "worktree"`), which dissolves the shared-working-tree hazard that the `*-worktrees` skills exist to work around. Codex has no workflow runtime, so there is no Codex sibling; the Claude entrypoint hook seeds these `.js` files into `~/.claude/workflows/` (no-clobber file copy, not yet part of the `.powbox-seeded` refresh flow). See [the directory README](docker/claude/agent-container/workflows/README.md) for the conversion rationale and open questions.
+
 ### Refreshing Skills
 
 Because seeding is no-clobber, editing a skill in this repo and rebuilding the image is not enough — the volumes still hold the previously-seeded copy. `commands/update-skills.*` closes that gap by copying the freshly baked skills over the volume copies in a single throwaway container, replacing the old manual dance (enter a container, delete skills, exit, relaunch to re-seed).

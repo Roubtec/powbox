@@ -179,12 +179,16 @@ seed_workflow() {
 	# Publish the workflow first, THEN stamp its sidecar marker, so a marker can
 	# never outlive its `.js`. An orphan marker (marker, no file) is the dangerous
 	# direction: a later user-created <name>.js would be misread as powbox-owned
-	# and refreshed/pruned. -T makes mv replace $dest rather than nest the temp
-	# inside a directory collision (a wrong-type --adopt-all target), failing
-	# loudly into the cleanup below instead of a false success — mirroring
-	# seed_skill. If the file lands but its marker rename fails, the workflow is
+	# and refreshed/pruned. Mirror seed_skill: rm any existing $dest before the
+	# rename, so an --adopt-all run recovers EVERY collision type — including a
+	# wrong-type directory, which `mv -fT` alone refuses to replace with a file
+	# (it would fail loudly instead of adopting). -T still guards the tiny rm->mv
+	# window on the shared volume: if a concurrent seed recreated $dest as a
+	# directory, mv fails into the cleanup below rather than nesting the temp
+	# inside it. If the file lands but its marker rename fails, the workflow is
 	# left unmarked (treated as user-authored): unmanaged, but never destructive.
 	if cp "$src" "$tmp" && printf '%s' "$marker" >"$markertmp"; then
+		rm -rf "$dest"
 		if mv -fT "$tmp" "$dest" && mv -fT "$markertmp" "$markerpath"; then
 			return 0
 		fi

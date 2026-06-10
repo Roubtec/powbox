@@ -78,27 +78,15 @@ if [ -f "$AGENT_TMPL" ]; then
 
 		# Seed image-baked dynamic workflows (Claude-only — Codex has no workflow
 		# runtime). Workflows are flat `.js` files under ~/.claude/workflows/, so
-		# unlike skills (folders with a `.powbox-seeded` marker) this is a simple
-		# no-clobber file copy: an existing file on the volume is preserved, so
-		# user edits survive; delete the file to pick up the image version on the
-		# next container start. Per-repo `.claude/workflows/` still wins at invoke
-		# time. (Refresh parity with `agent-update-skills` is a follow-up.)
-		WF_SRC="$AGENT_SEED_DIR/workflows"
-		WF_DEST="$AGENT_CONFIG_DIR/workflows"
-		# Best-effort like the rest of seeding: if the destination cannot be created
-		# (a pre-existing regular file, dangling mount, or unwritable dir on the
-		# volume), warn and skip rather than let `set -e` abort the whole entrypoint
-		# over an optional experimental feature.
-		if [ -d "$WF_SRC" ] && { [ -d "$WF_DEST" ] || mkdir -p "$WF_DEST"; }; then
-			for wf in "$WF_SRC"/*.js; do
-				[ -e "$wf" ] || continue
-				dest="$WF_DEST/$(basename "$wf")"
-				[ -e "$dest" ] || cp "$wf" "$dest" ||
-					echo "Warning: failed to seed Claude workflow $(basename "$wf"); continuing." >&2
-			done
-		elif [ -d "$WF_SRC" ]; then
-			echo "Warning: cannot create $WF_DEST; skipping Claude workflow seeding." >&2
-		fi
+		# seed_workflows records provenance with a hidden per-file sidecar marker
+		# (`.<name>.powbox-seeded`) instead of the in-folder marker skills use, but
+		# the no-clobber semantics are identical: an existing file on the volume is
+		# preserved (user edits survive), delete it to pick up the image version on
+		# the next container start, and per-repo `.claude/workflows/` still wins at
+		# invoke time. The marker is what lets a future `agent-update-skills`
+		# refresh/prune workflows the same way it does skills.
+		seed_workflows "$AGENT_SEED_DIR/workflows" "$AGENT_CONFIG_DIR/workflows" noclobber "$AGENT_SEED_DIR" ||
+			echo "Warning: one or more Claude workflows failed to seed; continuing." >&2
 
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi

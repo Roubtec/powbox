@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
-# Shared skill-seeding helper, baked to /usr/local/bin/seed-skills.sh.
+# Shared skill/workflow-seeding helper, baked to /usr/local/bin/seed-skills.sh.
 #
-# Single source of truth for copying image-baked skills onto a persistent config
-# volume. Sourced (not executed) by:
+# Single source of truth for copying image-baked skills (folders) and Claude
+# dynamic workflows (flat `.js` files) onto a persistent config volume. Sourced
+# (not executed) by:
 #   - the agent entrypoint hooks (docker/shared/entrypoint-{claude,codex}-hook.sh)
-#     in `noclobber` mode — seed only skills whose folder is absent, and
+#     in `noclobber` mode — seed only skills/workflows whose destination is
+#     absent, and
 #   - the update-skills worker (docker/shared/update-skills-incontainer.sh), which uses
 #     the primitives below to force-refresh, resolve conflicts, and prune.
 #
-# Ownership marker: every skill this code PLACES gets a hidden
-# `<skill>/.powbox-seeded` file recording the image build epoch and the powbox
-# commit that built the image. The marker means "powbox owns this copy": the
-# refresher may overwrite or prune a marked skill, while a skill WITHOUT the
-# marker is treated as user-authored and is never touched. To adopt a seeded
-# skill as your own, delete its marker (or rename the folder).
+# Ownership marker: every skill/workflow this code PLACES gets a hidden
+# `.powbox-seeded` marker recording the image build epoch and the powbox commit
+# that built the image. A skill is a folder, so its marker is the in-folder file
+# `<skill>/.powbox-seeded`; a workflow is a single file, which has no "inside",
+# so its marker is a sibling sidecar `<dir>/.<workflow>.powbox-seeded`. Either
+# way the marker means "powbox owns this copy": the refresher may overwrite or
+# prune a marked item, while one WITHOUT the marker is treated as user-authored
+# and is never touched. To adopt a seeded item as your own, delete its marker
+# (or rename it).
 #
 # This file is sourced, so it defines functions only and must not `set -e` or run
 # side effects at load time.
 
 POWBOX_SEED_MARKER=".powbox-seeded"
 
-# seed_meta_dir <src_skills_dir> -> the seed dir that holds build-epoch/build-commit.
-# The baked layout is <seed>/skills, so the meta dir is the parent of the skills dir.
+# seed_meta_dir <src_dir> -> the seed dir that holds build-epoch/build-commit.
+# The baked layout is <seed>/skills and <seed>/workflows, so the meta dir is the
+# parent of whichever source dir was passed.
 seed_meta_dir() {
 	dirname "$1"
 }
@@ -115,5 +121,100 @@ seed_skills() {
 		fi
 		seed_skill "$src/$name" "$target" "$marker" || rc=1
 	done < <(seed_skill_names "$src")
+	return "$rc"
+}
+
+# --- Workflows (flat `.js` files) ---------------------------------------------
+# Claude dynamic workflows are single files, not folders, so the ownership marker
+# can't live "inside" the item. Instead each seeded workflow gets a hidden sibling
+# sidecar marker; everything else mirrors the skill helpers above, so a future
+# refresh/prune worker can treat workflows exactly like skills.
+
+# seed_workflow_marker_path <dest_workflow_file> -> its sidecar marker path.
+# Hidden (leading dot) and suffixed with the marker name, so it is never matched
+# by the `*.js` enumeration in seed_workflow_names. e.g.
+#   .../workflows/foo.js -> .../workflows/.foo.js.powbox-seeded
+seed_workflow_marker_path() {
+	local dir name
+	dir="$(dirname "$1")"
+	name="$(basename "$1")"
+	printf '%s/.%s%s' "$dir" "$name" "$POWBOX_SEED_MARKER"
+}
+
+# seed_workflow_is_marked <dest_workflow_file> -> 0 when its sidecar marker exists.
+seed_workflow_is_marked() {
+	[ -f "$(seed_workflow_marker_path "$1")" ]
+}
+
+# seed_workflow_names <dir> -> prints the `*.js` file names (one per line). The
+# glob skips dotfiles, so sidecar markers never leak into the enumeration. Quiet
+# when the dir is absent or holds no workflows.
+seed_workflow_names() {
+	local dir="$1" f
+	[ -d "$dir" ] || return 0
+	for f in "$dir"/*.js; do
+		[ -e "$f" ] || continue
+		basename "$f"
+	done
+}
+
+# seed_workflow <src_workflow_file> <dest_workflow_file> <marker_body>
+# Copy one workflow into a sibling temp file, then atomically rename it into
+# place so a concurrently-invoking agent never reads a half-written `.js`. The
+# sidecar marker is stamped BEFORE the rename, so a published workflow always
+# carries its provenance. Overwrites <dest_workflow_file> if it exists. Returns
+# nonzero on failure, leaving any existing destination untouched.
+seed_workflow() {
+	local src="$1" dest="$2" marker="$3"
+	local dir name tmp markerpath
+	dir="$(dirname "$dest")"
+	name="$(basename "$dest")"
+	mkdir -p "$dir"
+	markerpath="$(seed_workflow_marker_path "$dest")"
+	tmp="$(mktemp "$dir/.${name}.tmp.XXXXXX")" || return 1
+	# Stamp the marker first: if the file publishes, its provenance is already in
+	# place. A failed rename leaves the marker untouched rather than orphaning a
+	# still-present older file as "user-authored", so we only clean up the temp.
+	if cp "$src" "$tmp" && printf '%s' "$marker" >"$markerpath"; then
+		if mv -f "$tmp" "$dest"; then
+			return 0
+		fi
+	fi
+	rm -f "$tmp"
+	return 1
+}
+
+# seed_workflows <src_dir> <dest_dir> <noclobber|refresh> [<meta_dir>]
+# Workflow analogue of seed_skills, with identical mode semantics:
+#   noclobber: place only workflows whose destination is ABSENT (preserves any
+#              existing entry — file, dir, or symlink — marked or not).
+#   refresh:   place absent workflows and overwrite plain files that carry our
+#              sidecar marker; an unmarked file, or any non-file collision, is a
+#              conflict and is left untouched.
+# Returns nonzero if any copy failed.
+seed_workflows() {
+	local src="$1" dest="$2" mode="$3" meta="${4:-}"
+	[ -d "$src" ] || return 0
+	[ -n "$meta" ] || meta="$(seed_meta_dir "$src")"
+	local marker
+	marker="$(seed_marker_content "$meta")"
+	mkdir -p "$dest"
+	local rc=0 name target
+	while IFS= read -r name; do
+		[ -n "$name" ] || continue
+		target="$dest/$name"
+		# Any existing entry blocks a blind overwrite — seed_workflow renames over
+		# the destination, so we must only reach it for an absent target or a marked
+		# plain file. -e misses dangling symlinks, so test -L too.
+		if [ -e "$target" ] || [ -L "$target" ]; then
+			case "$mode" in
+			noclobber) continue ;;
+			# Only a plain file we placed (carries the sidecar marker) may be
+			# refreshed; an unmarked file or any non-file collision is user-owned.
+			refresh) { [ -f "$target" ] && seed_workflow_is_marked "$target"; } || continue ;;
+			esac
+		fi
+		seed_workflow "$src/$name" "$target" "$marker" || rc=1
+	done < <(seed_workflow_names "$src")
 	return "$rc"
 }

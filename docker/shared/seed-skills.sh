@@ -161,9 +161,9 @@ seed_workflow_names() {
 # seed_workflow <src_workflow_file> <dest_workflow_file> <marker_body>
 # Copy one workflow into a sibling temp file, then atomically rename it into
 # place so a concurrently-invoking agent never reads a half-written `.js`. The
-# sidecar marker is stamped BEFORE the rename, so a published workflow always
-# carries its provenance. Overwrites <dest_workflow_file> if it exists. Returns
-# nonzero on failure, leaving any existing destination untouched.
+# sidecar marker is renamed into place only AFTER the workflow rename succeeds,
+# so a marker never outlives its `.js`. Overwrites <dest_workflow_file> if it
+# exists. Returns nonzero on failure, leaving any existing destination untouched.
 seed_workflow() {
 	local src="$1" dest="$2" marker="$3"
 	local dir name tmp markerpath markertmp

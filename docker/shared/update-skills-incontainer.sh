@@ -167,6 +167,37 @@ process_items() {
 		fi
 	done < <(item_names "$kind" "$dest")
 
+	# Marker-only orphans (workflows only). A workflow's ownership marker is a
+	# sibling sidecar, not an in-folder file, so a vanished `.js` can strand its
+	# `.<name>.js.powbox-seeded`. seed_workflow stamps the marker only AFTER the
+	# file lands, so this code never creates one — but a hand-deleted `.js` (or a
+	# pre-fix volume) can, and the `*.js` enumeration above is blind to it. A
+	# stale marker would later mis-flag a same-named user workflow as
+	# powbox-owned, so sweep sidecars whose `.js` is gone and prune/report them.
+	if [ "$kind" = workflow ]; then
+		local markerfile mbase wf
+		for markerfile in "$dest"/.*"$POWBOX_SEED_MARKER"; do
+			[ -e "$markerfile" ] || continue
+			mbase="$(basename "$markerfile")"
+			wf="${mbase#.}"
+			wf="${wf%"$POWBOX_SEED_MARKER"}"
+			[ -n "$wf" ] || continue
+			# A live workflow file is already handled by the loops above; act only
+			# when the `.js` is truly absent (-e misses dangling symlinks, -L too).
+			{ [ -e "$dest/$wf" ] || [ -L "$dest/$wf" ]; } && continue
+			if [ "$MODE" = apply ] && [ "$PRUNE" = true ]; then
+				if rm -f "$markerfile"; then
+					emit pruned "$agent" "$kind" "$wf"
+				else
+					emit error "$agent" "$kind" "$wf"
+					rc=1
+				fi
+			else
+				emit orphan "$agent" "$kind" "$wf"
+			fi
+		done
+	fi
+
 	return "$rc"
 }
 

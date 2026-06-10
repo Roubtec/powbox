@@ -166,21 +166,30 @@ seed_workflow_names() {
 # nonzero on failure, leaving any existing destination untouched.
 seed_workflow() {
 	local src="$1" dest="$2" marker="$3"
-	local dir name tmp markerpath
+	local dir name tmp markerpath markertmp
 	dir="$(dirname "$dest")"
 	name="$(basename "$dest")"
 	mkdir -p "$dir"
 	markerpath="$(seed_workflow_marker_path "$dest")"
 	tmp="$(mktemp "$dir/.${name}.tmp.XXXXXX")" || return 1
-	# Stamp the marker first: if the file publishes, its provenance is already in
-	# place. A failed rename leaves the marker untouched rather than orphaning a
-	# still-present older file as "user-authored", so we only clean up the temp.
-	if cp "$src" "$tmp" && printf '%s' "$marker" >"$markerpath"; then
-		if mv -f "$tmp" "$dest"; then
+	markertmp="$(mktemp "$dir/.${name}.marker.XXXXXX")" || {
+		rm -f "$tmp"
+		return 1
+	}
+	# Publish the workflow first, THEN stamp its sidecar marker, so a marker can
+	# never outlive its `.js`. An orphan marker (marker, no file) is the dangerous
+	# direction: a later user-created <name>.js would be misread as powbox-owned
+	# and refreshed/pruned. -T makes mv replace $dest rather than nest the temp
+	# inside a directory collision (a wrong-type --adopt-all target), failing
+	# loudly into the cleanup below instead of a false success — mirroring
+	# seed_skill. If the file lands but its marker rename fails, the workflow is
+	# left unmarked (treated as user-authored): unmanaged, but never destructive.
+	if cp "$src" "$tmp" && printf '%s' "$marker" >"$markertmp"; then
+		if mv -fT "$tmp" "$dest" && mv -fT "$markertmp" "$markerpath"; then
 			return 0
 		fi
 	fi
-	rm -f "$tmp"
+	rm -f "$tmp" "$markertmp"
 	return 1
 }
 

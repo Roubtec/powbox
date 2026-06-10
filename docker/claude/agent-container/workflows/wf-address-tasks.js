@@ -93,10 +93,10 @@ const PLAN_SCHEMA = {
             content: { type: "string", description: "Full verbatim content of the task file." },
             branch: { type: "string", description: "Branch the implementer should create and work on." },
             base: { type: "string", description: "Base branch to create from and target the PR against (a prior task's branch for dependents)." },
-            dependsOn: { type: "array", items: { type: "string" }, description: "Slugs of in-batch tasks this one depends on (its base is one of them). Empty for independent tasks." },
+            dependsOn: { type: "array", items: { type: "string" }, description: "Slugs of in-batch tasks this one depends on (its base is one of them). Empty array for independent tasks — required, never omitted, so a forgotten dependency cannot silently unblock a dependent." },
             upstream: { type: "string", description: "Short note on what an in-batch dependency introduced, or empty." },
           },
-          required: ["slug", "path", "content", "branch", "base"],
+          required: ["slug", "path", "content", "branch", "base", "dependsOn"],
         },
       },
     },
@@ -355,6 +355,23 @@ const statusBySlug = new Map();
 const results = [];
 const throttled = [];
 
+// Map every in-batch branch to the slug that produces it. A dependent task's
+// `base` IS its prerequisite's `branch` (stacked PRs), so this lets the gate
+// derive the prerequisite structurally instead of trusting only the plan
+// agent's `dependsOn` list — a forgotten entry can no longer slip a dependent
+// past a failed prerequisite and have it build on known-bad work. Independent
+// tasks base off `defaultBase` / the current branch, which no in-batch task
+// produces, so they pick up no spurious dependency.
+const slugByBranch = new Map();
+for (const wave of plan.waves) {
+  if (!Array.isArray(wave)) continue;
+  for (const task of wave) {
+    if (task && typeof task.branch === "string" && typeof task.slug === "string") {
+      slugByBranch.set(task.branch, task.slug);
+    }
+  }
+}
+
 // Wave width: dependency-derived size, capped by MAX_WAVE_WIDTH and by storage
 // headroom measured at bootstrap (finish over fan-out — see the constants).
 const availBytes = typeof boot.availBytes === "number" ? boot.availBytes : 0;
@@ -371,11 +388,16 @@ for (let w = 0; w < plan.waves.length; w++) {
   // no-remote run, was implemented and reviewed locally (`local-only`): its base
   // branch and commits persist in the shared `.git`, so dependents can still
   // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr` do not unlock.
+  // Effective deps = the declared `dependsOn` UNION the prerequisite derived from
+  // the `base`→`branch` relationship, so the gate holds even if the plan agent
+  // omits a `dependsOn` entry it should have listed.
   const succeeded = (s) => s === "done" || s === "local-only";
   const runnable = [];
   for (const task of wave) {
-    const deps = Array.isArray(task.dependsOn) ? task.dependsOn : [];
-    const failedDep = deps.find((d) => !succeeded(statusBySlug.get(d)));
+    const deps = new Set(Array.isArray(task.dependsOn) ? task.dependsOn : []);
+    const baseDep = slugByBranch.get(task.base);
+    if (baseDep && baseDep !== task.slug) deps.add(baseDep);
+    const failedDep = [...deps].find((d) => !succeeded(statusBySlug.get(d)));
     if (failedDep) {
       const r = { slug: task.slug, branch: task.branch, status: "skipped-dep", blockedBy: failedDep, depStatus: statusBySlug.get(failedDep) || "missing" };
       statusBySlug.set(task.slug, "skipped-dep");

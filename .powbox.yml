@@ -1,0 +1,8 @@
+# powbox shadow declarations — keep worktree scaffolding container-local
+# (tmpfs-shadowed at container start; the launcher's .worktrees volume,
+# when mounted, takes precedence over the .worktrees fallback entry).
+shadow:
+  - .worktrees          # orchestrator-created worktrees (one per task)
+  - .claude/worktrees   # harness-native worktrees (EnterWorktree / Agent isolation)
+  - .git/worktrees      # per-worktree git metadata — keeps the host's own
+                        #   worktree registrations out of the container, and ours off the host

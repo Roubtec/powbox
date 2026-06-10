@@ -76,6 +76,18 @@ if [ -f "$AGENT_TMPL" ]; then
 		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/skills" noclobber "$AGENT_SEED_DIR" ||
 			echo "Warning: one or more Claude skills failed to seed; continuing." >&2
 
+		# Seed image-baked dynamic workflows (Claude-only — Codex has no workflow
+		# runtime). Workflows are flat `.js` files under ~/.claude/workflows/, so
+		# seed_workflows records provenance with a hidden per-file sidecar marker
+		# (`.<name>.powbox-seeded`) instead of the in-folder marker skills use, but
+		# the no-clobber semantics are identical: an existing file on the volume is
+		# preserved (user edits survive), delete it to pick up the image version on
+		# the next container start, and per-repo `.claude/workflows/` still wins at
+		# invoke time. The marker is what lets a future `agent-update-skills`
+		# refresh/prune workflows the same way it does skills.
+		seed_workflows "$AGENT_SEED_DIR/workflows" "$AGENT_CONFIG_DIR/workflows" noclobber "$AGENT_SEED_DIR" ||
+			echo "Warning: one or more Claude workflows failed to seed; continuing." >&2
+
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi

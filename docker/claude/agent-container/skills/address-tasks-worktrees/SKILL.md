@@ -34,49 +34,21 @@ Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs
 
 ## Session Bootstrap (run once, before any worktree)
 
-Do this in the **main working tree** before creating worktrees. All steps are idempotent.
+Do this in the **main working tree** before creating worktrees. The mechanics are an image-baked helper shared by every worktree consumer (this skill, `address-reviews-worktrees`, and the Claude dynamic workflows), so they can never drift apart:
 
-1. **Verify the worktree roots are container-local (not on the host bind mount).** The powbox launcher normally mounts the per-project volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. `shadow-refresh.sh` applies existing declarations immediately but cannot add missing ones — if a check below fails, stop and fix it before continuing: run `enable-worktrees` to add any missing `.powbox.yml` declarations, or, if the roots are already declared, rebuild the powbox image on the host (`./build.sh all`) and relaunch (the running image predates worktree-shadow support):
+```bash
+wt-bootstrap   # idempotent; prints one JSON object; exit 1 on a blocker
+```
 
-   ```bash
-   ROOT="$(git rev-parse --show-toplevel)"
-   mkdir -p "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"
-   shadow-refresh.sh "$ROOT"   # tmpfs-shadows declared, unmounted roots
-   for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-     mountpoint -q "$root" || { echo "Unsafe worktree root (not a mountpoint): $root" >&2; exit 1; }
-     findmnt -no TARGET,FSTYPE -T "$root"
-   done
-   for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-     [ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
-       { echo "Unsafe worktree metadata root (expected tmpfs): $root" >&2; exit 1; }
-   done
-   case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
-     9p|drvfs|virtiofs) echo "Unsafe .worktrees host filesystem" >&2; exit 1 ;;
-   esac
-   ```
+What it does, and how to react to its JSON output:
 
-   The safety criterion for `.worktrees` is the **mount**, not one specific local fstype: the volume may be backed by ext4, xfs, btrfs, or another container-local filesystem; tmpfs is the supported fallback. The other two roots must be tmpfs. If any check fails, worktree files or metadata could leak to the host. *(Only in the `.worktrees` tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means relaunching with the worktrees volume or a larger `SHADOW_TMPFS_SIZE`.)*
+1. **Verifies the worktree roots are container-local (not on the host bind mount).** The powbox launcher normally mounts the per-project volume at `.worktrees`; `.claude/worktrees` and `.git/worktrees` are tmpfs-shadowed from `.powbox.yml`. The script first applies `shadow-refresh.sh` (which mounts declared-but-unmounted shadows, but cannot add missing declarations), then enforces: all three roots are mountpoints, the two metadata roots are tmpfs, and `.worktrees` is not on a host filesystem (9p/drvfs/virtiofs). The safety criterion for `.worktrees` is the **mount**, not one specific local fstype — the volume may be ext4/xfs/btrfs, with tmpfs the supported fallback. On `ok: false`, stop and fix per the `blocker` before continuing: run `enable-worktrees` to add missing `.powbox.yml` declarations, or, if the roots are already declared, rebuild the powbox image on the host (`./build.sh all`) and relaunch (the running image predates worktree-shadow support). *(Only in the `.worktrees` tmpfs fallback do all worktrees share one ~2 GB cap; an `ENOSPC` there means relaunching with the worktrees volume or a larger `SHADOW_TMPFS_SIZE`.)*
 
-   Then prune any of **this container's own** worktree dirs orphaned by a prior recycle (their tmpfs git metadata is gone). Worktrees live under a per-container `.worktrees/$CONTAINER_NAME/` subdir (see Durability), so scope the scan there — scanning the whole volume would delete a *peer* container's live worktrees and any uncommitted work in them:
+2. **Prunes this container's own orphans.** Worktree dirs under `.worktrees/$CONTAINER_NAME/` whose tmpfs git metadata vanished in a prior recycle are removed (reported in `prunedOrphans`). The scan is scoped to this container's subdir — a peer container's live worktrees are never touched (see Durability).
 
-   ```bash
-   MINE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
-   mkdir -p "$MINE"
-   git -C "$ROOT" worktree prune
-   for d in "$MINE"/*/; do
-     [ -e "$d" ] || continue
-     git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || rm -rf "$d"
-   done
-   ```
+3. **Probes remote access without rewriting the host remote.** If `origin` is an SSH URL it adds the *container-local* `url."https://github.com/".insteadOf "git@github.com:"` rewrite (the container's global config only, never the host `.git/config`), then runs `git ls-remote --heads origin`. `remote: false` is **not** a blocker: fall back to **local reviewed branches only** and note in the final summary that PRs/pushes were skipped.
 
-2. **Ensure pushes work without rewriting the host remote.** If `origin` is an SSH URL, add a *container-local* rewrite so git reaches it over HTTPS via the gh credential helper (this touches only the container's global config, never the host `.git/config`):
-
-   ```bash
-   git config --global url."https://github.com/".insteadOf "git@github.com:"
-   git ls-remote --heads origin >/dev/null   # confirm auth before relying on push
-   ```
-
-   If `ls-remote` fails, fall back to **local reviewed branches only** and note in the final summary that PRs/pushes were skipped.
+It also reports `wtBase` (this container's `.worktrees/$CONTAINER_NAME/`, where every worktree goes) and `availBytes` (free space on the `.worktrees` mount — the starting input for Adaptive throttling below).
 
 ## Orchestrator Responsibilities
 
@@ -114,7 +86,7 @@ When this skill runs **unattended**, completing the batch matters more than maxi
 
 Cap each wave's concurrency at the **minimum** of its dependency-derived width and what the environment can support. Concretely, before and during each wave:
 
-- **Storage headroom.** Before launching a wave, measure free space on the `.worktrees` mount (`findmnt -nbo AVAIL -T .worktrees`, or `df -PB1 .worktrees | awk 'NR==2{print $4}'`). Estimate `per_worktree_need`, then cap width at `max_concurrent = max(1, floor(free_bytes / per_worktree_need))`; if that is below the wave's task count, run the wave in **sub-batches** of `max_concurrent` rather than all at once. On the normal volume-backed path pnpm packages are hardlinked, so `per_worktree_need` is mainly build artifacts plus package metadata; on the tmpfs fallback, measure one representative install and add its full package-copy cost. When unsure, measure one install before fanning out.
+- **Storage headroom.** Before launching a wave, measure free space on the `.worktrees` mount (`wt-bootstrap` already reported it as `availBytes`; re-measure mid-run with `findmnt -nbo AVAIL -T .worktrees`). Estimate `per_worktree_need`, then cap width at `max_concurrent = max(1, floor(free_bytes / per_worktree_need))`; if that is below the wave's task count, run the wave in **sub-batches** of `max_concurrent` rather than all at once. On the normal volume-backed path pnpm packages are hardlinked, so `per_worktree_need` is mainly build artifacts plus package metadata; on the tmpfs fallback, measure one representative install and add its full package-copy cost. When unsure, measure one install before fanning out.
 - **`ENOSPC` mid-wave.** Stop adding concurrency, let viable in-flight tasks finish, and reclaim only worktrees whose changes are committed and pushed. Then retry the failed and remaining tasks in smaller sub-batches — ultimately one at a time. Never force-remove a worktree with uncommitted changes just to free space, and never abandon a task because the parallel attempt failed.
 - **Shared exclusive resources.** Some validation cannot run two-at-once even in separate worktrees because it contends for a single host-wide resource: a fixed listen port, one shared dev database on one port, or a build/e2e server that infers the workspace root from the repo-root lockfile (see below). Run such phases **serially** regardless of wave width — give each task exclusive use, then move on.
 - **Provider rate-limiting.** Repeated `429`/`529` errors when spawning many subagents at once are a signal to fan out less. Reduce the number of concurrent subagents per phase and proceed.
@@ -135,16 +107,13 @@ Treat a task whose acceptance hinges on app-server e2e as a **serialize-this-pha
 
 For a wave of tasks `T1..Tn`:
 
-1. **Create a worktree per task** from the main tree (orchestrator git calls; safe to run while other waves' subagents are active — they touch only their own worktrees). Create them under this container's own `.worktrees/$CONTAINER_NAME/` subdir so a peer container's prune can never mistake them for orphans (see Durability):
+1. **Create a worktree per task** from the main tree (orchestrator calls; safe to run while other waves' subagents are active — they touch only their own worktrees), using the image-baked helper:
 
    ```bash
-   ROOT="$(git rev-parse --show-toplevel)"
-   WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
-   mkdir -p "$WT_BASE"
-   git worktree add "$WT_BASE/<task-slug>" -b <branch-name> <base-branch>
+   WT="$(wt-enter <task-slug> <branch-name> <base-branch>)"
    ```
 
-   Use a stable, collision-free slug per task (e.g. the task number + short name). The absolute path `"$WT_BASE/<task-slug>"` is what you hand to that task's subagents.
+   `wt-enter` places the worktree under this container's own `.worktrees/$CONTAINER_NAME/` subdir so a peer container's prune can never mistake it for an orphan (see Durability), and it is **rerun-safe**: it reuses the task's existing worktree (prior commits intact), attaches the branch without `-b` if the branch already exists (an interrupted prior run), or creates the branch off the base — and refuses with a non-zero exit rather than guessing when the worktree is on the wrong branch, the slug is unsafe, or the base does not resolve. Use a stable, collision-free slug per task (e.g. the task number + short name). The printed absolute path is what you hand to that task's subagents.
 
 2. **Run each task's loop, fanned out by phase.** Each task runs its own implement→review→fix loop, but you advance all of the wave's tasks **in lockstep by phase** so that same-phase agents (which live in different worktrees) can be spawned **together in one tool block and run concurrently**:
 
@@ -157,7 +126,7 @@ For a wave of tasks `T1..Tn`:
 
    Concurrency is safe here **only because each agent has its own worktree.** If for any reason a task is not running in its own worktree, fall back to serializing that task as in `address-tasks`.
 
-3. **On pass, push and open a PR** for the task (see Delivery), then `git worktree remove` its worktree to reclaim storage (the branch and its commits persist in `.git` and on the remote).
+3. **On pass, push and open a PR** for the task (see Delivery), then `wt-remove <task-slug>` to reclaim storage (the branch and its commits persist in `.git` and on the remote).
 
 4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches).
 
@@ -211,11 +180,11 @@ Default behavior, matching the existing workflow: each task that passes review g
    - For stacked PRs, note in the body which branch it stacks on, so reviewers understand the base.
 3. If pushing/PR creation is unavailable (no remote auth — see Bootstrap step 2), fall back to **local reviewed branches**: the work persists in the shared `.git` and is available to the host directly. Note in the final summary which branches still need to be pushed once a remote is reachable.
 
-After the PR is open, `git worktree remove "<absolute worktree path>"` to reclaim storage. Do not delete the branch — the PR and any dependents need it.
+After the PR is open, `wt-remove <task-slug>` to reclaim storage. Do not delete the branch — the PR and any dependents need it (`wt-remove` never touches branches).
 
 ## Cleanup
 
-- Remove each task's worktree once its PR is open (or once you've decided to stop on it): `git worktree remove <path>` (add `--force` only if you've confirmed the work is committed and pushed).
+- Remove each task's worktree once its PR is open (or once you've decided to stop on it): `wt-remove <task-slug>`. It refuses to delete uncommitted work or an in-progress rebase/merge — even with `--force`, which only clears git's refusal over leftovers like ignored build artifacts after the clean checks pass. If it refuses, surface why rather than deleting evidence.
 - Because `.git/worktrees` is tmpfs-shadowed, you do **not** need `git worktree prune` for host hygiene — the metadata never reaches the host. Prune only if a removed worktree leaves a stale registration *within the live session*.
 - Removing a worktree does not delete its branch; future dependent waves can still branch from that ref after the worktree is gone.
 
@@ -245,7 +214,7 @@ Build and report the safe prefix, then report the remaining canonical order as n
 
 Create collision-free guide branch names such as `review-stack/<batch>-<YYYYMMDD-HHMMSSZ>/01-<task-slug>`, using a git-ref-safe UTC timestamp — digits and dashes only, no `:` (ISO-8601 colons are invalid in ref names), matching the `YYYYMMDD-HHMMSS` form `rebase-stack` already uses for pre-rebase refs.
 Point each guide branch `gN` at the captured tip of its canonical branch `bN`; do not check out or move any `bN`.
-Create a dedicated worktree under `"$WT_BASE/_review-stack-<batch>-<YYYYMMDD-HHMMSSZ>"` (same ref-safe timestamp), initially checked out at `g1`.
+Create a dedicated worktree attached to `g1`: `wt-enter _review-stack-<batch>-<YYYYMMDD-HHMMSSZ> <g1>` (same ref-safe timestamp; `g1` already exists, so this attaches it under `$WT_BASE` without creating anything).
 Running the restack there keeps the user's main checkout and current branch untouched.
 A fresh worktree has no installed dependencies, so if `rebase-stack`'s post-conflict validation would need a build, install the project's dependencies in this worktree first (cheap on the hardlinked store) — otherwise a resolved trivial conflict that triggers validation false-stops the guide on missing modules rather than a real failure.
 
@@ -259,7 +228,7 @@ The prompt contract is:
 - "Do not push and do not fetch. Resolve only conflicts the skill classifies as trivial. On the first non-trivial conflict or unrecoverable validation failure, use the unattended clean-stop behavior: restore the current guide branch, leave the worktree clean, and stop without waiting for input."
 - "Report the canonical merge order, the `bN → gN` mapping, each guide branch outcome, any stop point, every conflict's files/offending commit/resolution or abort reason, any guide branch with no unique commits relative to its new base, and the exact `refs/pre-rebase/...` snapshots created."
 
-After the subagent returns, verify the canonical `bN` tips still equal the SHAs captured before creating the guide branches, verify the dedicated worktree is clean with no rebase in progress, then remove only that worktree.
+After the subagent returns, verify the canonical `bN` tips still equal the SHAs captured before creating the guide branches, verify the dedicated worktree is clean with no rebase in progress, then remove only that worktree (`wt-remove` its slug — the script enforces the same clean checks).
 If the subagent unexpectedly returns with a rebase in progress or dirty files, reset it to the disposable branch's reported pre-rebase ref, clear any untracked leftovers with `git clean -fd`, and confirm a clean `git status` before removal; never force-remove unresolved state.
 Delete only the exact `refs/pre-rebase/...` snapshots the subagent created for these disposable guide branches; the unchanged canonical `bN` refs are their recovery source.
 Never bulk-delete unrelated pre-rebase refs.

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# wt-remove — safely remove a task worktree under this container's
+# .worktrees/$CONTAINER_NAME/ subdir, without ever deleting work.
+#
+# Usage: wt-remove <slug> [--force]
+#
+# Guards (all hard refusals, exit 1, worktree left in place):
+#   * uncommitted changes (`git status --porcelain` non-empty) — even with
+#     --force; commit/push or clean up first, never delete evidence
+#   * a rebase/merge in progress
+#   * being invoked from inside the worktree being removed
+# --force is passed through to `git worktree remove` ONLY after the clean
+# checks pass (for e.g. ignored build artifacts git refuses to auto-remove).
+#
+# Removing an already-absent worktree is a no-op success (idempotent cleanup);
+# an orphaned dir (stale metadata after a container recycle) is pruned.
+# The branch is NEVER deleted — commits and refs persist in the shared .git.
+set -euo pipefail
+
+die() {
+	echo "wt-remove: $*" >&2
+	exit 1
+}
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then die "usage: wt-remove <slug> [--force]"; fi
+SLUG="$1"
+FORCE="${2:-}"
+[ -z "$FORCE" ] || [ "$FORCE" = "--force" ] || die "unknown option '$FORCE'"
+case "$SLUG" in
+[A-Za-z0-9_]*) ;;
+*) die "invalid slug '$SLUG' (must start with an alphanumeric or underscore)" ;;
+esac
+printf '%s' "$SLUG" | LC_ALL=C grep -Eq '^[A-Za-z0-9._-]+$' ||
+	die "invalid slug '$SLUG' (allowed: A-Za-z0-9._-)"
+
+GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+	die "not inside a git repository"
+case "$GIT_COMMON" in
+*/.git) ROOT="${GIT_COMMON%/.git}" ;;
+*) die "cannot resolve the main repo root from $GIT_COMMON" ;;
+esac
+WT="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}/$SLUG"
+
+if [ ! -d "$WT" ]; then
+	echo "wt-remove: $WT already absent; nothing to do" >&2
+	exit 0
+fi
+
+case "$PWD/" in
+"$WT"/*) die "refusing to remove the worktree you are inside; cd out first" ;;
+esac
+
+if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	# Orphan: stale dir whose tmpfs git metadata is gone. Nothing in it is
+	# recoverable as a worktree; prune like wt-bootstrap does.
+	echo "wt-remove: pruning orphaned worktree dir $WT" >&2
+	rm -rf "$WT"
+	git -C "$ROOT" worktree prune
+	exit 0
+fi
+
+[ -z "$(git -C "$WT" status --porcelain)" ] ||
+	die "worktree has uncommitted changes; commit (and push) or clean it before removal: $WT"
+GITDIR="$(git -C "$WT" rev-parse --absolute-git-dir)"
+for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD; do
+	[ ! -e "$GITDIR/$state" ] ||
+		die "worktree has a $state in progress; finish or abort it before removal: $WT"
+done
+
+if [ -n "$FORCE" ]; then
+	git -C "$ROOT" worktree remove --force "$WT" >&2
+else
+	git -C "$ROOT" worktree remove "$WT" >&2
+fi
+echo "wt-remove: removed $WT (branch kept)" >&2

@@ -233,9 +233,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d/10-powbox.conf
 
 # Copy the substrate startup scripts shared by every agent while still root.
-# The unified entrypoint and the per-agent setup hooks are intentionally NOT
-# baked here; the agent image (docker/agent/Dockerfile) copies them so that
-# editing one rebuilds only that layer — see that Dockerfile.
+# The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
+# helpers are intentionally NOT baked here; the agent image
+# (docker/agent/Dockerfile) copies them so that editing one rebuilds only that
+# cheap layer — see that Dockerfile. The wt-* helpers ride with the agent layer
+# because they evolve in lockstep with the agent-layer assets that consume them
+# (the *-worktrees skills and the Claude workflows), so an `agent-update` /
+# `build.sh agent` rebuild refreshes them without a base rebuild.
 COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \

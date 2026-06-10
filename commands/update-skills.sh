@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Refresh the image-baked agent skills onto the persistent config volumes.
+# Refresh the image-baked agent skills (and Claude workflows) onto the persistent
+# config volumes.
 #
-# Skill text is baked into powbox-agent:latest at build time and seeded onto the
-# claude-config / codex-config volumes the first time each skill folder is absent
-# (no-clobber, see docker/shared/entrypoint-*-hook.sh). That no-clobber means a
-# rebuilt image with updated skills does NOT overwrite the stale copies already
-# on the volume. This command closes that gap: it runs a throwaway container that
-# force-copies the freshly built skills over the volume copies, removing the old
+# Skills (folders) and Claude dynamic workflows (flat .js files) are baked into
+# powbox-agent:latest at build time and seeded onto the claude-config /
+# codex-config volumes the first time each item is absent (no-clobber, see
+# docker/shared/entrypoint-*-hook.sh). That no-clobber means a rebuilt image with
+# updated skills/workflows does NOT overwrite the stale copies already on the
+# volume. This command closes that gap: it runs a throwaway container that
+# force-copies the freshly built items over the volume copies, removing the old
 # "enter a container, delete skills, exit, relaunch" dance.
 #
-# Each skill powbox places carries a hidden .powbox-seeded ownership marker, so
-# this command can tell its own copies from skills you authored:
-#   - marked skills are refreshed (and, with --prune, removed when no longer baked)
-#   - an UNMARKED folder whose name collides with a baked skill is a CONFLICT and
-#     is never overwritten silently; resolve it with --adopt-all (take the baked
-#     version + track it) or by renaming your folder.
+# Each item powbox places carries a hidden .powbox-seeded ownership marker (in a
+# skill's folder; alongside a workflow as a sidecar), so this command can tell its
+# own copies from items you authored:
+#   - marked items are refreshed (and, with --prune, removed when no longer baked)
+#   - an UNMARKED item whose name collides with a baked one is a CONFLICT and is
+#     never overwritten silently; resolve it with --adopt-all (take the baked
+#     version + track it) or by renaming yours.
 #
 # Rebuild the image first (e.g. `cc <project> --build`, `agent-update`, or
 # `build.sh agent`) so the baked skills reflect your latest edits — this command
@@ -41,14 +44,15 @@ while [ "$#" -gt 0 ]; do
 	-h | --help)
 		cat <<'USAGE'
 Usage: update-skills.sh [--dry-run] [--prune] [--adopt-all]
-  Refresh image-baked skills onto the claude-config / codex-config volumes.
+  Refresh image-baked skills and Claude workflows onto the claude-config /
+  codex-config volumes.
 
   --dry-run, -n   Show the plan (seed/refresh/conflicts/obsolete) without changing anything.
-  --prune         Delete obsolete seeded skills (marked, no longer baked into the image).
+  --prune         Delete obsolete seeded items (marked, no longer baked into the image).
                   Without it they are reported; with it they are removed.
-  --adopt-all     Overwrite UNMARKED skills that collide with a baked skill name and start
-                  tracking them as powbox-managed. Use only if those are stale seeds, not
-                  your own customizations (rename those first).
+  --adopt-all     Overwrite UNMARKED items that collide with a baked skill/workflow name and
+                  start tracking them as powbox-managed. Use only if those are stale seeds,
+                  not your own customizations (rename those first).
 
   With a terminal attached, you are prompted before pruning or adopting; --prune /
   --adopt-all pre-approve those non-interactively.
@@ -101,27 +105,27 @@ n_seed=0 n_refresh=0
 conflicts=()
 orphans=()
 records="$(run_worker classify false false)" || {
-	echo "Skill refresh failed during planning." >&2
+	echo "Refresh failed during planning." >&2
 	exit 1
 }
-while IFS=$'\t' read -r verb agent name; do
+while IFS=$'\t' read -r verb agent kind name; do
 	[ -n "${verb:-}" ] || continue
 	case "$verb" in
 	would-seed) n_seed=$((n_seed + 1)) ;;
 	would-refresh) n_refresh=$((n_refresh + 1)) ;;
-	conflict) conflicts+=("$agent/$name") ;;
-	orphan) orphans+=("$agent/$name") ;;
+	conflict) conflicts+=("$agent/$name ($kind)") ;;
+	orphan) orphans+=("$agent/$name ($kind)") ;;
 	esac
 done <<<"$records"
 
 echo "Image: $IMAGE"
 echo "Plan: ${n_seed} to seed, ${n_refresh} to refresh."
 if [ "${#conflicts[@]}" -gt 0 ]; then
-	echo "Conflicts (unmarked skills shadowing a baked skill — left untouched):"
+	echo "Conflicts (unmarked items shadowing a baked skill/workflow — left untouched):"
 	printf '  - %s\n' "${conflicts[@]}"
 fi
 if [ "${#orphans[@]}" -gt 0 ]; then
-	echo "Obsolete seeded skills (marked, no longer baked into the image):"
+	echo "Obsolete seeded items (marked, no longer baked into the image):"
 	printf '  - %s\n' "${orphans[@]}"
 fi
 
@@ -149,38 +153,38 @@ fi
 rc=0
 records="$(run_worker apply "$ADOPT_ALL" "$PRUNE")" || rc=$?
 applied=0 failed=0 kept_conflicts=0 kept_orphans=0
-while IFS=$'\t' read -r verb agent name; do
+while IFS=$'\t' read -r verb agent kind name; do
 	[ -n "${verb:-}" ] || continue
 	case "$verb" in
 	seeded)
-		echo "[$agent] seeded skill: $name"
+		echo "[$agent] seeded $kind: $name"
 		applied=$((applied + 1))
 		;;
 	refreshed)
-		echo "[$agent] refreshed skill: $name"
+		echo "[$agent] refreshed $kind: $name"
 		applied=$((applied + 1))
 		;;
 	adopted)
-		echo "[$agent] adopted skill: $name"
+		echo "[$agent] adopted $kind: $name"
 		applied=$((applied + 1))
 		;;
 	pruned)
-		echo "[$agent] pruned obsolete skill: $name"
+		echo "[$agent] pruned obsolete $kind: $name"
 		applied=$((applied + 1))
 		;;
 	conflict) kept_conflicts=$((kept_conflicts + 1)) ;;
 	orphan) kept_orphans=$((kept_orphans + 1)) ;;
 	error)
-		echo "[$agent] WARNING: failed to update skill: $name" >&2
+		echo "[$agent] WARNING: failed to update $kind: $name" >&2
 		failed=$((failed + 1))
 		;;
 	esac
 done <<<"$records"
 
-echo "${applied} skill(s) updated."
+echo "${applied} item(s) updated."
 [ "$kept_conflicts" -gt 0 ] && echo "${kept_conflicts} conflict(s) left untouched (run with --adopt-all to take the baked version)."
-[ "$kept_orphans" -gt 0 ] && echo "${kept_orphans} obsolete seeded skill(s) kept (run with --prune to remove)."
+[ "$kept_orphans" -gt 0 ] && echo "${kept_orphans} obsolete seeded item(s) kept (run with --prune to remove)."
 if [ "$failed" -gt 0 ] || [ "$rc" -ne 0 ]; then
-	echo "Skill refresh completed with ${failed} failure(s)." >&2
+	echo "Refresh completed with ${failed} failure(s)." >&2
 	exit 1
 fi

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# wt-bootstrap — one-shot session bootstrap for worktree-isolated parallel work.
+#
+# This is the mechanical "Session Bootstrap" shared by the *-worktrees skills
+# and the Claude dynamic workflows: verify the repo's worktree roots are
+# container-local (never the host bind mount), prune THIS container's orphaned
+# worktrees, probe remote push access, and measure storage headroom. The skills
+# keep the rationale; this script is the single executable source of truth for
+# the checks themselves.
+#
+# Usage: wt-bootstrap          (run anywhere inside the repo; idempotent)
+#
+# Prints exactly one JSON object on stdout (diagnostics go to stderr):
+#
+#   {
+#     "ok": true|false,
+#     "blocker": "...",        // only when ok=false: why the session must stop
+#     "wtBase": "<repo>/.worktrees/$CONTAINER_NAME",
+#     "remote": true|false,    // push/PR available; false is a fallback, NOT a blocker
+#     "availBytes": N,         // free bytes on the .worktrees mount
+#     "prunedOrphans": ["<slug>", ...]
+#   }
+#
+# Exit 0 when ok (even with remote=false); exit 1 on a blocker.
+set -euo pipefail
+
+fail() {
+	jq -n --arg b "$1" '{ok: false, blocker: $b}'
+	exit 1
+}
+
+command -v jq >/dev/null 2>&1 || {
+	echo '{"ok":false,"blocker":"jq not found on PATH"}'
+	exit 1
+}
+
+# Resolve the MAIN repo root even when invoked from inside a worktree:
+# --git-common-dir points at the shared .git, not the per-worktree gitdir.
+GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+	fail "not inside a git repository"
+case "$GIT_COMMON" in
+*/.git) ROOT="${GIT_COMMON%/.git}" ;;
+*) fail "cannot resolve the main repo root from $GIT_COMMON" ;;
+esac
+
+[ -n "${CONTAINER_NAME:-}" ] ||
+	fail "CONTAINER_NAME is not set; this container cannot claim a worktree subdir"
+WT_BASE="$ROOT/.worktrees/$CONTAINER_NAME"
+
+# --- Worktree roots: must be container-local, never the host bind mount -------
+mkdir -p "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"
+# Apply any declared-but-unmounted shadows; the mount checks below are the
+# authority on whether this sufficed.
+if command -v shadow-refresh.sh >/dev/null 2>&1; then
+	shadow-refresh.sh "$ROOT" >&2 || true
+fi
+
+for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+	mountpoint -q "$root" ||
+		fail "unsafe worktree root (not a mountpoint): $root — run enable-worktrees, then rebuild/relaunch if the image predates worktree-shadow support"
+done
+for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+	[ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
+		fail "unsafe worktree metadata root (expected tmpfs): $root"
+done
+case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
+9p | drvfs | virtiofs) fail "unsafe .worktrees host filesystem: $(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" ;;
+esac
+
+# --- Prune ONLY this container's orphans --------------------------------------
+# A peer container's live worktrees live under its own $CONTAINER_NAME subdir
+# and are never scanned; the shared .pnpm-store sits at the volume root.
+mkdir -p "$WT_BASE"
+git -C "$ROOT" worktree prune
+PRUNED=()
+for d in "$WT_BASE"/*/; do
+	[ -e "$d" ] || continue
+	if ! git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		rm -rf "$d"
+		PRUNED+=("$(basename "$d")")
+		echo "pruned orphaned worktree: $d" >&2
+	fi
+done
+
+# --- Remote probe (failure is a fallback, not a blocker) -----------------------
+# If origin is SSH, add the container-local HTTPS rewrite so push goes through
+# the gh credential helper; never rewrite the host repo's remote URL.
+ORIGIN_URL="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
+case "$ORIGIN_URL" in
+git@github.com:*) git config --global url."https://github.com/".insteadOf "git@github.com:" ;;
+esac
+REMOTE=false
+if [ -n "$ORIGIN_URL" ] && git -C "$ROOT" ls-remote --heads origin >/dev/null 2>&1; then
+	REMOTE=true
+fi
+
+AVAIL="$(findmnt -nbo AVAIL -T "$ROOT/.worktrees" 2>/dev/null || echo 0)"
+
+jq -n \
+	--arg wtBase "$WT_BASE" \
+	--argjson remote "$REMOTE" \
+	--argjson avail "${AVAIL:-0}" \
+	--args '{ok: true, wtBase: $wtBase, remote: $remote, availBytes: $avail, prunedOrphans: $ARGS.positional}' \
+	-- ${PRUNED[@]+"${PRUNED[@]}"}

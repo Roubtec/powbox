@@ -1,4 +1,4 @@
-# Claude Dynamic Workflows (experimental)
+# Claude Dynamic Workflows
 
 Claude-only counterparts to some of the image-baked skills, expressed as
 [dynamic workflows](https://code.claude.com/docs/en/workflows) — JavaScript
@@ -7,10 +7,30 @@ sequencing subagents at scale.
 Codex has no workflow runtime, so this directory has no Codex sibling; the
 entrypoint seeds these into `~/.claude/workflows/` (Claude config volume) only.
 
-This is a **testing batch** to evaluate the shape, seeded alongside — not in
-place of — the existing skills. See the open questions at the bottom.
+Dynamic workflows are a **generally-available** Claude Code feature, not an
+experimental one. **This batch of `wf-*` scripts is the experiment**: a testing
+batch seeded alongside — not in place of — the existing skills, to evaluate
+whether some skills do better expressed as workflows. See the open questions at
+the bottom.
 
-## Runtime requirements (validated 2026-06-10 on Claude Code 2.1.170)
+## Availability (verified 2026-06-10 against the docs, on Claude Code 2.1.170)
+
+- **Requires Claude Code ≥ v2.1.154** and a **paid plan** (Pro/Max/Team/
+  Enterprise) or Anthropic API / Bedrock / Vertex / Foundry access. The image
+  ships a new-enough CLI, so in practice the gate is the account, not the binary.
+- **Default-off on Pro** (the docs single out Pro as needing the toggle; higher
+  paid tiers appear to default on). Enable via the "Dynamic workflows" row in
+  `/config`, which writes `"enableWorkflows": true` to
+  `~/.claude/settings.json` (persistent Claude config volume, so it sticks — a
+  fresh volume needs it re-set). The off switches are `"disableWorkflows": true`
+  or `CLAUDE_CODE_DISABLE_WORKFLOWS=1`. While disabled, every saved workflow is
+  an `Unknown command`.
+- **The effective plan is cached, and can be stale.** Claude Code reads
+  `subscriptionType` from `~/.claude/.credentials.json`, which only refreshes on
+  re-login — a stale `pro` there drops even a Max account into the default-off
+  path. Setting `enableWorkflows` explicitly sidesteps this.
+
+## Authoring constraints
 
 - **`export const meta = {...}` must be the script's first statement.** The
   runtime registers a saved workflow as a `/<meta.name>` command only after
@@ -18,11 +38,6 @@ place of — the existing skills. See the open questions at the bottom.
   optional `title`, `whenToUse`, and `phases: [{title, detail?, model?}]`).
   A script without it is silently not registered — the slash command reports
   `Unknown command`, with no error pointing at the file.
-- **Dynamic workflows must be enabled for the account/session.** They are
-  default-off on some plans; enable via the "Dynamic workflows" row in
-  `/config` (writes `"enableWorkflows": true` to `~/.claude/settings.json`,
-  which lives on the persistent Claude config volume, so it sticks). While
-  disabled, every saved workflow is an `Unknown command`.
 - Scripts must be deterministic plain JavaScript: `Date.now()`,
   `Math.random()`, and argless `new Date()` are rejected (they would break
   resume), and TypeScript syntax fails to parse.

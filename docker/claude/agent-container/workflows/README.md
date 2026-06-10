@@ -10,6 +10,23 @@ entrypoint seeds these into `~/.claude/workflows/` (Claude config volume) only.
 This is a **testing batch** to evaluate the shape, seeded alongside — not in
 place of — the existing skills. See the open questions at the bottom.
 
+## Runtime requirements (validated 2026-06-10 on Claude Code 2.1.170)
+
+- **`export const meta = {...}` must be the script's first statement.** The
+  runtime registers a saved workflow as a `/<meta.name>` command only after
+  parsing that block (a pure literal with required `name` and `description`,
+  optional `title`, `whenToUse`, and `phases: [{title, detail?, model?}]`).
+  A script without it is silently not registered — the slash command reports
+  `Unknown command`, with no error pointing at the file.
+- **Dynamic workflows must be enabled for the account/session.** They are
+  default-off on some plans; enable via the "Dynamic workflows" row in
+  `/config` (writes `"enableWorkflows": true` to `~/.claude/settings.json`,
+  which lives on the persistent Claude config volume, so it sticks). While
+  disabled, every saved workflow is an `Unknown command`.
+- Scripts must be deterministic plain JavaScript: `Date.now()`,
+  `Math.random()`, and argless `new Date()` are rejected (they would break
+  resume), and TypeScript syntax fails to parse.
+
 ## Why these, and what the workflow shape buys us
 
 A dynamic workflow turns the *control flow* a skill describes in prose into real
@@ -123,13 +140,19 @@ would want to call it.
    (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the Claude
    `address-tasks` / `address-review` skills, which keep their names. When
    promoting, we'd likely retire the Claude skill copies (the Codex skills stay).
-2. **Agent worktree management under the runtime.** `wf-address-tasks.js` has its
-   agents run `wt-enter` / `cd` themselves (see "Worktrees" above) rather than
-   using runtime isolation. The load-bearing assumption is that a
-   workflow-spawned agent runs in the repo working directory with a shared
-   filesystem — so one agent's explicit worktree persists for the next agent of
-   the same task to `cd` into. That matches how `Agent`-tool subagents behave in
-   the same container, but should be confirmed against the live workflow runtime.
+2. **Agent worktree management under the runtime (confirmed).**
+   `wf-address-tasks.js` has its agents run `wt-enter` / `cd` themselves (see
+   "Worktrees" above) rather than using runtime isolation. The load-bearing
+   assumption is that a workflow-spawned agent runs in the repo working
+   directory with a shared filesystem — so one agent's explicit worktree
+   persists for the next agent of the same task to `cd` into. Confirmed on
+   2026-06-10 against the live workflow runtime (Claude Code 2.1.170): a
+   minimal two-agent probe showed a separately spawned agent saw the first
+   agent's worktree, file, and commit via `wt-enter`, and a real two-task
+   `/wf-address-tasks` batch ran both tasks concurrently in distinct
+   `.worktrees/$CONTAINER_NAME/<slug>` worktrees, with each task's fresh
+   reviewer reading its implementer's commits from the shared worktree (both
+   tasks `done`, 1 round, no empty-diff flags).
 3. **Refresh parity.** Workflows are seeded no-clobber and tracked with a hidden
    per-file `.<name>.powbox-seeded` sidecar marker (the file analogue of a skill
    folder's marker), so they participate fully in `agent-update-skills`' classify

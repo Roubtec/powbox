@@ -50,6 +50,22 @@
  *    object, never by pausing to ask.
  */
 
+// The runtime requires `export const meta = {...}` (a pure literal) as the
+// FIRST statement: it is how the script registers as the `/wf-address-tasks`
+// command and what the pre-run approval prompt shows. Wave phases are dynamic
+// (`Wave N (...)`), so only the fixed phases are declared here; undeclared
+// phase() titles still get their own progress group.
+export const meta = {
+  name: "wf-address-tasks",
+  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), one PR per passing task.",
+  whenToUse: "Execute a folder/glob of pre-planned task files end to end with per-task worktree isolation. Not for one-off coding requests or planning new tasks.",
+  phases: [
+    { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
+    { title: "Resolve batch", detail: "read task files, derive dependency waves and branches" },
+    { title: "Summary" },
+  ],
+};
+
 const MAX_ROUNDS = 3;
 
 // Finish over fan-out (inherited from the skills' adaptive-throttling rule): a

@@ -46,6 +46,22 @@
  *    contend.
  */
 
+// The runtime requires `export const meta = {...}` (a pure literal) as the
+// FIRST statement: it is how the script registers as the `/wf-address-review`
+// command and what the pre-run approval prompt shows. The conditional report
+// phases are not declared; undeclared phase() titles get their own group.
+export const meta = {
+  name: "wf-address-review",
+  description: "Address every unresolved review thread on one PR: fix or push back, verify with a fresh-eyes reviewer (max 3 rounds), then publish only when asked.",
+  whenToUse: "Work through maintainer-vetted review feedback on a single PR hands-off. Not for new task batches (wf-address-tasks) or stack rebases.",
+  phases: [
+    { title: "Gather", detail: "resolve the PR, branch state, and unresolved threads" },
+    { title: "Fix and verify", detail: "fix/push-back per thread, fresh-eyes verification loop" },
+    { title: "Publish", detail: "lease-safe push, thread replies, summary comment, pings" },
+    { title: "Summary" },
+  ],
+};
+
 const MAX_ROUNDS = 3;
 
 const PACKET_SCHEMA = {

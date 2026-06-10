@@ -48,6 +48,15 @@ services:
       # active line for the commented one below.
       NODE_OPTIONS: --max-old-space-size=4096
       # NODE_OPTIONS: --max-old-space-size=8192   # generous heap for heavy / parallel builds
+      # Opt the in-container Claude TUI into fullscreen (alternate-screen) rendering:
+      # flicker-free, mouse support, and flat memory in long sessions. Equivalent to the
+      # `tui: "fullscreen"` setting, but passed as an env var so it applies at
+      # `docker compose run` time (no image rebuild) and survives config-volume resets.
+      # Requires Claude Code >= v2.1.89 (the image tracks latest, so this is met).
+      # Claude-only — Codex ignores it, so it is harmless when PRIMARY_AGENT=codex.
+      # Force the classic renderer for one launch with
+      # `-e CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, or run `/tui default` in-session.
+      CLAUDE_CODE_NO_FLICKER: "1"
     volumes:
       - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh

@@ -31,8 +31,8 @@ Parsing is **lenient** — accept commas, `&`, `#` prefixes, and free word order
 |---|---|
 | `<PRs and/or branches>` | The batch: one or more entries, each a **PR number** (`#38`, `38`) or a **local branch name** (`task/088`). May be mixed (`#38 task/084 6`). Each becomes one worktree + one phased review-addressing workflow. This is the only required argument. |
 | `push` | Passed through to every passing entry's publisher: push the fixed branch (normal fast-forward or exact expected-OID lease for a rewrite) and do the PR-side communication (replies, resolves, Summary comment). |
-| `ping-codex` | Passed through: after pushing, post a dedicated `@codex review` comment on that PR. Implies `push`. |
-| `ping-claude` | Passed through: after pushing, post a dedicated `@claude review` comment on that PR. Implies `push`. |
+| `ping-codex` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@codex review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
+| `ping-claude` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@claude review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
 
 **Classifying each entry:** a bare integer or `#`-prefixed integer is a **PR number**; anything else (contains a `/`, letters, etc.) is a **branch name**. A branch literally named like an integer is the one ambiguous case — name it with an explicit `refs/heads/` prefix or just pass its PR number instead.
 
@@ -198,7 +198,7 @@ If the user wants them integrated into a linear, mergeable order, point them at 
 
 Aggregate the per-PR `address-review` reports into one batch summary:
 
-- **Per entry:** its PR URL, the branch, **which ref was worked** (your local ref — and how far it diverged from `origin` — vs. the `origin` head), reviewer rounds, whether it was pushed and/or pinged, and a one-line outcome (`fixed & pushed`, `fixed, not pushed`, `skipped — <reason>`, `blocked — <reason>`). Call out divergence explicitly: it tells the user a push rewrote `origin` to their local state.
+- **Per entry:** its PR URL, the branch, **which ref was worked** (your local ref — and how far it diverged from `origin` — vs. the `origin` head), reviewer rounds, whether it was pushed, and whether any requested ping was posted or skipped as a no-op, plus a one-line outcome (`fixed & pushed`, `fixed, not pushed`, `skipped — <reason>`, `blocked — <reason>`). Call out divergence explicitly: it tells the user a push rewrote `origin` to their local state.
 - **Hands-off blockers, surfaced prominently** — every item any subagent skipped for lack of an authoritative decision, gathered across all PRs so the user can act on them in one place. This is the main value of an unattended batch: nothing silently dropped.
 - **Push-backs** made across the batch, with their rationale.
 - **No-push runs:** include each PR's per-thread disposition map (from its `address-review` report) so a later "push now" pass can replay replies/resolves precisely.

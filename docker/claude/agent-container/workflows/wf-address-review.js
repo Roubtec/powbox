@@ -143,7 +143,7 @@ const PUBLISH_SCHEMA = {
     published: { type: "boolean", description: "True only if the push AND every required reply/resolve/summary/ping step succeeded. False if any guard (moved head, unmatched remote, rejected lease, failed comment) aborted publication." },
     aborted: { type: "string", description: "Why publication stopped, when published is false (e.g. `head moved`, `lease rejected`, `push remote unmatched`). Empty when published." },
     pushed: { type: "boolean", description: "Whether a push was performed at all (may be an `Everything up-to-date` no-op)." },
-    pushedNewCommits: { type: "boolean", description: "True ONLY if the push actually advanced the remote branch — new commits or rewritten history. False for a no-op `Everything up-to-date` push. Gates whether the re-review pings may fire." },
+    pushedNewCommits: { type: "boolean", description: "True ONLY if the push actually advanced the remote branch — new commits or rewritten history. False when no push happened or for a no-op `Everything up-to-date` push. Gates whether the re-review pings may fire." },
     threadOutcomes: {
       type: "array",
       description: "Per item: its stable reference and what was done (replied/resolved/left-open).",
@@ -159,7 +159,7 @@ const PUBLISH_SCHEMA = {
     summaryCommentUrl: { type: "string", description: "URL of the posted Summary of Review Fixes, or empty if not posted." },
     pings: { type: "string", description: "Which ping comments were posted, or empty." },
   },
-  required: ["published"],
+  required: ["published", "pushed", "pushedNewCommits"],
 };
 
 function gatherPrompt(input) {

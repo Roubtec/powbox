@@ -26,8 +26,8 @@ All arguments are optional and parsing is **lenient** — accept commas, `&`, an
 | `rebase on top of <branch>` | Rebase the **current branch** onto `<branch>` before gathering or fixing review feedback (Procedure step 2). Single-branch rebase only. |
 | `push` | When done, push the branch to the PR's actual head repository/ref and perform all PR-side communication (replies, resolves, summary comment). Use a normal push for a fast-forward; use an explicit `--force-with-lease=<ref>:<expected-oid>` only when history was rewritten. |
 | `hands-off` | Run with no user interaction — best-effort to completion, documenting every skipped/blocked item in the final report. See "Hands-off mode". Typically how a parallel review orchestrator invokes this skill in a subagent. |
-| `ping-codex` | After pushing, post a dedicated top-level `@codex review` comment to summon a fresh review round. **Implies `push`** (nothing to re-review unpushed). |
-| `ping-claude` | After pushing, post a dedicated top-level `@claude review` comment. **Implies `push`.** |
+| `ping-codex` | After a push that advances the PR branch (new commits or rewritten history), post a dedicated top-level `@codex review` comment to summon a fresh review round. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
+| `ping-claude` | After a push that advances the PR branch, post a dedicated top-level `@claude review` comment. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
 
 ### Flag interactions
 

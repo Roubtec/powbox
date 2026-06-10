@@ -26,6 +26,9 @@ IMAGE="${1:-powbox-agent:latest}"
 	"sqlite3 --version >/dev/null" \
 	"psql --version >/dev/null" \
 	"pg-dev-up check >/dev/null" \
+	"command -v wt-bootstrap >/dev/null" \
+	"command -v wt-enter >/dev/null" \
+	"command -v wt-remove >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	"ping -V >/dev/null" \
 	"nc -h >/dev/null 2>&1" \

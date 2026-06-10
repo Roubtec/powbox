@@ -1,4 +1,6 @@
 .claude
 .git
 .github
+node_modules
 tasks
+.worktrees

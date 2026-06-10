@@ -30,6 +30,8 @@ case "$SLUG" in
 [A-Za-z0-9_]*) ;;
 *) die "invalid slug '$SLUG' (must start with an alphanumeric or underscore)" ;;
 esac
+printf '%s' "$SLUG" | LC_ALL=C grep -Eq '^[A-Za-z0-9._-]+$' ||
+	die "invalid slug '$SLUG' (allowed: A-Za-z0-9._-)"
 
 GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
 	die "not inside a git repository"

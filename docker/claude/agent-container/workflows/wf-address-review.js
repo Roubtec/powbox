@@ -5,6 +5,9 @@
  * threads, fix what is right / push back on what is wrong, verify every
  * disposition with a fresh-eyes reviewer (max 3 rounds), then — only when asked
  * — publish (lease-safe push, reply + resolve threads, Summary comment, pings).
+ * The re-review pings fire ONLY when the push actually advanced the branch with
+ * new commits/rewritten history; a no-op push (nothing new to review) skips them
+ * so an automated review -> address -> review loop can terminate.
  *
  * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [push]
  * [ping-codex] [ping-claude]`.
@@ -139,7 +142,8 @@ const PUBLISH_SCHEMA = {
   properties: {
     published: { type: "boolean", description: "True only if the push AND every required reply/resolve/summary/ping step succeeded. False if any guard (moved head, unmatched remote, rejected lease, failed comment) aborted publication." },
     aborted: { type: "string", description: "Why publication stopped, when published is false (e.g. `head moved`, `lease rejected`, `push remote unmatched`). Empty when published." },
-    pushed: { type: "boolean", description: "Whether the branch was actually pushed." },
+    pushed: { type: "boolean", description: "Whether a push was performed at all (may be an `Everything up-to-date` no-op)." },
+    pushedNewCommits: { type: "boolean", description: "True ONLY if the push actually advanced the remote branch — new commits or rewritten history. False for a no-op `Everything up-to-date` push. Gates whether the re-review pings may fire." },
     threadOutcomes: {
       type: "array",
       description: "Per item: its stable reference and what was done (replied/resolved/left-open).",
@@ -255,7 +259,7 @@ Report a STRUCTURED result: set \`published: true\` ONLY if the push and every r
    - \`standalone\` items (no thread to resolve): address them only in the Summary comment below; do NOT call \`resolveReviewThread\`. Record their outcome by \`url\`.
    Avoid duplicate replies (check for an equivalent prior reply by the authed user); resolve only after the reply succeeds.
 5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
-6. Pings (only after push + summary succeeded): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${!flags.pingCodex && !flags.pingClaude ? "none." : "If both, post two separate comments."}
+6. Pings (only after push + summary succeeded, AND only when the push ACTUALLY advanced the remote branch with new commits or rewritten history — never on an \`Everything up-to-date\` no-op push): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${!flags.pingCodex && !flags.pingClaude ? "none requested. " : "If both, post two separate comments. "}If nothing new was pushed this run (the remote ref already pointed at your HEAD — e.g. every disposition was already-addressed/push-back, or the branch was up to date), SKIP all pings even if requested above: re-requesting a review with nothing new to look at would spin the review->address->review loop forever. Set \`pushedNewCommits\` to whether the push advanced the branch, and record which pings (if any) you posted in \`pings\`.
 
 ## Dispositions to publish
 
@@ -394,21 +398,45 @@ if (badDisp) {
   };
 }
 
+// A ping summons a FRESH review, which only makes sense when this run actually
+// pushed something new. With no new commits and no rebase, the branch tip is
+// unchanged — pushing is a no-op and re-pinging would spin the
+// review->address->review loop forever, so suppress the pings. We can positively
+// know "nothing new" only when the final SHA equals the pre-run remote tip and
+// no rebase ran; in every other case (incl. missing finalSha, or a local
+// off-shoot whose SHA legitimately differs) we leave the flag on and defer to
+// the publisher's own git check, which the prompt also gates on a no-op push.
+const knownNoNewCommits =
+  !packet.pr.rebased &&
+  !!dispositions.finalSha &&
+  dispositions.finalSha === packet.pr.headOid;
+const publishFlags = {
+  ...flags,
+  pingCodex: flags.pingCodex && !knownNoNewCommits,
+  pingClaude: flags.pingClaude && !knownNoNewCommits,
+};
+
 phase("Publish");
-const publishReport = await agent(publishPrompt(packet, dispositions.dispositions, flags), {
+const publishReport = await agent(publishPrompt(packet, dispositions.dispositions, publishFlags), {
   label: "publish",
   schema: PUBLISH_SCHEMA,
 });
 
 phase("Summary");
 const published = !!(publishReport && publishReport.published);
+const pingsRequested = flags.pingCodex || flags.pingClaude;
+const nothingNewPushed = knownNoNewCommits || (publishReport && publishReport.pushedNewCommits === false);
 return {
   status: published ? "fixed-published" : "fixed-publish-failed",
   pr: packet.pr,
   rounds,
-  flags,
+  flags: publishFlags,
   dispositions: dispositions.dispositions,
   proactiveFixes: dispositions.proactiveFixes,
   publishReport: publishReport || { published: false, aborted: "publisher returned nothing" },
-  note: published ? undefined : "Fixes passed review but publication did not fully complete — see publishReport.aborted; nothing may have been pushed.",
+  note: published
+    ? (pingsRequested && nothingNewPushed
+        ? "Published, but nothing new was pushed this run, so the re-review ping(s) were skipped to keep an automated review->address->review loop from spinning forever."
+        : undefined)
+    : "Fixes passed review but publication did not fully complete — see publishReport.aborted; nothing may have been pushed.",
 };

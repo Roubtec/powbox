@@ -32,6 +32,7 @@ All arguments are optional and parsing is **lenient** — accept commas, `&`, an
 ### Flag interactions
 
 - **`ping-*` implies `push`.** If `ping-codex` or `ping-claude` is present without `push`, push anyway — a re-review of unpushed work is meaningless.
+- **A ping fires only when the push actually advanced the branch.** A `ping-*` summons a *fresh* review, which is only meaningful if new commits (or a rewritten history) were just pushed. If this run produces nothing new to push — every disposition was already-addressed or push-back, or the branch was already up to date — **skip the pings even though `ping-*` was supplied.** Re-requesting a review with nothing new to look at would spin the review → address → review cycle forever; the resolved threads and Summary comment already record the outcome.
 - **Both pings present** → two separate comments, one per bot (never a single comment mentioning both). They are also separate from the Summary comment.
 - **`hands-off` + `rebase`** is uncommon and the riskiest combination: a non-trivial rebase conflict has no one to consult, so you abort cleanly and stop rather than guess (see "Hands-off mode" and step 2).
 - **No `push` and no `ping`** → a local-only run. Make commits, but **do not mutate the PR at all** (no replies, no resolves, no summary comment). The final report captures every disposition so a later "push now" turn can replay it.
@@ -176,7 +177,7 @@ In `publish-reviewed` mode, first require the supplied review packet, a fresh ex
    - *Ambiguous/skipped* → **leave open**, list it in the summary as needing a decision.
    Before replying, inspect the thread for an equivalent prior reply from the authenticated user (for example, a previous run replied but failed to resolve) and avoid posting duplicates. Resolve only after the reply succeeds; record any communication failure and leave that thread open.
 5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
-6. **Pings** — only after the push and summary succeeded: `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments.
+6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
 
 ### Step 8 — Final report
 
@@ -254,6 +255,6 @@ gh pr comment NUMBER --body '@claude review'
 - [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); same-pattern sweep done in changed/related code.
 - [ ] Worktree clean and every intended change committed before review and publication.
 - [ ] Fresh independent reviewer checked every disposition after commits landed; feedback loop capped at 3 reviewer rounds.
-- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success.
+- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success **and only when new commits were actually pushed** (skip pings on a no-op push so an automated loop can terminate).
 - [ ] No-push run: zero PR mutations; final report maps every thread to its disposition for a later push turn.
 - [ ] Final report covers rebase outcome, dispositions with stable refs, push-backs, proactive fixes, reviewer result, and blocked/skipped items.

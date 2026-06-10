@@ -1,9 +1,9 @@
 /**
- * address-tasks — dynamic-workflow form of the `address-tasks` skill.
+ * wf-address-tasks — dynamic-workflow form of the `address-tasks` skill.
  *
  * Resolve a batch of pre-planned task files into dependency waves, then for each
  * task run an implement -> review -> fix loop (max 3 rounds), open a PR per
- * passing task, and report. Invoke as `/address-tasks <glob-or-file-list>`.
+ * passing task, and report. Invoke as `/wf-address-tasks <glob-or-file-list>`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------

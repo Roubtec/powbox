@@ -1,12 +1,12 @@
 /**
- * address-review — dynamic-workflow form of the `address-review` skill.
+ * wf-address-review — dynamic-workflow form of the `address-review` skill.
  *
  * Work through every UNRESOLVED review thread on one pull request: gather the
  * threads, fix what is right / push back on what is wrong, verify every
  * disposition with a fresh-eyes reviewer (max 3 rounds), then — only when asked
  * — publish (lease-safe push, reply + resolve threads, Summary comment, pings).
  *
- * Invoke as `/address-review [PR#] [rebase on top of <branch>] [push]
+ * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [push]
  * [ping-codex] [ping-claude]`.
  *
  * Why a workflow rather than a skill
@@ -33,7 +33,7 @@
  * reviewer — the failure the original draft had. The batch front-end role —
  * many PRs at once — is where per-PR isolation belongs, and that must use the
  * explicit `.worktrees/$CONTAINER_NAME/` convention, not runtime isolation; see
- * address-tasks.js and the directory README.)
+ * wf-address-tasks.js and the directory README.)
  *
  * Runtime notes:
  *  - The script cannot run git/gh/file IO; the gather/fix/review/publish agents
@@ -267,7 +267,7 @@ Record each item's outcome with its stable reference (file:line, author, threadI
 // --- Flag parsing (the only logic the script does itself; no shell needed) ---
 // `args` may arrive as a string OR, per the workflow docs, as structured data
 // (array / object). Flatten any shape into the words it contains so `push` /
-// `ping-codex` / `ping-claude` survive `Run /address-review on #38 with push`
+// `ping-codex` / `ping-claude` survive `Run /wf-address-review on #38 with push`
 // being delivered as an object — `String(args)` would yield "[object Object]".
 function flattenArgs(a) {
   if (a == null) return "";

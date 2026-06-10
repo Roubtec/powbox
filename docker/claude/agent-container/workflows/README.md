@@ -52,7 +52,7 @@ things powbox needs:
 2. **A separate worktree per agent, started from the default branch, hides an
    implementer's commits from its reviewer.**
 
-So `address-tasks.js` manages worktrees itself, through the same `wt-*` helpers
+So `wf-address-tasks.js` manages worktrees itself, through the same `wt-*` helpers
 the `address-tasks-worktrees` skill calls: a bootstrap agent runs `wt-bootstrap`
 (root-safety checks, container-scoped orphan prune, remote probe — one JSON
 result), then each task gets **one** explicit worktree under
@@ -64,12 +64,12 @@ silent empty checkout. Cross-task parallelism comes from `parallel()` over
 distinct worktrees; cross-stage commit visibility comes from sharing the
 on-disk worktree, not the remote.
 
-`address-review.js` is a single-PR, strictly sequential pipeline with no
+`wf-address-review.js` is a single-PR, strictly sequential pipeline with no
 fan-out, so it needs no worktree at all — every stage runs on the PR branch in
 the one working tree, which is the simplest way to keep the fixer's commits
 visible to the reviewer and publisher.
 
-### `address-tasks.js` — the fan-out implement/review loop
+### `wf-address-tasks.js` — the fan-out implement/review loop
 
 The `address-tasks` skill's dominant constraint is that every subagent shares
 the orchestrator's one working tree, which forces strict one-at-a-time
@@ -93,7 +93,7 @@ merge-order artifact for batches with two or more mergeable branches. Adding
 that final phase (it would delegate to `rebase-stack` in a subagent) is tracked
 as follow-up work before this could replace the skill outright.
 
-### `address-review.js` — the verify-loop + conditional publish
+### `wf-address-review.js` — the verify-loop + conditional publish
 
 `address-review`'s interesting part is its bounded verify-and-loop cycle and a
 publish stage gated on flags. That is naturally a workflow. Because workflows
@@ -115,11 +115,12 @@ would want to call it.
 
 ## Open questions (for the "where to go from there" conversation)
 
-1. **Namespace overlap.** A workflow and a skill with the same name both answer
-   `/address-tasks`. These keep the canonical names for a faithful comparison;
-   when promoting, we'd likely retire the Claude skill copies (the Codex skills
-   stay).
-2. **Agent worktree management under the runtime.** `address-tasks.js` has its
+1. **Namespace overlap (resolved).** A workflow and a same-named skill would both
+   answer one slash command, so these workflows are prefixed `wf-`
+   (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the Claude
+   `address-tasks` / `address-review` skills, which keep their names. When
+   promoting, we'd likely retire the Claude skill copies (the Codex skills stay).
+2. **Agent worktree management under the runtime.** `wf-address-tasks.js` has its
    agents run `wt-enter` / `cd` themselves (see "Worktrees" above) rather than
    using runtime isolation. The load-bearing assumption is that a
    workflow-spawned agent runs in the repo working directory with a shared

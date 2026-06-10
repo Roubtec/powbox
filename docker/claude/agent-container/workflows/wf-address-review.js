@@ -162,6 +162,16 @@ const PUBLISH_SCHEMA = {
   required: ["published", "pushed", "pushedNewCommits"],
 };
 
+// Shell-quote a ref before embedding it in a copy-paste command these prompts
+// emit. A PR head/base ref name (from `gh pr view`) may legally contain shell
+// metacharacters (`;`, `$`, backticks — git ref names forbid spaces but little
+// else), so an unquoted ref could run the rest of the line or act on the wrong
+// thing. Single-quote and escape embedded quotes; adjacent quoted spans like
+// `refs/heads/'b'` concatenate into one shell word, so the path still resolves.
+function shq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
@@ -234,7 +244,7 @@ ${JSON.stringify(dispositions, null, 2)}
 
 How to verify:
 1. Run the build / type-check first; a failure is an automatic blocker (\`pass: false\`).
-2. Read the actual files. If \`git diff --name-only ${packet.pr.base}...HEAD\` looks empty despite claimed fixes, report a likely race/wrong-branch in \`issues\` rather than reviewing nothing.
+2. Read the actual files. If \`git diff --name-only ${shq(packet.pr.base)}...HEAD\` looks empty despite claimed fixes, report a likely race/wrong-branch in \`issues\` rather than reviewing nothing.
 3. Quality pass on changed files (logic, error handling, edge cases, dead code, consistency, duplication, type safety) and confirm the same-pattern sweep did not miss a sibling occurrence.
 
 Return \`pass: true\` only if every disposition holds, the build passes, and no material issue remains; else \`pass: false\` with numbered, actionable \`issues\`. Do not use the task-tracker tools.`;
@@ -248,7 +258,7 @@ Flags for this publication: ${JSON.stringify(flags)}.
 Report a STRUCTURED result: set \`published: true\` ONLY if the push and every required reply/resolve/summary/ping below succeeded. If any guard aborts you, set \`published: false\` and \`aborted: "<reason>"\` and report what (if anything) was pushed — never claim success on an aborted publication.
 
 1. Re-check before publication: clean worktree, no rebase in progress; re-fetch the PR and confirm it is still open and still points at the expected head repo/ref. Resolve the branch's exact push remote/ref and verify it matches the PR head (never assume \`origin\`, especially for forks). Expected head OID to replace: \`${packet.pr.headOid}\`. If the head moved or the target can't be matched, set \`published: false\`, \`aborted\`, and STOP — do not guess.
-2. Push: if the expected tip is an ancestor of HEAD, normal push (\`git push <remote> HEAD:refs/heads/${packet.pr.branch}\`). If history was rewritten (rebased: ${packet.pr.rebased ? "yes" : "no"}), use an exact lease: \`git push <remote> --force-with-lease=refs/heads/${packet.pr.branch}:${packet.pr.headOid} HEAD:refs/heads/${packet.pr.branch}\`. If the lease is rejected, NEVER escalate to bare \`--force\`; set \`published: false\`, \`aborted: "lease rejected"\`, and stop.
+2. Push: if the expected tip is an ancestor of HEAD, normal push (\`git push <remote> HEAD:refs/heads/${shq(packet.pr.branch)}\`). If history was rewritten (rebased: ${packet.pr.rebased ? "yes" : "no"}), use an exact lease: \`git push <remote> --force-with-lease=refs/heads/${shq(packet.pr.branch)}:${packet.pr.headOid} HEAD:refs/heads/${shq(packet.pr.branch)}\`. If the lease is rejected, NEVER escalate to bare \`--force\`; set \`published: false\`, \`aborted: "lease rejected"\`, and stop.
 3. Re-read unresolved threads after the push. Do not mutate newly-arrived feedback that was not triaged this run — leave it open and call it out.
 4. Per-item hygiene for each disposition:
    - \`review-thread\` items: reply via REST \`pulls/.../comments/<commentId>/replies\`, resolve via GraphQL \`resolveReviewThread\` on \`threadId\`:
@@ -282,11 +292,22 @@ function flattenArgs(a) {
 }
 const raw = flattenArgs(args);
 const lower = raw.toLowerCase();
-const wantPush = /\bpush\b/.test(lower) || /\bping-?codex\b/.test(lower) || /\bping-?claude\b/.test(lower);
+// Detect publish intent carefully. `push-back`/`pushback` means rebutting a
+// comment, not git push, so strip it before looking for the push token. Honor
+// explicit negation ("no push", "do not push", "don't push", "without push",
+// "skip push", "no-push") so a local-only request is never silently published —
+// pushing mutates the remote and the PR threads. A ping still implies push (a
+// re-review is meaningless without it), so negation cannot veto a requested ping.
+const pushWords = lower.replace(/\bpush-?back\b/g, " ");
+const pushNegated =
+  /\bno-push\b/.test(lower) || /\b(?:no|not|never|without|skip|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
+const pingCodex = /\bping-?codex\b/.test(lower);
+const pingClaude = /\bping-?claude\b/.test(lower);
+const wantPush = pingCodex || pingClaude || (/\bpush\b/.test(pushWords) && !pushNegated);
 const flags = {
   push: wantPush,
-  pingCodex: /\bping-?codex\b/.test(lower),
-  pingClaude: /\bping-?claude\b/.test(lower),
+  pingCodex,
+  pingClaude,
 };
 
 phase("Gather");

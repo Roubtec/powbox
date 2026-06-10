@@ -170,14 +170,24 @@ Do this:
 Return the structured plan. Paste each task file's FULL content verbatim into \`content\` — downstream agents have no other access to it.`;
 }
 
+// Shell-quote a ref/slug before embedding it in a copy-paste command these
+// prompts emit. `slug`/`branch`/`base` come from the plan agent's reading of
+// task files, so a stray space or shell metacharacter (a git ref name forbids
+// spaces but little else) could push/PR the wrong ref or run the rest of the
+// line. Single-quote and escape embedded quotes; adjacent quoted spans like
+// `'a'..'b'` concatenate into one shell word, so `base..branch` still works.
+function shq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 function worktreeContract(task, { mayCreate = false } = {}) {
   // wt-enter encodes the rerun-safe lifecycle (reuse the existing worktree,
   // attach an existing branch, create off the base) so prompts never re-derive
   // it. Stages that must not create work (reviewer, PR) omit the base: a
   // missing branch then errors instead of silently checking out an empty tree.
   const enter = mayCreate
-    ? `WT="$(wt-enter ${task.slug} ${task.branch} ${task.base})" && cd "$WT"`
-    : `WT="$(wt-enter ${task.slug} ${task.branch})" && cd "$WT"`;
+    ? `WT="$(wt-enter ${shq(task.slug)} ${shq(task.branch)} ${shq(task.base)})" && cd "$WT"`
+    : `WT="$(wt-enter ${shq(task.slug)} ${shq(task.branch)})" && cd "$WT"`;
   return `## WORKTREE CONTRACT (do this before anything else)
 
 Resolve your worktree with the image-baked helper and \`cd\` into it:
@@ -196,7 +206,7 @@ function implementPrompt(task, round, findings, remote) {
     : "";
   const upstream = task.upstream ? `\n## Upstream context\n\n${task.upstream}\n` : "";
   const pushLine = remote
-    ? `- After every commit, push for durability: \`git push -u origin ${task.branch}\` first, \`git push\` thereafter. The reviewer reads your worktree directly, so a transient push failure is not fatal — keep committing and note it — but pushed commits are the backup if the worktree is lost.`
+    ? `- After every commit, push for durability: \`git push -u origin ${shq(task.branch)}\` first, \`git push\` thereafter. The reviewer reads your worktree directly, so a transient push failure is not fatal — keep committing and note it — but pushed commits are the backup if the worktree is lost.`
     : `- Remote push is unavailable this run; commit locally (the shared \`.git\` persists). Do not fail on missing push.`;
   return `You are implementing a single task on branch \`${task.branch}\` (base \`${task.base}\`).
 
@@ -224,7 +234,7 @@ function reviewPrompt(task) {
 
 ${worktreeContract(task)}
 
-Read \`AGENTS.md\` / \`CLAUDE.md\` first for conventions. The implementation is already committed on \`${task.branch}\` in WT — read the actual files. If \`git diff --name-only ${task.base}...HEAD\` looks empty, set \`emptyDiffFlag\` true and stop — that signals a wrong worktree/branch, not real absence.
+Read \`AGENTS.md\` / \`CLAUDE.md\` first for conventions. The implementation is already committed on \`${task.branch}\` in WT — read the actual files. If \`git diff --name-only ${shq(task.base)}...HEAD\` looks empty, set \`emptyDiffFlag\` true and stop — that signals a wrong worktree/branch, not real absence.
 
 ## Task
 
@@ -233,7 +243,7 @@ ${task.content}
 ## How to review
 
 1. Run a full build / type-check first. A failure is an automatic blocker (\`pass: false\`).
-2. List touched files with \`git diff --name-only ${task.base}...HEAD\` to scope your quality pass. Do NOT read commit messages or \`git diff\` content — read each touched file in full. Follow references into untouched files when needed.
+2. List touched files with \`git diff --name-only ${shq(task.base)}...HEAD\` to scope your quality pass. Do NOT read commit messages or \`git diff\` content — read each touched file in full. Follow references into untouched files when needed.
 3. Check each acceptance criterion against the actual code.
 4. Quality pass over the touched files: logic correctness, error handling, edge cases, dead code, consistency, duplication, type safety.
 5. Be strict but fair — flag real gaps and functional problems, not style nits. Do not write follow-up task files.
@@ -243,13 +253,13 @@ Return \`pass: true\` only if every criterion is met, the build passes, and ther
 
 function prPrompt(task, notes, remote) {
   if (!remote) {
-    return `Remote push/PR is unavailable this run. Verify branch \`${task.branch}\` and its commits are intact: \`WT="$(wt-enter ${task.slug} ${task.branch})" && git -C "$WT" log --oneline ${task.base}..${task.branch}\` shows the work. Return \`opened: false\`, \`pushed: false\`, \`reason: "no remote auth this run"\`. Do not fail.`;
+    return `Remote push/PR is unavailable this run. Verify branch \`${task.branch}\` and its commits are intact: \`WT="$(wt-enter ${shq(task.slug)} ${shq(task.branch)})" && git -C "$WT" log --oneline ${shq(task.base)}..${shq(task.branch)}\` shows the work. Return \`opened: false\`, \`pushed: false\`, \`reason: "no remote auth this run"\`. Do not fail.`;
   }
   const caveats = notes ? `\n\nReviewer caveats to surface in the PR body:\n${notes}` : "";
-  return `Open a pull request for branch \`${task.branch}\` against base \`${task.base}\`. Work from this task's worktree: \`WT="$(wt-enter ${task.slug} ${task.branch})" && cd "$WT"\` (rerun-safe resolve of the existing worktree; if it errors, STOP and report).
+  return `Open a pull request for branch \`${task.branch}\` against base \`${task.base}\`. Work from this task's worktree: \`WT="$(wt-enter ${shq(task.slug)} ${shq(task.branch)})" && cd "$WT"\` (rerun-safe resolve of the existing worktree; if it errors, STOP and report).
 
-1. Ensure the branch is pushed: \`git push -u origin ${task.branch}\` (or \`git push\`).
-2. \`gh pr create --base ${task.base} --head ${task.branch} --title "<concise title>" --body "<summary>"\`.
+1. Ensure the branch is pushed: \`git push -u origin ${shq(task.branch)}\` (or \`git push\`).
+2. \`gh pr create --base ${shq(task.base)} --head ${shq(task.branch)} --title "<concise title>" --body "<summary>"\`.
    - Reference the task file (${task.path}); don't restate the whole task unless it adds review value.
    - Note tradeoffs / intentional divergences / uncertainties.${caveats}
 
@@ -259,7 +269,7 @@ Return \`opened: true\` with the \`url\` ONLY if \`gh pr create\` actually produ
 function cleanupNote(task) {
   // Best-effort worktree removal is requested at the end of runTask; commits and
   // the branch persist in shared `.git` and on the remote, so removal is safe.
-  return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${task.slug}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
+  return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${shq(task.slug)}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
 }
 
 async function runTask(task, remote) {
@@ -327,7 +337,12 @@ const boot = await agent(bootstrapPrompt(), { label: "bootstrap", schema: BOOTST
 if (!boot || !boot.ok) {
   return { error: "Worktree bootstrap failed; batch not started.", blocker: boot ? boot.blocker : "(agent returned nothing)" };
 }
-const remote = boot.remote !== false;
+// `remote` is optional in BOOTSTRAP_SCHEMA (only `ok` is required), so a
+// schema-valid response can omit it. Treat remote as available ONLY when
+// explicitly true: pushing and opening PRs are outward side effects, so a
+// missing/undefined probe result must fall back to local-branch-only rather
+// than silently attempt a publish.
+const remote = boot.remote === true;
 
 phase("Resolve batch");
 const plan = await agent(resolvePrompt(args), { label: "resolve", schema: PLAN_SCHEMA });

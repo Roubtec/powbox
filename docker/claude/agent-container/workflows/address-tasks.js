@@ -27,14 +27,21 @@
  *      shared ~2 GB cap, no per-`$CONTAINER_NAME` discipline).
  *   2. A SEPARATE worktree per agent, started from the default branch, hides an
  *      implementer's commits from its reviewer.
- * So this workflow does its own worktree management exactly like the
- * `address-tasks-worktrees` skill: each task gets ONE explicit worktree under
+ * So this workflow uses the same explicit worktree model as the
+ * `address-tasks-worktrees` skill: each task gets ONE worktree under
  * `.worktrees/$CONTAINER_NAME/<slug>`, created by its first implementer and
  * REUSED by that task's reviewer and every later round (so the reviewer sees the
  * commits and no agent ever tries to re-check-out a branch already checked out).
  * Tasks run concurrently because each lives in its own worktree; an agent's
  * WORKTREE CONTRACT keeps it inside its own directory. Push is for durability;
  * cross-stage visibility comes from sharing the on-disk worktree, not the remote.
+ *
+ * The worktree/git MECHANICS are not spelled out in prompt text. They live in
+ * three image-baked helpers — `wt-bootstrap` (root-safety checks + orphan prune
+ * + remote probe), `wt-enter` (rerun-safe worktree resolve/attach/create), and
+ * `wt-remove` (guarded cleanup) — the same single source of truth the
+ * *-worktrees skills call. Agents here invoke those scripts and exercise
+ * judgment; they never re-derive the lifecycle from prose.
  *
  * Runtime notes:
  *  - The script itself cannot read files or run shell/git — every git, gh, and
@@ -45,13 +52,26 @@
 
 const MAX_ROUNDS = 3;
 
+// Finish over fan-out (inherited from the skills' adaptive-throttling rule): a
+// wave that runs four-wide and dies to ENOSPC delivers nothing; the same wave
+// two-wide delivers everything a little slower. Width is the MINIMUM of the
+// dependency-derived wave size, this hard cap, and a storage-headroom cap
+// computed from wt-bootstrap's availBytes.
+const MAX_WAVE_WIDTH = 4;
+// Conservative per-task estimate. On the volume-backed path pnpm packages are
+// hardlinked, so the real cost is build artifacts + package metadata; 1 GiB
+// keeps a comfortable margin without measuring a representative install (which
+// a deterministic script cannot do).
+const PER_WORKTREE_BYTES = 1024 ** 3;
+
 const BOOTSTRAP_SCHEMA = {
   type: "object",
   properties: {
     ok: { type: "boolean" },
-    blocker: { type: "string", description: "Why the batch cannot proceed (worktree roots unsafe, CONTAINER_NAME unset). Empty when ok." },
+    blocker: { type: "string", description: "Why the batch cannot proceed (worktree roots unsafe, CONTAINER_NAME unset, wt-bootstrap missing). Empty when ok." },
     wtBase: { type: "string", description: "Absolute path to this container's worktree base, `<repo>/.worktrees/$CONTAINER_NAME`." },
-    remote: { type: "boolean", description: "True if push/PR is available (gh auth + remote reachable); false means local-branch-only fallback." },
+    remote: { type: "boolean", description: "True if push/PR is available (remote reachable); false means local-branch-only fallback." },
+    availBytes: { type: "number", description: "Free bytes on the .worktrees mount, verbatim from wt-bootstrap (drives wave-width throttling)." },
   },
   required: ["ok"],
 };
@@ -120,15 +140,12 @@ const PR_SCHEMA = {
 };
 
 function bootstrapPrompt() {
-  return `Prepare this container for a worktree-isolated task batch. Read \`AGENTS.md\` / \`CLAUDE.md\` first. Set \`ok: false\` with a \`blocker\` on any unrecoverable problem.
+  return `Prepare this container for a worktree-isolated task batch. This is setup only — edit no project files.
 
-1. Require \`CONTAINER_NAME\` to be set (\`<agent>-<project>\`, Docker-unique). If empty, blocker and stop.
-2. Compute and return \`wtBase = "$(git rev-parse --show-toplevel)/.worktrees/$CONTAINER_NAME"\` and \`mkdir -p\` it.
-3. Verify worktree roots are container-local, not the host bind mount: \`.worktrees\` must be a mountpoint on a container-local fs, and \`.claude/worktrees\` + \`.git/worktrees\` must be tmpfs. If a root is missing/unsafe, try \`shadow-refresh.sh "$(git rev-parse --show-toplevel)"\`; if it still fails, blocker and stop (the image predates worktree-shadow support — the user must run \`enable-worktrees\` then rebuild/relaunch). (This is the \`address-tasks-worktrees\` Session Bootstrap — use its exact checks.)
-4. Prune ONLY this container's orphaned worktree dirs under \`$wtBase\` (a dir whose \`git rev-parse --is-inside-work-tree\` fails): \`git worktree prune\` then remove the dead dirs. Never scan the rest of the volume — a peer container's live worktrees live under its own \`$CONTAINER_NAME\` subdir.
-5. Ensure pushes work without rewriting the host remote: if \`origin\` is SSH, \`git config --global url."https://github.com/".insteadOf "git@github.com:"\`, then \`git ls-remote --heads origin >/dev/null\`. Set \`remote: true\` on success; on failure set \`remote: false\` (the batch will fall back to local branches and skip PRs) — this is not a blocker.
-
-Edit no project files; this is setup only.`;
+1. From the repo root, run \`wt-bootstrap\` (an image-baked helper on PATH). It performs the whole Session Bootstrap deterministically: verifies the worktree roots are container-local (never the host bind mount), prunes ONLY this container's orphaned worktrees under \`.worktrees/$CONTAINER_NAME/\`, sets up the container-local SSH→HTTPS remote rewrite, probes push access, and prints one JSON object.
+2. Map that JSON onto the structured result verbatim — \`ok\`, \`blocker\`, \`wtBase\`, \`remote\`, \`availBytes\` — with no reinterpretation. \`remote: false\` is NOT a blocker (the batch falls back to local branches and skips PRs).
+3. If \`wt-bootstrap\` is not on PATH, the image predates it: return \`ok: false\` with blocker \`"image predates the wt-* helpers; rebuild the powbox image and relaunch"\`. Do not re-derive the checks by hand.
+4. On \`ok: false\` from the script, return its \`blocker\` verbatim (typical remedies it names: set CONTAINER_NAME, run \`enable-worktrees\`, rebuild/relaunch).`;
 }
 
 function resolvePrompt(input) {
@@ -153,15 +170,23 @@ Do this:
 Return the structured plan. Paste each task file's FULL content verbatim into \`content\` — downstream agents have no other access to it.`;
 }
 
-function worktreeContract(task) {
+function worktreeContract(task, { mayCreate = false } = {}) {
+  // wt-enter encodes the rerun-safe lifecycle (reuse the existing worktree,
+  // attach an existing branch, create off the base) so prompts never re-derive
+  // it. Stages that must not create work (reviewer, PR) omit the base: a
+  // missing branch then errors instead of silently checking out an empty tree.
+  const enter = mayCreate
+    ? `WT="$(wt-enter ${task.slug} ${task.branch} ${task.base})" && cd "$WT"`
+    : `WT="$(wt-enter ${task.slug} ${task.branch})" && cd "$WT"`;
   return `## WORKTREE CONTRACT (do this before anything else)
 
-Your worktree is \`$(git rev-parse --show-toplevel)/.worktrees/\${CONTAINER_NAME:?CONTAINER_NAME must be set}/${task.slug}\` (call it WT).
-- If WT already exists (a prior round/stage of this same task created it): just \`cd "$WT"\` — it is already on \`${task.branch}\` with the prior commits. Do NOT \`git worktree add\` again and do NOT \`git switch\` to a branch that may be checked out elsewhere.
-- If WT does not exist yet, create it, choosing by whether the branch already exists (a rerun after cleanup, or an interrupted prior run, can leave the branch without its worktree):
-  - branch \`${task.branch}\` does NOT exist → \`git worktree add "$WT" -b ${task.branch} ${task.base}\` (create it off its base).
-  - branch \`${task.branch}\` already exists → \`git worktree add "$WT" ${task.branch}\` (attach the existing branch; do NOT pass \`-b\`, which errors on an existing branch).
-Then \`cd "$WT"\` and verify \`git rev-parse --show-toplevel\` prints exactly WT and \`git branch --show-current\` prints \`${task.branch}\`. If either is wrong, STOP and report.
+Resolve your worktree with the image-baked helper and \`cd\` into it:
+
+    ${enter}
+
+\`wt-enter\` is rerun-safe: it reuses this task's existing worktree (prior commits intact)${mayCreate ? `, attaches the existing branch \`${task.branch}\` if its worktree is gone, or creates the branch off \`${task.base}\` if neither exists yet` : ` or re-attaches the existing branch \`${task.branch}\`; it deliberately CANNOT create the branch for this stage — if it errors that the branch does not exist, the implementation is missing`}. If the command fails, STOP and report its error verbatim — never improvise your own \`git worktree add\` or \`git switch\`.
+
+Then verify: \`git rev-parse --show-toplevel\` prints exactly \`$WT\` and \`git branch --show-current\` prints \`${task.branch}\`. If either is wrong, STOP and report.
 Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.`;
 }
 
@@ -175,7 +200,7 @@ function implementPrompt(task, round, findings, remote) {
     : `- Remote push is unavailable this run; commit locally (the shared \`.git\` persists). Do not fail on missing push.`;
   return `You are implementing a single task on branch \`${task.branch}\` (base \`${task.base}\`).
 
-${worktreeContract(task)}
+${worktreeContract(task, { mayCreate: true })}
 
 Read \`AGENTS.md\` / \`CLAUDE.md\` first for project conventions. The base branch already contains any dependency's work — build on it.
 ${upstream}
@@ -199,8 +224,6 @@ function reviewPrompt(task) {
 
 ${worktreeContract(task)}
 
-(The worktree already exists from the implementer — you take the "WT already exists" branch above: \`cd\` in, do not re-add.)
-
 Read \`AGENTS.md\` / \`CLAUDE.md\` first for conventions. The implementation is already committed on \`${task.branch}\` in WT — read the actual files. If \`git diff --name-only ${task.base}...HEAD\` looks empty, set \`emptyDiffFlag\` true and stop — that signals a wrong worktree/branch, not real absence.
 
 ## Task
@@ -220,10 +243,10 @@ Return \`pass: true\` only if every criterion is met, the build passes, and ther
 
 function prPrompt(task, notes, remote) {
   if (!remote) {
-    return `Remote push/PR is unavailable this run. Ensure branch \`${task.branch}\` and its commits are intact in the worktree at \`$(git rev-parse --show-toplevel)/.worktrees/\${CONTAINER_NAME}/${task.slug}\` and in shared \`.git\`. Return \`opened: false\`, \`pushed: false\`, \`reason: "no remote auth this run"\`. Do not fail.`;
+    return `Remote push/PR is unavailable this run. Verify branch \`${task.branch}\` and its commits are intact: \`WT="$(wt-enter ${task.slug} ${task.branch})" && git -C "$WT" log --oneline ${task.base}..${task.branch}\` shows the work. Return \`opened: false\`, \`pushed: false\`, \`reason: "no remote auth this run"\`. Do not fail.`;
   }
   const caveats = notes ? `\n\nReviewer caveats to surface in the PR body:\n${notes}` : "";
-  return `Open a pull request for branch \`${task.branch}\` against base \`${task.base}\`. Work from this task's worktree (\`cd "$(git rev-parse --show-toplevel)/.worktrees/\${CONTAINER_NAME}/${task.slug}"\`).
+  return `Open a pull request for branch \`${task.branch}\` against base \`${task.base}\`. Work from this task's worktree: \`WT="$(wt-enter ${task.slug} ${task.branch})" && cd "$WT"\` (rerun-safe resolve of the existing worktree; if it errors, STOP and report).
 
 1. Ensure the branch is pushed: \`git push -u origin ${task.branch}\` (or \`git push\`).
 2. \`gh pr create --base ${task.base} --head ${task.branch} --title "<concise title>" --body "<summary>"\`.
@@ -236,7 +259,7 @@ Return \`opened: true\` with the \`url\` ONLY if \`gh pr create\` actually produ
 function cleanupNote(task) {
   // Best-effort worktree removal is requested at the end of runTask; commits and
   // the branch persist in shared `.git` and on the remote, so removal is safe.
-  return `Remove this task's worktree to reclaim space — the branch and commits persist. Run from the repo root (not inside the worktree): \`git worktree remove "$(git rev-parse --show-toplevel)/.worktrees/\${CONTAINER_NAME}/${task.slug}"\` (add \`--force\` only after confirming \`git status\` in it is clean). Do not delete the branch \`${task.branch}\`. Report done.`;
+  return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${task.slug}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
 }
 
 async function runTask(task, remote) {
@@ -315,6 +338,13 @@ if (!plan || !Array.isArray(plan.waves) || plan.waves.length === 0) {
 // Track each task's terminal status so dependent waves can be gated.
 const statusBySlug = new Map();
 const results = [];
+const throttled = [];
+
+// Wave width: dependency-derived size, capped by MAX_WAVE_WIDTH and by storage
+// headroom measured at bootstrap (finish over fan-out — see the constants).
+const availBytes = typeof boot.availBytes === "number" ? boot.availBytes : 0;
+const storageCap = availBytes > 0 ? Math.max(1, Math.floor(availBytes / PER_WORKTREE_BYTES)) : MAX_WAVE_WIDTH;
+const widthCap = Math.min(MAX_WAVE_WIDTH, storageCap);
 
 for (let w = 0; w < plan.waves.length; w++) {
   const wave = plan.waves[w];
@@ -342,15 +372,24 @@ for (let w = 0; w < plan.waves.length; w++) {
   if (runnable.length === 0) continue;
 
   phase(`Wave ${w + 1} (${runnable.length} task${runnable.length === 1 ? "" : "s"})`);
-  const waveResults = await parallel(runnable.map((task) => () => runTask(task, remote)));
-  waveResults.forEach((r, i) => {
-    const res = r || { slug: runnable[i].slug, branch: runnable[i].branch, status: "error", detail: "task crashed" };
-    statusBySlug.set(res.slug, res.status);
-    results.push(res);
-  });
+  if (runnable.length > widthCap) {
+    log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) (cap ${MAX_WAVE_WIDTH}, storage allows ${storageCap}).`);
+    throttled.push({ wave: w + 1, tasks: runnable.length, width: widthCap });
+  }
+  // Sub-batch the wave at the width cap: slower than full fan-out, but a wave
+  // that exhausts the .worktrees mount mid-flight delivers nothing.
+  for (let i = 0; i < runnable.length; i += widthCap) {
+    const slice = runnable.slice(i, i + widthCap);
+    const sliceResults = await parallel(slice.map((task) => () => runTask(task, remote)));
+    sliceResults.forEach((r, j) => {
+      const res = r || { slug: slice[j].slug, branch: slice[j].branch, status: "error", detail: "task crashed" };
+      statusBySlug.set(res.slug, res.status);
+      results.push(res);
+    });
+  }
 }
 
 phase("Summary");
 const landed = results.filter((r) => r.status === "done").length;
 log(`Batch complete: ${landed}/${results.length} tasks landed a PR.`);
-return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, results };
+return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, results };

@@ -55,10 +55,10 @@ The durability rule here is **commit early, but do not push before `address-revi
 
 ## Session Bootstrap (run once, in the main working tree, before any worktree)
 
-Identical to `address-tasks-worktrees` → "Session Bootstrap" — run that procedure. In brief, all idempotent:
+Identical to `address-tasks-worktrees` → "Session Bootstrap" — run the shared image-baked helper. In brief, all idempotent:
 
-1. **Verify the worktree roots are container-local and prune this container's orphans.** Confirm `.worktrees` is a mountpoint on a container-local fs (not the host bind mount) and that `.claude/worktrees` + `.git/worktrees` are tmpfs; if a check fails, stop and run `enable-worktrees` (or rebuild/relaunch) before continuing. Then prune only **this** container's orphaned worktree dirs under `.worktrees/$CONTAINER_NAME/` (scanning the whole volume would delete a peer container's live work). Use the exact command blocks from the sibling skill's Bootstrap.
-2. **Confirm GitHub access and, when publishing, push access.** `gh auth status` must succeed for every run because each subagent must read review threads. If `origin` is SSH, add the container-local `url."https://github.com/".insteadOf "git@github.com:"` rewrite, then confirm `git ls-remote --heads origin >/dev/null`. If remote access fails, stop: PR-number resolution and lease-safe publication cannot be trusted from stale refs.
+1. **Run `wt-bootstrap`.** It verifies the worktree roots are container-local, prunes only **this** container's orphaned worktree dirs under `.worktrees/$CONTAINER_NAME/` (a peer container's live work is never scanned), adds the container-local `url."https://github.com/".insteadOf "git@github.com:"` rewrite when `origin` is SSH, and probes `git ls-remote`. On `ok: false`, stop and fix per the `blocker` (run `enable-worktrees`, or rebuild/relaunch); see the sibling skill's Bootstrap for the full rationale. **Stricter than the task batch:** here `remote: false` is also a stop — PR-number resolution and lease-safe publication cannot be trusted from stale refs. Its `wtBase` is the `$WT_BASE` used below.
+2. **Confirm GitHub API access.** `gh auth status` must succeed for every run because each subagent must read review threads (`wt-bootstrap` only probes git remote access, not the API).
 3. **`git fetch origin`** to refresh remote-tracking refs. This updates `origin/*` only — it never moves a local branch or rewrites a worktree — so it is safe for branch entries (which work the local ref regardless) and is what makes a later `--force-with-lease` push compare against the true current remote tip. It also lets a PR-number entry whose head you lack locally check out the current `origin` head.
 4. **Record the main checkout's starting checkout mode:** current branch (which may be empty when detached) and `HEAD` SHA. A branch can be checked out in only one place at a time, so any entry branch the **main checkout currently occupies** must be freed before its worktree is created. The orchestrator does this on demand by detaching the main `HEAD` (see "Resolving and checking out each entry"), which needs the main tree clean. Restore the original branch after all entries using it are finished, or the original detached SHA if the session began detached. Starting from a branch outside the batch (usually `main`) avoids this dance.
 
@@ -79,15 +79,7 @@ You are the orchestrator. You do **not** edit the PR branches yourself; delegate
 
 This is the part that differs most from the task-file skills: you check out a branch that **already exists** (your local ref, or `origin`'s, occasionally a fork's) rather than creating one. Each entry resolves to a `(branch-to-check-out, PR-number)` pair; the pair drives the worktree and the subagent.
 
-Shared setup, from the main tree:
-
-```bash
-ROOT="$(git rev-parse --show-toplevel)"
-WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
-mkdir -p "$WT_BASE"
-```
-
-These git calls are safe to run while other entries' subagents are active — they touch only their own worktrees and the lock-protected refs. Use a stable, collision-free slug per entry (e.g. `pr-<N>` or a sanitized branch name).
+Shared setup, from the main tree: `$WT_BASE` is the `wtBase` that `wt-bootstrap` reported (`<repo>/.worktrees/$CONTAINER_NAME`), and `$ROOT` the repo root. For the **plain attach cases** below use the image-baked `wt-enter <slug> <branch>` (no base argument): it attaches the existing local branch under `$WT_BASE`, is rerun-safe, and refuses rather than guesses on a wrong-branch or occupied-ref conflict. The cases `wt-enter` does not cover (detaching the main checkout, tracking `origin`, forks) keep their explicit commands. These calls are safe to run while other entries' subagents are active — they touch only their own worktrees and the lock-protected refs. Use a stable, collision-free slug per entry (e.g. `pr-<N>` or a sanitized branch name).
 
 ### Branch entry — work your local ref
 
@@ -99,8 +91,8 @@ The local-control path (the rebased-locally / stale-origin case). Normalize an e
    - More than one → skip-and-record as ambiguous (or, interactive, ask which).
    - If the PR head is a fork, skip-and-record this branch-form entry and tell the user to pass the PR number instead; the unconditional `origin/<branch>` upstream used below is valid only for same-repository heads.
 2. **Check out the verified local ref as-is** — never `origin`, never a reset:
-   - Not checked out anywhere → `git worktree add "$WT_BASE/<slug>" <branch>`.
-   - Occupied by the **main checkout** (it's the orchestrator's current branch) → free it by detaching the main `HEAD` (`git -C "$ROOT" switch --detach`) **when the main tree is clean**, then `git worktree add` it; the starting checkout mode recorded in Bootstrap is restored in Cleanup. If the main tree is *dirty*, skip-and-record (commit/stash or move the main checkout off it first). If setup fails after detaching and no later entry needs that branch free, restore immediately before continuing.
+   - Not checked out anywhere → `wt-enter <slug> <branch>`.
+   - Occupied by the **main checkout** (it's the orchestrator's current branch) → free it by detaching the main `HEAD` (`git -C "$ROOT" switch --detach`) **when the main tree is clean**, then `wt-enter` it; the starting checkout mode recorded in Bootstrap is restored in Cleanup. If the main tree is *dirty*, skip-and-record (commit/stash or move the main checkout off it first). If setup fails after detaching and no later entry needs that branch free, restore immediately before continuing.
    - Occupied by **another worktree** (a sibling entry, or the same branch listed twice) → skip-and-record; a branch can't live in two worktrees.
 3. **Set the push target:** `git -C "$WT_BASE/<slug>" branch --set-upstream-to=origin/<branch>` (origin's head ref for the paired same-repository PR, refreshed by Bootstrap's fetch). `address-review` still verifies the exact PR head and uses an expected-OID lease before any rewrite.
 
@@ -111,7 +103,7 @@ The canonical path. Resolve the PR, then prefer a same-named local branch if you
 1. **Resolve and sanity-check:** `gh pr view N --json number,state,headRefName,headRepositoryOwner,baseRefName,url,title`. If `state` is not `OPEN`, skip-and-record. Note `headRefName` and whether `headRepositoryOwner` matches `origin`'s owner (same-repo) or differs (fork).
 2. **Same-repo:**
    - If local `<headRefName>` exists, compare it with `origin/<headRefName>` **before** considering checkout occupancy. If it is strictly behind with no unique local commits, skip-and-record rather than force-rewriting newer remote work; ask the user to fast-forward it or explicitly pass the branch if they truly intend the stale local state.
-   - A usable local `<headRefName>` that is free → `git worktree add "$WT_BASE/pr-<N>" <headRefName>` and **record any ahead/diverged state** in the summary.
+   - A usable local `<headRefName>` that is free → `wt-enter pr-<N> <headRefName>` and **record any ahead/diverged state** in the summary.
    - A usable local `<headRefName>` occupied by the main checkout → detach the clean main `HEAD` and add the worktree as in the Branch-entry case; if held by another worktree or the main tree is dirty, skip-and-record.
    - No local `<headRefName>` → `git worktree add --track -b <headRefName> "$WT_BASE/pr-<N>" origin/<headRefName>`.
 3. **Fork PR** — let `gh` wire up the fork remote and tracking inside a detached worktree:
@@ -175,8 +167,7 @@ Record whenever you ran narrower than the batch size and why.
 
 ## Cleanup
 
-- Before removal, verify the worktree has no rebase/merge in progress and `git status --porcelain` is empty. If it contains uncommitted or unresolved state, leave the worktree in place and report its path instead of deleting evidence or work.
-- `git worktree remove "<path>"` once a PR's subagents have returned cleanly and its work is committed. The branch and commits persist in shared `.git`; on push runs, the publisher's report must state whether publication succeeded or why it did not.
+- `wt-remove <slug>` once a PR's subagents have returned cleanly and its work is committed. The script enforces the safety checks itself — it refuses on uncommitted changes or an in-progress rebase/merge (even with `--force`); if it refuses, leave the worktree in place and report its path instead of deleting evidence or work. The branch and commits persist in shared `.git`; on push runs, the publisher's report must state whether publication succeeded or why it did not.
 - **Never delete the branch** — it is the PR's head. (This is the opposite of nothing-to-lose task branches: deleting it would orphan the PR.)
 - **Restore the main checkout** after every entry using its starting branch is complete, including failure paths: switch back to the recorded starting branch, or `git switch --detach <starting-sha>` if the session began detached. Do not restore the branch between serial same-head entries or it will occupy the ref again. A restored branch points at its addressed local tip. Note the restore in the summary.
 - Because `.git/worktrees` is tmpfs-shadowed, host hygiene needs no `git worktree prune`; prune only to clear a stale registration within the live session.

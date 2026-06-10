@@ -19,6 +19,21 @@ script itself does no file/shell/git work and takes no mid-run user input —
 every side effect happens inside an agent, and a blocker is returned, never
 prompted.
 
+The division of labor is three layers, each owning what it is best at:
+
+| Layer | Owns | Form |
+|-------|------|------|
+| workflow script | control flow: waves, round caps, dependency gating, throttling | deterministic JS |
+| spawned agents | judgment: implement, review, decide, write PR bodies | prompts |
+| `wt-*` helpers | mechanics: worktree lifecycle, root-safety checks, rerun-safe git plumbing | image-baked shell (`wt-bootstrap`, `wt-enter`, `wt-remove`) |
+
+The helpers are the same scripts the `*-worktrees` skills call (baked by the
+base image from `docker/shared/`), so the hard-won mechanics exist exactly
+once: a prompt asks an agent to run `wt-enter <slug> <branch> <base>`, not to
+re-derive the lifecycle from prose. Workflows therefore **require an image
+new enough to bake the `wt-*` helpers**; the bootstrap stage detects an older
+image and reports a blocker instead of falling back to hand-rolled git.
+
 ### Worktrees: explicit convention, not runtime `isolation`
 
 The runtime offers `agent(..., { isolation: "worktree" })`, but these workflows
@@ -37,13 +52,17 @@ things powbox needs:
 2. **A separate worktree per agent, started from the default branch, hides an
    implementer's commits from its reviewer.**
 
-So `address-tasks.js` manages worktrees itself, exactly like the
-`address-tasks-worktrees` skill: a bootstrap agent verifies the roots and prunes
-this container's orphans, then each task gets **one** explicit worktree under
-`.worktrees/$CONTAINER_NAME/<slug>`, created by its first implementer and reused
-by that task's reviewer and every later round. Cross-task parallelism comes from
-`parallel()` over distinct worktrees; cross-stage commit visibility comes from
-sharing the on-disk worktree, not the remote.
+So `address-tasks.js` manages worktrees itself, through the same `wt-*` helpers
+the `address-tasks-worktrees` skill calls: a bootstrap agent runs `wt-bootstrap`
+(root-safety checks, container-scoped orphan prune, remote probe — one JSON
+result), then each task gets **one** explicit worktree under
+`.worktrees/$CONTAINER_NAME/<slug>`, resolved rerun-safely by `wt-enter`:
+created off the base by its first implementer, reused by that task's reviewer
+and every later round. Stages that must not create work (reviewer, PR) call
+`wt-enter` *without* a base, so a missing branch is an error rather than a
+silent empty checkout. Cross-task parallelism comes from `parallel()` over
+distinct worktrees; cross-stage commit visibility comes from sharing the
+on-disk worktree, not the remote.
 
 `address-review.js` is a single-PR, strictly sequential pipeline with no
 fan-out, so it needs no worktree at all — every stage runs on the PR branch in
@@ -61,6 +80,11 @@ same explicit `.worktrees/$CONTAINER_NAME/<slug>` worktree-per-task model (see
 their prerequisites, the 3-round implement→review→fix loop, "implementer
 finishes before its reviewer" — as deterministic JavaScript rather than prose.
 Independent tasks run concurrently via `parallel()` over distinct worktrees.
+
+It also ports the skill's **adaptive throttling** ("finish over fan-out") as
+code: wave width is the minimum of the dependency-derived size, a hard cap, and
+a storage cap computed from `wt-bootstrap`'s `availBytes`; an over-wide wave is
+run in sub-batches and the throttling decision is reported in the summary.
 
 **It does not yet fully supersede `address-tasks-worktrees`.** This conversion
 stops after per-task PR creation; it omits that skill's post-batch
@@ -96,8 +120,8 @@ would want to call it.
    when promoting, we'd likely retire the Claude skill copies (the Codex skills
    stay).
 2. **Agent worktree management under the runtime.** `address-tasks.js` has its
-   agents run `git worktree add` / `cd` themselves (see "Worktrees" above)
-   rather than using runtime isolation. The load-bearing assumption is that a
+   agents run `wt-enter` / `cd` themselves (see "Worktrees" above) rather than
+   using runtime isolation. The load-bearing assumption is that a
    workflow-spawned agent runs in the repo working directory with a shared
    filesystem — so one agent's explicit worktree persists for the next agent of
    the same task to `cd` into. That matches how `Agent`-tool subagents behave in

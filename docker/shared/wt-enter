@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# wt-enter — rerun-safely resolve a task worktree under this container's
+# .worktrees/$CONTAINER_NAME/ subdir and print its absolute path.
+#
+# Usage: wt-enter <slug> <branch> [<base>]
+#
+#   <slug>    worktree directory name (task identifier; [A-Za-z0-9._-], must
+#             not start with a dot or dash)
+#   <branch>  the branch that must be checked out in that worktree
+#   <base>    ref to create <branch> from when it does not exist yet; OMIT it
+#             for stages that must never create work (e.g. a reviewer attaching
+#             to an implementer's worktree — a missing branch is then an error,
+#             not a silent fresh checkout that reviews an empty diff)
+#
+# Exactly one of three rerun-safe outcomes (matching the *-worktrees skills):
+#   * worktree exists and is on <branch>  -> reuse it (prior commits intact)
+#   * branch exists without its worktree  -> attach it (no -b)
+#   * neither exists                      -> create branch off <base> (-b)
+# An orphaned dir (stale from a recycled container) is pruned and recreated.
+#
+# stdout is ONLY the worktree path, so callers can `WT="$(wt-enter ...)"`;
+# diagnostics go to stderr. Non-zero exit means the caller must STOP and
+# report, never improvise a checkout.
+set -euo pipefail
+
+die() {
+	echo "wt-enter: $*" >&2
+	exit 1
+}
+
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then die "usage: wt-enter <slug> <branch> [<base>]"; fi
+SLUG="$1"
+BRANCH="$2"
+BASE="${3:-}"
+
+case "$SLUG" in
+[A-Za-z0-9_]*) ;;
+*) die "invalid slug '$SLUG' (must start with an alphanumeric or underscore)" ;;
+esac
+printf '%s' "$SLUG" | LC_ALL=C grep -Eq '^[A-Za-z0-9._-]+$' ||
+	die "invalid slug '$SLUG' (allowed: A-Za-z0-9._-)"
+
+GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+	die "not inside a git repository"
+case "$GIT_COMMON" in
+*/.git) ROOT="${GIT_COMMON%/.git}" ;;
+*) die "cannot resolve the main repo root from $GIT_COMMON" ;;
+esac
+WT_BASE="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}"
+WT="$WT_BASE/$SLUG"
+
+if [ -d "$WT" ]; then
+	if git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		TOP="$(git -C "$WT" rev-parse --show-toplevel)"
+		[ "$TOP" = "$WT" ] ||
+			die "$WT is inside another worktree (toplevel: $TOP); refusing"
+		CUR="$(git -C "$WT" branch --show-current)"
+		[ "$CUR" = "$BRANCH" ] ||
+			die "worktree $WT is on branch '$CUR', expected '$BRANCH'; refusing to switch — resolve manually"
+		printf '%s\n' "$WT"
+		exit 0
+	fi
+	# Orphan from a recycled container: its tmpfs git metadata is gone, so it
+	# can never be a worktree again. Prune and fall through to recreate.
+	echo "wt-enter: pruning orphaned worktree dir $WT" >&2
+	rm -rf "$WT"
+	git -C "$ROOT" worktree prune
+fi
+
+mkdir -p "$WT_BASE"
+if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+	# Existing branch (interrupted run / post-cleanup rerun): attach, never -b.
+	# git itself refuses if the branch is checked out in another worktree.
+	git -C "$ROOT" worktree add "$WT" "$BRANCH" >&2
+else
+	[ -n "$BASE" ] ||
+		die "branch '$BRANCH' does not exist and no <base> was given (this stage must not create it)"
+	git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null ||
+		die "base ref '$BASE' does not resolve to a commit"
+	git -C "$ROOT" worktree add "$WT" -b "$BRANCH" "$BASE" >&2
+fi
+
+TOP="$(git -C "$WT" rev-parse --show-toplevel)"
+[ "$TOP" = "$WT" ] || die "post-create verification failed: toplevel is $TOP, expected $WT"
+CUR="$(git -C "$WT" branch --show-current)"
+[ "$CUR" = "$BRANCH" ] || die "post-create verification failed: on branch '$CUR', expected '$BRANCH'"
+
+printf '%s\n' "$WT"

@@ -243,6 +243,9 @@ COPY --chmod=755 \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
     docker/shared/pg-dev-up \
+    docker/shared/wt-bootstrap \
+    docker/shared/wt-enter \
+    docker/shared/wt-remove \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \
     /usr/local/bin/

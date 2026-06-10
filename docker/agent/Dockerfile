@@ -64,15 +64,25 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
     && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/claude.commit \
     && printf '%s\n' "${POWBOX_COMMIT_CODEX}" > /home/node/.powbox/codex.commit
 
-# --- Entrypoint + every agent's setup hook -----------------------------------
+# --- Entrypoint, setup hooks, and worktree helpers ---------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
 # Each agent's hook is baked here so editing a hook rebuilds only this layer.
+# The wt-* worktree helpers are baked here too — not in the base image — because
+# they evolve in lockstep with the agent-layer assets that call them (the
+# *-worktrees skills and the Claude workflows). Keeping them in this layer means
+# the documented `agent-update` / `build.sh agent` path (which reuses an
+# existing base image unless --pull) refreshes the helpers along with the
+# skills/workflows, instead of leaving stale /usr/local/bin/wt-* behind a base
+# that was not rebuilt.
 COPY --chmod=755 \
     docker/shared/entrypoint-agent.sh \
     docker/shared/entrypoint-claude-hook.sh \
     docker/shared/entrypoint-codex-hook.sh \
     docker/shared/seed-skills.sh \
     docker/shared/powbox-provenance \
+    docker/shared/wt-bootstrap \
+    docker/shared/wt-enter \
+    docker/shared/wt-remove \
     /usr/local/bin/
 
 # --- Provenance labels -------------------------------------------------------

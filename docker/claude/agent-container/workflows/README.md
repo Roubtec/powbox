@@ -28,11 +28,14 @@ The division of labor is three layers, each owning what it is best at:
 | `wt-*` helpers | mechanics: worktree lifecycle, root-safety checks, rerun-safe git plumbing | image-baked shell (`wt-bootstrap`, `wt-enter`, `wt-remove`) |
 
 The helpers are the same scripts the `*-worktrees` skills call (baked by the
-base image from `docker/shared/`), so the hard-won mechanics exist exactly
-once: a prompt asks an agent to run `wt-enter <slug> <branch> <base>`, not to
-re-derive the lifecycle from prose. Workflows therefore **require an image
-new enough to bake the `wt-*` helpers**; the bootstrap stage detects an older
-image and reports a blocker instead of falling back to hand-rolled git.
+**agent** image from `docker/shared/`, alongside the entrypoint and hooks, so
+the ordinary `agent-update` / `build.sh agent` rebuild refreshes them in lockstep
+with the workflows and skills — no base rebuild needed), so the hard-won
+mechanics exist exactly once: a prompt asks an agent to run
+`wt-enter <slug> <branch> <base>`, not to re-derive the lifecycle from prose.
+Workflows therefore **require an image new enough to bake the `wt-*` helpers**;
+the bootstrap stage detects an older image and reports a blocker instead of
+falling back to hand-rolled git.
 
 ### Worktrees: explicit convention, not runtime `isolation`
 

@@ -7,22 +7,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Refresh the image-baked agent skills onto the persistent config volumes.
+# Refresh the image-baked agent skills (and Claude workflows) onto the persistent
+# config volumes.
 #
-# Skill text is baked into powbox-agent:latest at build time and seeded onto the
-# claude-config / codex-config volumes the first time each skill folder is absent
-# (no-clobber, see docker/shared/entrypoint-*-hook.sh). That no-clobber means a
-# rebuilt image with updated skills does NOT overwrite the stale copies already
-# on the volume. This command closes that gap: it runs a throwaway container that
-# force-copies the freshly built skills over the volume copies, removing the old
+# Skills (folders) and Claude dynamic workflows (flat .js files) are baked into
+# powbox-agent:latest at build time and seeded onto the claude-config /
+# codex-config volumes the first time each item is absent (no-clobber, see
+# docker/shared/entrypoint-*-hook.sh). That no-clobber means a rebuilt image with
+# updated skills/workflows does NOT overwrite the stale copies already on the
+# volume. This command closes that gap: it runs a throwaway container that
+# force-copies the freshly built items over the volume copies, removing the old
 # "enter a container, delete skills, exit, relaunch" dance.
 #
-# Each skill powbox places carries a hidden .powbox-seeded ownership marker, so
-# this command can tell its own copies from skills you authored:
-#   - marked skills are refreshed (and, with -Prune, removed when no longer baked)
-#   - an UNMARKED folder whose name collides with a baked skill is a CONFLICT and
-#     is never overwritten silently; resolve it with -AdoptAll (take the baked
-#     version + track it) or by renaming your folder.
+# Each item powbox places carries a hidden .powbox-seeded ownership marker (in a
+# skill's folder; alongside a workflow as a sidecar), so this command can tell its
+# own copies from items you authored:
+#   - marked items are refreshed (and, with -Prune, removed when no longer baked)
+#   - an UNMARKED item whose name collides with a baked one is a CONFLICT and is
+#     never overwritten silently; resolve it with -AdoptAll (take the baked
+#     version + track it) or by renaming yours.
 #
 # Rebuild the image first (e.g. `cc <project> -Build`, `agent-update`, or
 # `.\build.ps1 agent`) so the baked skills reflect your latest edits - this
@@ -82,7 +85,7 @@ $interactive = -not [System.Console]::IsInputRedirected
 # --- Classify: build the plan and collect conflicts / orphans -----------------
 $records = Invoke-Worker -Mode "classify"
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Skill refresh failed during planning."
+  Write-Error "Refresh failed during planning."
   exit 1
 }
 
@@ -96,19 +99,19 @@ foreach ($line in $records) {
   switch ($f[0]) {
     'would-seed'    { $nSeed++ }
     'would-refresh' { $nRefresh++ }
-    'conflict'      { $conflicts += "$($f[1])/$($f[2])" }
-    'orphan'        { $orphans += "$($f[1])/$($f[2])" }
+    'conflict'      { $conflicts += "$($f[1])/$($f[3]) ($($f[2]))" }
+    'orphan'        { $orphans += "$($f[1])/$($f[3]) ($($f[2]))" }
   }
 }
 
 Write-Host "Image: $image"
 Write-Host "Plan: $nSeed to seed, $nRefresh to refresh."
 if ($conflicts.Count -gt 0) {
-  Write-Host "Conflicts (unmarked skills shadowing a baked skill - left untouched):"
+  Write-Host "Conflicts (unmarked items shadowing a baked skill/workflow - left untouched):"
   $conflicts | ForEach-Object { Write-Host "  - $_" }
 }
 if ($orphans.Count -gt 0) {
-  Write-Host "Obsolete seeded skills (marked, no longer baked into the image):"
+  Write-Host "Obsolete seeded items (marked, no longer baked into the image):"
   $orphans | ForEach-Object { Write-Host "  - $_" }
 }
 
@@ -143,22 +146,23 @@ foreach ($line in $records) {
   if (-not $line) { continue }
   $f = $line -split "`t"
   $agent = $f[1]
-  $name = $f[2]
+  $kind = $f[2]
+  $name = $f[3]
   switch ($f[0]) {
-    'seeded'    { Write-Host "[$agent] seeded skill: $name"; $applied++ }
-    'refreshed' { Write-Host "[$agent] refreshed skill: $name"; $applied++ }
-    'adopted'   { Write-Host "[$agent] adopted skill: $name"; $applied++ }
-    'pruned'    { Write-Host "[$agent] pruned obsolete skill: $name"; $applied++ }
+    'seeded'    { Write-Host "[$agent] seeded ${kind}: $name"; $applied++ }
+    'refreshed' { Write-Host "[$agent] refreshed ${kind}: $name"; $applied++ }
+    'adopted'   { Write-Host "[$agent] adopted ${kind}: $name"; $applied++ }
+    'pruned'    { Write-Host "[$agent] pruned obsolete ${kind}: $name"; $applied++ }
     'conflict'  { $keptConflicts++ }
     'orphan'    { $keptOrphans++ }
-    'error'     { Write-Warning "[$agent] failed to update skill: $name"; $failed++ }
+    'error'     { Write-Warning "[$agent] failed to update ${kind}: $name"; $failed++ }
   }
 }
 
-Write-Host "$applied skill(s) updated."
+Write-Host "$applied item(s) updated."
 if ($keptConflicts -gt 0) { Write-Host "$keptConflicts conflict(s) left untouched (run with -AdoptAll to take the baked version)." }
-if ($keptOrphans -gt 0) { Write-Host "$keptOrphans obsolete seeded skill(s) kept (run with -Prune to remove)." }
+if ($keptOrphans -gt 0) { Write-Host "$keptOrphans obsolete seeded item(s) kept (run with -Prune to remove)." }
 if ($failed -gt 0 -or $applyExit -ne 0) {
-  Write-Error "Skill refresh completed with $failed failure(s)."
+  Write-Error "Refresh completed with $failed failure(s)."
   exit 1
 }

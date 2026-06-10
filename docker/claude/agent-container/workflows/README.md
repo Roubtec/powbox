@@ -126,7 +126,10 @@ would want to call it.
    filesystem — so one agent's explicit worktree persists for the next agent of
    the same task to `cd` into. That matches how `Agent`-tool subagents behave in
    the same container, but should be confirmed against the live workflow runtime.
-3. **Refresh parity.** Seeding is a simple no-clobber file copy (delete the file
-   to re-seed). It does not yet participate in `agent-update-skills`' marker /
-   refresh / prune flow; wiring that in is the obvious follow-up if the shape
-   proves out.
+3. **Refresh parity.** Workflows are seeded no-clobber and tracked with a hidden
+   per-file `.<name>.powbox-seeded` sidecar marker (the file analogue of a skill
+   folder's marker), so they participate fully in `agent-update-skills`' classify
+   / refresh / adopt / prune flow — `update-skills.{sh,ps1}` report and act on them
+   as `workflow` items. Delete a workflow (and its sidecar) to re-seed it from the
+   image on the next container start, or run `agent-update-skills` to force a
+   refresh.

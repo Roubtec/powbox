@@ -49,6 +49,7 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 - The shared instruction template is rendered via `envsubst` with agent-specific variables (including `${AGENT_PEERS}`, the registry-derived peer list for the "Delegating to another agent" section).
 - `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal. On success it also adds a container-global `url."https://github.com/".insteadOf "git@github.com:"` rewrite (written to the ephemeral `GIT_CONFIG_GLOBAL`, never the host) so SSH-form `origin` remotes push/fetch over HTTPS+gh without rewriting the host repo.
 - Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering.
+- The container's two shells are split on purpose, so the `usermod --shell /bin/zsh` and `ENV SHELL=/bin/bash` in `docker/base/Dockerfile` are not a contradiction: zsh is the human login shell (and `launch-agent --shell` execs `zsh` directly), while bash is the `$SHELL` the agent harnesses' Bash tools spawn — the models write bash/POSIX (word-splitting, 0-indexed arrays) and a non-interactive one-shot call gains nothing from zsh, so defaulting agents to zsh only wasted turns. Both rc files (`docker/shared/.bashrc`, `.zshrc`) are baked but only shape interactive sessions; `EDITOR` and `PATH` live in image `ENV` so neither shell owns them.
 
 ## Project Identity
 

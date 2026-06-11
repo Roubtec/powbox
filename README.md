@@ -213,6 +213,12 @@ Either agent can be started first in a clean Docker environment.
 
 All shared volumes are marked `external` in the Compose files and pre-created by the launch scripts on first use.
 
+### Shell
+
+The default shell (`$SHELL`) is **bash**. The agent harnesses' Bash tools spawn `$SHELL` non-interactively, and the models' command prior is bash/POSIX — word-splitting on unquoted expansions, 0-indexed arrays — so running those one-shot calls under zsh just wasted turns on no-word-split and 1-indexed-array surprises. The agent path gains nothing from zsh's interactive features, so bash is the right default for it.
+
+`zsh` is still installed and is what a human gets: it is the login shell and what `--shell` opens. The baked `~/.bashrc` and `~/.zshrc` only shape interactive sessions (history, completion, prompt) and share the `agent-zsh-history` volume; both shells inherit `PATH`, `EDITOR`, and the rest from the image environment, so changing the default shell does not change the toolchain.
+
 ### Cross-Agent Delegation
 
 Because the unified image ships both agent binaries on `PATH` and the entrypoint seeds every agent's config at startup, the running primary agent can invoke the other agent directly inside the same container — no Docker-in-Docker, no mounted socket, no sibling container.

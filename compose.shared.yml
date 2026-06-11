@@ -60,6 +60,8 @@ services:
     volumes:
       - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh
+      # Persists interactive shell history. bash (the default $SHELL) reuses this
+      # same volume rather than declaring a second one — see docker/shared/.bashrc.
       - zsh-history:/home/node/.zsh_history_dir
 
 volumes:

@@ -18,12 +18,15 @@
 # locations. --raw drops the numbering (a range still slices, raw).
 set -euo pipefail
 
+# Usage text goes to stdout for an explicit help request (exit 0, pipeable)
+# and to stderr when it is an error diagnosis (exit non-zero).
 usage() {
+	local code="${1:-1}"
 	{
 		echo "usage: gitcat [--raw] <ref> <path> [<start> [<end>]]"
 		echo "       gitcat [--raw] <ref>:<path> [<start> [<end>]]"
-	} >&2
-	exit "${1:-1}"
+	} >&$((code == 0 ? 1 : 2))
+	exit "$code"
 }
 
 die() {
@@ -37,7 +40,7 @@ if [ "${1:-}" = "--raw" ]; then
 	shift
 fi
 case "${1:-}" in
-"" ) usage 1 ;;
+"") usage 1 ;;
 -h | --help) usage 0 ;;
 esac
 

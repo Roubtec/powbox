@@ -294,7 +294,7 @@ RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
 # Install Oh My Zsh and the shared shell configuration. zsh is the human login
 # shell (and what `--shell` opens); bash is the default $SHELL the agent tools
 # spawn — both rc files are baked so either shell is configured.
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+RUN CHSH=no RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 COPY --chown=node:node docker/shared/.zshrc /home/node/.zshrc
 COPY --chown=node:node docker/shared/.bashrc /home/node/.bashrc
 

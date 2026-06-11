@@ -95,11 +95,11 @@ const PACKET_SCHEMA = {
           path: { type: "string" },
           line: { type: "integer" },
           author: { type: "string", description: "Comment author login." },
-          authorIsBot: { type: "boolean", description: "True if the comment author is a bot / GitHub App. Derive from GraphQL author `__typename` (`Bot`) — NOT from guessing the login. Drives whether a push-back thread may be auto-resolved." },
+          authorIsBot: { type: "boolean", description: "True if the comment author is a bot / GitHub App. Derive from GraphQL author `__typename` (`Bot`) — NOT from guessing the login; if the author is unavailable (e.g. deleted account), use false, the safe value that keeps the thread open. Drives whether a push-back or deferred thread may be auto-resolved." },
           body: { type: "string", description: "Comment text, verbatim." },
           url: { type: "string", description: "Permalink to the comment (the stable reference for a standalone item, which has no threadId)." },
         },
-        required: ["type", "body"],
+        required: ["type", "body", "authorIsBot"],
       },
     },
   },
@@ -117,13 +117,13 @@ const DISPOSITION_SCHEMA = {
           type: { type: "string", description: "`review-thread` or `standalone`, echoed from the gathered item." },
           threadId: { type: "string", description: "The review-thread node id — REQUIRED for type `review-thread` (publication resolves it); omit for `standalone`." },
           commentId: { type: "string", description: "The comment databaseId — REQUIRED for type `review-thread` (publication replies to it); omit for `standalone`." },
-          authorIsBot: { type: "boolean", description: "Echoed from the gathered item; lets publication decide whether a push-back thread may be auto-resolved (bot) or must stay open (human)." },
+          authorIsBot: { type: "boolean", description: "Echoed from the gathered item; lets publication decide whether a push-back or deferred thread may be auto-resolved (bot) or must stay open (human). REQUIRED — if the gathered item somehow lacked it, re-derive from GraphQL author `__typename`, or use false (human), the safe value that keeps the thread open." },
           url: { type: "string", description: "Permalink — the stable reference, especially for `standalone` items." },
           ref: { type: "string", description: "file:line + author, a human-readable reference." },
           kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | deferred-to-task | ambiguous-skipped" },
           detail: { type: "string", description: "For fixed: the one-line summary + commit sha. For already-addressed: where it's handled. For push-back: the rationale. For deferred: the committed task file path + one-line scope, and whether the deferral was maintainer-directed or agent-proposed. For ambiguous: what decision is needed." },
         },
-        required: ["type", "kind", "detail"],
+        required: ["type", "kind", "detail", "authorIsBot"],
       },
     },
     proactiveFixes: { type: "string", description: "Same-pattern fixes made beyond the literal comments, or empty." },
@@ -205,7 +205,8 @@ If \`rebase on top of <branch>\` was given: save \`refs/pre-rebase/<branch>/<ts>
 
 Gather feedback into \`items\` (each verbatim):
 - UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`). Emit each as \`type: "review-thread"\` with \`threadId\` (node id), \`commentId\` (top comment databaseId), \`path\`, \`line\`, \`author\` (login), \`authorIsBot\` (true when the comment's GraphQL \`author.__typename\` is \`Bot\` — query \`author{ login __typename }\`; do not guess from the login), \`body\`, \`url\`. \`threadId\` and \`commentId\` are mandatory for these — they are how publication resolves and replies.
-- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`authorIsBot\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context. So is a top-level maintainer comment recording per-item verdicts (often titled "Maintainer Decisions" or similar) — fold each decision into the relevant thread's context as its binding disposition (including "defer to a follow-up task" and "keep as-is").
+- Top-level context — ALWAYS fetch every review summary (\`gh pr view --json reviews\`) and every issue comment (\`gh api --paginate repos/{owner}/{repo}/issues/<PR>/comments\`), even when the request names no standalone item: this sweep is how maintainer replies and decision comments are discovered. A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context. So is a top-level maintainer comment recording per-item verdicts (often titled "Maintainer Decisions" or similar) — fold each decision into the relevant thread's context as its binding disposition (including "defer to a follow-up task" and "keep as-is").
+- A standalone issue comment or review summary becomes its own item ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`authorIsBot\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread).
 
 If there are no unresolved threads and no included standalone item, return \`ok: true\` with an empty \`items\` array — the caller will exit as a successful no-op.
 
@@ -239,7 +240,7 @@ Triage each item into exactly one kind and act:
 - Do NOT push, reply, resolve, or comment on the PR — publication is a separate, later step.
 - Do NOT use the \`TaskCreate\`/\`TaskUpdate\`/\`TaskList\` tools.
 
-For each disposition, echo the item's \`type\` and \`authorIsBot\`, and carry its identifiers: for \`review-thread\` items \`threadId\` and \`commentId\` are MANDATORY (publication cannot reply/resolve without them); for \`standalone\` items include \`url\`. Return the structured dispositions.`;
+For each disposition, echo the item's \`type\` and \`authorIsBot\` (both MANDATORY — publication uses \`authorIsBot\` to decide whether a push-back/deferred thread may be auto-resolved, so never omit it; if the gathered item lacked it, use false, the safe human default), and carry its identifiers: for \`review-thread\` items \`threadId\` and \`commentId\` are MANDATORY (publication cannot reply/resolve without them); for \`standalone\` items include \`url\`. Return the structured dispositions.`;
 }
 
 function reviewPrompt(packet, dispositions) {

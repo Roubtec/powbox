@@ -115,7 +115,7 @@ Classify each into one of:
 - **Actionable** — a real issue; implement the fix.
 - **Already addressed** — the current code (possibly thanks to the rebase or an earlier commit) already satisfies it. Note where.
 - **Push-back** (should be **rare**) — the comment is wrong, misunderstands context, or points in the wrong direction. Do **not** implement it; draft a respectful, specific rationale instead. Lean on judgment; never implement a fix you believe is wrong just to clear a comment.
-- **Deferred to follow-up task** — the concern is real, but fixing it here would expand the PR's scope considerably while the branch is defendable as it stands (it builds and covers its main paths) — or the maintainer has already deferred it (reply or decision comment). Do **not** implement it; record it as a committed task file instead (step 5). Never use this to dodge a cheap fix.
+- **Deferred-to-task** — the concern is real, but fixing it here would expand the PR's scope considerably while the branch is defendable as it stands (it builds and covers its main paths) — or the maintainer has already deferred it (reply or decision comment). Do **not** implement it; record it as a committed task file instead (step 5). Never use this to dodge a cheap fix.
 - **Ambiguous** — the right fix needs an authoritative decision you cannot make from the code/history. **Interactive:** ask the user. **Hands-off:** make a best-effort call only when stakes are low; otherwise skip and document it — do not guess where an authoritative determination is required.
 
 ### Step 5 — Fix

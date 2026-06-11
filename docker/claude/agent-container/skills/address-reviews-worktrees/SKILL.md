@@ -23,7 +23,7 @@ Everything here follows from one fact: **the PRs already exist**, so we modify e
 
 ## Stacked PRs: a fix may be hostable on only one branch
 
-When the batch contains stacked PRs, a thread's fix can depend on code that exists only higher up the stack (a gate, helper, or schema a later branch introduces). A per-PR fixer on a lower branch cannot host that fix, and two worktrees must never implement halves of one atomic change. When triage reveals such a dependency, concentrate the change on the branch where its prerequisite lives (often top-of-stack), and have the lower PR's thread dispositioned as deferred-to-task or already-addressed with a pointer to the hosting PR rather than fixed locally.
+When the batch contains stacked PRs, a thread's fix can depend on code that exists only higher up the stack (a gate, helper, or schema a later branch introduces). A per-PR fixer on a lower branch cannot host that fix, and two worktrees must never implement halves of one atomic change. When triage reveals such a dependency, concentrate the change on the branch where its prerequisite lives (often top-of-stack), and close out the lower PR's thread without a local code fix — while keeping each disposition's `address-review` contract intact. Cross-PR references are valid and expected here, but they ride on the normal disposition mechanics: use **deferred-to-task** backed by a task file committed on the lower branch that restates the concern and points at the hosting PR/branch (the cross-PR pointer lives in that committed record, not in a bare reply), and use **already-addressed** only when the lower branch's *own* code already satisfies the concern — never on the strength of a fix that exists only on another branch.
 
 ## Arguments
 

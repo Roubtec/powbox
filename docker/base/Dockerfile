@@ -255,7 +255,15 @@ USER node
 
 ENV PNPM_HOME="/home/node/.local/share/pnpm"
 ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
-ENV SHELL=/bin/zsh
+# The agent harnesses' Bash tools spawn $SHELL non-interactively, so default it
+# to bash: the models' command prior is bash/POSIX (word-splitting, 0-indexed
+# arrays), and a one-shot tool call gains nothing from zsh's interactive features
+# — running under zsh just wastes turns on no-word-split / 1-indexed-array
+# surprises. Humans still get zsh: it stays the login shell (`usermod` above) and
+# is what `launch-agent --shell` opens. EDITOR is set here (not in a shell rc) so
+# both shells, and any non-shell child process, inherit it.
+ENV SHELL=/bin/bash
+ENV EDITOR=nano
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
 
 # Rootless Podman keeps its transient runtime state (sockets, runroot) under
@@ -283,9 +291,12 @@ ENV CHROME_NO_SANDBOX=true
 RUN pnpm config --global set store-dir /home/node/.local/share/pnpm/store \
     && pnpm config --global set package-import-method auto
 
-# Install Oh My Zsh and the shared zsh configuration.
+# Install Oh My Zsh and the shared shell configuration. zsh is the human login
+# shell (and what `--shell` opens); bash is the default $SHELL the agent tools
+# spawn — both rc files are baked so either shell is configured.
 RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 COPY --chown=node:node docker/shared/.zshrc /home/node/.zshrc
+COPY --chown=node:node docker/shared/.bashrc /home/node/.bashrc
 
 WORKDIR /home/node
 

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# gitcat — print a file as of another branch/commit, with stable line numbers,
+# without touching the checkout. Replaces the `git show <ref>:<path> > /tmp/x`
+# + grep/sed dance when reading code across branches (e.g. a stacked-PR
+# review worked from a single checkout).
+#
+# Usage: gitcat [--raw] <ref> <path> [<start> [<end>]]
+#        gitcat [--raw] <ref>:<path> [<start> [<end>]]
+#
+#   gitcat task/021 src/payment.service.ts          # whole file, numbered
+#   gitcat task/021 src/payment.service.ts 120 180  # lines 120-180 only
+#   gitcat task/021 src/payment.service.ts 120      # line 120 to EOF
+#   gitcat --raw origin/main package.json | jq .    # plain bytes for piping
+#
+# <path> is repo-root-relative (git show semantics); prefix it with ./ to
+# resolve relative to the current directory. Line numbers always reflect
+# positions in the full file, so a range slice still cites correct file:line
+# locations. --raw drops the numbering (a range still slices, raw).
+set -euo pipefail
+
+# Usage text goes to stdout for an explicit help request (exit 0, pipeable)
+# and to stderr when it is an error diagnosis (exit non-zero).
+usage() {
+	local code="${1:-1}"
+	{
+		echo "usage: gitcat [--raw] <ref> <path> [<start> [<end>]]"
+		echo "       gitcat [--raw] <ref>:<path> [<start> [<end>]]"
+	} >&$((code == 0 ? 1 : 2))
+	exit "$code"
+}
+
+die() {
+	echo "gitcat: $*" >&2
+	exit 1
+}
+
+RAW=0
+if [ "${1:-}" = "--raw" ]; then
+	RAW=1
+	shift
+fi
+case "${1:-}" in
+"") usage 1 ;;
+-h | --help) usage 0 ;;
+esac
+
+if [[ "$1" == *:* ]]; then
+	SPEC="$1"
+	shift
+else
+	[ $# -ge 2 ] || usage
+	SPEC="$1:$2"
+	shift 2
+fi
+[ $# -le 2 ] || usage
+
+START="${1:-}"
+END="${2:-}"
+for n in "$START" "$END"; do
+	[ -z "$n" ] || [[ "$n" =~ ^[1-9][0-9]*$ ]] ||
+		die "line numbers must be positive integers: '$n'"
+done
+if [ -n "$END" ]; then
+	[ -n "$START" ] || die "an end line requires a start line"
+	if [ "$END" -lt "$START" ]; then
+		die "end ($END) is before start ($START)"
+	fi
+fi
+
+slice() {
+	if [ -n "$START" ]; then
+		sed -n "${START},${END:-\$}p"
+	else
+		cat
+	fi
+}
+
+# --end-of-options keeps a dash-prefixed SPEC from being parsed as a git
+# option (a plain `--` would not: it demotes the spec to a pathspec).
+if [ "$RAW" = 1 ]; then
+	git show --end-of-options "$SPEC" | slice
+else
+	git show --end-of-options "$SPEC" | cat -n | slice
+fi

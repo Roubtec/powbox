@@ -75,8 +75,10 @@ slice() {
 	fi
 }
 
+# --end-of-options keeps a dash-prefixed SPEC from being parsed as a git
+# option (a plain `--` would not: it demotes the spec to a pathspec).
 if [ "$RAW" = 1 ]; then
-	git show "$SPEC" | slice
+	git show --end-of-options "$SPEC" | slice
 else
-	git show "$SPEC" | cat -n | slice
+	git show --end-of-options "$SPEC" | cat -n | slice
 fi

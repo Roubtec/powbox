@@ -37,7 +37,8 @@ if [ "${1:-}" = "--raw" ]; then
 	shift
 fi
 case "${1:-}" in
-"" | -h | --help) usage 0 ;;
+"" ) usage 1 ;;
+-h | --help) usage 0 ;;
 esac
 
 if [[ "$1" == *:* ]]; then

@@ -60,8 +60,11 @@ for n in "$START" "$END"; do
 	[ -z "$n" ] || [[ "$n" =~ ^[1-9][0-9]*$ ]] ||
 		die "line numbers must be positive integers: '$n'"
 done
-if [ -n "$END" ] && [ "$END" -lt "$START" ]; then
-	die "end ($END) is before start ($START)"
+if [ -n "$END" ]; then
+	[ -n "$START" ] || die "an end line requires a start line"
+	if [ "$END" -lt "$START" ]; then
+		die "end ($END) is before start ($START)"
+	fi
 fi
 
 slice() {

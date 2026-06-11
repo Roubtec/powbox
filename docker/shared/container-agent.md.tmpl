@@ -41,6 +41,7 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 - Host-mounted workspaces often have an SSH-form `origin` remote (`git@github.com:...`). You do **not** need to rewrite it: a container-local `insteadOf` rewrite transparently routes SSH-form GitHub remotes through HTTPS + the gh credential helper, so `git push origin`, `git fetch`, and `gh pr create` just work with no action needed. The rewrite lives only in the container's git config — the host repo's remote URL is left untouched.
 
 - `git` is available for all local operations (status, diff, log, commit, branch, etc.).
+- `gitcat [--raw] <ref> <path> [<start> [<end>]]` prints a file as of another branch or commit with stable line numbers (a range slice keeps full-file numbering; `--raw` emits plain bytes for piping). Use it for cross-branch reads — e.g. inspecting code across a stacked-PR chain from one checkout — instead of `git show <ref>:<path> > /tmp/...` round-trips or switching branches.
 - The global git config is seeded from the host on first run. Do not modify `/home/node/.gitconfig-host` (read-only mount).
 
 ## Filesystem layout

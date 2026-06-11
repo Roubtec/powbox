@@ -23,6 +23,10 @@ Everything here follows from one fact: **the PRs already exist**, so we modify e
 - **Per-PR guidance comes from `address-review`, but the parallel orchestrator owns the phases.** A fix subagent runs `delegated-fix`; a separate fresh reviewer checks the returned packet; fix-up/re-review rounds follow as needed; only a passing entry gets a `publish-reviewed` subagent.
 - **A leafy branch stack is the expected outcome and is fine.** Parallel fixes leave the PR branches diverged. This skill does **not** build a restack guide — integrating the result is a deliberate follow-up via `rebase-stack` (or manual rebases). See "After the batch".
 
+## Stacked PRs: a fix may be hostable on only one branch
+
+When the batch contains stacked PRs, a thread's fix can depend on code that exists only higher up the stack (a gate, helper, or schema a later branch introduces). A per-PR fixer on a lower branch cannot host that fix, and two worktrees must never implement halves of one atomic change. When triage reveals such a dependency, concentrate the change on the branch where its prerequisite lives (often top-of-stack), and have the lower PR's thread dispositioned as deferred-to-task or already-addressed with a pointer to the hosting PR rather than fixed locally.
+
 ## Arguments
 
 Parsing is **lenient** — accept commas, `&`, `#` prefixes, and free word order.

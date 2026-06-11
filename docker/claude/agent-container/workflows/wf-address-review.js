@@ -120,8 +120,8 @@ const DISPOSITION_SCHEMA = {
           authorIsBot: { type: "boolean", description: "Echoed from the gathered item; lets publication decide whether a push-back thread may be auto-resolved (bot) or must stay open (human)." },
           url: { type: "string", description: "Permalink — the stable reference, especially for `standalone` items." },
           ref: { type: "string", description: "file:line + author, a human-readable reference." },
-          kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | ambiguous-skipped" },
-          detail: { type: "string", description: "For fixed: the one-line summary + commit sha. For already-addressed: where it's handled. For push-back: the rationale. For ambiguous: what decision is needed." },
+          kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | deferred-to-task | ambiguous-skipped" },
+          detail: { type: "string", description: "For fixed: the one-line summary + commit sha. For already-addressed: where it's handled. For push-back: the rationale. For deferred: the committed task file path + one-line scope, and whether the deferral was maintainer-directed or agent-proposed. For ambiguous: what decision is needed." },
         },
         required: ["type", "kind", "detail"],
       },
@@ -205,7 +205,7 @@ If \`rebase on top of <branch>\` was given: save \`refs/pre-rebase/<branch>/<ts>
 
 Gather feedback into \`items\` (each verbatim):
 - UNRESOLVED review threads via GraphQL \`reviewThreads\` (paginate past 100; keep only \`isResolved == false\`). Emit each as \`type: "review-thread"\` with \`threadId\` (node id), \`commentId\` (top comment databaseId), \`path\`, \`line\`, \`author\` (login), \`authorIsBot\` (true when the comment's GraphQL \`author.__typename\` is \`Bot\` — query \`author{ login __typename }\`; do not guess from the login), \`body\`, \`url\`. \`threadId\` and \`commentId\` are mandatory for these — they are how publication resolves and replies.
-- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`authorIsBot\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context.
+- A standalone issue comment or review summary ONLY if the request explicitly identifies it as outstanding. Emit it as \`type: "standalone"\` with \`author\`, \`authorIsBot\`, \`body\`, and \`url\` (its permalink is the stable reference; it has no threadId and is never resolved as a thread). A maintainer reply on an unresolved thread is authoritative — fold it into that thread's context. So is a top-level maintainer comment recording per-item verdicts (often titled "Maintainer Decisions" or similar) — fold each decision into the relevant thread's context as its binding disposition (including "defer to a follow-up task" and "keep as-is").
 
 If there are no unresolved threads and no included standalone item, return \`ok: true\` with an empty \`items\` array — the caller will exit as a successful no-op.
 
@@ -230,6 +230,7 @@ Triage each item into exactly one kind and act:
 - \`actionable-fixed\` — implement the fix. Commit at logical milestones.
 - \`already-addressed\` — current code already satisfies it; note where.
 - \`push-back\` (should be rare) — the comment is wrong/misunderstands context. Do NOT implement; draft a respectful, specific rationale. Never implement a fix you believe is wrong just to clear a comment.
+- \`deferred-to-task\` — the concern is real but fixing it here would expand the PR's scope considerably while the branch is defendable as it stands (builds, covers its main paths), or a maintainer reply/decision comment defers it. Do NOT implement; write a standalone follow-up task file instead, per the write-tasks skill conventions: place it in the repo's task folder (commonly \`tasks/\`; parked work in its deferred subfolder, e.g. \`tasks/deferred/\` — follow the repo's existing layout), number it to continue the existing sequence, restate the concern with file/line references and the PR thread link, and commit it on this branch SEPARATELY from code-fix commits. Never use this to dodge a cheap fix.
 - \`ambiguous-skipped\` — needs an authoritative decision you cannot make here.
 
 - Preclude repeat comments: for each pattern you fix, grep the PR's changed files and closely related code for the SAME offending pattern and fix those too; report them in \`proactiveFixes\`.
@@ -247,6 +248,7 @@ function reviewPrompt(packet, dispositions) {
 You are given the unresolved items and the proposed dispositions — but NOT the fixer's reasoning. Independently confirm each:
 - \`actionable-fixed\` / \`already-addressed\` claims must actually hold in the committed code.
 - \`push-back\` must be technically justified, not a convenient dismissal.
+- \`deferred-to-task\` must point at a committed task file that genuinely covers the concern, with the deferral itself justified (maintainer-directed, or genuinely scope-expanding while the branch builds and covers its main paths) — not an evasion of a cheap fix.
 - \`ambiguous-skipped\` must genuinely require an authoritative decision.
 You may reclassify any item.
 
@@ -281,10 +283,11 @@ Report a STRUCTURED result: set \`published: true\` ONLY if the push and every r
      - actionable-fixed → reply \`Fixed in <sha>: <one line>\` AND resolve.
      - already-addressed → reply pointing to where it's handled AND resolve.
      - push-back → reply with the rationale; resolve ONLY when the disposition's \`authorIsBot\` is true (a bot thread), and leave a thread with \`authorIsBot\` false (human) open unless explicitly authorized. Use that flag, not a guess from the author login.
+     - deferred-to-task → reply citing the committed task file (\`Deferred to <task file>: <one line>\`); resolve when the deferral was maintainer-directed or \`authorIsBot\` is true, else leave the human thread open. Never re-implement a deferred thread.
      - ambiguous-skipped → leave open.
    - \`standalone\` items (no thread to resolve): address them only in the Summary comment below; do NOT call \`resolveReviewThread\`. Record their outcome by \`url\`.
    Avoid duplicate replies (check for an equivalent prior reply by the authed user); resolve only after the reply succeeds.
-5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
+5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, a "Deferred to follow-up tasks" section listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
 6. Pings (only after push + summary succeeded, AND only when the push ACTUALLY advanced the remote branch with new commits or rewritten history — never on an \`Everything up-to-date\` no-op push): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${!flags.pingCodex && !flags.pingClaude ? "none requested. " : "If both, post two separate comments. "}If nothing new was pushed this run (the remote ref already pointed at your HEAD — e.g. every disposition was already-addressed/push-back, or the branch was up to date), SKIP all pings even if requested above: re-requesting a review with nothing new to look at would spin the review->address->review loop forever. Set \`pushedNewCommits\` to whether the push advanced the branch, and record which pings (if any) you posted in \`pings\`.
 
 ## Dispositions to publish

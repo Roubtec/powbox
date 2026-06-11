@@ -1,6 +1,6 @@
 ---
 name: address-review
-description: Address the maintainer-vetted review feedback on one pull request — optionally rebase the branch onto a target first, fix or push back on each unresolved review thread, verify every disposition with a fresh-eyes reviewer, then (when asked) push with exact lease protection, reply/resolve the threads, post a "Summary of Review Fixes" comment, and request fresh bot reviews. Trigger when the user asks to address review comments, action a reviewed PR, work through review feedback, or run address-review. Do not trigger for planning, for implementing new task files (use address-tasks), or for rebasing a whole stacked chain (use rebase-stack).
+description: Address the maintainer-vetted review feedback on one pull request — optionally rebase the branch onto a target first, fix, push back on, or defer each unresolved review thread to a committed follow-up task file, verify every disposition with a fresh-eyes reviewer, then (when asked) push with exact lease protection, reply/resolve the threads, post a "Summary of Review Fixes" comment, and request fresh bot reviews. Trigger when the user asks to address review comments, action a reviewed PR, work through review feedback, or run address-review. Do not trigger for planning, for implementing new task files (use address-tasks), or for rebasing a whole stacked chain (use rebase-stack).
 ---
 
 Address the review feedback on a single pull request, end to end.
@@ -10,7 +10,7 @@ Address the review feedback on a single pull request, end to end.
 Explicit Codex invocation uses `$address-review`; natural-language equivalents are fine.
 
 A maintainer triggers this skill once a PR has been reviewed (by bots like `@codex`/`@claude` and/or humans) and they have decided the outstanding feedback is ready to be acted upon.
-Your job is to work through every **unresolved** review thread — fix what is right, push back on what is wrong, confirm what is already handled — keep the thread state tidy, and optionally publish the result and summon a fresh review round.
+Your job is to work through every **unresolved** review thread — fix what is right, push back on what is wrong, confirm what is already handled, defer what is real but out of scope into a committed follow-up task — keep the thread state tidy, and optionally publish the result and summon a fresh review round.
 
 The maintainer signals intent through GitHub's own resolved/unresolved state, not a custom marker.
 They resolve threads they want dropped (or reply with their own push-back) **before** triggering you, so the rule is simply: **unresolved = actionable, resolved = leave alone.**
@@ -118,6 +118,7 @@ Fetch the **unresolved** review threads and enough context to judge them (see "G
 - **Top-level review summaries** (`gh pr view --json reviews`) and **issue comments** (`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`) — read for context, especially **maintainer replies/push-backs** that override or qualify a bot's original comment. They are not automatically actionable because they have no resolved/unresolved state; include a standalone item only when the maintainer explicitly identifies it as outstanding in the request or discussion.
 
 A maintainer reply on an unresolved thread is **authoritative**: if they said "skip this" or "do X instead," follow the maintainer over the original reviewer.
+The same authority extends to a **top-level decision comment** — a maintainer comment that walks the open feedback and records a verdict per item (often titled "Maintainer Decisions" or similar). Treat each recorded decision as the binding disposition for the thread(s) it covers — including "defer to a follow-up task" and "keep as-is" — rather than re-triaging those threads from scratch.
 Treat `isOutdated` as context, not a disposition: inspect the current code and re-locate the concern rather than auto-dismissing an outdated thread.
 If there are no unresolved threads and no explicitly included standalone items, stop as a successful no-op: make no commits, do not push or ping, do not post a summary comment, and report that nothing actionable remains.
 
@@ -128,6 +129,7 @@ Classify each into one of:
 - **Actionable** — a real issue; implement the fix.
 - **Already addressed** — the current code (possibly thanks to the rebase or an earlier commit) already satisfies it. Note where.
 - **Push-back** (should be **rare**) — the comment is wrong, misunderstands context, or points in the wrong direction. Do **not** implement it; draft a respectful, specific rationale instead. Lean on judgment; never implement a fix you believe is wrong just to clear a comment.
+- **Deferred to follow-up task** — the concern is real, but fixing it here would expand the PR's scope considerably while the branch is defendable as it stands (it builds and covers its main paths) — or the maintainer has already deferred it (reply or decision comment). Do **not** implement it; record it as a committed task file instead (step 5). Never use this to dodge a cheap fix.
 - **Ambiguous** — the right fix needs an authoritative decision you cannot make from the code/history. **Interactive:** ask the user. **Hands-off:** make a best-effort call only when stakes are low; otherwise skip and document it — do not guess where an authoritative determination is required.
 
 ### Step 5 — Fix
@@ -140,6 +142,13 @@ For the actionable items:
 - Keep commits buildable where practical; run the build/lint before declaring done.
 - Before review, require `git status --porcelain` to be empty. Inspect and commit every intended change; if a fixer leaves partial or unexplained changes, resolve that state or stop rather than letting the reviewer inspect only the committed subset.
 
+For the **deferred** items, write the follow-up task file(s) following the `write-tasks` skill conventions (invoke that skill where available):
+
+- Place them in the repo's task folder (commonly `tasks/`; parked, not-yet-scheduled work goes in its deferred subfolder, e.g. `tasks/deferred/`) — follow whatever layout the repo already uses.
+- Number each file to continue the folder's existing sequence, slotted by priority/intended order.
+- Each task must stand alone: restate the concern with file/line references and link the PR thread; an implementer should not need to re-read the review.
+- **Commit task files on the current branch, separately from code-fix commits** (when practical). The task ships with the branch that prompted it — merging the PR then also lands the record of its loose ends, which is what makes deferral a legitimate way to close a thread.
+
 Fixer subagent prompt should include: the relevant review comment(s) **verbatim**, the file/line locations, the branch name (and "verify you are on it"), an instruction to read `AGENTS.md` first, the same-pattern sweep instruction, commit/validation instructions, an instruction not to write to any shared task/plan tracker, and a request to report what it changed, any tradeoffs, and anything uncertain. Do **not** give it unrelated context.
 
 In `delegated-fix` mode, do not spawn a Fixer or Reviewer.
@@ -149,9 +158,9 @@ Perform the fixes directly, leave the worktree clean with all intended changes c
 
 Once fixes are committed and the worktree is clean, spawn **one fresh `explorer` Reviewer subagent** (never concurrently with a fixer; only after commits land), wait for it, and close it after recording the result:
 
-Give it: every unresolved thread and explicitly included standalone item verbatim, each proposed disposition label (actionable-fixed / already-addressed / push-back / ambiguous), the effective review base, and the current branch. The effective review base is the requested rebase target when step 2 ran; otherwise it is `baseRefName`. Do **not** give it your implementation reasoning, drafted rationale, or the fixer's report. Tell it to:
+Give it: every unresolved thread and explicitly included standalone item verbatim, each proposed disposition label (actionable-fixed / already-addressed / push-back / deferred-to-task / ambiguous), the effective review base, and the current branch. The effective review base is the requested rebase target when step 2 ran; otherwise it is `baseRefName`. Do **not** give it your implementation reasoning, drafted rationale, or the fixer's report. Tell it to:
 
-- Independently verify every disposition: fixes and already-addressed claims must hold in the committed code; push-backs must be technically justified rather than convenient dismissals; ambiguous items must genuinely require an authoritative decision. It may reclassify any item.
+- Independently verify every disposition: fixes and already-addressed claims must hold in the committed code; push-backs must be technically justified rather than convenient dismissals; deferred-to-task items must point at a committed task file that genuinely covers the concern, with the deferral itself justified (maintainer-directed, or genuinely scope-expanding while the branch builds and covers its main paths — not an evasion of a cheap fix); ambiguous items must genuinely require an authoritative decision. It may reclassify any item.
 - Read the actual files; if `git diff --name-only <base>...HEAD` looks empty despite claimed fixes, report a likely race/wrong-branch flag rather than reviewing nothing.
 - Run the build/typecheck; a failure is an automatic blocker.
 - Do a quality pass on the changed files (logic correctness, error handling, edge cases, dead code, consistency, duplication, type safety) and check the same-pattern sweep did not miss a sibling occurrence.
@@ -173,10 +182,11 @@ In `publish-reviewed` mode, first require the supplied review packet, a fresh ex
 4. **Per-thread hygiene** — for each triaged thread still unresolved (recipes below):
    - *Actionable-fixed* → reply (`Fixed in <sha>: <one line>`) **and resolve**.
    - *Already-addressed* → reply pointing to where it's handled **and resolve**.
+   - *Deferred-to-task* → reply citing the committed task file (`Deferred to tasks/0NN-…: <one line>`) **and resolve** when the deferral was maintainer-directed or the thread is bot-authored; leave a human-authored thread unresolved unless the maintainer authorized closing it. Never re-implement a deferred thread.
    - *Push-back* → reply with the rationale and flag it prominently in the summary. Resolve a bot-authored thread after independent review validates the push-back. Leave a human-authored thread unresolved unless the maintainer explicitly authorized resolving it, so unattended runs do not silently close a person's objection.
    - *Ambiguous/skipped* → **leave open**, list it in the summary as needing a decision.
    Before replying, inspect the thread for an equivalent prior reply from the authenticated user (for example, a previous run replied but failed to resolve) and avoid posting duplicates. Resolve only after the reply succeeds; record any communication failure and leave that thread open.
-5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
+5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, a **"Deferred to follow-up tasks" section** listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
 6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
 
 ### Step 8 — Final report
@@ -184,8 +194,9 @@ In `publish-reviewed` mode, first require the supplied review packet, a fresh ex
 Always produce a report (this is the only output of a no-push run, and it doubles as the body of the Summary comment on push runs):
 
 - The PR, the branch, before/after tip SHAs, and whether a rebase happened (and how conflicts went).
-- Each addressed comment with a **stable reference** — file:line, comment author, the thread's GraphQL node id, and the comment permalink — and its disposition (fixed / already-addressed / pushed-back / skipped). On a **no-push** run this mapping is essential: a later "push now" turn uses it to replay the exact replies/resolves without re-deriving everything.
+- Each addressed comment with a **stable reference** — file:line, comment author, the thread's GraphQL node id, and the comment permalink — and its disposition (fixed / already-addressed / pushed-back / deferred-to-task / skipped). On a **no-push** run this mapping is essential: a later "push now" turn uses it to replay the exact replies/resolves without re-deriving everything.
 - Push-backs, prominently, with rationale.
+- Deferrals, each with its committed task file, and whether it was maintainer-directed or agent-proposed.
 - Proactive same-pattern fixes made beyond the literal comments.
 - Reviewer outcome and how many iterations it took (and whether it hit the cap).
 - Anything blocked or skipped for lack of an authoritative decision, with what's needed to unblock.
@@ -195,6 +206,7 @@ Always produce a report (this is the only output of a no-push run, and it double
 Purpose: run inside a parallelized agent that has no direct line to the user (e.g. a review orchestrator's subagent). Reach the orchestrator if you can, but otherwise drive to a best-effort completion and **document, never guess on high-stakes choices.**
 
 - Low-stakes ambiguity → make a sensible best-effort call and record it.
+- A real concern whose fix would expand the PR's scope, on a branch that is defendable as it stands → defer it to a committed follow-up task (step 5) and flag the deferral prominently; this is a legitimate unattended resolution, not a skip.
 - High-stakes/authoritative ambiguity → skip, do not guess, document precisely what's needed.
 - Non-trivial rebase conflict → abort cleanly and stop the run (step 2).
 - Lease-rejected push, unidentifiable/unrelated PR, or reviewer cap hit → stop and document; do not force or guess your way past it.
@@ -250,11 +262,12 @@ gh pr comment NUMBER --body '@claude review'
 - [ ] Working tree clean; no rebase in progress; `gh` authenticated.
 - [ ] PR resolved (explicit `PR#` precedence) and sanity-checked against the current branch.
 - [ ] If requested, single-branch rebase done first; non-trivial conflict handled (interactive loop-in / hands-off abort+stop); validated when conflicted.
-- [ ] All **unresolved** threads gathered with pagination; resolved ones ignored; maintainer replies treated as authoritative; a zero-actionable run exits without push/comment/ping.
-- [ ] Each thread triaged: actionable / already-addressed / push-back / ambiguous.
+- [ ] All **unresolved** threads gathered with pagination; resolved ones ignored; maintainer replies and top-level decision comments treated as authoritative; a zero-actionable run exits without push/comment/ping.
+- [ ] Each thread triaged: actionable / already-addressed / push-back / deferred-to-task / ambiguous.
 - [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); same-pattern sweep done in changed/related code.
+- [ ] Deferred items recorded as standalone task files per `write-tasks` conventions, numbered into the repo's task folder, committed on the current branch separately from code fixes.
 - [ ] Worktree clean and every intended change committed before review and publication.
 - [ ] Fresh independent reviewer checked every disposition after commits landed; feedback loop capped at 3 reviewer rounds.
-- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success **and only when new commits were actually pushed** (skip pings on a no-op push so an automated loop can terminate).
+- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; deferred threads replied with their committed task file; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success **and only when new commits were actually pushed** (skip pings on a no-op push so an automated loop can terminate).
 - [ ] No-push run: zero PR mutations; final report maps every thread to its disposition for a later push turn.
 - [ ] Final report covers rebase outcome, dispositions with stable refs, push-backs, proactive fixes, reviewer result, and blocked/skipped items.

@@ -99,7 +99,7 @@ const PACKET_SCHEMA = {
           body: { type: "string", description: "Comment text, verbatim." },
           url: { type: "string", description: "Permalink to the comment (the stable reference for a standalone item, which has no threadId)." },
         },
-        required: ["type", "body", "authorIsBot"],
+        required: ["type", "body", "authorIsBot", "url"],
       },
     },
   },

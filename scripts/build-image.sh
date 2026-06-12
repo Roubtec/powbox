@@ -125,8 +125,12 @@ registry_base_digest() {
 }
 
 local_base_digest() {
+	# Must return empty -- never fail -- when the image is absent (fresh host
+	# that has not pulled the upstream base yet): under set -euo pipefail a
+	# failing `docker image inspect` would otherwise abort the whole script
+	# with no output. The caller falls back to registry_base_digest.
 	docker image inspect "$BASE_SOURCE_IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
-		| sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1
+		| sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1 || true
 }
 
 resolve_base_source_digest() {

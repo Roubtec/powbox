@@ -17,6 +17,11 @@ iptables -A OUTPUT -d 10.0.0.0/8 -j DROP
 iptables -A OUTPUT -d 172.16.0.0/12 -j DROP
 iptables -A OUTPUT -d 192.168.0.0/16 -j DROP
 iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
+# CGNAT (100.64.0.0/10): not RFC-1918, but it is the range Tailscale assigns,
+# so on a tailnet-joined host an agent could otherwise reach every other
+# device on the user's tailnet. (Tailscale's IPv6 ULA fd7a:115c:a1e0::/48 is
+# already covered by the fc00::/7 drop below.)
+iptables -A OUTPUT -d 100.64.0.0/10 -j DROP
 
 # Allow everything else (public internet)
 iptables -A OUTPUT -j ACCEPT

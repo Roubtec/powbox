@@ -2,8 +2,10 @@
  * wf-address-tasks — dynamic-workflow form of the `address-tasks` skill.
  *
  * Resolve a batch of pre-planned task files into dependency waves, then for each
- * task run an implement -> review -> fix loop (max 3 rounds), open a PR per
- * passing task, and report. Invoke as `/wf-address-tasks <glob-or-file-list>`.
+ * task run an implement -> review -> fix loop (max 3 rounds), scan reviewed
+ * sibling branches for add/add collisions before delivery, open PRs for
+ * non-colliding passing tasks, and report. Invoke as
+ * `/wf-address-tasks <glob-or-file-list>`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------
@@ -57,7 +59,7 @@
 // phase() titles still get their own progress group.
 export const meta = {
   name: "wf-address-tasks",
-  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), one PR per passing task.",
+  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), pre-PR collision guard, one PR per non-colliding passing task.",
   whenToUse: "Execute a folder/glob of pre-planned task files end to end with per-task worktree isolation. Not for one-off coding requests or planning new tasks.",
   phases: [
     { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
@@ -305,16 +307,16 @@ Return \`opened: true\` with the \`url\` ONLY if \`gh pr create\` actually produ
 }
 
 function cleanupNote(task) {
-  // Best-effort worktree removal is requested at the end of runTask; commits and
-  // the branch persist in shared `.git` and on the remote, so removal is safe.
+  // Best-effort worktree removal is requested after delivery; commits and the
+  // branch persist in shared `.git` and on the remote, so removal is safe.
   return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${shq(task.slug)}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
 }
 
 function collisionScanPrompt(branches) {
   const list = branches
-    .map((b) => `- slug ${b.slug}: branch ${shq(b.branch)} diverged from base ${shq(b.base)}`)
+    .map((b) => `- slug ${b.slug}: branch ${JSON.stringify(b.branch)} diverged from base ${JSON.stringify(b.base)}`)
     .join("\n");
-  return `You are a read-only PRE-MERGE COLLISION GUARD for a batch of sibling task branches implemented in parallel, each destined for its own PR. Edit, stage, commit, or push NOTHING. Work from the repo ROOT; do not enter or create any worktree — these branches live in the shared \`.git\` and you compare them by ref.
+  return `You are a read-only PRE-PR COLLISION GUARD for a batch of sibling task branches implemented in parallel, each reviewed and ready for its own PR. Edit, stage, commit, or push NOTHING. Work from the repo ROOT; do not enter or create any worktree — these branches live in the shared \`.git\` and you compare them by ref.
 
 Why this exists: independent siblings never conflict while they are implemented (each in its own worktree), so two of them can each ADD the same new file path — or a file with the same basename, or a file that exports the same top-level class/symbol — with no warning. The clash only surfaces later, when the branches linearize or merge (an add/add conflict, or a duplicate definition). Find those overlaps now so they can be reconciled before merge.
 
@@ -329,12 +331,30 @@ Method:
    - the same repo-relative path was added (kind \`path\`), OR
    - the same basename was added at different paths (kind \`filename\`), OR
    - two added source files (sharing a basename, or clearly the same kind of module) declare the same exported top-level name — class/function/const/interface/type/enum (kind \`symbol\`). Open ONLY those candidate files to confirm; keep it cheap.
-3. For each collision give the colliding value, the 2+ branches that added it, and a one-line reconciliation hint.
+3. For each collision give the colliding value, the 2+ branches that added it, and a one-line reconciliation hint. In \`branches\`, use the exact branch strings from the Branches list without shell quote characters.
 
 Flag only genuine overlaps between independently-based branches; never flag a file a branch merely inherited from its base. If nothing overlaps, return an empty \`collisions\` array.`;
 }
 
-async function runTask(task, remote) {
+function normalizeBranchName(s) {
+  const value = String(s || "").trim();
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function collisionBranchNames(collision) {
+  return Array.isArray(collision.branches)
+    ? collision.branches.map(normalizeBranchName).filter(Boolean)
+    : [];
+}
+
+async function implementTask(task, remote) {
   let findings = null;
   let verdict = null;
   let rounds = 0;
@@ -372,7 +392,13 @@ async function runTask(task, remote) {
     return { slug: task.slug, branch: task.branch, status: "review-cap", rounds, outstanding: verdict ? verdict.issues : null };
   }
 
-  const pr = await agent(prPrompt(task, verdict.notes, remote), {
+  // Reviewed and ready, but not delivered yet: the wave-level collision guard
+  // runs before any PR is opened or worktree is cleaned up.
+  return { slug: task.slug, branch: task.branch, status: "ready", rounds, notes: verdict.notes || "" };
+}
+
+async function deliverTask(task, ready, remote) {
+  const pr = await agent(prPrompt(task, ready.notes, remote), {
     label: `pr:${task.slug}`,
     schema: PR_SCHEMA,
   });
@@ -381,14 +407,14 @@ async function runTask(task, remote) {
   await agent(cleanupNote(task), { label: `cleanup:${task.slug}` });
 
   if (pr && pr.opened && pr.url) {
-    return { slug: task.slug, branch: task.branch, status: "done", rounds, prUrl: pr.url };
+    return { slug: task.slug, branch: task.branch, status: "done", rounds: ready.rounds, prUrl: pr.url };
   }
   // Reviewed and (usually) pushed, but no PR — do NOT count this as a landed PR.
   return {
     slug: task.slug,
     branch: task.branch,
     status: remote ? "pushed-no-pr" : "local-only",
-    rounds,
+    rounds: ready.rounds,
     pushed: pr ? pr.pushed : false,
     reason: pr ? pr.reason : "PR agent returned nothing",
   };
@@ -416,6 +442,7 @@ if (!plan || !Array.isArray(plan.waves) || plan.waves.length === 0) {
 const statusBySlug = new Map();
 const results = [];
 const throttled = [];
+const collisions = [];
 
 // Map every in-batch branch to the slug that produces it. A dependent task's
 // `base` IS its prerequisite's `branch` (stacked PRs), so this lets the gate
@@ -425,15 +452,11 @@ const throttled = [];
 // tasks base off `defaultBase` / the current branch, which no in-batch task
 // produces, so they pick up no spurious dependency.
 const slugByBranch = new Map();
-// Each task's recorded base, so the end-of-batch collision scan can diff every
-// branch's ADDED files against the base it actually diverged from.
-const baseBySlug = new Map();
 for (const wave of plan.waves) {
   if (!Array.isArray(wave)) continue;
   for (const task of wave) {
     if (task && typeof task.branch === "string" && typeof task.slug === "string") {
       slugByBranch.set(task.branch, task.slug);
-      baseBySlug.set(task.slug, task.base);
     }
   }
 }
@@ -453,7 +476,8 @@ for (let w = 0; w < plan.waves.length; w++) {
   // prerequisite. A dependency is "succeeded" if it landed a PR (`done`) OR, on a
   // no-remote run, was implemented and reviewed locally (`local-only`): its base
   // branch and commits persist in the shared `.git`, so dependents can still
-  // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr` do not unlock.
+  // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr`,
+  // `collision-hold`, and `collision-scan-error` do not unlock.
   // Effective deps = the declared `dependsOn` UNION the prerequisite derived from
   // the `base`→`branch` relationship, so the gate holds even if the plan agent
   // omits a `dependsOn` entry it should have listed.
@@ -481,39 +505,84 @@ for (let w = 0; w < plan.waves.length; w++) {
   }
   // Sub-batch the wave at the width cap: slower than full fan-out, but a wave
   // that exhausts the .worktrees mount mid-flight delivers nothing.
+  const ready = [];
   for (let i = 0; i < runnable.length; i += widthCap) {
     const slice = runnable.slice(i, i + widthCap);
-    const sliceResults = await parallel(slice.map((task) => () => runTask(task, remote)));
+    const sliceResults = await parallel(slice.map((task) => () => implementTask(task, remote)));
     sliceResults.forEach((r, j) => {
       const res = r || { slug: slice[j].slug, branch: slice[j].branch, status: "error", detail: "task crashed" };
+      if (res.status === "ready") {
+        ready.push({ task: slice[j], result: res });
+      } else {
+        statusBySlug.set(res.slug, res.status);
+        results.push(res);
+      }
+    });
+  }
+
+  // Pre-PR collision guard. Independent sibling branches in this wave each live
+  // in their own worktree, so two can ADD the same new file or exported symbol
+  // with no in-worktree conflict. Scan reviewed branches before delivery so a
+  // known clash does not become a fresh PR that immediately needs a rename.
+  let heldBranches = new Set();
+  let scanError = "";
+  if (ready.length >= 2) {
+    phase(`Collision scan (wave ${w + 1})`);
+    const scan = await agent(
+      collisionScanPrompt(ready.map(({ task }) => ({ slug: task.slug, branch: task.branch, base: task.base || plan.defaultBase }))),
+      { label: `collision-scan:w${w + 1}`, schema: COLLISION_SCHEMA }
+    );
+    if (!scan || !Array.isArray(scan.collisions)) {
+      scanError = `collision scan failed for wave ${w + 1}; holding reviewed branches before PR delivery`;
+      log(scanError);
+    } else if (scan.collisions.length) {
+      collisions.push(...scan.collisions.map((c) => ({ ...c, wave: w + 1 })));
+      heldBranches = new Set(scan.collisions.flatMap(collisionBranchNames));
+      log(`${scan.collisions.length} cross-branch naming collision(s) in wave ${w + 1}; holding ${heldBranches.size} branch(es) before PR delivery.`);
+    }
+  }
+
+  const deliverable = [];
+  ready.forEach(({ task, result }) => {
+    if (scanError) {
+      const held = {
+        slug: task.slug,
+        branch: task.branch,
+        status: "collision-scan-error",
+        rounds: result.rounds,
+        detail: scanError,
+      };
+      statusBySlug.set(task.slug, held.status);
+      results.push(held);
+    } else if (heldBranches.has(task.branch) || heldBranches.has(task.slug)) {
+      const related = collisions.filter((c) => {
+        if (c.wave !== w + 1) return false;
+        const names = collisionBranchNames(c);
+        return names.includes(task.branch) || names.includes(task.slug);
+      });
+      const held = {
+        slug: task.slug,
+        branch: task.branch,
+        status: "collision-hold",
+        rounds: result.rounds,
+        detail: "review passed, but sibling add/add collision scan found an overlap; reconcile, regenerate derived files if needed, and re-review before opening a PR",
+        collisions: related,
+      };
+      statusBySlug.set(task.slug, held.status);
+      results.push(held);
+    } else {
+      deliverable.push({ task, result });
+    }
+  });
+
+  for (let i = 0; i < deliverable.length; i += widthCap) {
+    const slice = deliverable.slice(i, i + widthCap);
+    const delivered = await parallel(slice.map(({ task, result }) => () => deliverTask(task, result, remote)));
+    delivered.forEach((r, j) => {
+      const res = r || { slug: slice[j].task.slug, branch: slice[j].task.branch, status: "error", detail: "delivery crashed" };
       statusBySlug.set(res.slug, res.status);
       results.push(res);
     });
-  }
-}
-
-// Pre-merge collision guard (ADVISORY — never blocks a PR). Independent sibling
-// branches implemented in parallel each live in their own worktree, so two can
-// ADD the same new file or class with no in-worktree conflict; the clash only
-// surfaces later when the branches linearize (the add/add controller collision
-// from the 2026-06 batch). The branches persist in the shared `.git` after their
-// worktrees are removed, so one read-only agent diffs the files each branch
-// ADDED relative to its own base and flags overlaps. Scoped to branches that
-// carry committed work; stacked tasks drop out structurally, since
-// added-relative-to-own-base never re-lists an inherited file.
-let collisions = [];
-const implemented = results.filter(
-  (r) => r.branch && ["done", "local-only", "pushed-no-pr", "review-cap"].includes(r.status)
-);
-if (implemented.length >= 2) {
-  phase("Collision scan");
-  const scan = await agent(
-    collisionScanPrompt(implemented.map((r) => ({ slug: r.slug, branch: r.branch, base: baseBySlug.get(r.slug) || plan.defaultBase }))),
-    { label: "collision-scan", schema: COLLISION_SCHEMA }
-  );
-  collisions = scan && Array.isArray(scan.collisions) ? scan.collisions : [];
-  if (collisions.length) {
-    log(`⚠ ${collisions.length} cross-branch naming collision(s) — reconcile (rename one side, regen derived files) before merging; see summary.`);
   }
 }
 

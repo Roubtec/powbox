@@ -126,9 +126,9 @@ For a wave of tasks `T1..Tn`:
 
    Concurrency is safe here **only because each agent has its own worktree.** If for any reason a task is not running in its own worktree, fall back to serializing that task as in `address-tasks`.
 
-3. **On pass, push and open a PR** for the task (see Delivery), then `wt-remove <task-slug>` to reclaim storage (the branch and its commits persist in `.git` and on the remote).
+3. **Before delivery, run the sibling add/add collision guard below** across the wave's reviewed-passing branches. For non-colliding tasks, push and open a PR (see Delivery), then `wt-remove <task-slug>` to reclaim storage (the branch and its commits persist in `.git` and on the remote). For colliding tasks, do **not** open the PR yet; leave the worktree in place, reconcile the naming/path conflict, regenerate derived files, and re-review that task before delivery.
 
-4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches).
+4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches). A branch held for a collision is not resolved and must not unlock its dependents.
 
 ### Guarding against sibling add/add collisions
 
@@ -138,12 +138,19 @@ Independent tasks in the same wave run in **separate worktrees**, so two of them
 - **Catch it before the PRs.** After a wave's tasks pass review but **before** opening their PRs, compare what each sibling branch newly added:
 
   ```bash
+  # Exact same new path.
   for b in <wave-branch-1> <wave-branch-2> ...; do
     git diff --diff-filter=A --name-only <that-branch's-base>...$b
   done | sort | uniq -d
+
+  # Same new basename at any path; inspect repeated first columns.
+  for b in <wave-branch-1> <wave-branch-2> ...; do
+    git diff --diff-filter=A --name-only <that-branch's-base>...$b |
+      awk -v branch="$b" '{ n=split($0, p, "/"); print p[n] "\t" branch "\t" $0 }'
+  done | sort
   ```
 
-  A duplicated path (or basename, or a shared exported class name across two added files) is a collision: rename one side, regenerate anything derived (e.g. contracts), and re-review that one task before its PR. Diff each branch against **its own base** with the three-dot form so a dependent branch that legitimately builds on a sibling isn't flagged — it never re-lists an inherited file. (The `wf-address-tasks` workflow runs this same scan automatically as an end-of-batch advisory step and reports any collisions in its summary.)
+  A duplicated path (or basename, or a shared exported top-level class/function/const/interface/type/enum name across two added files) is a collision: hold the colliding branch(es) before PR delivery, rename one side, regenerate anything derived (e.g. contracts), and re-review the changed task before its PR. Diff each branch against **its own base** with the three-dot form so a dependent branch that legitimately builds on a sibling isn't flagged — it never re-lists an inherited file.
 
 ## Implementer Agent
 

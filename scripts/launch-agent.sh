@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENT="${1:?usage: launch-agent.sh <claude|codex> [project-path] [--build] [--detach] [--shell] [--volatile] [--persist] [--resume] [--continue] [--exec <task> (codex only)]}"
+AGENT="${1:?usage: launch-agent.sh <claude|codex> [project-path | repo-spec] [--build] [--detach] [--shell] [--volatile] [--persist] [--resume] [--continue] [--exec <task> (codex only)] [--isolated [--repo <spec>] [--name <label>] [--ref <branch>] [--reclone]]}"
 shift
 
 case "$AGENT" in
@@ -23,11 +23,38 @@ RESUME=false
 CONTINUE=false
 EXEC_TASK=""
 CTX_PATH=""
+# Self-hosted ("--isolated") mode: the container clones the repo into a private
+# per-instance volume instead of bind-mounting a host dir. All of the following
+# stay inert (and dir-mounted mode stays byte-for-byte unchanged) unless
+# ISOLATED is set.
+ISOLATED=false
+REPO_FLAG=""
+INSTANCE_NAME=""
+CLONE_REF=""
+RECLONE=false
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--build)
 		BUILD=true
+		;;
+	--isolated)
+		ISOLATED=true
+		;;
+	--repo)
+		shift
+		REPO_FLAG="${1:?missing spec for --repo}"
+		;;
+	--name)
+		shift
+		INSTANCE_NAME="${1:?missing label for --name}"
+		;;
+	--ref)
+		shift
+		CLONE_REF="${1:?missing branch for --ref}"
+		;;
+	--reclone | --fresh)
+		RECLONE=true
 		;;
 	--detach)
 		DETACH=true
@@ -75,9 +102,23 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-if [ ! -d "$PROJECT_PATH" ]; then
-	echo "Error: project path does not exist: ${PROJECT_PATH}" >&2
-	exit 1
+# Reject the self-hosted-only flags when --isolated was not given, so a typo
+# fails loudly instead of silently launching the unchanged dir-mounted mode.
+if [ "$ISOLATED" != true ]; then
+	if [ -n "$REPO_FLAG" ] || [ -n "$INSTANCE_NAME" ] || [ -n "$CLONE_REF" ] || [ "$RECLONE" = true ]; then
+		echo "Error: --repo/--name/--ref/--reclone require --isolated." >&2
+		exit 1
+	fi
+fi
+
+# In dir-mounted mode the positional is a host project directory and must exist;
+# in self-hosted mode it is re-interpreted as the repo spec (resolved below) and
+# is NOT a host path, so the directory checks/canonicalisation are skipped.
+if [ "$ISOLATED" != true ]; then
+	if [ ! -d "$PROJECT_PATH" ]; then
+		echo "Error: project path does not exist: ${PROJECT_PATH}" >&2
+		exit 1
+	fi
 fi
 
 if [ -n "$CTX_PATH" ] && [ ! -d "$CTX_PATH" ]; then
@@ -87,13 +128,15 @@ fi
 if [ -n "$CTX_PATH" ]; then
 	CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"
 fi
-PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
-# Only strip the trailing slash when the path is not the filesystem root ("/"), since
-# stripping "/" would produce an empty string and break basename and Docker bind-mount paths.
-if [ "$PROJECT_PATH" != "/" ]; then
-	PROJECT_PATH="${PROJECT_PATH%/}"
+if [ "$ISOLATED" != true ]; then
+	PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
+	# Only strip the trailing slash when the path is not the filesystem root ("/"), since
+	# stripping "/" would produce an empty string and break basename and Docker bind-mount paths.
+	if [ "$PROJECT_PATH" != "/" ]; then
+		PROJECT_PATH="${PROJECT_PATH%/}"
+	fi
+	PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
 fi
-PROJECT_BASENAME="$(basename "$PROJECT_PATH")"
 
 project_hash() {
 	local input="${1:-}"
@@ -151,31 +194,86 @@ normalize_ctx_path() {
 	printf '%s' "${p%/}"
 }
 
-# On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
-# may report paths with inconsistent capitalisation, so we normalise to lowercase before
-# hashing — matching PowerShell's ToLowerInvariant() behaviour.
-# On Linux and macOS the filesystem is case-sensitive, so two paths differing only by case
-# are genuinely distinct directories; lowercasing would risk hash collisions between different
-# workspaces. We therefore preserve the path as-is on those platforms.
-case "$(uname -s)" in
+# Per-instance volume names that only exist in one mode. Declared empty up front
+# so referencing them under `set -u` in the other mode is always safe.
+NM_VOLUME=""
+WT_VOLUME=""
+WS_VOLUME=""
+REPO_SPEC=""
+
+if [ "$ISOLATED" = true ]; then
+	# --- Self-hosted (isolated) identity -------------------------------------
+	# Resolve the repo to clone. Precedence: explicit --repo wins; else if the
+	# positional is an existing directory, infer it from that dir's `origin`
+	# remote (the "standing inside a repo" convenience); else the positional
+	# itself is the repo spec (an owner/repo slug or a clone URL).
+	if [ -n "$REPO_FLAG" ]; then
+		REPO_SPEC="$REPO_FLAG"
+	elif [ -d "$PROJECT_PATH" ]; then
+		REPO_SPEC="$(git -C "$PROJECT_PATH" remote get-url origin 2>/dev/null || true)"
+		if [ -z "$REPO_SPEC" ]; then
+			echo "Error: --isolated needs a repo to clone (owner/repo or a clone URL)." >&2
+			echo "None was given and 'git remote get-url origin' found nothing in ${PROJECT_PATH}." >&2
+			echo "Pass it explicitly, e.g. --repo owner/repo, or --repo https://github.com/owner/repo.git" >&2
+			exit 1
+		fi
+		echo "Self-hosted mode: inferred repo from origin in ${PROJECT_PATH}: ${REPO_SPEC}" >&2
+	else
+		REPO_SPEC="$PROJECT_PATH"
+	fi
+
+	# repo-slug: basename, strip a trailing .git, lowercase + sanitise — the same
+	# shape as the dir-mounted PROJECT_BASENAME handling above.
+	REPO_BASENAME="$(basename "$REPO_SPEC")"
+	REPO_BASENAME="${REPO_BASENAME%.git}"
+	REPO_SLUG="$(printf '%s' "$REPO_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"
+	if [ -z "$REPO_SLUG" ]; then
+		echo "Error: could not derive a repo slug from '${REPO_SPEC}'." >&2
+		exit 1
+	fi
+
+	# Instance discriminator: --name <label> if given (named → deterministic →
+	# reusable: same clone + session history across launches), else a
+	# high-resolution timestamp + pid + random token so two same-second unnamed
+	# launches never collide (unnamed → fresh every launch). The instance hash is
+	# SHA256(label)[:12], reusing the dir-mounted 12-char hash shape.
+	INSTANCE_LABEL="$INSTANCE_NAME"
+	if [ -z "$INSTANCE_LABEL" ]; then
+		INSTANCE_LABEL="ts-$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}${RANDOM}"
+	fi
+	INSTANCE_HASH="$(project_hash "$INSTANCE_LABEL")"
+	PROJECT_NAME="${REPO_SLUG}-${INSTANCE_HASH}"
+else
+	# --- Dir-mounted identity (unchanged) ------------------------------------
+	# On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
+	# may report paths with inconsistent capitalisation, so we normalise to lowercase before
+	# hashing — matching PowerShell's ToLowerInvariant() behaviour.
+	# On Linux and macOS the filesystem is case-sensitive, so two paths differing only by case
+	# are genuinely distinct directories; lowercasing would risk hash collisions between different
+	# workspaces. We therefore preserve the path as-is on those platforms.
+	case "$(uname -s)" in
 	MINGW* | MSYS* | CYGWIN*)
 		PROJECT_HASH_INPUT="$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')"
 		;;
 	*)
 		PROJECT_HASH_INPUT="$PROJECT_PATH"
 		;;
-esac
-PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
-PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
+	esac
+	PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
+	PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
+	NM_VOLUME="agent-nm-${PROJECT_NAME}"
+	# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+	# ONE mount so pnpm hardlinks package files into per-worktree node_modules
+	# instead of copying them. ext4, persistent, container-local, and shared between
+	# this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
+	WT_VOLUME="agent-wt-${PROJECT_NAME}"
+fi
+
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
-NM_VOLUME="agent-nm-${PROJECT_NAME}"
-# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
-# ONE mount so pnpm hardlinks package files into per-worktree node_modules
-# instead of copying them. ext4, persistent, container-local, and shared between
-# this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
-WT_VOLUME="agent-wt-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
-# pnpm store path inside the worktrees volume (same mount as .worktrees/<task>).
+# pnpm store path under the workspace mount (same mount as .worktrees/<task> in
+# both modes — a per-project volume in dir-mounted mode, the one workspace volume
+# in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
@@ -184,9 +282,42 @@ WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 # runroots/namespaces sharing one graphroot corrupt each other's metadata and
 # lifecycle state. A shared image cache is a separate concern (additionalimagestores).
 PODMAN_VOLUME="agent-podman-${CONTAINER_NAME}"
+if [ "$ISOLATED" = true ]; then
+	# The one per-instance workspace volume that REPLACES the host bind mount plus
+	# the dir-mounted agent-nm-*/agent-wt-* shadows: the clone, node_modules,
+	# .worktrees, and the pnpm store all live inside it as ordinary subdirs (one
+	# mount → pnpm hardlinks everywhere, including the root node_modules). Keyed by
+	# the full container name, like PODMAN_VOLUME, so it is part of the container's
+	# identity. Mounted via compose.selfhosted.yml (merged by target path).
+	WS_VOLUME="agent-ws-${CONTAINER_NAME}"
+fi
+
+# Internal/testing hook: print the resolved identity and exit before touching
+# Docker. Lets the self-hosted smoke test assert naming (named→deterministic,
+# unnamed→fresh, repo-slug derivation) without building or launching anything.
+if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
+	if [ "$ISOLATED" = true ]; then printf 'mode=isolated\n'; else printf 'mode=dir-mounted\n'; fi
+	printf 'PROJECT_NAME=%s\n' "$PROJECT_NAME"
+	printf 'CONTAINER_NAME=%s\n' "$CONTAINER_NAME"
+	printf 'WORKSPACE_MOUNT=%s\n' "$WORKSPACE_MOUNT"
+	printf 'PODMAN_VOLUME=%s\n' "$PODMAN_VOLUME"
+	printf 'NM_VOLUME=%s\n' "$NM_VOLUME"
+	printf 'WT_VOLUME=%s\n' "$WT_VOLUME"
+	printf 'WS_VOLUME=%s\n' "$WS_VOLUME"
+	printf 'REPO_SPEC=%s\n' "$REPO_SPEC"
+	printf 'CLONE_REF=%s\n' "$CLONE_REF"
+	exit 0
+fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
+# Self-hosted overlay: replaces the host workspace BIND mount in compose.shared.yml
+# with the per-instance named volume (merged by target path /workspace/<slug>).
+# Added after the shared file so its volume entry wins; the fuse/netdev overlays
+# appended later only add devices, so ordering with them is irrelevant.
+if [ "$ISOLATED" = true ]; then
+	COMPOSE_ARGS+=(-f "${ROOT_DIR}/compose.selfhosted.yml")
+fi
 
 # Ensure named volumes exist (compose won't auto-create external volumes). Both
 # config volumes are always created/mounted so the non-primary agent can be
@@ -201,7 +332,17 @@ for vol in "${SHARED_VOLUMES[@]}"; do
 	fi
 done
 
-export WORKSPACE_PATH="$PROJECT_PATH"
+# In dir-mounted mode WORKSPACE_PATH is the host bind source. In self-hosted mode
+# the workspace mount comes from compose.selfhosted.yml (which overrides the bind
+# by target path), so WORKSPACE_PATH is unused — set it to a harmless "." that
+# still parses as a valid short-syntax mount source, and export the volume name
+# the overlay interpolates into its external `name:`.
+if [ "$ISOLATED" = true ]; then
+	export WORKSPACE_PATH="."
+	export POWBOX_WS_VOLUME="$WS_VOLUME"
+else
+	export WORKSPACE_PATH="$PROJECT_PATH"
+fi
 export PROJECT_NAME
 
 GH_HOST_CONFIG_DIR="${GH_HOST_CONFIG_DIR:-$HOME/.config/gh}"
@@ -232,7 +373,30 @@ if [ "$RESUME" = true ]; then
 	if [ "$CONTINUE" = true ]; then
 		echo "Note: --continue is ignored with --resume; container will restart with the CMD it was originally created with. Omit --resume to apply a continue-flag change." >&2
 	fi
+	if [ "$RECLONE" = true ]; then
+		echo "Note: --reclone is ignored with --resume; the existing checkout is left untouched. Omit --resume to wipe and re-clone." >&2
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
+fi
+
+# Self-hosted --reclone: wipe and re-seed an existing named container's clone.
+# The clone inputs (POWBOX_RECLONE etc.) are frozen at creation, so the only way
+# to re-trigger the seed step on a reused container is to recreate it — removing a
+# stopped container keeps its agent-ws-* volume, and the fresh container's
+# POWBOX_RECLONE=1 makes the entrypoint wipe that volume's tree and clone again.
+if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	if [ "$CONTAINER_RUNNING" = true ]; then
+		echo "Container ${CONTAINER_NAME} is running; stop it before --reclone (it re-clones on recreate)." >&2
+		exit 1
+	fi
+	echo "--reclone: recreating ${CONTAINER_NAME} so it re-seeds its workspace from a fresh clone."
+	if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+		if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+			echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+			exit 1
+		fi
+	fi
+	CONTAINER_EXISTS=false
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
@@ -318,8 +482,10 @@ fi
 # so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
 # it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
 # stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
-# take effect; warn (don't disrupt) if it is currently running.
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+# take effect; warn (don't disrupt) if it is currently running. Self-hosted mode has
+# no separate .worktrees mount (it is a subdir of the one workspace volume), so this
+# guard is dir-mounted-only — otherwise it would wrongly recreate every reuse.
+if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_WT_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
@@ -455,13 +621,26 @@ if [ -n "$CTX_PATH" ]; then
 	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
 fi
 
-docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
-	-v "${NM_VOLUME}:/mnt/node_modules" \
-	-v "${WT_VOLUME}:/mnt/worktrees" \
-	-v "${PODMAN_VOLUME}:/mnt/containers" \
-	-v "agent-podman-imagestore:/mnt/podman-imagestore" \
-	agent \
-	-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
+# Pre-create and chown the per-instance volumes to node so the entrypoint (which
+# runs as node) can write into them. Self-hosted mode has ONE workspace volume
+# (it must be node-owned before the entrypoint clones into it) and no nm/wt
+# shadows; dir-mounted mode has the separate node_modules + worktrees shadows.
+if [ "$ISOLATED" = true ]; then
+	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
+		-v "${WS_VOLUME}:/mnt/workspace" \
+		-v "${PODMAN_VOLUME}:/mnt/containers" \
+		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		agent \
+		-lc 'mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore'
+else
+	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
+		-v "${NM_VOLUME}:/mnt/node_modules" \
+		-v "${WT_VOLUME}:/mnt/worktrees" \
+		-v "${PODMAN_VOLUME}:/mnt/containers" \
+		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		agent \
+		-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
+fi
 
 RUN_ARGS=()
 if [ "$DETACH" = true ]; then
@@ -505,16 +684,38 @@ esac
 # authenticate too.
 EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT" -e "PNPM_STORE_DIR=$WT_STORE_DIR")
 
-# Mount per-project named volumes over node_modules and .worktrees inside the
-# bind mount. Both shadow the host paths with Linux-native ext4 volumes so that
-# native binaries compiled for the container OS are never mixed with host
-# binaries. The .worktrees volume additionally co-locates the pnpm store
-# (PNPM_STORE_DIR) with each worktree's node_modules under one mount, so
-# per-worktree `pnpm install` hardlinks from the store instead of copying.
-# The trade-off is that Docker may create empty node_modules/ and .worktrees/
-# directories on the host the first time (harmless; .worktrees is gitignored in
-# worktree-enabled repos), and the host's copies are inaccessible inside the
-# container (intentional — use the volume copies for all in-container installs).
+# Self-hosted clone inputs. The entrypoint (after gh auth) clones POWBOX_CLONE_REPO
+# at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, skips the clone when a .git already
+# exists (reuse), and wipes-then-re-clones when POWBOX_RECLONE=1. These are frozen
+# at container creation, which is why --reclone recreates the container above.
+SELFHOSTED_LABEL=()
+if [ "$ISOLATED" = true ]; then
+	RECLONE_FLAG=0
+	[ "$RECLONE" = true ] && RECLONE_FLAG=1
+	EXTRA_ENV+=(
+		-e "POWBOX_SELF_HOSTED=1"
+		-e "POWBOX_CLONE_REPO=$REPO_SPEC"
+		-e "POWBOX_CLONE_REF=$CLONE_REF"
+		-e "POWBOX_RECLONE=$RECLONE_FLAG"
+		-e "POWBOX_WORKSPACE_DIR=$WORKSPACE_MOUNT"
+	)
+	# Label self-hosted containers so tooling/lists can distinguish them from
+	# dir-mounted ones (they already share the claude-/codex- name prefix).
+	SELFHOSTED_LABEL=(--label "powbox.self-hosted=true")
+fi
+
+# In dir-mounted mode the root node_modules and .worktrees are separate per-project
+# named volumes mounted over the bind mount. In self-hosted mode they are ordinary
+# subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no
+# extra -v args are added here.
+WORKSPACE_VOL_ARGS=()
+if [ "$ISOLATED" != true ]; then
+	WORKSPACE_VOL_ARGS=(
+		-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules"
+		-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees"
+	)
+fi
+
 CONTINUE_LABEL="false"
 if [ "$CONTINUE" = true ]; then
 	CONTINUE_LABEL="true"
@@ -552,12 +753,12 @@ docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
 	--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
+	"${SELFHOSTED_LABEL[@]}" \
 	"${EXTRA_ENV[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
 	"${CTX_ARGS[@]}" \
-	-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules" \
-	-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees" \
+	"${WORKSPACE_VOL_ARGS[@]}" \
 	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
 	-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \
 	-w "${WORKSPACE_MOUNT}" \

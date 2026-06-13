@@ -94,22 +94,41 @@ if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	fi
 fi
 
+# Self-hosted ("--isolated") mode: clone the repo into the per-instance workspace
+# volume. Runs AFTER gh auth (above) so a private clone has credentials, and BEFORE
+# the shadow/pnpm steps below. On any clone failure seed-workspace.sh announces the
+# remedies (loudly) and exits non-zero; we then drop to a plain zsh rather than
+# execing the agent into an empty workspace — no retry by design. A no-op when not
+# self-hosted (including the image-store writer role).
+if [ "${POWBOX_SELF_HOSTED:-}" = "1" ]; then
+	if ! /usr/local/bin/seed-workspace.sh; then
+		exec zsh
+	fi
+fi
+
 # Shadow nested node_modules in monorepo workspaces with tmpfs so that
 # container-native (Linux) binaries never mix with host-native binaries.
 # The root node_modules is already shadowed by a Docker volume mount;
 # this covers subpackage directories detected from pnpm-workspace.yaml,
 # package.json workspaces, or .powbox.yml.  See README.md for details.
-for _dir in /workspace/*/; do
-	[ -d "$_dir" ] || continue
-	_dir="${_dir%/}"
-	mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
-	if [ "${#_targets[@]}" -gt 0 ]; then
-		if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
-			echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
+#
+# Skipped entirely in self-hosted mode: there is no host filesystem to shadow (the
+# whole workspace is one container-local volume), and a tmpfs over a subpackage's
+# node_modules would break the hardlinking that the single-volume layout exists to
+# enable (the store and every node_modules already share one mount).
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
+	for _dir in /workspace/*/; do
+		[ -d "$_dir" ] || continue
+		_dir="${_dir%/}"
+		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
+		if [ "${#_targets[@]}" -gt 0 ]; then
+			if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+				echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
+			fi
 		fi
-	fi
-done
-unset _dir _targets
+	done
+	unset _dir _targets
+fi
 
 # Co-locate the pnpm store with the per-project worktrees volume so that
 # `pnpm install` inside a worktree HARDLINKS package files from the store

@@ -250,6 +250,7 @@ COPY --chmod=755 \
     docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \
+    docker/shared/seed-workspace.sh \
     /usr/local/bin/
 
 USER node

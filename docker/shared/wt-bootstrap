@@ -49,23 +49,38 @@ WT_BASE="$ROOT/.worktrees/$CONTAINER_NAME"
 
 # --- Worktree roots: must be container-local, never the host bind mount -------
 mkdir -p "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"
-# Apply any declared-but-unmounted shadows; the mount checks below are the
-# authority on whether this sufficed.
-if command -v shadow-refresh.sh >/dev/null 2>&1; then
-	shadow-refresh.sh "$ROOT" >&2 || true
-fi
 
-for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-	mountpoint -q "$root" ||
-		fail "unsafe worktree root (not a mountpoint): $root — run enable-worktrees, then rebuild/relaunch if the image predates worktree-shadow support"
-done
-for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-	[ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
-		fail "unsafe worktree metadata root (expected tmpfs): $root"
-done
-case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
-9p | drvfs | virtiofs) fail "unsafe .worktrees host filesystem: $(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" ;;
-esac
+if [ "${POWBOX_SELF_HOSTED:-}" = "1" ]; then
+	# Self-hosted ("--isolated") mode: the ENTIRE workspace is one container-local
+	# named volume, so the worktree roots are plain subdirs of it — there are no
+	# per-dir mountpoint/tmpfs shadows (shadow-mounts is deliberately skipped, and a
+	# tmpfs here would break the single-mount hardlinking). Safety then means the
+	# workspace itself is a container-local mount on a real fs, not a host network
+	# mount — which it is by construction (an ext4 Docker volume).
+	mountpoint -q "$ROOT" ||
+		fail "self-hosted workspace root is not a mountpoint: $ROOT (expected the agent-ws-* volume)"
+	case "$(findmnt -nro FSTYPE -T "$ROOT")" in
+	9p | drvfs | virtiofs) fail "unsafe self-hosted workspace filesystem: $(findmnt -nro FSTYPE -T "$ROOT")" ;;
+	esac
+else
+	# Apply any declared-but-unmounted shadows; the mount checks below are the
+	# authority on whether this sufficed.
+	if command -v shadow-refresh.sh >/dev/null 2>&1; then
+		shadow-refresh.sh "$ROOT" >&2 || true
+	fi
+
+	for root in "$ROOT/.worktrees" "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+		mountpoint -q "$root" ||
+			fail "unsafe worktree root (not a mountpoint): $root — run enable-worktrees, then rebuild/relaunch if the image predates worktree-shadow support"
+	done
+	for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
+		[ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
+			fail "unsafe worktree metadata root (expected tmpfs): $root"
+	done
+	case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
+	9p | drvfs | virtiofs) fail "unsafe .worktrees host filesystem: $(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" ;;
+	esac
+fi
 
 # --- Prune ONLY this container's orphans --------------------------------------
 # A peer container's live worktrees live under its own $CONTAINER_NAME subdir

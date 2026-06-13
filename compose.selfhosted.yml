@@ -1,0 +1,32 @@
+# Self-hosted ("--isolated") overlay: replace the host workspace BIND mount with a
+# per-instance named volume the container clones the repo into ITSELF. This is the
+# second launch mode (see README "Self-Hosted Mode" and AGENTS.md "Project
+# Identity"); the default dir-mounted mode does not use this file.
+#
+# `docker compose run` cannot remove or override a service volume from the command
+# line (a `-v` at the same target errors with "duplicate mount destination"), so the
+# swap is done by merging this file AFTER compose.shared.yml: Compose merges the
+# `volumes` list by the target path inside the container, so this entry — sharing the
+# `/workspace/${PROJECT_NAME}` target with the bind in compose.shared.yml — wins and
+# the bind is dropped entirely. The launcher adds this file to the `-f` chain only in
+# self-hosted mode (mirrors the compose.fuse.yml / compose.netdev.yml overlay pattern).
+#
+# The single workspace volume also holds node_modules, .worktrees, and the pnpm
+# store as ordinary subdirs, so the dir-mounted agent-nm-* / agent-wt-* shadow
+# mounts are omitted in this mode (the launcher simply does not add them). Because
+# everything shares one mount, pnpm hardlinks package files everywhere — including
+# the root node_modules, which falls back to copying in dir-mounted mode (separate
+# mount → link(2) EXDEV).
+#
+# POWBOX_WS_VOLUME is the per-instance external volume name (agent-ws-<container>);
+# the launcher exports it. The launcher also pre-creates and chowns it to node so
+# the entrypoint (running as node) can clone into it.
+services:
+  agent:
+    volumes:
+      - workspace:/workspace/${PROJECT_NAME}:rw
+
+volumes:
+  workspace:
+    name: ${POWBOX_WS_VOLUME}
+    external: true

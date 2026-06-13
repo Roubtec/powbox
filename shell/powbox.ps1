@@ -387,16 +387,37 @@ function agent-update {
     if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
 }
 
+# Print the standard 'docker ps' table for the given filters, appending a
+# "[self-hosted]" marker to the rows of self-hosted (-Isolated) containers so they
+# are visible at a glance. The self-hosted set is resolved with a label FILTER
+# (docker ps --filter label=powbox.self-hosted=true) rather than a per-key
+# '{{.Label ...}}' template column, because podman's docker shim rejects the
+# method-with-arg template form; the filter and the 'table' output are both
+# portable. The header and dir-mounted rows pass through unchanged, so the output
+# is identical to before when no self-hosted container exists.
+function _Powbox-AgentList {
+    param([string[]]$Filters)
+    $selfHosted = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    docker ps -a @Filters --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}" | ForEach-Object {
+        $line = $_
+        $marked = ""
+        foreach ($name in $selfHosted) {
+            if ($line -like "*$name*") { $marked = " [self-hosted]"; break }
+        }
+        "$line$marked"
+    }
+}
+
 function cc-list {
-    docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=claude-")
 }
 
 function cx-list {
-    docker ps -a --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=codex-")
 }
 
 function agent-list {
-    docker ps -a --filter "name=claude-" --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=claude-", "--filter", "name=codex-")
 }
 
 function agent-volumes {

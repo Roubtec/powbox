@@ -350,16 +350,44 @@ agent-update() {
     return "$rc"
 }
 
+# Print the standard `docker ps` table for the given filters, appending a
+# "[self-hosted]" marker to the rows of self-hosted (--isolated) containers so
+# they are visible at a glance. The self-hosted set is resolved with a label
+# FILTER (docker ps --filter label=powbox.self-hosted=true) rather than a
+# `{{.Label "key"}}` template column, because podman's docker shim rejects the
+# method-with-arg template form; the filter and the no-clobber `table` output are
+# both portable. The header and dir-mounted rows pass through unchanged, so the
+# output is byte-identical to before when no self-hosted container exists. Names
+# are read into an array (not word-split) so this behaves identically under bash
+# and zsh.
+_powbox_agent_list() {
+    local name self_hosted=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && self_hosted+=("$name")
+    done < <(docker ps -a "$@" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
+
+    local line marked
+    while IFS= read -r line; do
+        marked=""
+        for name in "${self_hosted[@]}"; do
+            case "$line" in
+                *"$name"*) marked=" [self-hosted]"; break ;;
+            esac
+        done
+        printf '%s%s\n' "$line" "$marked"
+    done < <(docker ps -a "$@" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}')
+}
+
 cc-list() {
-    docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=claude-"
 }
 
 cx-list() {
-    docker ps -a --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=codex-"
 }
 
 agent-list() {
-    docker ps -a --filter "name=claude-" --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=claude-" --filter "name=codex-"
 }
 
 agent-volumes() {

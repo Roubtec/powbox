@@ -84,12 +84,15 @@ if ($p1["CONTAINER_NAME"] -eq $p2["CONTAINER_NAME"]) { Fail "two repos sharing a
 if ($p1["WORKSPACE_MOUNT"] -eq $p2["WORKSPACE_MOUNT"]) { Fail "two repos sharing a basename share a workspace path under the same -Name" }
 Ok "named identity is per-repo (owner1/app vs owner2/app, same -Name, differ)"
 
-# ... while the SAME repo expressed different ways (slug vs full https URL) under
-# the same -Name stays stable, so reuse is not broken by spec form.
+# ... while the SAME repo expressed different ways (slug, full https URL, or an
+# uppercase .GIT extension) under the same -Name stays stable, so reuse is not
+# broken by spec form (the .GIT case also guards .sh/.ps1 strip-case parity).
 $s1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "stable")
 $s2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "https://github.com/owner/app.git", "-Name", "stable")
+$s3 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app.GIT", "-Name", "stable")
 if ($s1["CONTAINER_NAME"] -ne $s2["CONTAINER_NAME"]) { Fail "same repo via slug vs https URL produced different identities under the same -Name" }
-Ok "named identity is spec-form stable (owner/app == https://github.com/owner/app.git)"
+if ($s1["CONTAINER_NAME"] -ne $s3["CONTAINER_NAME"]) { Fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)" }
+Ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
 
 if (-not $n1["PROJECT_NAME"].StartsWith("repo-")) { Fail "repo-slug derivation wrong: $($n1["PROJECT_NAME"])" }
 Ok "repo-slug strips .git and lowercases (Repo.git -> repo)"

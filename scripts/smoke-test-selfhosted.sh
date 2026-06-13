@@ -106,13 +106,17 @@ P2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner2/app --
 	fail "two repos sharing a basename share a workspace path under the same --name"
 ok "named identity is per-repo (owner1/app vs owner2/app, same --name, differ)"
 
-# ... while the SAME repo expressed different ways (slug vs full https URL) under
-# the same --name stays stable, so reuse is not broken by spec form.
+# ... while the SAME repo expressed different ways (slug, full https URL, or an
+# uppercase .GIT extension) under the same --name stays stable, so reuse is not
+# broken by spec form (the .GIT case also guards .sh/.ps1 strip-case parity).
 S1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name stable 2>/dev/null)"
 S2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo https://github.com/owner/app.git --name stable 2>/dev/null)"
+S3="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app.GIT --name stable 2>/dev/null)"
 [ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S2" CONTAINER_NAME)" ] ||
 	fail "same repo via slug vs https URL produced different identities under the same --name"
-ok "named identity is spec-form stable (owner/app == https://github.com/owner/app.git)"
+[ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S3" CONTAINER_NAME)" ] ||
+	fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)"
+ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
 
 # repo-slug: .git stripped, lowercased.
 case "$(id_field "$N1" PROJECT_NAME)" in

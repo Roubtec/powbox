@@ -106,7 +106,10 @@ if ($Isolated) {
       exit 1
     }
     $repoSpec = $repoSpec.Trim()
-    Write-Host "Self-hosted mode: inferred repo from origin in ${ProjectPath}: $repoSpec" -ForegroundColor Yellow
+    # Redact any userinfo (token) from the displayed origin URL so an embedded
+    # credential is not echoed to the terminal; the real spec is still used below.
+    $repoSpecSafe = $repoSpec -replace '(://)[^/]*@', '$1'
+    Write-Host "Self-hosted mode: inferred repo from origin in ${ProjectPath}: $repoSpecSafe" -ForegroundColor Yellow
   }
   else {
     $repoSpec = $ProjectPath

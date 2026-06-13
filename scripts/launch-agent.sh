@@ -186,8 +186,11 @@ repo_identity() {
 		id="github.com/$spec"
 		;;
 	esac
-	id="${id%.git}"
-	printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
+	# Lowercase BEFORE stripping .git so an uppercase extension (.GIT/.Git) is also
+	# removed — matching launch-agent.ps1's case-insensitive `-replace '\.git$'`, so
+	# the two launchers (and repo.GIT vs repo.git here) agree on the identity.
+	id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
+	printf '%s' "${id%.git}"
 }
 
 # Normalise a path for /ctx comparison.
@@ -246,16 +249,21 @@ if [ "$ISOLATED" = true ]; then
 			echo "Pass it explicitly, e.g. --repo owner/repo, or --repo https://github.com/owner/repo.git" >&2
 			exit 1
 		fi
-		echo "Self-hosted mode: inferred repo from origin in ${PROJECT_PATH}: ${REPO_SPEC}" >&2
+		# Redact any userinfo (token) from the displayed origin URL so an embedded
+		# credential is not echoed to the terminal/scrollback (sed mirrors
+		# seed-workspace.sh's redact_url); the real spec is still used below.
+		echo "Self-hosted mode: inferred repo from origin in ${PROJECT_PATH}: $(printf '%s' "$REPO_SPEC" | sed -E 's#(://)[^/]*@#\1#')" >&2
 	else
 		REPO_SPEC="$PROJECT_PATH"
 	fi
 
 	# repo-slug: basename, strip a trailing .git, lowercase + sanitise — the same
-	# shape as the dir-mounted PROJECT_BASENAME handling above.
-	REPO_BASENAME="$(basename "$REPO_SPEC")"
+	# shape as the dir-mounted PROJECT_BASENAME handling above. Lowercase BEFORE the
+	# .git strip so an uppercase .GIT/.Git extension is removed too (POSIX %.git is
+	# case-sensitive), matching the PowerShell launcher's case-insensitive strip.
+	REPO_BASENAME="$(basename "$REPO_SPEC" | tr '[:upper:]' '[:lower:]')"
 	REPO_BASENAME="${REPO_BASENAME%.git}"
-	REPO_SLUG="$(printf '%s' "$REPO_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"
+	REPO_SLUG="$(printf '%s' "$REPO_BASENAME" | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')"
 	if [ -z "$REPO_SLUG" ]; then
 		echo "Error: could not derive a repo slug from '${REPO_SPEC}'." >&2
 		exit 1

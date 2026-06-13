@@ -383,7 +383,10 @@ function collisionBranchNames(collision) {
 
 function resolveCollisionsPrompt(tasks, waveCollisions, remote) {
   const taskList = tasks
-    .map((t) => `- slug ${JSON.stringify(t.slug)}: branch ${JSON.stringify(t.branch)} (base ${JSON.stringify(t.base)})`)
+    .map(
+      (t) =>
+        `- slug ${JSON.stringify(t.slug)}: branch ${JSON.stringify(t.branch)} (base ${JSON.stringify(t.base)})\n      enter its worktree with: WT="$(wt-enter ${shq(t.slug)} ${shq(t.branch)})" && cd "$WT"`
+    )
     .join("\n");
   const collisionList = JSON.stringify(waveCollisions, null, 2);
   const pushLine = remote
@@ -391,9 +394,7 @@ function resolveCollisionsPrompt(tasks, waveCollisions, remote) {
     : "Remote push is unavailable this run; commit locally — the shared `.git` persists.";
   return `You are the orchestrator's deputy DECONFLICTING add/add naming collisions between sibling task branches built in parallel. Each branch already passed review on its own, but the pre-PR scan found that two or more INDEPENDENTLY added the same new file path, basename, or exported top-level symbol — which will clash (an add/add conflict, or a duplicate definition) when the branches merge. You decide how to deconflict, and you carry it out.
 
-Every branch below still has its live worktree (it was held before PR delivery). For each branch you CHANGE, resolve its worktree with the rerun-safe helper and \`cd\` in — no base argument, the branch already exists:
-
-    WT="$(wt-enter <slug> <branch>)" && cd "$WT"
+Each held branch's commits persist in the shared \`.git\`; its worktree may have been reclaimed after review to bound disk use. For each branch you CHANGE, \`cd\` into its worktree using the exact, ready-to-run \`wt-enter\` command listed for that branch under "Held branches" below — its slug and branch are already shell-quoted there because a generated/task-derived branch name can contain shell metacharacters (\`$\`, backticks, \`;\`). NEVER hand-substitute a raw \`<branch>\` into \`wt-enter\` — copy the listed command verbatim. No base argument is needed: the branch already exists and \`wt-enter\` is rerun-safe, re-attaching the worktree if it was reclaimed.
 
 If \`wt-enter\` errors, STOP and report it. Verify \`git rev-parse --show-toplevel\` is that worktree and \`git branch --show-current\` is that branch before editing. Touch ONLY the worktree of the branch you are changing; never edit a sibling's worktree. Read \`AGENTS.md\` / \`CLAUDE.md\` for the project's regen and build commands.
 
@@ -561,21 +562,39 @@ for (let w = 0; w < plan.waves.length; w++) {
     log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) (cap ${MAX_WAVE_WIDTH}, storage allows ${storageCap}).`);
     throttled.push({ wave: w + 1, tasks: runnable.length, width: widthCap });
   }
-  // Sub-batch the wave at the width cap: slower than full fan-out, but a wave
-  // that exhausts the .worktrees mount mid-flight delivers nothing.
+  // Sub-batch the wave at the width cap: a wave that exhausts the .worktrees
+  // mount mid-flight delivers nothing. But the pre-PR collision scan must compare
+  // EVERY reviewed branch before any delivery, so — unlike the old per-task flow
+  // that delivered and `wt-remove`d each task as it finished — delivery is now
+  // deferred to after the whole wave is scanned. Left unmanaged, that would let
+  // reviewed worktrees from earlier slices pile up while later slices run,
+  // re-introducing the ENOSPC the sub-batching exists to prevent. So reclaim each
+  // finished slice's reviewed worktrees right here: the branch refs persist in
+  // the shared `.git`, the scan compares by ref (it never enters a worktree), and
+  // the resolver, re-review, and delivery each re-attach on demand via `wt-enter`
+  // — keeping the live worktree count bounded by the cap. Only when the wave is
+  // actually sub-batched; a single-slice wave already fits the cap, so reclaiming
+  // it just to re-attach for delivery would be pure churn.
   const ready = [];
+  const subBatched = runnable.length > widthCap;
   for (let i = 0; i < runnable.length; i += widthCap) {
     const slice = runnable.slice(i, i + widthCap);
     const sliceResults = await parallel(slice.map((task) => () => implementTask(task, remote)));
+    const sliceReady = [];
     sliceResults.forEach((r, j) => {
       const res = r || { slug: slice[j].slug, branch: slice[j].branch, status: "error", detail: "task crashed" };
       if (res.status === "ready") {
-        ready.push({ task: slice[j], result: res });
+        const entry = { task: slice[j], result: res };
+        ready.push(entry);
+        sliceReady.push(entry);
       } else {
         statusBySlug.set(res.slug, res.status);
         results.push(res);
       }
     });
+    if (subBatched && sliceReady.length) {
+      await parallel(sliceReady.map(({ task }) => () => agent(cleanupNote(task), { label: `reclaim:${task.slug}` })));
+    }
   }
 
   // Pre-PR collision guard. Independent sibling branches in this wave each live
@@ -674,16 +693,17 @@ for (let w = 0; w < plan.waves.length; w++) {
       }
     }
     const collisionBlocked = (c) => blockedNames.has(c.name);
-    const changedForCollision = (c) => {
-      const branches = collisionBranchNames(c);
-      const changed = new Set(changedBranchesByCollision.get(c.name) || []);
-      // Belt-and-suspenders for a resolver that reports changedBranches but
-      // mistypes the collision echo: count a globally changed involved branch.
-      branches.forEach((n) => {
-        if (changedBranches.has(n)) changed.add(n);
-      });
-      return changed;
-    };
+    // Only branches the resolver reported as changed FOR THIS collision count
+    // toward resolving it. An earlier version also credited any branch in the
+    // global `changedBranches` set, to guard against a resolver that mistypes the
+    // collision echo — but that is unsound when a branch sits in more than one
+    // collision: renaming branch B to fix an A/B path clash would also mark B
+    // "changed" for an unrelated B/C symbol clash, dropping that clash to a single
+    // remaining branch and letting B and C both deliver while still colliding. A
+    // mis-echoed rename now conservatively leaves the branch held (for a manual
+    // pass / re-scan) instead — matching this guard's bias that holding a real
+    // conflict beats shipping a wrong delivery.
+    const changedForCollision = (c) => new Set(changedBranchesByCollision.get(c.name) || []);
     const remainingForCollision = (c) => {
       const changed = changedForCollision(c);
       return collisionBranchNames(c).filter((n) => !changed.has(n));

@@ -35,8 +35,9 @@ See README "Layout" for the repo file map. Rules that map does not state:
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
-| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project>`) |
-| `/workspace/<project-slug>/.worktrees` | Per-project worktrees volume (`agent-wt-<project>`); also holds the per-project pnpm store at `.worktrees/.pnpm-store` |
+| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project>`); dir-mounted mode only |
+| `/workspace/<project-slug>/.worktrees` | Per-project worktrees volume (`agent-wt-<project>`); also holds the per-project pnpm store at `.worktrees/.pnpm-store`; dir-mounted mode only |
+| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 
@@ -48,16 +49,22 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 - `entrypoint-core.sh` is a wrapper-style entrypoint that must end with `exec "$@"` and is unchanged by the unification (still runs the single `AGENT_SETUP_HOOK`).
 - The shared instruction template is rendered via `envsubst` with agent-specific variables (including `${AGENT_PEERS}`, the registry-derived peer list for the "Delegating to another agent" section).
 - `gh auth setup-git` runs from `$HOME` (not the workspace) and failure is non-fatal. On success it also adds a container-global `url."https://github.com/".insteadOf "git@github.com:"` rewrite (written to the ephemeral `GIT_CONFIG_GLOBAL`, never the host) so SSH-form `origin` remotes push/fetch over HTTPS+gh without rewriting the host repo.
-- Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering.
+- Self-hosted (`--isolated`) clone seeding runs **after** the `gh auth` step (so a private clone has credentials) and **before** the shadow/pnpm steps, via the base-baked `seed-workspace.sh` (gated on `POWBOX_SELF_HOSTED=1`; a no-op otherwise, including the image-store writer role). It clones `POWBOX_CLONE_REPO` at `POWBOX_CLONE_REF` into `POWBOX_WORKSPACE_DIR`, skips the clone when a `.git` already exists (reuse — the agent owns its branches/worktrees), and wipes-then-re-clones when `POWBOX_RECLONE=1`. There is deliberately **no clone/auth failsafe and no retry**: on any failure it prints a loud announcement of the three remedies (use dir-mounted mode / `gh auth login` here / seed the shared gh volume) and `entrypoint-core.sh` `exec`s a plain `zsh` rather than execing the agent into an empty workspace. `safe.directory`/`core.filemode` handling is left as-is (harmless on a node-owned clone).
+- Workspace shadow mounts run after git setup, so any shadow logic must not assume an earlier ordering. `shadow-mounts.sh` is **skipped** in self-hosted mode (no host FS to shadow, and a tmpfs would break the single-mount hardlinking); `wt-bootstrap` likewise branches its root-safety check on `POWBOX_SELF_HOSTED` (the worktree roots are plain subdirs of the one workspace volume, not per-dir mounts).
 - The container's two shells are split on purpose, so the `usermod --shell /bin/zsh` and `ENV SHELL=/bin/bash` in `docker/base/Dockerfile` are not a contradiction: zsh is the human login shell (and `launch-agent --shell` execs `zsh` directly), while bash is the `$SHELL` the agent harnesses' Bash tools spawn — the models write bash/POSIX (word-splitting, 0-indexed arrays) and a non-interactive one-shot call gains nothing from zsh, so defaulting agents to zsh only wasted turns. Both rc files (`docker/shared/.bashrc`, `.zshrc`) are baked but only shape interactive sessions; `EDITOR` and `PATH` live in image `ENV` so neither shell owns them.
 
 ## Project Identity
 
-Per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars) so container names and `node_modules` volumes do not collide across similarly named projects.
+There are two launch modes; the launchers (`scripts/launch-agent.{sh,ps1}`) branch the identity block on `--isolated` and dir-mounted is the default.
+
+- **Dir-mounted (default, unchanged):** per-project identity uses `basename + SHA256(full path)` (truncated to 12 chars) so container names and `node_modules` volumes do not collide across similarly named projects. The host working dir is bind-mounted; this path-based identity is the contract and must not be altered.
+- **Self-hosted (`--isolated`):** the container clones the repo into a private per-instance volume instead of bind-mounting the host (see README "Self-Hosted Mode"). Identity is `<repo-slug> + SHA256(label-or-timestamp)[:12]` — the same 12-char shape — where the discriminator is `--name <label>` (deterministic → reusable: same clone + session history across launches) or, unnamed, a high-resolution timestamp (fresh every launch). The repo is a required input (positional or `--repo`); when omitted inside a git repo it is inferred from `git remote get-url origin`. All self-hosted logic is gated behind `--isolated` so the dir-mounted path is byte-for-byte unchanged.
 
 ## Volumes and Stores
 
 See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm can only **hardlink** from its store when the store and the target `node_modules` share **one mount** (not merely one device — `link(2)` returns `EXDEV` across mount points even on the same filesystem). So the per-project pnpm store lives *inside* the `.worktrees` volume (`agent-wt-<project>`) alongside every `.worktrees/<task>/node_modules`, and `package-import-method=auto` lets pnpm hardlink there and transparently fall back to copying for the root `node_modules` (a separate mount). The launcher passes `PNPM_STORE_DIR` and `entrypoint-core.sh` points pnpm at it per project.
+
+In **self-hosted (`--isolated`)** mode this three-mount layout collapses to **one**: a single per-instance `agent-ws-<container>` volume mounted at `/workspace/<slug>` holds the clone plus `node_modules`, `.worktrees`, and the pnpm store as ordinary subdirs. The dir-mounted `agent-nm-*` / `agent-wt-*` shadow volumes are omitted (no host FS underneath to shadow), the workspace bind mount is replaced via `compose.selfhosted.yml` (merged by target path, mirroring the fuse/netdev overlays), and `shadow-mounts.sh` is skipped entirely in `entrypoint-core.sh`. Because everything shares one mount, pnpm hardlinks everywhere — including the root `node_modules`, which falls back to copying in dir-mounted mode. The `agent-ws-*` and per-container `agent-podman-*` volumes are keyed by the full container name (part of the container identity); prune tooling (`commands/prune-volumes.*`) GCs orphaned `agent-ws-*` volumes alongside the others.
 
 ## Bundled PostgreSQL
 

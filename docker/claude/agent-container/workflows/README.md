@@ -119,7 +119,31 @@ Independent tasks run concurrently via `parallel()` over distinct worktrees.
 It also ports the skill's **adaptive throttling** ("finish over fan-out") as
 code: wave width is the minimum of the dependency-derived size, a hard cap, and
 a storage cap computed from `wt-bootstrap`'s `availBytes`; an over-wide wave is
-run in sub-batches and the throttling decision is reported in the summary.
+run in sub-batches and the throttling decision is reported in the summary. Because
+the collision scan below must compare every reviewed branch before any delivery,
+a sub-batched wave can't deliver-and-reclaim each sub-batch as it finishes, so it
+instead reclaims each finished sub-batch's reviewed worktrees right away — the
+branch refs persist in `.git`, the scan compares by ref, and the deconflict,
+re-review, and delivery steps re-attach on demand via `wt-enter` — keeping the
+live worktree count bounded by the cap rather than growing to the whole wave.
+
+Before delivering each wave's reviewed branches, it runs a **pre-PR collision
+scan**: independent siblings built in parallel can each *add* the same new file
+or exported top-level symbol without any in-worktree conflict, so a read-only
+agent diffs the files each branch added relative to its own base
+(`--diff-filter=A`, three-dot, so stacked branches don't false-flag). On a clash
+the colliding branches are held back from delivery, then a second
+**orchestrator-deputy agent deconflicts** them (re-attaching each branch's
+worktree on demand via `wt-enter`): it picks the least-disruptive
+side(s) and renames enough files/symbols that at most one branch keeps the
+original colliding value — each renamed side getting a name distinct from the
+others, so the renames can't re-collide — regenerates derived files, and commits;
+each changed branch is then re-reviewed fresh before it delivers, while any
+unchanged non-colliding side delivers as-is. A name that must stay identical (framework-mandated, externally
+fixed, or pinned by a task file) is reported `collision-blocked` rather than given
+an invented divergent name, and stays held for a human. The prose skill documents
+the same flow (plus the up-front "give same-kind surfaces distinct names"
+prevention) for the hand-driven path.
 
 **It does not yet fully supersede `address-tasks-worktrees`.** This conversion
 stops after per-task PR creation; it omits that skill's post-batch

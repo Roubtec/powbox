@@ -2,8 +2,12 @@
  * wf-address-tasks — dynamic-workflow form of the `address-tasks` skill.
  *
  * Resolve a batch of pre-planned task files into dependency waves, then for each
- * task run an implement -> review -> fix loop (max 3 rounds), open a PR per
- * passing task, and report. Invoke as `/wf-address-tasks <glob-or-file-list>`.
+ * task run an implement -> review -> fix loop (max 3 rounds), scan reviewed
+ * sibling branches for add/add collisions before delivery and deconflict them
+ * (an orchestrator-deputy agent renames one side, regenerates derived files, and
+ * the changed branch is re-reviewed) — or hold a name that must stay identical —
+ * then open PRs for the delivered tasks and report. Invoke as
+ * `/wf-address-tasks <glob-or-file-list>`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------
@@ -57,11 +61,13 @@
 // phase() titles still get their own progress group.
 export const meta = {
   name: "wf-address-tasks",
-  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), one PR per passing task.",
+  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), pre-PR collision guard that deconflicts add/add clashes (rename one side + re-review) or holds an imperative name, one PR per delivered task.",
   whenToUse: "Execute a folder/glob of pre-planned task files end to end with per-task worktree isolation. Not for one-off coding requests or planning new tasks.",
   phases: [
     { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
     { title: "Resolve batch", detail: "read task files, derive dependency waves and branches" },
+    { title: "Collision scan", detail: "diff added files across sibling branches for add/add clashes" },
+    { title: "Collision resolve", detail: "rename one side of each clash, regen, re-review, then deliver" },
     { title: "Summary" },
   ],
 };
@@ -153,6 +159,51 @@ const PR_SCHEMA = {
     reason: { type: "string", description: "When opened is false: why (no remote auth, gh error, branch-target failure). Empty when opened." },
   },
   required: ["opened", "pushed"],
+};
+
+const COLLISION_SCHEMA = {
+  type: "object",
+  properties: {
+    collisions: {
+      type: "array",
+      description: "Each entry is one newly-added surface that two or more INDEPENDENT sibling branches created on their own — a likely add/add clash (or duplicate definition) when the branches linearize. Empty array when none.",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", description: "path | filename | symbol — a duplicated repo-relative path, a duplicated basename at different paths, or a duplicated exported top-level name (class/function/const/interface/type/enum)." },
+          name: { type: "string", description: "The colliding value: the repo-relative path, the basename, or the symbol name." },
+          branches: { type: "array", items: { type: "string" }, description: "The two or more branches that each independently added it." },
+          detail: { type: "string", description: "One actionable line for the integrator (e.g. 'both define class PaymentReconciliationController — rename one side and regen contracts')." },
+        },
+        required: ["kind", "name", "branches"],
+      },
+    },
+  },
+  required: ["collisions"],
+};
+
+const RESOLUTION_SCHEMA = {
+  type: "object",
+  properties: {
+    resolutions: {
+      type: "array",
+      description: "One entry per collision from the scan: how it was deconflicted (which side renamed, to what) or that the shared name is imperative and the collision is blocked for a human.",
+      items: {
+        type: "object",
+        properties: {
+          collision: { type: "string", description: "The exact `name` of the collision (from the guard's list) this entry resolves." },
+          action: { type: "string", description: "renamed | blocked. `renamed` = a side was renamed, regenerated, and committed; `blocked` = the name must stay identical and cannot be changed without a design decision." },
+          changedBranches: { type: "array", items: { type: "string" }, description: "Branches actually modified + committed by this resolution (each is re-reviewed before delivery). Empty when blocked." },
+          from: { type: "string", description: "The original colliding name/path. Empty when blocked." },
+          to: { type: "string", description: "The new name/path on the renamed side(s). Empty when blocked." },
+          regenerated: { type: "string", description: "Derived files regenerated after the rename (e.g. 'contracts'), or empty if none." },
+          reason: { type: "string", description: "Why that side was chosen to rename, why multiple sides were renamed, or why the collision is blocked." },
+        },
+        required: ["collision", "action", "changedBranches"],
+      },
+    },
+  },
+  required: ["resolutions"],
 };
 
 function bootstrapPrompt() {
@@ -283,12 +334,89 @@ Return \`opened: true\` with the \`url\` ONLY if \`gh pr create\` actually produ
 }
 
 function cleanupNote(task) {
-  // Best-effort worktree removal is requested at the end of runTask; commits and
-  // the branch persist in shared `.git` and on the remote, so removal is safe.
+  // Best-effort worktree removal is requested after delivery; commits and the
+  // branch persist in shared `.git` and on the remote, so removal is safe.
   return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${shq(task.slug)}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
 }
 
-async function runTask(task, remote) {
+function collisionScanPrompt(branches) {
+  const list = branches
+    .map(
+      (b) =>
+        `- slug ${JSON.stringify(b.slug)}: branch ${JSON.stringify(b.branch)} diverged from base ${JSON.stringify(b.base)}\n      list its added files with: git diff --diff-filter=A --name-only ${shq(b.base)}...${shq(b.branch)}`
+    )
+    .join("\n");
+  return `You are a read-only PRE-PR COLLISION GUARD for a batch of sibling task branches implemented in parallel, each reviewed and ready for its own PR. Edit, stage, commit, or push NOTHING. Work from the repo ROOT; do not enter or create any worktree — these branches live in the shared \`.git\` and you compare them by ref.
+
+Why this exists: independent siblings never conflict while they are implemented (each in its own worktree), so two of them can each ADD the same new file path — or a file with the same basename, or a file that exports the same top-level class/symbol — with no warning. The clash only surfaces later, when the branches linearize or merge (an add/add conflict, or a duplicate definition). Find those overlaps now so they can be reconciled before merge.
+
+Branches:
+${list}
+
+Method:
+1. For each branch, list ONLY the files it ADDED relative to its OWN base by running the exact, ready-to-run command listed for that branch under "Branches" above — its base and branch are already shell-quoted there because a generated/task-derived ref can contain shell metacharacters (\`$\`, backticks, \`;\`); never hand-substitute a raw \`<branch>\` into the command. It has the form:
+       git diff --diff-filter=A --name-only <base>...<branch>
+   The three-dot form compares against the merge-base, so a dependent branch built on a sibling will NOT re-list that sibling's files and legitimate stacking is never flagged.
+2. Report a collision when, across two or more DIFFERENT branches:
+   - the same repo-relative path was added (kind \`path\`), OR
+   - the same basename was added at different paths (kind \`filename\`), OR
+   - two added source files (sharing a basename, or clearly the same kind of module) declare the same exported top-level name — class/function/const/interface/type/enum (kind \`symbol\`). Open ONLY those candidate files to confirm; keep it cheap.
+3. For each collision give the colliding value, the 2+ branches that added it, and a one-line reconciliation hint. In \`branches\`, use the exact branch strings from the Branches list without shell quote characters.
+
+Flag only genuine overlaps between independently-based branches; never flag a file a branch merely inherited from its base. If nothing overlaps, return an empty \`collisions\` array.`;
+}
+
+function normalizeBranchName(s) {
+  const value = String(s || "").trim();
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function collisionBranchNames(collision) {
+  return Array.isArray(collision.branches)
+    ? collision.branches.map(normalizeBranchName).filter(Boolean)
+    : [];
+}
+
+function resolveCollisionsPrompt(tasks, waveCollisions, remote) {
+  const taskList = tasks
+    .map(
+      (t) =>
+        `- slug ${JSON.stringify(t.slug)}: branch ${JSON.stringify(t.branch)} (base ${JSON.stringify(t.base)})\n      enter its worktree with: WT="$(wt-enter ${shq(t.slug)} ${shq(t.branch)})" && cd "$WT"`
+    )
+    .join("\n");
+  const collisionList = JSON.stringify(waveCollisions, null, 2);
+  const pushLine = remote
+    ? "Push each rename for durability and so the PR carries it: `git push` (the implement loop already set the upstream)."
+    : "Remote push is unavailable this run; commit locally — the shared `.git` persists.";
+  return `You are the orchestrator's deputy DECONFLICTING add/add naming collisions between sibling task branches built in parallel. Each branch already passed review on its own, but the pre-PR scan found that two or more INDEPENDENTLY added the same new file path, basename, or exported top-level symbol — which will clash (an add/add conflict, or a duplicate definition) when the branches merge. You decide how to deconflict, and you carry it out.
+
+Each held branch's commits persist in the shared \`.git\`; its worktree may have been reclaimed after review to bound disk use. For each branch you CHANGE, \`cd\` into its worktree using the exact, ready-to-run \`wt-enter\` command listed for that branch under "Held branches" below — its slug and branch are already shell-quoted there because a generated/task-derived branch name can contain shell metacharacters (\`$\`, backticks, \`;\`). NEVER hand-substitute a raw \`<branch>\` into \`wt-enter\` — copy the listed command verbatim. No base argument is needed: the branch already exists and \`wt-enter\` is rerun-safe, re-attaching the worktree if it was reclaimed.
+
+If \`wt-enter\` errors, STOP and report it. Verify \`git rev-parse --show-toplevel\` is that worktree and \`git branch --show-current\` is that branch before editing. Touch ONLY the worktree of the branch you are changing; never edit a sibling's worktree. Read \`AGENTS.md\` / \`CLAUDE.md\` for the project's regen and build commands.
+
+Held branches:
+${taskList}
+
+Collisions to resolve (from the read-only scan; \`name\` is the colliding value):
+${collisionList}
+
+For each collision:
+1. Pick the side(s) to change. There is no inherent "first", so choose the LEAST disruptive rename(s): branches with fewer references, not a path a framework mandates, not a name a task file pins. Read the colliding files on each branch first. Rename enough sides that AT MOST ONE branch keeps the original colliding path/basename/symbol. With a two-branch collision, renaming one side is normally enough and the other then delivers unchanged; with three or more branches, you may need to rename multiple sides.
+2. If the name is genuinely IMPERATIVE — it MUST stay identical (a framework-required filename, an external/published contract, or a name a task file explicitly mandates) — do NOT invent a divergent name. Mark the collision \`blocked\` with the reason and leave those branches untouched; a human decides. Blocking a real conflict beats shipping a wrong rename.
+3. Otherwise, on EACH branch you chose to change, rename the file and/or exported symbol plus every in-branch reference to it, to a clear name that is distinct from the original AND from any other renamed side — so two renamed branches cannot themselves re-collide on the new name. Regenerate anything derived from it (e.g. contracts). Run the project build / type-check — it MUST pass. Commit with a clear message. ${pushLine}
+4. Record the outcome with \`collision\` set to the exact \`name\` from the list above: \`renamed\` (with \`changedBranches\`, \`from\`, \`to\`, what you \`regenerated\`, and why that side) or \`blocked\` (with the reason; empty \`changedBranches\`).
+
+Do NOT open any PR and do NOT remove any worktree — the workflow re-reviews each changed branch and handles delivery. Return one resolution entry per collision.`;
+}
+
+async function implementTask(task, remote) {
   let findings = null;
   let verdict = null;
   let rounds = 0;
@@ -326,7 +454,13 @@ async function runTask(task, remote) {
     return { slug: task.slug, branch: task.branch, status: "review-cap", rounds, outstanding: verdict ? verdict.issues : null };
   }
 
-  const pr = await agent(prPrompt(task, verdict.notes, remote), {
+  // Reviewed and ready, but not delivered yet: the wave-level collision guard
+  // runs before any PR is opened or worktree is cleaned up.
+  return { slug: task.slug, branch: task.branch, status: "ready", rounds, notes: verdict.notes || "" };
+}
+
+async function deliverTask(task, ready, remote) {
+  const pr = await agent(prPrompt(task, ready.notes, remote), {
     label: `pr:${task.slug}`,
     schema: PR_SCHEMA,
   });
@@ -335,14 +469,14 @@ async function runTask(task, remote) {
   await agent(cleanupNote(task), { label: `cleanup:${task.slug}` });
 
   if (pr && pr.opened && pr.url) {
-    return { slug: task.slug, branch: task.branch, status: "done", rounds, prUrl: pr.url };
+    return { slug: task.slug, branch: task.branch, status: "done", rounds: ready.rounds, prUrl: pr.url };
   }
   // Reviewed and (usually) pushed, but no PR — do NOT count this as a landed PR.
   return {
     slug: task.slug,
     branch: task.branch,
     status: remote ? "pushed-no-pr" : "local-only",
-    rounds,
+    rounds: ready.rounds,
     pushed: pr ? pr.pushed : false,
     reason: pr ? pr.reason : "PR agent returned nothing",
   };
@@ -370,6 +504,7 @@ if (!plan || !Array.isArray(plan.waves) || plan.waves.length === 0) {
 const statusBySlug = new Map();
 const results = [];
 const throttled = [];
+const collisions = [];
 
 // Map every in-batch branch to the slug that produces it. A dependent task's
 // `base` IS its prerequisite's `branch` (stacked PRs), so this lets the gate
@@ -403,7 +538,8 @@ for (let w = 0; w < plan.waves.length; w++) {
   // prerequisite. A dependency is "succeeded" if it landed a PR (`done`) OR, on a
   // no-remote run, was implemented and reviewed locally (`local-only`): its base
   // branch and commits persist in the shared `.git`, so dependents can still
-  // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr` do not unlock.
+  // build on it. `error`/`review-cap`/`skipped-dep`/`pushed-no-pr`,
+  // `collision-hold`, `collision-blocked`, and `collision-scan-error` do not unlock.
   // Effective deps = the declared `dependsOn` UNION the prerequisite derived from
   // the `base`→`branch` relationship, so the gate holds even if the plan agent
   // omits a `dependsOn` entry it should have listed.
@@ -429,13 +565,209 @@ for (let w = 0; w < plan.waves.length; w++) {
     log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) (cap ${MAX_WAVE_WIDTH}, storage allows ${storageCap}).`);
     throttled.push({ wave: w + 1, tasks: runnable.length, width: widthCap });
   }
-  // Sub-batch the wave at the width cap: slower than full fan-out, but a wave
-  // that exhausts the .worktrees mount mid-flight delivers nothing.
+  // Sub-batch the wave at the width cap: a wave that exhausts the .worktrees
+  // mount mid-flight delivers nothing. But the pre-PR collision scan must compare
+  // EVERY reviewed branch before any delivery, so — unlike the old per-task flow
+  // that delivered and `wt-remove`d each task as it finished — delivery is now
+  // deferred to after the whole wave is scanned. Left unmanaged, that would let
+  // reviewed worktrees from earlier slices pile up while later slices run,
+  // re-introducing the ENOSPC the sub-batching exists to prevent. So reclaim each
+  // finished slice's reviewed worktrees right here: the branch refs persist in
+  // the shared `.git`, the scan compares by ref (it never enters a worktree), and
+  // the resolver, re-review, and delivery each re-attach on demand via `wt-enter`
+  // — keeping the live worktree count bounded by the cap. Only when the wave is
+  // actually sub-batched; a single-slice wave already fits the cap, so reclaiming
+  // it just to re-attach for delivery would be pure churn.
+  const ready = [];
+  const subBatched = runnable.length > widthCap;
   for (let i = 0; i < runnable.length; i += widthCap) {
     const slice = runnable.slice(i, i + widthCap);
-    const sliceResults = await parallel(slice.map((task) => () => runTask(task, remote)));
+    const sliceResults = await parallel(slice.map((task) => () => implementTask(task, remote)));
+    const sliceReady = [];
     sliceResults.forEach((r, j) => {
       const res = r || { slug: slice[j].slug, branch: slice[j].branch, status: "error", detail: "task crashed" };
+      if (res.status === "ready") {
+        const entry = { task: slice[j], result: res };
+        ready.push(entry);
+        sliceReady.push(entry);
+      } else {
+        statusBySlug.set(res.slug, res.status);
+        results.push(res);
+      }
+    });
+    if (subBatched && sliceReady.length) {
+      await parallel(sliceReady.map(({ task }) => () => agent(cleanupNote(task), { label: `reclaim:${task.slug}` })));
+    }
+  }
+
+  // Pre-PR collision guard. Independent sibling branches in this wave each live
+  // in their own worktree, so two can ADD the same new file or exported symbol
+  // with no in-worktree conflict. Scan reviewed branches before delivery so a
+  // known clash does not become a fresh PR that immediately needs a rename.
+  let heldBranches = new Set();
+  let scanError = "";
+  if (ready.length >= 2) {
+    phase(`Collision scan (wave ${w + 1})`);
+    const scan = await agent(
+      collisionScanPrompt(ready.map(({ task }) => ({ slug: task.slug, branch: task.branch, base: task.base || plan.defaultBase }))),
+      { label: `collision-scan:w${w + 1}`, schema: COLLISION_SCHEMA }
+    );
+    if (!scan || !Array.isArray(scan.collisions)) {
+      scanError = `collision scan failed for wave ${w + 1}; holding reviewed branches before PR delivery`;
+      log(scanError);
+    } else if (scan.collisions.length) {
+      collisions.push(...scan.collisions.map((c) => ({ ...c, wave: w + 1 })));
+      heldBranches = new Set(scan.collisions.flatMap(collisionBranchNames));
+      log(`${scan.collisions.length} cross-branch naming collision(s) in wave ${w + 1}; holding ${heldBranches.size} branch(es) before PR delivery.`);
+    }
+  }
+
+  // Partition the wave's reviewed branches: clean ones are deliverable; ones the
+  // scan flagged go to resolution; a scan failure holds everything it covered.
+  const deliverable = [];
+  const heldTasks = [];
+  ready.forEach(({ task, result }) => {
+    if (scanError) {
+      const held = {
+        slug: task.slug,
+        branch: task.branch,
+        status: "collision-scan-error",
+        rounds: result.rounds,
+        detail: scanError,
+      };
+      statusBySlug.set(task.slug, held.status);
+      results.push(held);
+    } else if (heldBranches.has(task.branch) || heldBranches.has(task.slug)) {
+      heldTasks.push({ task, result });
+    } else {
+      deliverable.push({ task, result });
+    }
+  });
+
+  // Collision resolution. Neither side of an add/add clash is inherently "first",
+  // so a single orchestrator-deputy agent — seeing every held branch and its
+  // worktree, still in place — decides which side to rename and does it: rename
+  // the file/symbol, regenerate derived files, commit, push. A name that MUST
+  // stay identical (framework-mandated, externally fixed, or pinned by a task
+  // file) is reported `blocked` instead of getting an invented divergent name.
+  // Each branch the resolver CHANGED is then re-reviewed fresh (one pass) before
+  // it may deliver; the unchanged side of a resolved clash delivers as-is; a
+  // blocked, unresolved, or re-review-failed branch stays held for a human.
+  if (heldTasks.length) {
+    const waveCollisions = collisions.filter((c) => c.wave === w + 1);
+    const relatedFor = (task) =>
+      waveCollisions.filter((c) => {
+        const names = collisionBranchNames(c);
+        return names.includes(task.branch) || names.includes(task.slug);
+      });
+
+    phase(`Collision resolve (wave ${w + 1})`);
+    const resolution = await agent(
+      resolveCollisionsPrompt(
+        heldTasks.map(({ task }) => ({ slug: task.slug, branch: task.branch, base: task.base || plan.defaultBase })),
+        waveCollisions,
+        remote
+      ),
+      { label: `collision-resolve:w${w + 1}`, schema: RESOLUTION_SCHEMA }
+    );
+    const resolutions = resolution && Array.isArray(resolution.resolutions) ? resolution.resolutions : null;
+
+    // Index the resolver's outcome by branch and by collision name. A collision
+    // is actually resolved only when enough involved branches were changed that
+    // at most one branch still carries the original colliding value. This matters
+    // for 3+ branch clashes: renaming one side leaves the other two still
+    // colliding, so those unchanged branches must stay held.
+    const changedBranches = new Set();
+    const changedBranchesByCollision = new Map();
+    const blockedNames = new Set();
+    if (resolutions) {
+      for (const r of resolutions) {
+        const changed = Array.isArray(r.changedBranches) ? r.changedBranches.map(normalizeBranchName).filter(Boolean) : [];
+        if (r.action === "renamed") {
+          changed.forEach((n) => changedBranches.add(n));
+          if (r.collision) {
+            const existing = changedBranchesByCollision.get(r.collision) || new Set();
+            changed.forEach((n) => existing.add(n));
+            changedBranchesByCollision.set(r.collision, existing);
+          }
+        } else if (r.action === "blocked" && r.collision) {
+          blockedNames.add(r.collision);
+        }
+      }
+    }
+    const collisionBlocked = (c) => blockedNames.has(c.name);
+    // Only branches the resolver reported as changed FOR THIS collision count
+    // toward resolving it. An earlier version also credited any branch in the
+    // global `changedBranches` set, to guard against a resolver that mistypes the
+    // collision echo — but that is unsound when a branch sits in more than one
+    // collision: renaming branch B to fix an A/B path clash would also mark B
+    // "changed" for an unrelated B/C symbol clash, dropping that clash to a single
+    // remaining branch and letting B and C both deliver while still colliding. A
+    // mis-echoed rename now conservatively leaves the branch held (for a manual
+    // pass / re-scan) instead — matching this guard's bias that holding a real
+    // conflict beats shipping a wrong delivery.
+    const changedForCollision = (c) => new Set(changedBranchesByCollision.get(c.name) || []);
+    const remainingForCollision = (c) => {
+      const changed = changedForCollision(c);
+      return collisionBranchNames(c).filter((n) => !changed.has(n));
+    };
+    const collisionResolved = (c) => !collisionBlocked(c) && remainingForCollision(c).length <= 1;
+    const collisionStillIncludes = (c, task) => {
+      if (collisionBlocked(c)) return true;
+      const names = collisionBranchNames(c);
+      const participates = names.includes(task.branch) || names.includes(task.slug);
+      if (!participates) return false;
+      const changed = changedForCollision(c);
+      if (changed.has(task.branch) || changed.has(task.slug)) return false;
+      return remainingForCollision(c).length >= 2;
+    };
+
+    for (const { task, result } of heldTasks) {
+      const related = relatedFor(task);
+      const isChanged = changedBranches.has(task.branch) || changedBranches.has(task.slug);
+
+      if (!resolutions) {
+        const held = { slug: task.slug, branch: task.branch, status: "collision-hold", rounds: result.rounds, detail: "collision resolver returned no result; branch held before PR delivery — deconflict manually and re-review", collisions: related };
+        statusBySlug.set(task.slug, held.status);
+        results.push(held);
+      } else if (related.some(collisionBlocked)) {
+        // An imperative shared name still clashes even if this branch was also
+        // touched — keep it held for a human/design decision.
+        const held = { slug: task.slug, branch: task.branch, status: "collision-blocked", rounds: result.rounds, detail: "shared name must stay identical (imperative); resolver could not deconflict — needs a human/design decision", collisions: related };
+        statusBySlug.set(task.slug, held.status);
+        results.push(held);
+      } else if (related.some((c) => collisionStillIncludes(c, task))) {
+        const held = { slug: task.slug, branch: task.branch, status: "collision-hold", rounds: result.rounds, detail: "collision still has two or more unchanged branches after resolver ran; branch held before PR delivery — rename enough sides and re-review", collisions: related };
+        statusBySlug.set(task.slug, held.status);
+        results.push(held);
+      } else if (isChanged) {
+        // Fresh re-review of the rename — one pass; hold on failure rather than loop.
+        const verdict = await agent(reviewPrompt(task), { label: `re-review:${task.slug}`, schema: VERDICT_SCHEMA });
+        if (verdict && verdict.pass && !verdict.emptyDiffFlag) {
+          deliverable.push({ task, result: { ...result, notes: verdict.notes || result.notes } });
+        } else {
+          const held = { slug: task.slug, branch: task.branch, status: "collision-hold", rounds: result.rounds, detail: "rename did not pass fresh re-review; held before PR delivery", outstanding: verdict ? verdict.issues : null, collisions: related };
+          statusBySlug.set(task.slug, held.status);
+          results.push(held);
+        }
+      } else if (related.every(collisionResolved)) {
+        // Unchanged side of a clash the resolver fixed on the other branch.
+        deliverable.push({ task, result });
+      } else {
+        // Resolver neither changed nor blocked this branch's clash — do not
+        // re-introduce it by delivering; hold for a manual pass.
+        const held = { slug: task.slug, branch: task.branch, status: "collision-hold", rounds: result.rounds, detail: "collision left unresolved by the resolver; branch held before PR delivery — deconflict manually and re-review", collisions: related };
+        statusBySlug.set(task.slug, held.status);
+        results.push(held);
+      }
+    }
+  }
+
+  for (let i = 0; i < deliverable.length; i += widthCap) {
+    const slice = deliverable.slice(i, i + widthCap);
+    const delivered = await parallel(slice.map(({ task, result }) => () => deliverTask(task, result, remote)));
+    delivered.forEach((r, j) => {
+      const res = r || { slug: slice[j].task.slug, branch: slice[j].task.branch, status: "error", detail: "delivery crashed" };
       statusBySlug.set(res.slug, res.status);
       results.push(res);
     });
@@ -445,4 +777,4 @@ for (let w = 0; w < plan.waves.length; w++) {
 phase("Summary");
 const landed = results.filter((r) => r.status === "done").length;
 log(`Batch complete: ${landed}/${results.length} tasks landed a PR.`);
-return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, results };
+return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, results };

@@ -126,9 +126,31 @@ For a wave of tasks `T1..Tn`:
 
    Concurrency is safe here **only because each agent has its own worktree.** If for any reason a task is not running in its own worktree, fall back to serializing that task as in `address-tasks`.
 
-3. **On pass, push and open a PR** for the task (see Delivery), then `wt-remove <task-slug>` to reclaim storage (the branch and its commits persist in `.git` and on the remote).
+3. **Before delivery, run the sibling add/add collision guard below** across the wave's reviewed-passing branches. For non-colliding tasks, push and open a PR (see Delivery), then `wt-remove <task-slug>` to reclaim storage (the branch and its commits persist in `.git` and on the remote). For colliding tasks, do **not** open the PR yet; leave the worktree in place, reconcile the naming/path conflict, regenerate derived files, and re-review that task before delivery.
 
-4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches).
+4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches). A branch held for a collision is not resolved and must not unlock its dependents.
+
+### Guarding against sibling add/add collisions
+
+Independent tasks in the same wave run in **separate worktrees**, so two of them can each *add* the same new file — or a file exporting the same top-level class/symbol — with no conflict at implementation time. The clash only surfaces later, when the branches linearize or merge (an add/add conflict, or a duplicate definition). It is rare, but it has happened; two cheap guards keep it from costing a fix-up round:
+
+- **Prevent it up front.** When you fan out two independent tasks that both introduce the same *kind* of new surface (a "reconciliation controller", a "work-list endpoint", a migration helper), assign each a **distinct file and class name** in its implementer prompt. The implementers can't see each other, so the disambiguation has to come from you.
+- **Catch it before the PRs.** After a wave's tasks pass review but **before** opening their PRs, compare what each sibling branch newly added:
+
+  ```bash
+  # Exact same new path.
+  for b in <wave-branch-1> <wave-branch-2> ...; do
+    git diff --diff-filter=A --name-only <that-branch's-base>...$b
+  done | sort | uniq -d
+
+  # Same new basename at any path; inspect repeated first columns.
+  for b in <wave-branch-1> <wave-branch-2> ...; do
+    git diff --diff-filter=A --name-only <that-branch's-base>...$b |
+      awk -v branch="$b" '{ n=split($0, p, "/"); print p[n] "\t" branch "\t" $0 }'
+  done | sort
+  ```
+
+  A duplicated path (or basename, or a shared exported top-level class/function/const/interface/type/enum name across two added files) is a collision. Hold the colliding branch(es) before PR delivery, then **deconflict — that call is yours to make** (a bounded exception to "the orchestrator doesn't implement", like building an integration branch): there is no inherent "first", so pick the side(s) whose rename is least disruptive, rename enough files and/or symbols that at most one branch keeps the original colliding value, regenerate anything derived (e.g. contracts), and **re-review each changed task with fresh eyes** before its PR; any unchanged non-colliding side then delivers unchanged. If the shared name is **imperative** — a framework-mandated path, an external/published contract, or a name a task file explicitly pins — do **not** invent a divergent name: keep those branches held and surface it as a design decision for a human. Diff each branch against **its own base** with the three-dot form so a dependent branch that legitimately builds on a sibling isn't flagged — it never re-lists an inherited file. (The `wf-address-tasks` workflow automates this end to end: a deputy agent makes the same which-side call, performs the rename + regen, and the workflow re-reviews each changed branch before delivery — holding as `collision-blocked` any branch whose name it can't deconflict.)
 
 ## Implementer Agent
 

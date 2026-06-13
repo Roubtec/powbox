@@ -9,17 +9,19 @@
 # steps. The egress model is push / PR — the host never sees the working tree.
 #
 # Inputs (env, set by the launcher at container creation; frozen for the container's
-# life, which is why --reclone recreates the container):
+# life):
 #   POWBOX_SELF_HOSTED   "1" enables this script; anything else is a no-op (exit 0)
 #   POWBOX_CLONE_REPO    repo spec — an owner/repo slug or a clone URL (required)
 #   POWBOX_CLONE_REF     optional branch/tag to start on (default: the repo default)
-#   POWBOX_RECLONE       "1" wipes the existing checkout and re-clones
 #   POWBOX_WORKSPACE_DIR target dir (the workspace mount); defaults to $PWD
 #
-# Reuse semantics: clone once on first creation; on a restart of a named container,
-# an existing .git means the agent already owns its branches/worktrees, so the tree
-# is left exactly as it was (skip). --reclone is the explicit "wipe and re-seed"
-# escape hatch; it re-clones into the cleaned dir (the volume itself is kept).
+# Reuse semantics: clone once when the workspace has no .git; on a restart of a
+# named container an existing .git means the agent already owns its branches/
+# worktrees, so the tree is left exactly as it was (skip). This must NOT carry any
+# "always re-clone" flag, or a reused container would wipe the agent's work on
+# every restart. The `--reclone` escape hatch is therefore handled launcher-side as
+# a ONE-SHOT: the launcher empties the (kept) workspace volume before recreating the
+# container, so this script then sees an empty dir and clones fresh.
 #
 # By DESIGN there is no clone/auth failsafe and no retry: gh auth is a one-time
 # manual setup that holds until the token expires. On any clone failure this prints
@@ -34,7 +36,6 @@ set -euo pipefail
 WS="${POWBOX_WORKSPACE_DIR:-$PWD}"
 REPO="${POWBOX_CLONE_REPO:-}"
 REF="${POWBOX_CLONE_REF:-}"
-RECLONE="${POWBOX_RECLONE:-0}"
 
 # Resolve a clone URL from an owner/repo slug or a full URL, for display + cloning.
 clone_url() {
@@ -89,13 +90,8 @@ fi
 
 mkdir -p "$WS"
 
-# --reclone: wipe the working tree (keep the volume mount) before re-seeding.
-if [ "$RECLONE" = "1" ] && [ -e "$WS/.git" ]; then
-	echo "seed-workspace: --reclone — wiping $WS before re-cloning." >&2
-	find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-fi
-
-# Reuse: an existing checkout is left exactly as the agent left it.
+# Reuse: an existing checkout is left exactly as the agent left it. (A --reclone
+# launch empties the volume launcher-side, so this branch is not taken then.)
 if [ -e "$WS/.git" ]; then
 	echo "seed-workspace: existing checkout in $WS — reusing it (skipping clone)." >&2
 	exit 0

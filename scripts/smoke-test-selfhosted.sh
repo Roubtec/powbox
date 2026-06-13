@@ -143,12 +143,16 @@ docker run --rm -v "${WSVOL}:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ -e /ws/SMO
 	fail "reuse re-cloned (marker was wiped)"
 ok "reuse skips the clone and preserves the working tree"
 
-# --reclone wipes + re-seeds: the marker must be gone, .git present again
-run_seed -e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" -e POWBOX_RECLONE=1 >/dev/null 2>&1 ||
-	fail "--reclone failed"
+# --reclone is a one-shot launcher action: it empties the (kept) volume, then the
+# entrypoint clones fresh. Simulate the launcher's prep wipe, then re-seed; the
+# marker must be gone and a new .git present.
+docker run --rm --user root -v "${WSVOL}:/ws" --entrypoint /bin/sh "$IMAGE" \
+	-c 'find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; true'
+run_seed -e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" >/dev/null 2>&1 ||
+	fail "re-clone after a --reclone wipe failed"
 docker run --rm -v "${WSVOL}:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ ! -e /ws/SMOKE_MARKER ] && [ -e /ws/.git ]' ||
-	fail "--reclone did not wipe + re-clone"
-ok "--reclone wipes the tree and re-clones"
+	fail "--reclone wipe + re-clone did not produce a clean checkout"
+ok "--reclone (launcher empties the volume) yields a fresh clone"
 
 # unauthenticated/failed clone → loud announcement + non-zero exit
 docker volume create "${WSVOL}-fail" >/dev/null

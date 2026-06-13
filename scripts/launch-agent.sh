@@ -380,10 +380,10 @@ if [ "$RESUME" = true ]; then
 fi
 
 # Self-hosted --reclone: wipe and re-seed an existing named container's clone.
-# The clone inputs (POWBOX_RECLONE etc.) are frozen at creation, so the only way
-# to re-trigger the seed step on a reused container is to recreate it — removing a
-# stopped container keeps its agent-ws-* volume, and the fresh container's
-# POWBOX_RECLONE=1 makes the entrypoint wipe that volume's tree and clone again.
+# A reused container is started in place (reuse block below) and never re-runs the
+# prep/create flow, so --reclone removes the stopped container to force that flow;
+# the prep step then empties the (kept) agent-ws-* volume and the entrypoint clones
+# fresh. The wipe is one-shot — nothing about it is frozen into the container.
 if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		echo "Container ${CONTAINER_NAME} is running; stop it before --reclone (it re-clones on recreate)." >&2
@@ -626,12 +626,20 @@ fi
 # (it must be node-owned before the entrypoint clones into it) and no nm/wt
 # shadows; dir-mounted mode has the separate node_modules + worktrees shadows.
 if [ "$ISOLATED" = true ]; then
+	# --reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
+	# (the container was recreated above) so the entrypoint re-clones into a clean
+	# dir. The volume itself is kept. Nothing persists the wipe, so a later restart
+	# of a named instance never re-wipes the agent's work.
+	WS_PREP_CMD='mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore'
+	if [ "$RECLONE" = true ]; then
+		WS_PREP_CMD='find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; '"$WS_PREP_CMD"
+	fi
 	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 		-v "${WS_VOLUME}:/mnt/workspace" \
 		-v "${PODMAN_VOLUME}:/mnt/containers" \
 		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
 		agent \
-		-lc 'mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore'
+		-lc "$WS_PREP_CMD"
 else
 	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
 		-v "${NM_VOLUME}:/mnt/node_modules" \
@@ -685,18 +693,17 @@ esac
 EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT" -e "PNPM_STORE_DIR=$WT_STORE_DIR")
 
 # Self-hosted clone inputs. The entrypoint (after gh auth) clones POWBOX_CLONE_REPO
-# at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, skips the clone when a .git already
-# exists (reuse), and wipes-then-re-clones when POWBOX_RECLONE=1. These are frozen
-# at container creation, which is why --reclone recreates the container above.
+# at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and skips the clone when a .git
+# already exists (reuse — the agent owns its tree). These env vars are frozen at
+# container creation; --reclone is NOT one of them on purpose — it is a one-shot
+# launcher action (the prep step below empties the volume so the entrypoint clones
+# fresh), so a reused container never re-wipes the agent's work on a later restart.
 SELFHOSTED_LABEL=()
 if [ "$ISOLATED" = true ]; then
-	RECLONE_FLAG=0
-	[ "$RECLONE" = true ] && RECLONE_FLAG=1
 	EXTRA_ENV+=(
 		-e "POWBOX_SELF_HOSTED=1"
 		-e "POWBOX_CLONE_REPO=$REPO_SPEC"
 		-e "POWBOX_CLONE_REF=$CLONE_REF"
-		-e "POWBOX_RECLONE=$RECLONE_FLAG"
 		-e "POWBOX_WORKSPACE_DIR=$WORKSPACE_MOUNT"
 	)
 	# Label self-hosted containers so tooling/lists can distinguish them from

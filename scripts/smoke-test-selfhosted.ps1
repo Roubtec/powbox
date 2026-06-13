@@ -138,15 +138,17 @@ try {
   if ($LASTEXITCODE -ne 0) { Fail "reuse re-cloned (marker was wiped)" }
   Ok "reuse skips the clone and preserves the working tree"
 
-  # -Reclone wipes + re-seeds
+  # -Reclone is a one-shot launcher action: it empties the (kept) volume, then the
+  # entrypoint clones fresh. Simulate the launcher's prep wipe, then re-seed.
+  docker run --rm --user root -v "${wsVol}:/ws" --entrypoint /bin/sh $Image -c 'find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; true' *> $null
   docker run --rm --user root `
     -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
-    -e "POWBOX_CLONE_REPO=$publicRepo" -e POWBOX_RECLONE=1 `
+    -e "POWBOX_CLONE_REPO=$publicRepo" `
     -v "${wsVol}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image *> $null
-  if ($LASTEXITCODE -ne 0) { Fail "-Reclone failed" }
+  if ($LASTEXITCODE -ne 0) { Fail "re-clone after a -Reclone wipe failed" }
   docker run --rm -v "${wsVol}:/ws" --entrypoint /bin/sh $Image -c '[ ! -e /ws/SMOKE_MARKER ] && [ -e /ws/.git ]' *> $null
-  if ($LASTEXITCODE -ne 0) { Fail "-Reclone did not wipe + re-clone" }
-  Ok "-Reclone wipes the tree and re-clones"
+  if ($LASTEXITCODE -ne 0) { Fail "-Reclone wipe + re-clone did not produce a clean checkout" }
+  Ok "-Reclone (launcher empties the volume) yields a fresh clone"
 
   # unauthenticated/failed clone -> loud announcement + non-zero exit
   docker volume create $wsFail *> $null

@@ -264,11 +264,11 @@ if ($Resume) {
   exit $LASTEXITCODE
 }
 
-# Self-hosted -Reclone: wipe and re-seed an existing named container's clone. The
-# clone inputs (POWBOX_RECLONE etc.) are frozen at creation, so the only way to
-# re-trigger the seed step on a reused container is to recreate it — removing a
-# stopped container keeps its agent-ws-* volume, and the fresh container's
-# POWBOX_RECLONE=1 makes the entrypoint wipe that volume's tree and clone again.
+# Self-hosted -Reclone: wipe and re-seed an existing named container's clone. A
+# reused container is started in place (reuse block below) and never re-runs the
+# prep/create flow, so -Reclone removes the stopped container to force that flow;
+# the prep step then empties the (kept) agent-ws-* volume and the entrypoint clones
+# fresh. The wipe is one-shot - nothing about it is frozen into the container.
 if ($Isolated -and $Reclone -and -not $Volatile -and $containerExists) {
   if ($containerRunning) {
     Write-Error "Container $containerName is running; stop it before -Reclone (it re-clones on recreate)."
@@ -559,12 +559,20 @@ if ($resolvedCtx -ne "") {
 # must be node-owned before the entrypoint clones into it) and no nm/wt shadows;
 # dir-mounted mode has the separate node_modules + worktrees shadows.
 if ($Isolated) {
+  # -Reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
+  # (the container was recreated above) so the entrypoint re-clones into a clean
+  # dir. The volume itself is kept. Nothing persists the wipe, so a later restart
+  # of a named instance never re-wipes the agent's work.
+  $wsPrepCmd = "mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore"
+  if ($Reclone) {
+    $wsPrepCmd = "find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; " + $wsPrepCmd
+  }
   docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
     -v "${workspaceVolume}:/mnt/workspace" `
     -v "${podmanVolume}:/mnt/containers" `
     -v "agent-podman-imagestore:/mnt/podman-imagestore" `
     agent `
-    -lc "mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore"
+    -lc $wsPrepCmd
 }
 else {
   docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
@@ -658,21 +666,20 @@ if (",$podmanDevices," -like "*,fuse,*") {
 $envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "--label", "powbox.podman-devices=$podmanDevices", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent", "-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 
 # Self-hosted clone inputs + label, plus the volume mounts. The entrypoint (after gh
-# auth) clones POWBOX_CLONE_REPO at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, skips
-# the clone when a .git already exists (reuse), and wipes-then-re-clones when
-# POWBOX_RECLONE=1; these are frozen at creation (why -Reclone recreates above). In
-# dir-mounted mode the root node_modules and .worktrees are separate per-project
-# named volumes mounted over the bind mount; in self-hosted mode they are ordinary
-# subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no
-# extra -v args are added here.
+# auth) clones POWBOX_CLONE_REPO at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and
+# skips the clone when a .git already exists (reuse). These are frozen at creation;
+# -Reclone is NOT one of them on purpose - it is a one-shot launcher action (the prep
+# step empties the volume so the entrypoint clones fresh), so a reused container
+# never re-wipes the agent's work on a later restart. In dir-mounted mode the root
+# node_modules and .worktrees are separate per-project named volumes mounted over the
+# bind mount; in self-hosted mode they are ordinary subdirs of the one workspace
+# volume (mounted via compose.selfhosted.yml), so no extra -v args are added here.
 $workspaceVolArgs = @()
 if ($Isolated) {
-  $recloneFlag = if ($Reclone) { "1" } else { "0" }
   $envArgs += @(
     "-e", "POWBOX_SELF_HOSTED=1",
     "-e", "POWBOX_CLONE_REPO=$repoSpec",
     "-e", "POWBOX_CLONE_REF=$Ref",
-    "-e", "POWBOX_RECLONE=$recloneFlag",
     "-e", "POWBOX_WORKSPACE_DIR=$workspaceMount"
   )
   # Label self-hosted containers so tooling/lists can distinguish them from

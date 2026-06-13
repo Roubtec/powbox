@@ -56,6 +56,17 @@ _powbox_should_cd() {
     esac
 }
 
+# True if the given args contain a flag (used to suppress the cd-after-launch when
+# the positional is a self-hosted repo spec, not a host path).
+_powbox_arg_present() {
+    local needle="$1"; shift
+    local a
+    for a in "$@"; do
+        [ "$a" = "$needle" ] && return 0
+    done
+    return 1
+}
+
 cc() {
     if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
@@ -63,7 +74,9 @@ cc() {
         local target="$1"; shift
         "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
         local rc=$?
-        if [ $rc -eq 0 ] && _powbox_should_cd; then
+        # In self-hosted (--isolated) mode the positional is a repo spec, not a
+        # path, so never cd into it.
+        if [ $rc -eq 0 ] && _powbox_should_cd && ! _powbox_arg_present --isolated "$@"; then
             cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc
@@ -77,7 +90,9 @@ cx() {
         local target="$1"; shift
         "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
         local rc=$?
-        if [ $rc -eq 0 ] && _powbox_should_cd; then
+        # In self-hosted (--isolated) mode the positional is a repo spec, not a
+        # path, so never cd into it.
+        if [ $rc -eq 0 ] && _powbox_should_cd && ! _powbox_arg_present --isolated "$@"; then
             cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc

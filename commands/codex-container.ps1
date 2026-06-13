@@ -8,7 +8,12 @@ param(
   [switch]$Continue,
   [switch]$Volatile,
   [string]$Exec = "",
-  [string]$Ctx = ""
+  [string]$Ctx = "",
+  [switch]$Isolated,
+  [string]$Repo = "",
+  [string]$Name = "",
+  [string]$Ref = "",
+  [switch]$Reclone
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,4 +31,9 @@ $rootDir = Split-Path -Parent $scriptDir
   -Continue:$Continue `
   -Volatile:$Volatile `
   -Exec $Exec `
-  -Ctx $Ctx
+  -Ctx $Ctx `
+  -Isolated:$Isolated `
+  -Repo $Repo `
+  -Name $Name `
+  -Ref $Ref `
+  -Reclone:$Reclone

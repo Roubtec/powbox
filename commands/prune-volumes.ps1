@@ -21,11 +21,14 @@ foreach ($containerName in $containerNames) {
     if ($projectSuffix) {
         # Each container expects an nm (node_modules) and a wt (worktrees + pnpm
         # store) volume for its project (project-keyed, shared between the
-        # project's two agents) plus its own agent-podman-* store, keyed by the
-        # FULL container name so a project's concurrently-running Claude and Codex
-        # containers never share one Podman graphroot.
+        # project's two agents) plus its own agent-podman-* store and (for a
+        # self-hosted container) its agent-ws-* workspace, both keyed by the FULL
+        # container name so a project's concurrently-running Claude and Codex
+        # containers never share one. agent-ws-* is over-expected for dir-mounted
+        # containers too (which never create one), which is harmless.
         [void]$expectedVolumes.Add("agent-nm-$projectSuffix")
         [void]$expectedVolumes.Add("agent-wt-$projectSuffix")
+        [void]$expectedVolumes.Add("agent-ws-$containerName")
         [void]$expectedVolumes.Add("agent-podman-$containerName")
     }
 }
@@ -35,14 +38,14 @@ foreach ($containerName in $containerNames) {
 # candidate glob below but is never an orphan. Always expect it.
 [void]$expectedVolumes.Add("agent-podman-imagestore")
 
-# Candidates: agent-nm-* / agent-wt-* / agent-podman-* plus the deprecated shared
-# store (agent-pnpm-store), which nothing mounts anymore now that the store is
-# per-project inside each agent-wt-* volume.
-$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -like 'agent-podman-*' -or $_ -eq 'agent-pnpm-store' })
+# Candidates: agent-nm-* / agent-wt-* / agent-ws-* / agent-podman-* plus the
+# deprecated shared store (agent-pnpm-store), which nothing mounts anymore now that
+# the store is per-project inside each agent-wt-* volume.
+$candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -like 'agent-ws-*' -or $_ -like 'agent-podman-*' -or $_ -eq 'agent-pnpm-store' })
 $pruneCandidates = @($candidateVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
 
 if ($pruneCandidates.Count -eq 0) {
-    Write-Host 'No orphaned agent-nm-*/agent-wt-*/agent-podman-* (or deprecated agent-pnpm-store) volumes found.'
+    Write-Host 'No orphaned agent-nm-*/agent-wt-*/agent-ws-*/agent-podman-* (or deprecated agent-pnpm-store) volumes found.'
     return
 }
 

@@ -52,14 +52,22 @@ function cc {
         [switch]$Resume,
         [switch]$Continue,
         [switch]$Volatile,
-        [string]$Ctx = ""
+        [string]$Ctx = "",
+        [switch]$Isolated,
+        [string]$Repo = "",
+        [string]$Name = "",
+        [string]$Ref = "",
+        [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Ctx $Ctx
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
+        -Ctx $Ctx `
+        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
+    # never Set-Location into it.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath
     }
 }
@@ -75,14 +83,22 @@ function cx {
         [switch]$Continue,
         [switch]$Volatile,
         [string]$Exec = "",
-        [string]$Ctx = ""
+        [string]$Ctx = "",
+        [switch]$Isolated,
+        [string]$Repo = "",
+        [string]$Name = "",
+        [string]$Ref = "",
+        [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Exec $Exec -Ctx $Ctx
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
+        -Exec $Exec -Ctx $Ctx `
+        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
+    # never Set-Location into it.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath
     }
 }

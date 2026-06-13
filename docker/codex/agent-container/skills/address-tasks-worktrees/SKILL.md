@@ -192,7 +192,9 @@ It is rare, but it has happened; two cheap guards keep it from costing a fix-up 
   done | sort
   ```
 
-  A duplicated path (or basename, or a shared exported top-level class/function/const/interface/type/enum name across two added files) is a collision: hold the colliding branch(es) before PR delivery, rename one side, regenerate anything derived (e.g. contracts), and re-review the changed task before its PR.
+  A duplicated path (or basename, or a shared exported top-level class/function/const/interface/type/enum name across two added files) is a collision.
+  Hold the colliding branch(es) before PR delivery, then **deconflict — that call is yours to make** (a bounded exception to "the orchestrator doesn't implement", like building an integration branch): there is no inherent "first", so pick the side whose rename is least disruptive, rename its file and/or symbol, regenerate anything derived (e.g. contracts), and **re-review that changed task with fresh eyes** before its PR; the other side then delivers unchanged.
+  If the shared name is **imperative** — a framework-mandated path, an external/published contract, or a name a task file explicitly pins — do **not** invent a divergent name: keep both branches held and surface it as a design decision for a human.
   Diff each branch against **its own base** with the three-dot form so a dependent branch that legitimately builds on a sibling isn't flagged — it never re-lists an inherited file.
 
 ## Implementer Agent

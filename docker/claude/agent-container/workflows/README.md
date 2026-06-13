@@ -128,10 +128,11 @@ agent diffs the files each branch added relative to its own base
 (`--diff-filter=A`, three-dot, so stacked branches don't false-flag). On a clash
 the colliding branches are held with their worktrees intact, then a second
 **orchestrator-deputy agent deconflicts** them: it picks the least-disruptive
-side(s), renames enough files/symbols that at most one branch keeps the original
-colliding value, regenerates derived files, and commits — and each changed branch
-is re-reviewed fresh before it delivers, while any unchanged non-colliding side
-delivers as-is. A name that must stay identical (framework-mandated, externally
+side(s) and renames enough files/symbols that at most one branch keeps the
+original colliding value — each renamed side getting a name distinct from the
+others, so the renames can't re-collide — regenerates derived files, and commits;
+each changed branch is then re-reviewed fresh before it delivers, while any
+unchanged non-colliding side delivers as-is. A name that must stay identical (framework-mandated, externally
 fixed, or pinned by a task file) is reported `collision-blocked` rather than given
 an invented divergent name, and stays held for a human. The prose skill documents
 the same flow (plus the up-front "give same-kind surfaces distinct names"

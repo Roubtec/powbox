@@ -400,10 +400,14 @@ function _Powbox-AgentList {
     $selfHosted = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
     docker ps -a @Filters --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}" | ForEach-Object {
         $line = $_
-        $marked = ""
-        foreach ($name in $selfHosted) {
-            if ($line -like "*$name*") { $marked = " [self-hosted]"; break }
-        }
+        # Names is field 2 of the table (ID NAMES STATUS IMAGE), and a container name
+        # never contains whitespace, so the 2nd whitespace-delimited token is the
+        # row's exact name. Compare it for EQUALITY: matching the whole line by
+        # substring would mislabel a row when one container name is a substring of
+        # another (claude-foo vs claude-foo-bar) or appears in another column. The
+        # header row's field 2 ("ID") matches no container, so it passes through.
+        $rowName = ($line.TrimStart() -split '\s+', 3)[1]
+        $marked = if ($selfHosted -contains $rowName) { " [self-hosted]" } else { "" }
         "$line$marked"
     }
 }

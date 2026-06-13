@@ -366,13 +366,22 @@ _powbox_agent_list() {
         [ -n "$name" ] && self_hosted+=("$name")
     done < <(docker ps -a "$@" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
 
-    local line marked
+    local line row_name marked
     while IFS= read -r line; do
+        # The Names column is field 2 of the table (ID NAMES STATUS IMAGE), and a
+        # container name never contains whitespace, so the 2nd whitespace-delimited
+        # token is the row's exact name. Compare it for EQUALITY: matching the whole
+        # formatted line by substring would mislabel a row when one container name is
+        # a substring of another (claude-foo vs claude-foo-bar) or when a name shows
+        # up in another column. The header row's field 2 ("ID") matches no container,
+        # so it passes through unmarked.
+        row_name="$(printf '%s\n' "$line" | awk '{print $2}')"
         marked=""
         for name in "${self_hosted[@]}"; do
-            case "$line" in
-                *"$name"*) marked=" [self-hosted]"; break ;;
-            esac
+            if [ "$row_name" = "$name" ]; then
+                marked=" [self-hosted]"
+                break
+            fi
         done
         printf '%s%s\n' "$line" "$marked"
     done < <(docker ps -a "$@" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}')

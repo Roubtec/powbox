@@ -46,6 +46,29 @@ function Get-Powbox-Hash12 ([string]$Value) {
   ).Replace("-", "").Substring(0, 12).ToLowerInvariant()
 }
 
+# Canonical "host/owner/repo" key for a repo spec (lowercased, .git stripped, any
+# userinfo removed) so different repos sharing a basename get distinct identities,
+# while the SAME repo expressed different ways (owner/repo slug, https URL,
+# scp-style git@host:path) maps to one stable key. Folded into a NAMED instance's
+# discriminator below. Must stay in lockstep with launch-agent.sh's repo_identity
+# so the two launchers agree on a named instance's identity.
+function Get-Powbox-RepoIdentity ([string]$Spec) {
+  $id = $Spec
+  if ($id -match '://') {
+    $id = $id -replace '^[^:]+://', ''   # drop scheme://
+    $id = $id -replace '^[^@/]*@', ''    # drop any userinfo
+  }
+  elseif ($id -match '^[^/]+@[^/]+:') {
+    $id = $id -replace '^[^@]*@', ''        # drop user@
+    $id = $id -replace '^([^:]+):', '$1/'   # host:path → host/path (first colon)
+  }
+  else {
+    $id = "github.com/$id"                   # bare owner/repo slug → default host
+  }
+  $id = $id -replace '\.git$', ''
+  return $id.ToLowerInvariant()
+}
+
 # In dir-mounted mode the positional is a host project directory and must exist;
 # in self-hosted mode it is re-interpreted as the repo spec (resolved below) and is
 # NOT a host path, so the directory checks/resolution are skipped.
@@ -102,8 +125,17 @@ if ($Isolated) {
   # Instance discriminator: -Name <label> if given (named → deterministic →
   # reusable), else a high-resolution timestamp + pid + random token so two
   # same-second unnamed launches never collide (unnamed → fresh every launch).
-  $instanceLabel = $Name
-  if ([string]::IsNullOrEmpty($instanceLabel)) {
+  #
+  # A NAMED discriminator folds in the canonical repo identity, so the same -Name
+  # used for two different repos that share a basename (owner1/app vs owner2/app)
+  # resolves to distinct identities instead of one shared app-<hash> — which would
+  # otherwise let the second launch attach to (or -Reclone wipe) the first repo's
+  # container and workspace. The unnamed branch already gets a globally-unique
+  # timestamp, so it needs no repo discriminator.
+  if (-not [string]::IsNullOrEmpty($Name)) {
+    $instanceLabel = (Get-Powbox-RepoIdentity $repoSpec) + "|" + $Name
+  }
+  else {
     $rand = -join ((1..8) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     $instanceLabel = "ts-" + [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfffffff") + "-" + $PID + "-" + $rand
   }

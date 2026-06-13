@@ -74,6 +74,23 @@ if ($n1["CONTAINER_NAME"] -ne $n2["CONTAINER_NAME"]) { Fail "named instance is n
 if ($n1["WORKSPACE_MOUNT"] -ne $n2["WORKSPACE_MOUNT"]) { Fail "named instance workspace path (-> Claude session slug) is not stable" }
 Ok "named instance is deterministic (same workspace path / session slug on relaunch)"
 
+# --- named identity is PER-REPO: same -Name on a different repo must not collide
+# Two remotes that share a basename (owner1/app, owner2/app) launched with the same
+# -Name must resolve to DISTINCT identities; otherwise the second launch would
+# attach to (or -Reclone wipe) the first repo's container/workspace.
+$p1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner1/app", "-Name", "shared")
+$p2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner2/app", "-Name", "shared")
+if ($p1["CONTAINER_NAME"] -eq $p2["CONTAINER_NAME"]) { Fail "two repos sharing a basename collide under the same -Name" }
+if ($p1["WORKSPACE_MOUNT"] -eq $p2["WORKSPACE_MOUNT"]) { Fail "two repos sharing a basename share a workspace path under the same -Name" }
+Ok "named identity is per-repo (owner1/app vs owner2/app, same -Name, differ)"
+
+# ... while the SAME repo expressed different ways (slug vs full https URL) under
+# the same -Name stays stable, so reuse is not broken by spec form.
+$s1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "stable")
+$s2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "https://github.com/owner/app.git", "-Name", "stable")
+if ($s1["CONTAINER_NAME"] -ne $s2["CONTAINER_NAME"]) { Fail "same repo via slug vs https URL produced different identities under the same -Name" }
+Ok "named identity is spec-form stable (owner/app == https://github.com/owner/app.git)"
+
 if (-not $n1["PROJECT_NAME"].StartsWith("repo-")) { Fail "repo-slug derivation wrong: $($n1["PROJECT_NAME"])" }
 Ok "repo-slug strips .git and lowercases (Repo.git -> repo)"
 if ($n1["WS_VOLUME"] -ne "agent-ws-$($n1["CONTAINER_NAME"])") { Fail "WS_VOLUME is not agent-ws-<container>" }

@@ -45,8 +45,18 @@ clone_url() {
 	esac
 }
 
+# Strip any userinfo (user[:secret]@) from a URL so an embedded credential — e.g.
+# https://<token>@github.com/owner/repo.git — never leaks into logs or terminal
+# scrollback. Specs with no scheme (owner/repo slugs, scp-style git@host:path)
+# carry no secret userinfo and pass through unchanged.
+redact_url() {
+	printf '%s' "$1" | sed -E 's#(://)[^/]*@#\1#'
+}
+
 announce_failure() {
-	local url="$1"
+	local url repo_safe
+	url="$(redact_url "$1")"
+	repo_safe="$(redact_url "${REPO:-}")"
 	cat >&2 <<EOF
 
 ================================================================================
@@ -54,7 +64,7 @@ announce_failure() {
 ================================================================================
   Could not clone the repository into this container's private workspace:
 
-      repo:   ${REPO:-(unset)}
+      repo:   ${repo_safe:-(unset)}
       url:    ${url}
       target: ${WS}
 
@@ -105,7 +115,7 @@ fi
 # (or a failed partial clone) and is safe to clear.
 find "$WS" -mindepth 1 -delete 2>/dev/null || true
 
-echo "seed-workspace: cloning $URL into $WS ..." >&2
+echo "seed-workspace: cloning $(redact_url "$URL") into $WS ..." >&2
 clone_args=(clone)
 [ -n "$REF" ] && clone_args+=(--branch "$REF")
 clone_args+=("$URL" "$WS")

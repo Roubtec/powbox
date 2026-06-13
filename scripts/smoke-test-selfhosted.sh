@@ -42,13 +42,39 @@ id_field() {
 	printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n1
 }
 
+# SHA256(input)[:12] using the SAME command-fallback chain as launch-agent.sh's
+# project_hash, so the expected hash is computed identically to the launcher's on
+# every supported host — including macOS (shasum, no sha256sum) and any host that
+# only ships openssl. Mirrors the launcher rather than hard-requiring sha256sum,
+# which made Stage A die under `set -euo pipefail` before it could run.
+project_hash() {
+	local input="${1:-}"
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf '%s' "$input" | sha256sum | cut -c1-12
+	elif command -v shasum >/dev/null 2>&1; then
+		printf '%s' "$input" | shasum -a 256 | cut -c1-12
+	elif command -v openssl >/dev/null 2>&1; then
+		printf '%s' "$input" | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-12
+	else
+		fail "no hashing command found (need sha256sum, shasum, or openssl)"
+	fi
+}
+
 echo "Self-hosted smoke test (launcher: $LAUNCHER)"
 echo "Stage A — launcher identity (no image/daemon needed)"
 
 # --- dir-mounted is unchanged: hash == SHA256(canonical path)[:12] -------------
 DM="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude "$ROOT_DIR" 2>/dev/null)"
 [ "$(id_field "$DM" mode)" = "dir-mounted" ] || fail "default mode is not dir-mounted"
-want_hash="$(printf '%s' "$ROOT_DIR" | sha256sum | cut -c1-12)"
+# Mirror the launcher's dir-mounted hash input exactly: it lowercases the path
+# before hashing on Windows (MSYS/Cygwin), where the FS is case-insensitive, and
+# preserves it as-is elsewhere. Without this the expected hash would diverge from
+# the launcher's on Git Bash/MSYS and the contract check would falsely fail.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*) hash_input="$(printf '%s' "$ROOT_DIR" | tr '[:upper:]' '[:lower:]')" ;;
+*) hash_input="$ROOT_DIR" ;;
+esac
+want_hash="$(project_hash "$hash_input")"
 case "$(id_field "$DM" CONTAINER_NAME)" in
 *"-$want_hash") ok "dir-mounted hash matches SHA256(path)[:12]" ;;
 *) fail "dir-mounted hash changed (want suffix -$want_hash): $(id_field "$DM" CONTAINER_NAME)" ;;
@@ -67,6 +93,26 @@ N2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.gi
 [ "$(id_field "$N1" WORKSPACE_MOUNT)" = "$(id_field "$N2" WORKSPACE_MOUNT)" ] ||
 	fail "named instance workspace path (→ Claude session slug) is not stable"
 ok "named instance is deterministic (same workspace path / session slug on relaunch)"
+
+# --- named identity is PER-REPO: same --name on a different repo must not collide
+# Two remotes that share a basename (owner1/app, owner2/app) launched with the same
+# --name must resolve to DISTINCT identities; otherwise the second launch would
+# attach to (or --reclone wipe) the first repo's container/workspace.
+P1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner1/app --name shared 2>/dev/null)"
+P2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner2/app --name shared 2>/dev/null)"
+[ "$(id_field "$P1" CONTAINER_NAME)" != "$(id_field "$P2" CONTAINER_NAME)" ] ||
+	fail "two repos sharing a basename collide under the same --name"
+[ "$(id_field "$P1" WORKSPACE_MOUNT)" != "$(id_field "$P2" WORKSPACE_MOUNT)" ] ||
+	fail "two repos sharing a basename share a workspace path under the same --name"
+ok "named identity is per-repo (owner1/app vs owner2/app, same --name, differ)"
+
+# ... while the SAME repo expressed different ways (slug vs full https URL) under
+# the same --name stays stable, so reuse is not broken by spec form.
+S1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name stable 2>/dev/null)"
+S2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo https://github.com/owner/app.git --name stable 2>/dev/null)"
+[ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S2" CONTAINER_NAME)" ] ||
+	fail "same repo via slug vs https URL produced different identities under the same --name"
+ok "named identity is spec-form stable (owner/app == https://github.com/owner/app.git)"
 
 # repo-slug: .git stripped, lowercased.
 case "$(id_field "$N1" PROJECT_NAME)" in

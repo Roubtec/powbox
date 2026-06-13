@@ -303,6 +303,16 @@ Flags (`cc`/`cx`, the `commands/*-container.*` scripts, and `scripts/launch-agen
 - **Shared auth, isolated workspace.** The config volumes (`claude-config`, `codex-config`, `agent-gh-config`, `agent-zsh-history`) stay globally shared — no re-auth per container, skills seeded once. Only the workspace and the per-container Podman storage are per-instance.
 - **Worktrees still work.** The `.worktrees/<container>/<slug>` convention and the `wt-bootstrap`/`wt-enter`/`wt-remove` helpers work unchanged; they just root in the one workspace volume (which hardlinks better). `wt-bootstrap`'s root-safety check recognises self-hosted mode and verifies the workspace volume itself is container-local rather than expecting per-directory tmpfs shadows.
 
+### Upgrading an existing install needs a base-image rebuild
+
+The clone helper (`seed-workspace.sh`) and the entrypoint logic that runs it live in the **base** image layer (`docker/base/Dockerfile`), not the agent layer.
+
+Rebuilding only the agent image — the common `cc --build` / `cx --build` path, and `agent-update` when just an agent binary changed — therefore layers a new agent on an **old base** that has no clone step, so `--isolated` would create the workspace volume but the entrypoint never clones into it (you land in an empty checkout).
+
+When adopting this feature on a machine that already has the images, rebuild the base too: `agent-update-base`, or `build.sh all` (see [Build Modes](#build-modes)). A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
+
+> A follow-up task tracks making `agent-update` / `agent-check-updates` flag a base rebuild automatically when the base layer's powbox source changes (today they only detect a stale **upstream** base), so this becomes a hands-off upgrade.
+
 ### gh auth must be ready before the clone
 
 The clone (and any private-repo access) depends on `gh` credentials, so the entrypoint establishes `gh auth` **before** cloning. There is deliberately **no clone/auth failsafe and no retry** — `gh auth` is a one-time manual setup that holds until the token expires. If `gh` is not authenticated when a self-hosted launch needs to clone, the container **announces it loudly** and drops to a plain `zsh` (rather than execing the agent into an empty workspace), stating the three remedies:

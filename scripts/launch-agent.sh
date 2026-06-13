@@ -161,6 +161,35 @@ project_hash() {
 	fi
 }
 
+# Canonical "host/owner/repo" key for a repo spec (lowercased, .git stripped, any
+# userinfo removed) so that different repos sharing a basename get distinct
+# identities, while the SAME repo expressed different ways (owner/repo slug, https
+# URL, scp-style git@host:path) maps to one stable key. Folded into a NAMED
+# instance's discriminator below; see the comment there. Must stay in lockstep
+# with launch-agent.ps1's Get-Powbox-RepoIdentity so the two launchers agree.
+repo_identity() {
+	local spec="${1:-}" id
+	case "$spec" in
+	*://*)
+		# scheme://[user@]host[:port]/path → host[:port]/path
+		id="${spec#*://}"
+		id="${id#*@}"
+		;;
+	*@*:*)
+		# scp-style user@host:owner/repo → host/owner/repo (first ':' → '/')
+		id="${spec#*@}"
+		id="${id%%:*}/${id#*:}"
+		;;
+	*)
+		# bare owner/repo slug → default host (matches the github.com default the
+		# clone step applies to a slug)
+		id="github.com/$spec"
+		;;
+	esac
+	id="${id%.git}"
+	printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
+}
+
 # Normalise a path for /ctx comparison.
 # On Windows (MSYS/Cygwin), Docker Desktop may report bind-mount sources using
 # Linux-style prefixes rather than the native drive:/... form that the shell sees.
@@ -237,8 +266,16 @@ if [ "$ISOLATED" = true ]; then
 	# high-resolution timestamp + pid + random token so two same-second unnamed
 	# launches never collide (unnamed → fresh every launch). The instance hash is
 	# SHA256(label)[:12], reusing the dir-mounted 12-char hash shape.
-	INSTANCE_LABEL="$INSTANCE_NAME"
-	if [ -z "$INSTANCE_LABEL" ]; then
+	#
+	# A NAMED discriminator folds in the canonical repo identity, so the same --name
+	# used for two different repos that share a basename (owner1/app vs owner2/app)
+	# resolves to distinct identities instead of one shared app-<hash> — which would
+	# otherwise let the second launch attach to (or --reclone wipe) the first repo's
+	# container and workspace. The unnamed branch already gets a globally-unique
+	# timestamp, so it needs no repo discriminator.
+	if [ -n "$INSTANCE_NAME" ]; then
+		INSTANCE_LABEL="$(repo_identity "$REPO_SPEC")|$INSTANCE_NAME"
+	else
 		INSTANCE_LABEL="ts-$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}${RANDOM}"
 	fi
 	INSTANCE_HASH="$(project_hash "$INSTANCE_LABEL")"

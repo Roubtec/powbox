@@ -130,6 +130,21 @@ For a wave of tasks `T1..Tn`:
 
 4. When the wave is fully resolved, unlock the next wave (dependents can now branch from these stable branches).
 
+### Guarding against sibling add/add collisions
+
+Independent tasks in the same wave run in **separate worktrees**, so two of them can each *add* the same new file — or a file exporting the same top-level class/symbol — with no conflict at implementation time. The clash only surfaces later, when the branches linearize or merge (an add/add conflict, or a duplicate definition). It is rare, but it has happened; two cheap guards keep it from costing a fix-up round:
+
+- **Prevent it up front.** When you fan out two independent tasks that both introduce the same *kind* of new surface (a "reconciliation controller", a "work-list endpoint", a migration helper), assign each a **distinct file and class name** in its implementer prompt. The implementers can't see each other, so the disambiguation has to come from you.
+- **Catch it before the PRs.** After a wave's tasks pass review but **before** opening their PRs, compare what each sibling branch newly added:
+
+  ```bash
+  for b in <wave-branch-1> <wave-branch-2> ...; do
+    git diff --diff-filter=A --name-only <that-branch's-base>...$b
+  done | sort | uniq -d
+  ```
+
+  A duplicated path (or basename, or a shared exported class name across two added files) is a collision: rename one side, regenerate anything derived (e.g. contracts), and re-review that one task before its PR. Diff each branch against **its own base** with the three-dot form so a dependent branch that legitimately builds on a sibling isn't flagged — it never re-lists an inherited file. (The `wf-address-tasks` workflow runs this same scan automatically as an end-of-batch advisory step and reports any collisions in its summary.)
+
 ## Implementer Agent
 
 Same contract as `address-tasks`, plus a **worktree isolation contract** and **push-every-commit**. Launch implementers as described in per-wave Phase A.

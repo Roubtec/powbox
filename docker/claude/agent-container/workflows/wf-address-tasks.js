@@ -62,6 +62,7 @@ export const meta = {
   phases: [
     { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
     { title: "Resolve batch", detail: "read task files, derive dependency waves and branches" },
+    { title: "Collision scan", detail: "diff added files across sibling branches for add/add clashes" },
     { title: "Summary" },
   ],
 };
@@ -153,6 +154,27 @@ const PR_SCHEMA = {
     reason: { type: "string", description: "When opened is false: why (no remote auth, gh error, branch-target failure). Empty when opened." },
   },
   required: ["opened", "pushed"],
+};
+
+const COLLISION_SCHEMA = {
+  type: "object",
+  properties: {
+    collisions: {
+      type: "array",
+      description: "Each entry is one newly-added surface that two or more INDEPENDENT sibling branches created on their own — a likely add/add clash (or duplicate definition) when the branches linearize. Empty array when none.",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", description: "path | filename | symbol — a duplicated repo-relative path, a duplicated basename at different paths, or a duplicated exported top-level name (class/function/const/interface/type/enum)." },
+          name: { type: "string", description: "The colliding value: the repo-relative path, the basename, or the symbol name." },
+          branches: { type: "array", items: { type: "string" }, description: "The two or more branches that each independently added it." },
+          detail: { type: "string", description: "One actionable line for the integrator (e.g. 'both define class PaymentReconciliationController — rename one side and regen contracts')." },
+        },
+        required: ["kind", "name", "branches"],
+      },
+    },
+  },
+  required: ["collisions"],
 };
 
 function bootstrapPrompt() {
@@ -288,6 +310,30 @@ function cleanupNote(task) {
   return `Remove this task's worktree to reclaim space — the branch and commits persist. From the repo root (not inside the worktree) run \`wt-remove ${shq(task.slug)}\`. It refuses to delete uncommitted work; if it refuses, report why instead of forcing (\`--force\` only clears git's refusal over ignored build artifacts — the clean checks still apply). It never deletes the branch \`${task.branch}\`. Report done.`;
 }
 
+function collisionScanPrompt(branches) {
+  const list = branches
+    .map((b) => `- slug ${b.slug}: branch ${shq(b.branch)} diverged from base ${shq(b.base)}`)
+    .join("\n");
+  return `You are a read-only PRE-MERGE COLLISION GUARD for a batch of sibling task branches implemented in parallel, each destined for its own PR. Edit, stage, commit, or push NOTHING. Work from the repo ROOT; do not enter or create any worktree — these branches live in the shared \`.git\` and you compare them by ref.
+
+Why this exists: independent siblings never conflict while they are implemented (each in its own worktree), so two of them can each ADD the same new file path — or a file with the same basename, or a file that exports the same top-level class/symbol — with no warning. The clash only surfaces later, when the branches linearize or merge (an add/add conflict, or a duplicate definition). Find those overlaps now so they can be reconciled before merge.
+
+Branches:
+${list}
+
+Method:
+1. For each branch, list ONLY the files it ADDED relative to its OWN base:
+       git diff --diff-filter=A --name-only <base>...<branch>
+   Use the three-dot form so the comparison is against the merge-base. A dependent branch built on a sibling will NOT re-list that sibling's files, so legitimate stacking is never flagged.
+2. Report a collision when, across two or more DIFFERENT branches:
+   - the same repo-relative path was added (kind \`path\`), OR
+   - the same basename was added at different paths (kind \`filename\`), OR
+   - two added source files (sharing a basename, or clearly the same kind of module) declare the same exported top-level name — class/function/const/interface/type/enum (kind \`symbol\`). Open ONLY those candidate files to confirm; keep it cheap.
+3. For each collision give the colliding value, the 2+ branches that added it, and a one-line reconciliation hint.
+
+Flag only genuine overlaps between independently-based branches; never flag a file a branch merely inherited from its base. If nothing overlaps, return an empty \`collisions\` array.`;
+}
+
 async function runTask(task, remote) {
   let findings = null;
   let verdict = null;
@@ -379,11 +425,15 @@ const throttled = [];
 // tasks base off `defaultBase` / the current branch, which no in-batch task
 // produces, so they pick up no spurious dependency.
 const slugByBranch = new Map();
+// Each task's recorded base, so the end-of-batch collision scan can diff every
+// branch's ADDED files against the base it actually diverged from.
+const baseBySlug = new Map();
 for (const wave of plan.waves) {
   if (!Array.isArray(wave)) continue;
   for (const task of wave) {
     if (task && typeof task.branch === "string" && typeof task.slug === "string") {
       slugByBranch.set(task.branch, task.slug);
+      baseBySlug.set(task.slug, task.base);
     }
   }
 }
@@ -442,7 +492,32 @@ for (let w = 0; w < plan.waves.length; w++) {
   }
 }
 
+// Pre-merge collision guard (ADVISORY — never blocks a PR). Independent sibling
+// branches implemented in parallel each live in their own worktree, so two can
+// ADD the same new file or class with no in-worktree conflict; the clash only
+// surfaces later when the branches linearize (the add/add controller collision
+// from the 2026-06 batch). The branches persist in the shared `.git` after their
+// worktrees are removed, so one read-only agent diffs the files each branch
+// ADDED relative to its own base and flags overlaps. Scoped to branches that
+// carry committed work; stacked tasks drop out structurally, since
+// added-relative-to-own-base never re-lists an inherited file.
+let collisions = [];
+const implemented = results.filter(
+  (r) => r.branch && ["done", "local-only", "pushed-no-pr", "review-cap"].includes(r.status)
+);
+if (implemented.length >= 2) {
+  phase("Collision scan");
+  const scan = await agent(
+    collisionScanPrompt(implemented.map((r) => ({ slug: r.slug, branch: r.branch, base: baseBySlug.get(r.slug) || plan.defaultBase }))),
+    { label: "collision-scan", schema: COLLISION_SCHEMA }
+  );
+  collisions = scan && Array.isArray(scan.collisions) ? scan.collisions : [];
+  if (collisions.length) {
+    log(`⚠ ${collisions.length} cross-branch naming collision(s) — reconcile (rename one side, regen derived files) before merging; see summary.`);
+  }
+}
+
 phase("Summary");
 const landed = results.filter((r) => r.status === "done").length;
 log(`Batch complete: ${landed}/${results.length} tasks landed a PR.`);
-return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, results };
+return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, results };

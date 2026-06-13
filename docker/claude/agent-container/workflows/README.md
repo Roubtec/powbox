@@ -121,6 +121,15 @@ code: wave width is the minimum of the dependency-derived size, a hard cap, and
 a storage cap computed from `wt-bootstrap`'s `availBytes`; an over-wide wave is
 run in sub-batches and the throttling decision is reported in the summary.
 
+After the waves finish it runs one **advisory collision scan**: independent
+sibling branches built in parallel can each *add* the same new file or exported
+class without any in-worktree conflict, so a read-only agent diffs the files each
+branch added relative to its own base (`--diff-filter=A`, three-dot, so stacked
+branches don't false-flag) and reports any add/add overlap in the summary. It
+never blocks a PR — it just surfaces a clash to reconcile before the branches
+linearize. The prose skill documents the same check (plus the up-front "give
+same-kind surfaces distinct names" prevention) for the hand-driven path.
+
 **It does not yet fully supersede `address-tasks-worktrees`.** This conversion
 stops after per-task PR creation; it omits that skill's post-batch
 `review-stack/...` construction — the integration-conflict check and recommended

@@ -1,7 +1,8 @@
 param(
   [string]$Image = "powbox-agent:latest",
   [switch]$SkipDb,
-  [switch]$SkipPodman
+  [switch]$SkipPodman,
+  [switch]$SkipSelfHosted
 )
 
 # The agent image is unified: both claude and codex (and codex's bwrap sandbox)
@@ -119,6 +120,19 @@ if ($SkipPodman) {
 }
 else {
   & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+}
+
+# Stage 4 - self-hosted ("-Isolated") launch mode. Validates the launcher's
+# self-hosted identity contract (always, no image needed) and the baked
+# seed-workspace.sh clone/reuse/reclone/failure + single-mount hardlink behavior
+# against the image (self-skips when the image is absent). Skip the whole stage
+# with -SkipSelfHosted; see scripts/smoke-test-selfhosted.ps1. The helper throws
+# on failure, so $ErrorActionPreference = "Stop" propagates that up.
+if ($SkipSelfHosted) {
+  Write-Host "Skipping self-hosted smoke test (-SkipSelfHosted)."
+}
+else {
+  & (Join-Path $rootDir "scripts/smoke-test-selfhosted.ps1") -Image $Image
 }
 
 Write-Host "Smoke test complete."

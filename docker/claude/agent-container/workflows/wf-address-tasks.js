@@ -197,7 +197,7 @@ const RESOLUTION_SCHEMA = {
           from: { type: "string", description: "The original colliding name/path. Empty when blocked." },
           to: { type: "string", description: "The new name/path on the renamed side(s). Empty when blocked." },
           regenerated: { type: "string", description: "Derived files regenerated after the rename (e.g. 'contracts'), or empty if none." },
-          reason: { type: "string", description: "Why that side was chosen to rename, or why the collision is blocked." },
+          reason: { type: "string", description: "Why that side was chosen to rename, why multiple sides were renamed, or why the collision is blocked." },
         },
         required: ["collision", "action", "changedBranches"],
       },
@@ -404,7 +404,7 @@ Collisions to resolve (from the read-only scan; \`name\` is the colliding value)
 ${collisionList}
 
 For each collision:
-1. Pick the side to change. There is no inherent "first", so choose the LEAST disruptive rename: the side with fewer references, not a path a framework mandates, not a name a task file pins. Read the colliding files on each branch first. Renaming ONE side is normally enough — the other then delivers unchanged; rename both only if the shared name is wrong for both.
+1. Pick the side(s) to change. There is no inherent "first", so choose the LEAST disruptive rename(s): branches with fewer references, not a path a framework mandates, not a name a task file pins. Read the colliding files on each branch first. Rename enough sides that AT MOST ONE branch keeps the original colliding path/basename/symbol. With a two-branch collision, renaming one side is normally enough and the other then delivers unchanged; with three or more branches, you may need to rename multiple sides.
 2. If the name is genuinely IMPERATIVE — it MUST stay identical (a framework-required filename, an external/published contract, or a name a task file explicitly mandates) — do NOT invent a divergent name. Mark the collision \`blocked\` with the reason and leave those branches untouched; a human decides. Blocking a real conflict beats shipping a wrong rename.
 3. Otherwise, on the chosen branch rename the file and/or exported symbol plus every in-branch reference to it, to a clear, distinct name. Regenerate anything derived from it (e.g. contracts). Run the project build / type-check — it MUST pass. Commit with a clear message. ${pushLine}
 4. Record the outcome with \`collision\` set to the exact \`name\` from the list above: \`renamed\` (with \`changedBranches\`, \`from\`, \`to\`, what you \`regenerated\`, and why that side) or \`blocked\` (with the reason; empty \`changedBranches\`).
@@ -651,24 +651,53 @@ for (let w = 0; w < plan.waves.length; w++) {
     const resolutions = resolution && Array.isArray(resolution.resolutions) ? resolution.resolutions : null;
 
     // Index the resolver's outcome by branch and by collision name. A collision
-    // counts as resolved if it was renamed OR one of its branches was changed
-    // (belt-and-suspenders against a mislabeled `collision` echo).
+    // is actually resolved only when enough involved branches were changed that
+    // at most one branch still carries the original colliding value. This matters
+    // for 3+ branch clashes: renaming one side leaves the other two still
+    // colliding, so those unchanged branches must stay held.
     const changedBranches = new Set();
-    const resolvedNames = new Set();
+    const changedBranchesByCollision = new Map();
     const blockedNames = new Set();
     if (resolutions) {
       for (const r of resolutions) {
         const changed = Array.isArray(r.changedBranches) ? r.changedBranches.map(normalizeBranchName).filter(Boolean) : [];
         if (r.action === "renamed") {
           changed.forEach((n) => changedBranches.add(n));
-          if (r.collision) resolvedNames.add(r.collision);
+          if (r.collision) {
+            const existing = changedBranchesByCollision.get(r.collision) || new Set();
+            changed.forEach((n) => existing.add(n));
+            changedBranchesByCollision.set(r.collision, existing);
+          }
         } else if (r.action === "blocked" && r.collision) {
           blockedNames.add(r.collision);
         }
       }
     }
-    const collisionResolved = (c) => resolvedNames.has(c.name) || collisionBranchNames(c).some((n) => changedBranches.has(n));
     const collisionBlocked = (c) => blockedNames.has(c.name);
+    const changedForCollision = (c) => {
+      const branches = collisionBranchNames(c);
+      const changed = new Set(changedBranchesByCollision.get(c.name) || []);
+      // Belt-and-suspenders for a resolver that reports changedBranches but
+      // mistypes the collision echo: count a globally changed involved branch.
+      branches.forEach((n) => {
+        if (changedBranches.has(n)) changed.add(n);
+      });
+      return changed;
+    };
+    const remainingForCollision = (c) => {
+      const changed = changedForCollision(c);
+      return collisionBranchNames(c).filter((n) => !changed.has(n));
+    };
+    const collisionResolved = (c) => !collisionBlocked(c) && remainingForCollision(c).length <= 1;
+    const collisionStillIncludes = (c, task) => {
+      if (collisionBlocked(c)) return true;
+      const names = collisionBranchNames(c);
+      const participates = names.includes(task.branch) || names.includes(task.slug);
+      if (!participates) return false;
+      const changed = changedForCollision(c);
+      if (changed.has(task.branch) || changed.has(task.slug)) return false;
+      return remainingForCollision(c).length >= 2;
+    };
 
     for (const { task, result } of heldTasks) {
       const related = relatedFor(task);
@@ -682,6 +711,10 @@ for (let w = 0; w < plan.waves.length; w++) {
         // An imperative shared name still clashes even if this branch was also
         // touched — keep it held for a human/design decision.
         const held = { slug: task.slug, branch: task.branch, status: "collision-blocked", rounds: result.rounds, detail: "shared name must stay identical (imperative); resolver could not deconflict — needs a human/design decision", collisions: related };
+        statusBySlug.set(task.slug, held.status);
+        results.push(held);
+      } else if (related.some((c) => collisionStillIncludes(c, task))) {
+        const held = { slug: task.slug, branch: task.branch, status: "collision-hold", rounds: result.rounds, detail: "collision still has two or more unchanged branches after resolver ran; branch held before PR delivery — rename enough sides and re-review", collisions: related };
         statusBySlug.set(task.slug, held.status);
         results.push(held);
       } else if (isChanged) {

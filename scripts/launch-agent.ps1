@@ -576,11 +576,19 @@ if ($Isolated) {
       exit 1
     }
   }
+  # Seed the workspace volume so the entrypoint (running as node) can clone into
+  # it: chown it to node AND leave it NON-EMPTY (a single placeholder file).
+  # Docker re-initialises an EMPTY named volume from the image on every mount;
+  # because the workspace mounts at the nested /workspace/<slug> (a path absent
+  # from the image), that re-init recreates the volume root as root:root on the
+  # real run, clobbering this chown and leaving node unable to write the clone. A
+  # NON-empty volume is left untouched, so the placeholder makes the chown stick.
+  # seed-workspace.sh empties the dir again just before cloning.
   # -Reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
   # (the container was recreated above) so the entrypoint re-clones into a clean
   # dir. The volume itself is kept. Nothing persists the wipe, so a later restart
   # of a named instance never re-wipes the agent's work.
-  $wsPrepCmd = "mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore"
+  $wsPrepCmd = "mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && : > /mnt/workspace/.powbox-ws-init"
   if ($Reclone) {
     $wsPrepCmd = "find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; " + $wsPrepCmd
   }

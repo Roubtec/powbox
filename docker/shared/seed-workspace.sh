@@ -97,16 +97,30 @@ if [ -e "$WS/.git" ]; then
 	exit 0
 fi
 
+# The launcher pre-seeds a fresh per-instance volume with a placeholder file so
+# Docker keeps the volume root node-owned (an EMPTY volume mounted at the nested
+# /workspace/<slug> is re-initialised root-owned, which would block this clone).
+# Empty the workspace so `git clone` sees a clean target: the reuse check above
+# already returned for a real checkout, so anything left here is that placeholder
+# (or a failed partial clone) and is safe to clear.
+find "$WS" -mindepth 1 -delete 2>/dev/null || true
+
 echo "seed-workspace: cloning $URL into $WS ..." >&2
 clone_args=(clone)
 [ -n "$REF" ] && clone_args+=(--branch "$REF")
 clone_args+=("$URL" "$WS")
 
-if git "${clone_args[@]}"; then
+# Capture git's own exit status: after a completed `if git …; then …; fi` the
+# value of $? is the if-statement's (0), not the failed clone's, so a failure
+# would otherwise be reported as "exit 0". `|| clone_rc=$?` also keeps set -e
+# from aborting before the loud announcement runs.
+clone_rc=0
+git "${clone_args[@]}" || clone_rc=$?
+if [ "$clone_rc" -eq 0 ]; then
 	echo "seed-workspace: clone complete." >&2
 	exit 0
 fi
 
-echo "seed-workspace: clone FAILED (exit $?)." >&2
+echo "seed-workspace: clone FAILED (exit $clone_rc)." >&2
 announce_failure "$URL"
 exit 1

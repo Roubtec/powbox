@@ -559,6 +559,23 @@ if ($resolvedCtx -ne "") {
 # must be node-owned before the entrypoint clones into it) and no nm/wt shadows;
 # dir-mounted mode has the separate node_modules + worktrees shadows.
 if ($Isolated) {
+  # The per-instance workspace volume is declared external in compose.selfhosted.yml,
+  # and compose validates external volumes (erroring if absent) BEFORE it would honour
+  # the ad-hoc -v "${workspaceVolume}:/mnt/workspace" below - so on a first launch the
+  # prep run would die with "External volume does not exist" and never create the
+  # container (making even the loud-clone-failure drop-to-zsh path unreachable).
+  # Pre-create the volume here so the prep step can chown it to node and clone into it.
+  # The dir-mounted nm/wt/podman volumes need no such step because nothing declares them
+  # external (the ad-hoc -v auto-creates them). Idempotent via the inspect guard, like
+  # the shared volumes above.
+  docker volume inspect $workspaceVolume *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker volume create $workspaceVolume *> $null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Error "Failed to create the self-hosted workspace volume '$workspaceVolume'. Ensure Docker is running and you have permission to access the Docker daemon."
+      exit 1
+    }
+  }
   # -Reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
   # (the container was recreated above) so the entrypoint re-clones into a clean
   # dir. The volume itself is kept. Nothing persists the wipe, so a later restart

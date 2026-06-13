@@ -68,7 +68,13 @@ _powbox_arg_present() {
 }
 
 cc() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+    # Self-hosted: the positional (if any) is a repo spec, not a host path, so the
+    # launcher resolves the repo from --isolated's positional or --repo. Never inject
+    # $PWD here — for the documented "cc --isolated owner/repo --name foo" form that
+    # would pass TWO positionals ($PWD and owner/repo) and fail. Never cd afterward.
+    if _powbox_arg_present --isolated "$@"; then
+        "$POWBOX_ROOT/commands/claude-container.sh" "$@"
+    elif [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift
@@ -84,7 +90,13 @@ cc() {
 }
 
 cx() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+    # Self-hosted: the positional (if any) is a repo spec, not a host path, so the
+    # launcher resolves the repo from --isolated's positional or --repo. Never inject
+    # $PWD here — for the documented "cx --isolated owner/repo --name foo" form that
+    # would pass TWO positionals ($PWD and owner/repo) and fail. Never cd afterward.
+    if _powbox_arg_present --isolated "$@"; then
+        "$POWBOX_ROOT/commands/codex-container.sh" "$@"
+    elif [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift

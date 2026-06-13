@@ -341,7 +341,10 @@ function cleanupNote(task) {
 
 function collisionScanPrompt(branches) {
   const list = branches
-    .map((b) => `- slug ${b.slug}: branch ${JSON.stringify(b.branch)} diverged from base ${JSON.stringify(b.base)}`)
+    .map(
+      (b) =>
+        `- slug ${JSON.stringify(b.slug)}: branch ${JSON.stringify(b.branch)} diverged from base ${JSON.stringify(b.base)}\n      list its added files with: git diff --diff-filter=A --name-only ${shq(b.base)}...${shq(b.branch)}`
+    )
     .join("\n");
   return `You are a read-only PRE-PR COLLISION GUARD for a batch of sibling task branches implemented in parallel, each reviewed and ready for its own PR. Edit, stage, commit, or push NOTHING. Work from the repo ROOT; do not enter or create any worktree — these branches live in the shared \`.git\` and you compare them by ref.
 
@@ -351,9 +354,9 @@ Branches:
 ${list}
 
 Method:
-1. For each branch, list ONLY the files it ADDED relative to its OWN base:
+1. For each branch, list ONLY the files it ADDED relative to its OWN base by running the exact, ready-to-run command listed for that branch under "Branches" above — its base and branch are already shell-quoted there because a generated/task-derived ref can contain shell metacharacters (\`$\`, backticks, \`;\`); never hand-substitute a raw \`<branch>\` into the command. It has the form:
        git diff --diff-filter=A --name-only <base>...<branch>
-   Use the three-dot form so the comparison is against the merge-base. A dependent branch built on a sibling will NOT re-list that sibling's files, so legitimate stacking is never flagged.
+   The three-dot form compares against the merge-base, so a dependent branch built on a sibling will NOT re-list that sibling's files and legitimate stacking is never flagged.
 2. Report a collision when, across two or more DIFFERENT branches:
    - the same repo-relative path was added (kind \`path\`), OR
    - the same basename was added at different paths (kind \`filename\`), OR

@@ -391,17 +391,41 @@ function agent-update {
     if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
 }
 
-# Print the standard 'docker ps' table for the given filters, appending a
-# "[self-hosted]" marker to the rows of self-hosted (-Isolated) containers so they
-# are visible at a glance. The self-hosted set is resolved with a label FILTER
-# (docker ps --filter label=powbox.self-hosted=true) rather than a per-key
-# '{{.Label ...}}' template column, because podman's docker shim rejects the
-# method-with-arg template form; the filter and the 'table' output are both
-# portable. The header and dir-mounted rows pass through unchanged, so the output
-# is identical to before when no self-hosted container exists.
+# Print the standard 'docker ps' table for the given filters, appending a marker to each
+# self-hosted (-Isolated) row so you can tell WHICH instance it is and resume it without
+# an inspect:  [self-hosted name=<-Name as entered> repo=<spec> ref=<ref>]  (fields are
+# omitted when empty, so an unnamed instance shows just repo/ref and an old container
+# with none of the labels shows a bare [self-hosted]). The self-hosted set is resolved
+# with a label FILTER (docker ps --filter label=powbox.self-hosted=true) and the per-row
+# name/repo/ref come from the powbox.instance-name/repo/ref labels via `docker inspect
+# --format {{index ...}}` — both portable, unlike the '{{.Label ...}}' column podman's
+# docker shim rejects. The name shown is the RAW -Name (the powbox.instance-name label),
+# which disambiguates two names that slugify to the same container-name shape. The header
+# and dir-mounted rows pass through unchanged, so the output is identical to before when
+# no self-hosted container exists.
 function _Powbox-AgentList {
     param([string[]]$Filters)
-    $selfHosted = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    $cand = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    # Markers keyed by container name, read from the labels in one inspect. Fields are
+    # separated by \x1f (US, [char]31), NOT a tab: a non-whitespace separator keeps an
+    # empty field (an unnamed instance's blank instance-name) from being lost, matching
+    # powbox.sh. .Split keeps empty entries, so columns stay positional.
+    $markers = @{}
+    if ($cand.Count -gt 0) {
+        $sep = [char]31
+        $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels "powbox.instance-name"}}' + $sep + '{{index .Config.Labels "powbox.repo"}}' + $sep + '{{index .Config.Labels "powbox.ref"}}'
+        docker inspect --format $fmt @cand 2>$null | ForEach-Object {
+            $parts = $_.Split($sep)
+            $n = $parts[0].TrimStart('/') # docker inspect's .Name is /-prefixed
+            if (-not $n) { return }
+            $m = " [self-hosted"
+            if ($parts.Count -ge 2 -and $parts[1]) { $m += " name=$($parts[1])" }
+            if ($parts.Count -ge 3 -and $parts[2]) { $m += " repo=$($parts[2])" }
+            if ($parts.Count -ge 4 -and $parts[3]) { $m += " ref=$($parts[3])" }
+            $m += "]"
+            $markers[$n] = $m
+        }
+    }
     docker ps -a @Filters --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}" | ForEach-Object {
         $line = $_
         # Names is field 2 of the table (ID NAMES STATUS IMAGE), and a container name
@@ -411,7 +435,7 @@ function _Powbox-AgentList {
         # another (claude-foo vs claude-foo-bar) or appears in another column. The
         # header row's field 2 ("ID") matches no container, so it passes through.
         $rowName = ($line.TrimStart() -split '\s+', 3)[1]
-        $marked = if ($selfHosted -contains $rowName) { " [self-hosted]" } else { "" }
+        $marked = if ($markers.ContainsKey($rowName)) { $markers[$rowName] } else { "" }
         "$line$marked"
     }
 }

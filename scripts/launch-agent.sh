@@ -195,6 +195,12 @@ repo_identity() {
 	# removed — matching launch-agent.ps1's case-insensitive `-replace '\.git$'`, so
 	# the two launchers (and repo.GIT vs repo.git here) agree on the identity.
 	id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
+	# Trim trailing slashes BEFORE stripping .git so a URL copied with a trailing
+	# separator (https://github.com/owner/app.git/) normalises to the same identity as
+	# the bare form — otherwise the .git strip misses (the suffix is '/'), the slash
+	# stays, and relaunching the same --name spawns a second container instead of
+	# reattaching to the existing clone. Mirrors launch-agent.ps1's `-replace '/+$'`.
+	id="${id%"${id##*[!/]}"}"
 	printf '%s' "${id%.git}"
 }
 

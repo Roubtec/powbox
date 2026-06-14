@@ -106,17 +106,21 @@ P2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner2/app --
 	fail "two repos sharing a basename share a workspace path under the same --name"
 ok "named identity is per-repo (owner1/app vs owner2/app, same --name, differ)"
 
-# ... while the SAME repo expressed different ways (slug, full https URL, or an
-# uppercase .GIT extension) under the same --name stays stable, so reuse is not
-# broken by spec form (the .GIT case also guards .sh/.ps1 strip-case parity).
+# ... while the SAME repo expressed different ways (slug, full https URL, an uppercase
+# .GIT extension, or a copied URL with a trailing slash) under the same --name stays
+# stable, so reuse is not broken by spec form (the .GIT case also guards .sh/.ps1
+# strip-case parity; the trailing-slash case guards the slash-trim before .git strip).
 S1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name stable 2>/dev/null)"
 S2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo https://github.com/owner/app.git --name stable 2>/dev/null)"
 S3="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app.GIT --name stable 2>/dev/null)"
+S4="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo https://github.com/owner/app.git/ --name stable 2>/dev/null)"
 [ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S2" CONTAINER_NAME)" ] ||
 	fail "same repo via slug vs https URL produced different identities under the same --name"
 [ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S3" CONTAINER_NAME)" ] ||
 	fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)"
-ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
+[ "$(id_field "$S1" CONTAINER_NAME)" = "$(id_field "$S4" CONTAINER_NAME)" ] ||
+	fail "a trailing slash on the clone URL produced a different identity (reuse would break)"
+ok "named identity is spec-form stable (slug == https URL == owner/app.GIT == trailing slash)"
 
 # --- cross-AGENT distinctness: the SAME repo+name under claude vs codex must get a
 # DISTINCT workspace PATH (not only a distinct ws volume). Both agents always mount
@@ -200,7 +204,7 @@ WSVOL="powbox-smoke-ws-$$"
 HV1="powbox-smoke-hl-a-$$"
 HV2="powbox-smoke-hl-b-$$"
 cleanup() {
-	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-scp" "${WSVOL}-fail" >/dev/null 2>&1 || true
+	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-sshp" "${WSVOL}-scp" "${WSVOL}-fail" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker volume create "$WSVOL" >/dev/null
@@ -276,6 +280,22 @@ docker volume rm -f "${WSVOL}-ssh" >/dev/null 2>&1 || true
 printf '%s' "$ssh_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
 	fail "ssh:// GitHub URL was not normalised to https before cloning"
 ok "ssh:// GitHub URL is normalised to https before cloning"
+
+# ... and an explicit-port ssh:// URL (ssh://git@github.com:22/owner/repo.git — the
+# form git emits for an origin on a custom SSH port) is normalised too: the entrypoint
+# insteadOf is a prefix rewrite that cannot strip the :port, so clone_url must, or it
+# would fall through to a keyless SSH clone and fail. Same fast-fail proof as above.
+docker volume create "${WSVOL}-sshp" >/dev/null
+sshp_out="$(docker run --rm --user root \
+	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+	-e GH_TOKEN= -e GITHUB_TOKEN= \
+	-e 'POWBOX_CLONE_REPO=ssh://git@github.com:22/this-org-does-not-exist-zzz/nope-9999.git' \
+	-v "${WSVOL}-sshp:/ws" \
+	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+docker volume rm -f "${WSVOL}-sshp" >/dev/null 2>&1 || true
+printf '%s' "$sshp_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
+	fail "ported ssh:// GitHub URL (with :22) was not normalised to https before cloning"
+ok "ported ssh:// GitHub URL (explicit :port) is normalised to https before cloning"
 
 # scp-style GitHub remotes (git@github.com:owner/repo.git — the form inferred from a
 # typical local checkout's origin) are normalised to HTTPS too: the insteadOf rewrite

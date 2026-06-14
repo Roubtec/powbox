@@ -84,15 +84,18 @@ if ($p1["CONTAINER_NAME"] -eq $p2["CONTAINER_NAME"]) { Fail "two repos sharing a
 if ($p1["WORKSPACE_MOUNT"] -eq $p2["WORKSPACE_MOUNT"]) { Fail "two repos sharing a basename share a workspace path under the same -Name" }
 Ok "named identity is per-repo (owner1/app vs owner2/app, same -Name, differ)"
 
-# ... while the SAME repo expressed different ways (slug, full https URL, or an
-# uppercase .GIT extension) under the same -Name stays stable, so reuse is not
-# broken by spec form (the .GIT case also guards .sh/.ps1 strip-case parity).
+# ... while the SAME repo expressed different ways (slug, full https URL, an uppercase
+# .GIT extension, or a copied URL with a trailing slash) under the same -Name stays
+# stable, so reuse is not broken by spec form (the .GIT case also guards .sh/.ps1
+# strip-case parity; the trailing-slash case guards the slash-trim before .git strip).
 $s1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "stable")
 $s2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "https://github.com/owner/app.git", "-Name", "stable")
 $s3 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app.GIT", "-Name", "stable")
+$s4 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "https://github.com/owner/app.git/", "-Name", "stable")
 if ($s1["CONTAINER_NAME"] -ne $s2["CONTAINER_NAME"]) { Fail "same repo via slug vs https URL produced different identities under the same -Name" }
 if ($s1["CONTAINER_NAME"] -ne $s3["CONTAINER_NAME"]) { Fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)" }
-Ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
+if ($s1["CONTAINER_NAME"] -ne $s4["CONTAINER_NAME"]) { Fail "a trailing slash on the clone URL produced a different identity (reuse would break)" }
+Ok "named identity is spec-form stable (slug == https URL == owner/app.GIT == trailing slash)"
 
 # --- cross-AGENT distinctness: the SAME repo+name under claude vs codex must get a
 # DISTINCT workspace PATH (not only a distinct ws volume). Both agents always mount the
@@ -172,6 +175,7 @@ $hv1 = "powbox-smoke-hl-a-$PID"
 $hv2 = "powbox-smoke-hl-b-$PID"
 $wsFail = "$wsVol-fail"
 $wsSsh = "$wsVol-ssh"
+$wsSshp = "$wsVol-sshp"
 $wsScp = "$wsVol-scp"
 try {
   docker volume create $wsVol *> $null
@@ -233,6 +237,18 @@ try {
   if ($sshOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "ssh:// GitHub URL was not normalised to https before cloning" }
   Ok "ssh:// GitHub URL is normalised to https before cloning"
 
+  # ... and an explicit-port ssh:// URL (ssh://git@github.com:22/owner/repo.git - the
+  # form git emits for an origin on a custom SSH port) is normalised too: the entrypoint
+  # insteadOf is a prefix rewrite that cannot strip the :port, so clone_url must, or it
+  # would fall through to a keyless SSH clone and fail. Same fast-fail proof as above.
+  docker volume create $wsSshp *> $null
+  $sshpOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e 'POWBOX_CLONE_REPO=ssh://git@github.com:22/this-org-does-not-exist-zzz/nope-9999.git' `
+    -v "${wsSshp}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  if ($sshpOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "ported ssh:// GitHub URL (with :22) was not normalised to https before cloning" }
+  Ok "ported ssh:// GitHub URL (explicit :port) is normalised to https before cloning"
+
   # scp-style GitHub remotes (git@github.com:owner/repo.git - the form inferred from a
   # typical local checkout's origin) are normalised to HTTPS too: the insteadOf rewrite
   # is installed only after gh auth succeeds, so an unauthenticated public clone would
@@ -259,7 +275,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $wsSsh $wsScp $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

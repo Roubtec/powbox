@@ -39,15 +39,21 @@ REF="${POWBOX_CLONE_REF:-}"
 
 # Resolve a clone URL from an owner/repo slug or a full URL, for display + cloning.
 clone_url() {
-	local spec="$1"
+	local spec="$1" rest
 	case "$spec" in
-	# Normalise a GitHub ssh:// URL to HTTPS so the in-container gh credential helper
-	# authenticates it: the container has no SSH keys, and entrypoint-core.sh's
-	# insteadOf rewrite historically covered only the scp-style git@github.com: form.
-	# Strip the optional `git@` userinfo and the ssh:// scheme, then prefix https://.
-	# Non-GitHub ssh:// hosts are left untouched (we only hold gh auth for github.com).
-	ssh://git@github.com/*) printf 'https://github.com/%s' "${spec#ssh://git@github.com/}" ;;
-	ssh://github.com/*) printf 'https://github.com/%s' "${spec#ssh://github.com/}" ;;
+	# Normalise any GitHub ssh:// URL to HTTPS so the in-container gh credential helper
+	# authenticates it: the container has no SSH keys, and entrypoint-core.sh's insteadOf
+	# rewrite covers only the unported ssh://git@github.com/ and scp git@github.com:
+	# prefixes. Match the host with or without the `git@` user AND with or without an
+	# explicit :port (e.g. ssh://git@github.com:22/owner/repo.git — the port form git
+	# emits for a custom-SSH-port origin, which a prefix insteadOf rewrite cannot fix
+	# because the :port would land in the path). The matched host is always github.com,
+	# so the path is simply everything after the authority's first '/'. Non-GitHub ssh://
+	# hosts fall through to the pass-through below (we only hold gh auth for github.com).
+	ssh://git@github.com/* | ssh://github.com/* | ssh://git@github.com:*/* | ssh://github.com:*/*)
+		rest="${spec#ssh://}"                       # drop scheme → [git@]github.com[:port]/path
+		printf 'https://github.com/%s' "${rest#*/}" # path = everything after authority's first '/'
+		;;
 	# Normalise a GitHub scp-style remote (git@github.com:owner/repo[.git]) to HTTPS
 	# for the same reason as the ssh:// cases above: the container has no SSH keys, and
 	# entrypoint-core.sh's git@github.com: insteadOf rewrite is installed ONLY after
@@ -152,8 +158,15 @@ clone_args+=("$URL" "$WS")
 # value of $? is the if-statement's (0), not the failed clone's, so a failure
 # would otherwise be reported as "exit 0". `|| clone_rc=$?` also keeps set -e
 # from aborting before the loud announcement runs.
+#
+# GIT_TERMINAL_PROMPT=0 forces a missing/expired credential to FAIL rather than
+# block: a self-hosted launch runs with a TTY, so a private clone reaching here
+# without gh auth would otherwise hang on git's interactive username/password
+# prompt — clone_rc never gets set, and the loud failure banner + plain-shell
+# fallback below never run. Disabling the prompt routes that auth failure straight
+# to announce_failure (git-scm.com documents this for HTTP auth terminal prompts).
 clone_rc=0
-git "${clone_args[@]}" || clone_rc=$?
+GIT_TERMINAL_PROMPT=0 git "${clone_args[@]}" || clone_rc=$?
 if [ "$clone_rc" -eq 0 ]; then
 	echo "seed-workspace: clone complete." >&2
 	exit 0

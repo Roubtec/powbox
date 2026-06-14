@@ -69,6 +69,11 @@ function Get-Powbox-RepoIdentity ([string]$Spec) {
   else {
     $id = "github.com/$id"                   # bare owner/repo slug → default host
   }
+  # Trim trailing slashes before stripping .git so a URL copied with a trailing
+  # separator (https://github.com/owner/app.git/) normalises to the same identity as
+  # the bare form; otherwise the .git strip misses and a relaunch with the same -Name
+  # spawns a second container. Mirrors launch-agent.sh's repo_identity.
+  $id = $id -replace '/+$', ''
   $id = $id -replace '\.git$', ''
   return $id.ToLowerInvariant()
 }

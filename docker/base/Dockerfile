@@ -166,6 +166,15 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       at runtime (Docker's seccomp profile blocks the mount syscall
 #                       without it); granted in compose.shared.yml.
 #
+#   fix-workspace-perms.sh — chowns a dir-mounted /workspace/<slug> to node when the
+#                       agent (uid 1000) cannot write it, i.e. when a native-Linux
+#                       host bind-mounts a repo owned by a different uid (commonly
+#                       root). Without it git pull/commit and file edits fail with
+#                       EACCES. The script is root-owned and immutable; it refuses to
+#                       act outside /workspace/ and is invoked only for a workspace
+#                       the entrypoint has already confirmed node cannot write, so it
+#                       no-ops on Windows/WSL and on uid-matched Linux hosts.
+#
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs
 #                       package maintainer scripts as root, so this is a deliberate
@@ -176,7 +185,7 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       privilege escalation — these containers are single-user and
 #                       disposable, and container escape is unrelated to sudo scope.
 RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
+    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/local/bin/fix-workspace-perms.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node \
     && usermod --shell /bin/zsh node \
     && mkdir -p \
@@ -251,6 +260,7 @@ COPY --chmod=755 \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \
     docker/shared/seed-workspace.sh \
+    docker/shared/fix-workspace-perms.sh \
     /usr/local/bin/
 
 USER node

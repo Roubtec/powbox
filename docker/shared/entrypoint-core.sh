@@ -39,6 +39,41 @@ elif [ ! -f "$GIT_CONFIG_GLOBAL" ]; then
 	: >"$GIT_CONFIG_GLOBAL"
 fi
 
+# Claim dir-mounted workspaces the node user cannot write. On a native-Linux host the
+# bind-mounted project keeps its host uid (commonly root's, when the repo lives under
+# /root), leaving the agent — which runs as node (uid 1000) — unable to change ANY
+# repo state: git pull/commit/checkout and file edits fail with EACCES (e.g.
+# `cannot open '.git/FETCH_HEAD': Permission denied`). We hand such a workspace to node
+# via the fix-workspace-perms.sh sudo helper, BEFORE the git/safe.directory steps below
+# so they operate on a node-owned tree. Gated on a real write probe (done here, as
+# node), so it is a no-op on Windows/WSL — whose FUSE bind mounts already honour node's
+# writes — and on Linux hosts whose mount uid already matches node; neither pays for a
+# recursive chown. Self-hosted ("--isolated") mode is exempt: its workspace is a
+# container-local volume the launcher already pre-seeds node-owned. Best-effort: a
+# warning is logged if the claim cannot be completed.
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && command -v sudo >/dev/null 2>&1; then
+	_unwritable=()
+	for _dir in /workspace/*/; do
+		[ -d "$_dir" ] || continue
+		_dir="${_dir%/}"
+		# Probe write access as node: create+remove a temp file. `[ -w ]` only reads
+		# the mode bits, which can disagree with what the host FS actually permits
+		# (e.g. Docker Desktop's FUSE); an actual write is the ground truth.
+		_probe="${_dir}/.powbox-write-probe.$$"
+		if (: >"$_probe") 2>/dev/null; then
+			rm -f "$_probe"
+		else
+			_unwritable+=("$_dir")
+		fi
+	done
+	if [ "${#_unwritable[@]}" -gt 0 ]; then
+		if ! sudo /usr/local/bin/fix-workspace-perms.sh "${_unwritable[@]}"; then
+			echo "Warning: could not make all dir-mounted workspaces writable by node; git and file writes may still fail (see the lines above)." >&2
+		fi
+	fi
+	unset _dir _unwritable _probe
+fi
+
 # Mark workspace bind-mounts as git safe directories. Host-owned project
 # directories under /workspace/ have a different UID than the container's
 # 'node' user, which triggers git's dubious-ownership check.

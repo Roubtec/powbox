@@ -115,6 +115,20 @@ if ($Isolated) {
     $repoSpec = $ProjectPath
   }
 
+  # Reject a clone URL that embeds a credential in its authority (e.g. a PAT URL
+  # https://<token>@github.com/owner/repo.git). Self-hosted containers are kept by
+  # default, so the spec is frozen into POWBOX_CLONE_REPO in the container env where
+  # `docker inspect` would expose the secret. The container authenticates via gh, so an
+  # embedded credential is never needed. Only http(s) userinfo is a secret; an ssh://
+  # URL's `git@` is a benign SSH user, normalised to HTTPS in the container.
+  if ($repoSpec -match '^https?://') {
+    $repoAuthority = ($repoSpec -replace '^https?://', '') -replace '/.*$', ''
+    if ($repoAuthority -match '@') {
+      Write-Error "The clone URL embeds a credential in its authority (userinfo before '@'). Self-hosted containers are kept, so this would persist the secret in the container environment (visible via 'docker inspect'). The container authenticates via gh - drop the credential and pass a plain URL or slug, e.g. -Repo owner/repo."
+      exit 1
+    }
+  }
+
   # repo-slug: leaf after the last '/', strip a trailing .git, lowercase + sanitise
   # (the same shape as the dir-mounted project basename handling).
   $repoBasename = ($repoSpec.TrimEnd('/') -split '/')[-1]
@@ -133,10 +147,16 @@ if ($Isolated) {
   # used for two different repos that share a basename (owner1/app vs owner2/app)
   # resolves to distinct identities instead of one shared app-<hash> — which would
   # otherwise let the second launch attach to (or -Reclone wipe) the first repo's
-  # container and workspace. The unnamed branch already gets a globally-unique
-  # timestamp, so it needs no repo discriminator.
+  # container and workspace. It ALSO folds in the agent, so the same repo+name under
+  # both agents (cc vs cx) gets distinct $projectSlug values and therefore distinct
+  # /workspace/<slug> paths — the per-instance workspace volume is already keyed per
+  # container (agent-ws-<container>), so without this the two agents would share one
+  # in-container cwd while holding independent clones, and a delegated peer agent
+  # (both config volumes are always mounted) resumes sessions by cwd and would pick up
+  # the other clone's history. The unnamed branch already gets a globally-unique
+  # timestamp, so it needs no repo/agent discriminator.
   if (-not [string]::IsNullOrEmpty($Name)) {
-    $instanceLabel = (Get-Powbox-RepoIdentity $repoSpec) + "|" + $Name
+    $instanceLabel = (Get-Powbox-RepoIdentity $repoSpec) + "|" + $Agent + "|" + $Name
   }
   else {
     $rand = -join ((1..8) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
@@ -612,18 +632,24 @@ if ($Isolated) {
     }
   }
   # Seed the workspace volume so the entrypoint (running as node) can clone into
-  # it: chown it to node AND leave it NON-EMPTY (a single placeholder file).
-  # Docker re-initialises an EMPTY named volume from the image on every mount;
-  # because the workspace mounts at the nested /workspace/<slug> (a path absent
-  # from the image), that re-init recreates the volume root as root:root on the
-  # real run, clobbering this chown and leaving node unable to write the clone. A
-  # NON-empty volume is left untouched, so the placeholder makes the chown stick.
-  # seed-workspace.sh empties the dir again just before cloning.
+  # it: chown it to node AND, WHEN IT WOULD OTHERWISE BE EMPTY, leave it NON-EMPTY
+  # (a single placeholder file). Docker re-initialises an EMPTY named volume from
+  # the image on every mount; because the workspace mounts at the nested
+  # /workspace/<slug> (a path absent from the image), that re-init recreates the
+  # volume root as root:root on the real run, clobbering this chown and leaving node
+  # unable to write the clone. A NON-empty volume is left untouched, so the
+  # placeholder makes the chown stick. seed-workspace.sh empties the dir again just
+  # before cloning. Only write it when the volume is empty: a REUSED instance
+  # (recreated for a non-reclone reason — a /ctx or Podman-device change, or the
+  # stopped container pruned while its agent-ws-* volume remains) already holds a
+  # .git checkout (non-empty, so the chown sticks without help) that
+  # seed-workspace.sh's reuse path does NOT clean — writing the placeholder there
+  # would leave a stray untracked .powbox-ws-init in the agent's working tree.
   # -Reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
   # (the container was recreated above) so the entrypoint re-clones into a clean
   # dir. The volume itself is kept. Nothing persists the wipe, so a later restart
   # of a named instance never re-wipes the agent's work.
-  $wsPrepCmd = "mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && : > /mnt/workspace/.powbox-ws-init"
+  $wsPrepCmd = 'mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && { [ -n "$(ls -A /mnt/workspace 2>/dev/null)" ] || : > /mnt/workspace/.powbox-ws-init; }'
   if ($Reclone) {
     $wsPrepCmd = "find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; " + $wsPrepCmd
   }

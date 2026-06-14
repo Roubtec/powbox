@@ -118,6 +118,36 @@ S3="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app.GIT
 	fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)"
 ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
 
+# --- cross-AGENT distinctness: the SAME repo+name under claude vs codex must get a
+# DISTINCT workspace PATH (not only a distinct ws volume). Both agents always mount
+# the global claude-config/codex-config volumes, and a delegated peer agent resumes
+# sessions by cwd, so a shared /workspace/<slug> would let one agent's clone inherit
+# the other's session history. The instance hash folds in the agent to keep the path
+# per-container, matching the per-container agent-ws-<container> volume.
+AC="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name dual 2>/dev/null)"
+AX="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" codex --isolated --repo owner/app --name dual 2>/dev/null)"
+[ "$(id_field "$AC" WORKSPACE_MOUNT)" != "$(id_field "$AX" WORKSPACE_MOUNT)" ] ||
+	fail "claude and codex share a workspace path for the same repo/name (session-history bleed)"
+[ "$(id_field "$AC" WS_VOLUME)" != "$(id_field "$AX" WS_VOLUME)" ] ||
+	fail "claude and codex share a workspace volume for the same repo/name"
+ok "cross-agent identity is distinct (claude vs codex, same repo/name, differ in path + volume)"
+
+# --- embedded http(s) credentials are rejected, not frozen into POWBOX_CLONE_REPO
+# (a kept self-hosted container would expose the secret via docker inspect). The
+# print-identity hook runs AFTER this check, so a rejected spec exits non-zero here.
+if POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated \
+	--repo 'https://x-access-token:ghp_smoketoken@github.com/owner/repo.git' --name credtest >/dev/null 2>&1; then
+	fail "a clone URL with embedded credentials should be rejected"
+fi
+ok "embedded-credential clone URLs are rejected"
+
+# ... while an ssh:// spec (benign git@ SSH user, no secret; normalised to https in
+# the container) is accepted and passed through unchanged, not mistaken for a credential.
+SSHID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo ssh://git@github.com/owner/repo.git --name sshok 2>/dev/null)"
+[ "$(id_field "$SSHID" REPO_SPEC)" = "ssh://git@github.com/owner/repo.git" ] ||
+	fail "ssh:// GitHub spec was rejected or altered by the launcher (should pass through)"
+ok "ssh:// GitHub spec is accepted (normalised to https in-container, not treated as a credential)"
+
 # repo-slug: .git stripped, lowercased.
 case "$(id_field "$N1" PROJECT_NAME)" in
 repo-*) ok "repo-slug strips .git and lowercases (Repo.git → repo)" ;;
@@ -162,7 +192,7 @@ WSVOL="powbox-smoke-ws-$$"
 HV1="powbox-smoke-hl-a-$$"
 HV2="powbox-smoke-hl-b-$$"
 cleanup() {
-	docker volume rm -f "$WSVOL" "$HV1" "$HV2" >/dev/null 2>&1 || true
+	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-fail" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker volume create "$WSVOL" >/dev/null
@@ -222,6 +252,22 @@ printf '%s' "$fail_out" | grep -q "POWBOX SELF-HOSTED CLONE FAILED" ||
 printf '%s' "$fail_out" | grep -q "gh auth login" ||
 	fail "the announcement is missing the gh-auth remedy"
 ok "a failed clone announces loudly and exits non-zero"
+
+# ssh:// GitHub URLs are normalised to HTTPS before cloning (the container has no SSH
+# keys; the entrypoint's git@github.com: insteadOf historically missed ssh://). The
+# pre-clone log line prints the RESOLVED url, so a fast-failing nonexistent ssh:// repo
+# (fresh volume → not the reuse path) must show the https form, proving the normalise.
+docker volume create "${WSVOL}-ssh" >/dev/null
+ssh_out="$(docker run --rm --user root \
+	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+	-e GH_TOKEN= -e GITHUB_TOKEN= \
+	-e 'POWBOX_CLONE_REPO=ssh://git@github.com/this-org-does-not-exist-zzz/nope-9999.git' \
+	-v "${WSVOL}-ssh:/ws" \
+	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+docker volume rm -f "${WSVOL}-ssh" >/dev/null 2>&1 || true
+printf '%s' "$ssh_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
+	fail "ssh:// GitHub URL was not normalised to https before cloning"
+ok "ssh:// GitHub URL is normalised to https before cloning"
 
 # Single-mount hardlink invariant: within ONE volume (store + node_modules as
 # subdirs, the self-hosted layout) link(2) succeeds; ACROSS two volumes it EXDEVs

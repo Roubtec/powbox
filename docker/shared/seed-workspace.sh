@@ -41,6 +41,13 @@ REF="${POWBOX_CLONE_REF:-}"
 clone_url() {
 	local spec="$1"
 	case "$spec" in
+	# Normalise a GitHub ssh:// URL to HTTPS so the in-container gh credential helper
+	# authenticates it: the container has no SSH keys, and entrypoint-core.sh's
+	# insteadOf rewrite historically covered only the scp-style git@github.com: form.
+	# Strip the optional `git@` userinfo and the ssh:// scheme, then prefix https://.
+	# Non-GitHub ssh:// hosts are left untouched (we only hold gh auth for github.com).
+	ssh://git@github.com/*) printf 'https://github.com/%s' "${spec#ssh://git@github.com/}" ;;
+	ssh://github.com/*) printf 'https://github.com/%s' "${spec#ssh://github.com/}" ;;
 	*://* | git@*) printf '%s' "$spec" ;;
 	*)
 		# owner/repo slug → canonical HTTPS clone URL. Strip a trailing .git of ANY

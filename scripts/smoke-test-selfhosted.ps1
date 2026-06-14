@@ -94,6 +94,34 @@ if ($s1["CONTAINER_NAME"] -ne $s2["CONTAINER_NAME"]) { Fail "same repo via slug 
 if ($s1["CONTAINER_NAME"] -ne $s3["CONTAINER_NAME"]) { Fail "uppercase .GIT extension produced a different identity (case-sensitive .git strip)" }
 Ok "named identity is spec-form stable (slug == https URL == owner/app.GIT)"
 
+# --- cross-AGENT distinctness: the SAME repo+name under claude vs codex must get a
+# DISTINCT workspace PATH (not only a distinct ws volume). Both agents always mount the
+# global claude-config/codex-config volumes, and a delegated peer agent resumes sessions
+# by cwd, so a shared /workspace/<slug> would let one agent's clone inherit the other's
+# session history. The instance hash folds in the agent to keep the path per-container,
+# matching the per-container agent-ws-<container> volume.
+$ac = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "dual")
+$ax = Get-Identity @("-Agent", "codex", "-Isolated", "-Repo", "owner/app", "-Name", "dual")
+if ($ac["WORKSPACE_MOUNT"] -eq $ax["WORKSPACE_MOUNT"]) { Fail "claude and codex share a workspace path for the same repo/name (session-history bleed)" }
+if ($ac["WS_VOLUME"] -eq $ax["WS_VOLUME"]) { Fail "claude and codex share a workspace volume for the same repo/name" }
+Ok "cross-agent identity is distinct (claude vs codex, same repo/name, differ in path + volume)"
+
+# --- embedded http(s) credentials are rejected, not frozen into POWBOX_CLONE_REPO (a
+# kept self-hosted container would expose the secret via docker inspect). The
+# print-identity hook runs AFTER this check, so a rejected spec exits non-zero here.
+$env:POWBOX_PRINT_IDENTITY = "1"
+& pwsh -NoProfile -File $launcher -Agent claude -Isolated -Repo 'https://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
+$credRejected = ($LASTEXITCODE -ne 0)
+Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
+if (-not $credRejected) { Fail "a clone URL with embedded credentials should be rejected" }
+Ok "embedded-credential clone URLs are rejected"
+
+# ... while an ssh:// spec (benign git@ SSH user, no secret; normalised to https in the
+# container) is accepted and passed through unchanged, not mistaken for a credential.
+$sshId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "ssh://git@github.com/owner/repo.git", "-Name", "sshok")
+if ($sshId["REPO_SPEC"] -ne "ssh://git@github.com/owner/repo.git") { Fail "ssh:// GitHub spec was rejected or altered by the launcher (should pass through)" }
+Ok "ssh:// GitHub spec is accepted (normalised to https in-container, not treated as a credential)"
+
 if (-not $n1["PROJECT_NAME"].StartsWith("repo-")) { Fail "repo-slug derivation wrong: $($n1["PROJECT_NAME"])" }
 Ok "repo-slug strips .git and lowercases (Repo.git -> repo)"
 if ($n1["WS_VOLUME"] -ne "agent-ws-$($n1["CONTAINER_NAME"])") { Fail "WS_VOLUME is not agent-ws-<container>" }
@@ -134,6 +162,7 @@ $wsVol = "powbox-smoke-ws-$PID"
 $hv1 = "powbox-smoke-hl-a-$PID"
 $hv2 = "powbox-smoke-hl-b-$PID"
 $wsFail = "$wsVol-fail"
+$wsSsh = "$wsVol-ssh"
 try {
   docker volume create $wsVol *> $null
 
@@ -152,7 +181,7 @@ try {
   $reuseOut = docker run --rm --user root `
     -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
     -e "POWBOX_CLONE_REPO=$publicRepo" `
-    -v "${wsVol}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1
+    -v "${wsVol}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
   if ($reuseOut -notmatch "skipping clone") { Fail "reuse did not skip the clone" }
   docker run --rm -v "${wsVol}:/ws" --entrypoint /bin/sh $Image -c '[ -e /ws/SMOKE_MARKER ]' *> $null
   if ($LASTEXITCODE -ne 0) { Fail "reuse re-cloned (marker was wiped)" }
@@ -175,12 +204,24 @@ try {
   $failOut = docker run --rm --user root `
     -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
     -e "POWBOX_CLONE_REPO=this-org-does-not-exist-zzz/nope-9999" `
-    -v "${wsFail}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1
+    -v "${wsFail}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
   $failRc = $LASTEXITCODE
   if ($failRc -eq 0) { Fail "a failed clone should exit non-zero" }
   if ($failOut -notmatch "POWBOX SELF-HOSTED CLONE FAILED") { Fail "a failed clone did not print the loud announcement" }
   if ($failOut -notmatch "gh auth login") { Fail "the announcement is missing the gh-auth remedy" }
   Ok "a failed clone announces loudly and exits non-zero"
+
+  # ssh:// GitHub URLs are normalised to HTTPS before cloning (the container has no SSH
+  # keys; the entrypoint's git@github.com: insteadOf historically missed ssh://). The
+  # pre-clone log line prints the RESOLVED url, so a fast-failing nonexistent ssh:// repo
+  # (fresh volume -> not the reuse path) must show the https form, proving the normalise.
+  docker volume create $wsSsh *> $null
+  $sshOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e 'POWBOX_CLONE_REPO=ssh://git@github.com/this-org-does-not-exist-zzz/nope-9999.git' `
+    -v "${wsSsh}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  if ($sshOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "ssh:// GitHub URL was not normalised to https before cloning" }
+  Ok "ssh:// GitHub URL is normalised to https before cloning"
 
   # Single-mount hardlink invariant: within ONE volume link(2) succeeds; ACROSS two
   # volumes it EXDEVs (the dir-mounted root-node_modules case the layout fixes).
@@ -196,7 +237,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

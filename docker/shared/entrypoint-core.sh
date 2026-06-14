@@ -83,12 +83,19 @@ if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	if ! (cd "$HOME" && gh auth setup-git); then
 		echo "Warning: gh auth is present, but git credential helper setup failed; continuing without automatic gh git integration." >&2
 	else
-		# Route SSH-form GitHub remotes (git@github.com:...) through HTTPS so the
-		# gh credential helper above authenticates them — host-mounted repos often
-		# carry an SSH origin, and the container has no SSH keys. This rewrite is
-		# written only to the container-local GIT_CONFIG_GLOBAL; the host repo's
-		# remote URL is left untouched.
-		if ! git config --global url."https://github.com/".insteadOf "git@github.com:"; then
+		# Route SSH-form GitHub remotes through HTTPS so the gh credential helper
+		# above authenticates them — host-mounted repos often carry an SSH origin,
+		# and the container has no SSH keys. Both the scp-style (git@github.com:…)
+		# and ssh:// (ssh://git@github.com/…) forms are rewritten to the same
+		# https://github.com/ base; the ssh:// form also covers a self-hosted clone
+		# whose --repo/origin is an ssh:// URL. Because the two map to one base they
+		# are values of one multi-valued insteadOf key — reset-then-add keeps it
+		# idempotent across container restarts (a plain `git config <key> <value>`
+		# errors once the key holds multiple values). Written only to the
+		# container-local GIT_CONFIG_GLOBAL; the host repo's remote URL is untouched.
+		git config --global --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
+		if ! git config --global --add url."https://github.com/".insteadOf "git@github.com:" ||
+			! git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"; then
 			echo "Warning: failed to configure SSH→HTTPS rewrite for GitHub remotes; continuing." >&2
 		fi
 	fi

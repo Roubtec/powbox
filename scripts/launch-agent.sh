@@ -168,12 +168,17 @@ project_hash() {
 # instance's discriminator below; see the comment there. Must stay in lockstep
 # with launch-agent.ps1's Get-Powbox-RepoIdentity so the two launchers agree.
 repo_identity() {
-	local spec="${1:-}" id
+	local spec="${1:-}" id authority rest
 	case "$spec" in
 	*://*)
-		# scheme://[user@]host[:port]/path → host[:port]/path
+		# scheme://[user@]host[:port]/path → host[:port]/path. Strip userinfo from
+		# the AUTHORITY only (a user[:pass]@ before the first '/'), not an '@' that
+		# appears later in the path — mirroring launch-agent.ps1's `^[^@/]*@`, so the
+		# two launchers agree on a URL whose path happens to contain an '@'.
 		id="${spec#*://}"
-		id="${id#*@}"
+		authority="${id%%/*}"
+		rest="${id#"$authority"}"
+		id="${authority#*@}${rest}"
 		;;
 	*@*:*)
 		# scp-style user@host:owner/repo → host/owner/repo (first ':' → '/')
@@ -257,6 +262,31 @@ if [ "$ISOLATED" = true ]; then
 		REPO_SPEC="$PROJECT_PATH"
 	fi
 
+	# Reject a clone URL that embeds a credential in its authority (e.g. a PAT URL
+	# https://<token>@github.com/owner/repo.git). Self-hosted containers are kept by
+	# default, so the spec is frozen into POWBOX_CLONE_REPO in the container env where
+	# `docker inspect` would expose the secret long after launch. The container
+	# authenticates via gh (established before the clone), so an embedded credential is
+	# never needed — fail fast. Only http(s) userinfo is a secret; an ssh:// URL's
+	# `git@` is a benign SSH user (key auth) and is normalised to HTTPS in the
+	# container, so it is left alone. The error never echoes the userinfo itself.
+	case "$REPO_SPEC" in
+	http://*@*/* | https://*@*/* | http://*@* | https://*@*)
+		_ru_authority="${REPO_SPEC#*://}"
+		_ru_authority="${_ru_authority%%/*}"
+		case "$_ru_authority" in
+		*@*)
+			echo "Error: the clone URL embeds a credential in its authority (userinfo before '@')." >&2
+			echo "Self-hosted containers are kept, so this would persist the secret in the container" >&2
+			echo "environment (visible via 'docker inspect'). The container authenticates via gh, so" >&2
+			echo "drop the credential and pass a plain URL or slug, e.g. --repo owner/repo." >&2
+			exit 1
+			;;
+		esac
+		unset _ru_authority
+		;;
+	esac
+
 	# repo-slug: basename, strip a trailing .git, lowercase + sanitise — the same
 	# shape as the dir-mounted PROJECT_BASENAME handling above. Lowercase BEFORE the
 	# .git strip so an uppercase .GIT/.Git extension is removed too (POSIX %.git is
@@ -279,10 +309,16 @@ if [ "$ISOLATED" = true ]; then
 	# used for two different repos that share a basename (owner1/app vs owner2/app)
 	# resolves to distinct identities instead of one shared app-<hash> — which would
 	# otherwise let the second launch attach to (or --reclone wipe) the first repo's
-	# container and workspace. The unnamed branch already gets a globally-unique
-	# timestamp, so it needs no repo discriminator.
+	# container and workspace. It ALSO folds in the agent, so the same repo+name under
+	# both agents (cc vs cx) gets distinct PROJECT_NAMEs and therefore distinct
+	# /workspace/<slug> paths — the per-instance workspace volume is already keyed per
+	# container (agent-ws-<container>), so without this the two agents would share one
+	# in-container cwd while holding independent clones, and a delegated peer agent
+	# (both config volumes are always mounted) resumes sessions by cwd and would pick
+	# up the other clone's history. The unnamed branch already gets a globally-unique
+	# timestamp, so it needs no repo/agent discriminator.
 	if [ -n "$INSTANCE_NAME" ]; then
-		INSTANCE_LABEL="$(repo_identity "$REPO_SPEC")|$INSTANCE_NAME"
+		INSTANCE_LABEL="$(repo_identity "$REPO_SPEC")|$AGENT|$INSTANCE_NAME"
 	else
 		INSTANCE_LABEL="ts-$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}${RANDOM}"
 	fi
@@ -685,18 +721,25 @@ if [ "$ISOLATED" = true ]; then
 	# Seed the workspace volume so the entrypoint (running as node) can clone into
 	# it. Two things are required:
 	#   - chown it to node, and
-	#   - leave it NON-EMPTY (a single placeholder file). Docker re-initialises an
-	#     EMPTY named volume from the image on every mount; because the workspace
-	#     mounts at the nested /workspace/<slug> (a path absent from the image),
-	#     that re-init recreates the volume root as root:root on the real run,
-	#     clobbering this chown and leaving node unable to write the clone. Docker
-	#     leaves a NON-empty volume untouched, so the placeholder makes the chown
-	#     stick. seed-workspace.sh empties the dir again just before cloning.
+	#   - leave it NON-EMPTY (a single placeholder file) WHEN IT WOULD OTHERWISE BE
+	#     EMPTY. Docker re-initialises an EMPTY named volume from the image on every
+	#     mount; because the workspace mounts at the nested /workspace/<slug> (a path
+	#     absent from the image), that re-init recreates the volume root as root:root
+	#     on the real run, clobbering this chown and leaving node unable to write the
+	#     clone. Docker leaves a NON-empty volume untouched, so the placeholder makes
+	#     the chown stick. seed-workspace.sh empties the dir again just before cloning.
+	#     Only write it when the volume is empty: a REUSED instance (recreated for a
+	#     non-reclone reason — a /ctx or Podman-device change, or the stopped
+	#     container pruned while its agent-ws-* volume remains) already holds a .git
+	#     checkout, which is non-empty (so the chown sticks without help) and which
+	#     seed-workspace.sh's reuse path does NOT clean — writing the placeholder there
+	#     would leave a stray untracked .powbox-ws-init in the agent's working tree.
 	# --reclone is a one-shot, launcher-driven wipe: empty the workspace volume here
 	# (the container was recreated above) so the entrypoint re-clones into a clean
-	# dir. The volume itself is kept. Nothing persists the wipe, so a later restart
-	# of a named instance never re-wipes the agent's work.
-	WS_PREP_CMD='mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && : > /mnt/workspace/.powbox-ws-init'
+	# dir; the now-empty volume then gets the placeholder below. The volume itself is
+	# kept. Nothing persists the wipe, so a later restart of a named instance never
+	# re-wipes the agent's work.
+	WS_PREP_CMD='mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && { [ -n "$(ls -A /mnt/workspace 2>/dev/null)" ] || : > /mnt/workspace/.powbox-ws-init; }'
 	if [ "$RECLONE" = true ]; then
 		WS_PREP_CMD='find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; '"$WS_PREP_CMD"
 	fi

@@ -39,9 +39,20 @@ REF="${POWBOX_CLONE_REF:-}"
 
 # Resolve a clone URL from an owner/repo slug or a full URL, for display + cloning.
 clone_url() {
-	case "$1" in
-	*://* | git@*) printf '%s' "$1" ;;
-	*) printf 'https://github.com/%s.git' "${1%.git}" ;;
+	local spec="$1"
+	case "$spec" in
+	*://* | git@*) printf '%s' "$spec" ;;
+	*)
+		# owner/repo slug → canonical HTTPS clone URL. Strip a trailing .git of ANY
+		# case first — POSIX ${spec%.git} is case-sensitive, so a slug like
+		# owner/repo.GIT would otherwise yield the invalid .GIT.git. Matches the
+		# launchers' case-insensitive .git handling (the launcher passes the raw,
+		# un-normalised spec as POWBOX_CLONE_REPO).
+		case "$spec" in
+		*.[Gg][Ii][Tt]) spec="${spec%.???}" ;;
+		esac
+		printf 'https://github.com/%s.git' "$spec"
+		;;
 	esac
 }
 

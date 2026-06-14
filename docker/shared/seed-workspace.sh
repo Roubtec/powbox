@@ -48,6 +48,16 @@ clone_url() {
 	# Non-GitHub ssh:// hosts are left untouched (we only hold gh auth for github.com).
 	ssh://git@github.com/*) printf 'https://github.com/%s' "${spec#ssh://git@github.com/}" ;;
 	ssh://github.com/*) printf 'https://github.com/%s' "${spec#ssh://github.com/}" ;;
+	# Normalise a GitHub scp-style remote (git@github.com:owner/repo[.git]) to HTTPS
+	# for the same reason as the ssh:// cases above: the container has no SSH keys, and
+	# entrypoint-core.sh's git@github.com: insteadOf rewrite is installed ONLY after
+	# `gh auth status` succeeds — so a public-repo clone with no gh auth (the common
+	# scp-origin case inferred from a local checkout) would otherwise fail on the bare
+	# git@ URL. The scp form is host:path (a colon, not a slash) after git@github.com;
+	# strip that prefix and prepend https://github.com/. Other git@host: remotes fall
+	# through to the pass-through below (we hold gh auth only for github.com). Must
+	# precede the git@* catch-all, which would otherwise swallow this.
+	git@github.com:*) printf 'https://github.com/%s' "${spec#git@github.com:}" ;;
 	*://* | git@*) printf '%s' "$spec" ;;
 	*)
 		# owner/repo slug → canonical HTTPS clone URL. Strip a trailing .git of ANY

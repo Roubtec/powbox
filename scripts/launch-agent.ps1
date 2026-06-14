@@ -19,6 +19,10 @@
   [string]$Repo = "",
   [string]$Name = "",
   [string]$Ref = "",
+  # -Fresh is a documented alias for -Reclone (README flag table), mirroring the bash
+  # launcher's `--reclone | --fresh`. The PS wrapper chain forwards -Reclone by name,
+  # so the alias is repeated at every user-facing layer (cc/cx, *-container.ps1, here).
+  [Alias("Fresh")]
   [switch]$Reclone
 )
 

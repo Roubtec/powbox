@@ -172,6 +172,7 @@ $hv1 = "powbox-smoke-hl-a-$PID"
 $hv2 = "powbox-smoke-hl-b-$PID"
 $wsFail = "$wsVol-fail"
 $wsSsh = "$wsVol-ssh"
+$wsScp = "$wsVol-scp"
 try {
   docker volume create $wsVol *> $null
 
@@ -232,6 +233,18 @@ try {
   if ($sshOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "ssh:// GitHub URL was not normalised to https before cloning" }
   Ok "ssh:// GitHub URL is normalised to https before cloning"
 
+  # scp-style GitHub remotes (git@github.com:owner/repo.git - the form inferred from a
+  # typical local checkout's origin) are normalised to HTTPS too: the insteadOf rewrite
+  # is installed only after gh auth succeeds, so an unauthenticated public clone would
+  # otherwise fail on the bare git@ URL. Same fast-fail proof as the ssh:// case above.
+  docker volume create $wsScp *> $null
+  $scpOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e 'POWBOX_CLONE_REPO=git@github.com:this-org-does-not-exist-zzz/nope-9999.git' `
+    -v "${wsScp}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  if ($scpOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "scp-style git@github.com: URL was not normalised to https before cloning" }
+  Ok "scp-style git@github.com: URL is normalised to https before cloning"
+
   # Single-mount hardlink invariant: within ONE volume link(2) succeeds; ACROSS two
   # volumes it EXDEVs (the dir-mounted root-node_modules case the layout fixes).
   docker volume create $hv1 *> $null
@@ -246,7 +259,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $wsSsh $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $wsScp $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

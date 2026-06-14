@@ -277,6 +277,22 @@ printf '%s' "$ssh_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz
 	fail "ssh:// GitHub URL was not normalised to https before cloning"
 ok "ssh:// GitHub URL is normalised to https before cloning"
 
+# scp-style GitHub remotes (git@github.com:owner/repo.git — the form inferred from a
+# typical local checkout's origin) are normalised to HTTPS too: the insteadOf rewrite
+# is installed only after gh auth succeeds, so an unauthenticated public clone would
+# otherwise fail on the bare git@ URL. Same fast-fail proof as the ssh:// case above.
+docker volume create "${WSVOL}-scp" >/dev/null
+scp_out="$(docker run --rm --user root \
+	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+	-e GH_TOKEN= -e GITHUB_TOKEN= \
+	-e 'POWBOX_CLONE_REPO=git@github.com:this-org-does-not-exist-zzz/nope-9999.git' \
+	-v "${WSVOL}-scp:/ws" \
+	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+docker volume rm -f "${WSVOL}-scp" >/dev/null 2>&1 || true
+printf '%s' "$scp_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
+	fail "scp-style git@github.com: URL was not normalised to https before cloning"
+ok "scp-style git@github.com: URL is normalised to https before cloning"
+
 # Single-mount hardlink invariant: within ONE volume (store + node_modules as
 # subdirs, the self-hosted layout) link(2) succeeds; ACROSS two volumes it EXDEVs
 # (the dir-mounted root-node_modules case the one-volume layout fixes).

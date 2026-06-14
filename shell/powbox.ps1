@@ -57,6 +57,8 @@ function cc {
         [string]$Repo = "",
         [string]$Name = "",
         [string]$Ref = "",
+        # -Fresh: documented alias for -Reclone (parity with bash --reclone | --fresh).
+        [Alias("Fresh")]
         [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
@@ -88,6 +90,8 @@ function cx {
         [string]$Repo = "",
         [string]$Name = "",
         [string]$Ref = "",
+        # -Fresh: documented alias for -Reclone (parity with bash --reclone | --fresh).
+        [Alias("Fresh")]
         [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `

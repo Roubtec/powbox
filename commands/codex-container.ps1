@@ -13,6 +13,8 @@ param(
   [string]$Repo = "",
   [string]$Name = "",
   [string]$Ref = "",
+  # -Fresh: documented alias for -Reclone (parity with bash --reclone | --fresh).
+  [Alias("Fresh")]
   [switch]$Reclone
 )
 

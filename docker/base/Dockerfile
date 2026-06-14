@@ -168,12 +168,16 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #
 #   fix-workspace-perms.sh — chowns a dir-mounted /workspace/<slug> to node when the
 #                       agent (uid 1000) cannot write it, i.e. when a native-Linux
-#                       host bind-mounts a repo owned by a different uid (commonly
-#                       root). Without it git pull/commit and file edits fail with
-#                       EACCES. The script is root-owned and immutable; it refuses to
-#                       act outside /workspace/ and is invoked only for a workspace
-#                       the entrypoint has already confirmed node cannot write, so it
-#                       no-ops on Windows/WSL and on uid-matched Linux hosts.
+#                       host bind-mounts a root-owned repo (uid 0; commonly a repo
+#                       under /root). Without it git pull/commit and file edits fail
+#                       with EACCES. It chowns ONLY a root-owned workspace — a tree
+#                       owned by some other foreign host uid is refused and warned
+#                       about, never chowned, so a real host user is not locked out.
+#                       The script is root-owned and immutable; it canonicalizes its
+#                       argument and refuses to act on anything but a direct child of
+#                       /workspace/, and is invoked only for a workspace the entrypoint
+#                       has already confirmed node cannot write, so it no-ops on
+#                       Windows/WSL and on uid-matched Linux hosts.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs

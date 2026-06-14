@@ -44,14 +44,19 @@ fi
 # /root), leaving the agent — which runs as node (uid 1000) — unable to change ANY
 # repo state: git pull/commit/checkout and file edits fail with EACCES (e.g.
 # `cannot open '.git/FETCH_HEAD': Permission denied`). We hand such a workspace to node
-# via the fix-workspace-perms.sh sudo helper, BEFORE the git/safe.directory steps below
-# so they operate on a node-owned tree. Gated on a real write probe (done here, as
+# via the fix-workspace-perms.sh sudo helper — but only when its root is owned by root
+# (uid 0); the helper refuses and warns for any other foreign host uid rather than
+# locking a real user out of their own repo. Runs BEFORE the git/safe.directory steps
+# below so they operate on a node-owned tree. Gated on a real write probe (done here, as
 # node), so it is a no-op on Windows/WSL — whose FUSE bind mounts already honour node's
 # writes — and on Linux hosts whose mount uid already matches node; neither pays for a
 # recursive chown. Self-hosted ("--isolated") mode is exempt: its workspace is a
-# container-local volume the launcher already pre-seeds node-owned. Best-effort: a
-# warning is logged if the claim cannot be completed.
-if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && command -v sudo >/dev/null 2>&1; then
+# container-local volume the launcher already pre-seeds node-owned. The detached image-
+# store writer (POWBOX_IMAGE_STORE_ROLE=writer) is also exempt: it mounts the workspace
+# but NOT the per-project node_modules/.worktrees volumes, so a recursive chown there
+# would descend into the host's copies of those dirs — and it never writes the workspace
+# anyway. Best-effort: a warning is logged if the claim cannot be completed.
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] && command -v sudo >/dev/null 2>&1; then
 	_unwritable=()
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue

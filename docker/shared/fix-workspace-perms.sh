@@ -31,6 +31,10 @@ set -euo pipefail
 
 NODE_OWNER="node:node"
 
+# Canonical /workspace root, mirroring shadow-mounts.sh, so a `..`-laden or
+# symlinked argument is normalised before the containment check in the loop.
+workspace_root="$(realpath /workspace 2>/dev/null || echo /workspace)"
+
 if [ "$#" -eq 0 ]; then
 	echo "fix-workspace-perms: no workspace given; nothing to do." >&2
 	exit 0
@@ -38,14 +42,23 @@ fi
 
 status=0
 for ws in "$@"; do
-	case "$ws" in
-	/workspace/*) ;;
-	*)
-		echo "fix-workspace-perms: refusing to touch '$ws' (not under /workspace/)." >&2
+	# Canonicalize first: a raw string prefix check lets `/workspace/../etc` (and
+	# symlinked args) slip past a `/workspace/*` glob, and this helper is sudo-
+	# allowlisted and node-invokable with arbitrary arguments. Resolve the path, then
+	# require it to be a DIRECT child of /workspace — a /workspace/<slug> bind mount,
+	# which is all the entrypoint ever passes — so nothing nested or outside the
+	# workspace is ever chowned. Mirrors shadow-mounts.sh's realpath containment.
+	if ! resolved="$(realpath -m -- "$ws" 2>/dev/null)"; then
+		echo "fix-workspace-perms: refusing to touch '$ws' (unable to resolve path)." >&2
 		status=1
 		continue
-		;;
-	esac
+	fi
+	if [ "$(dirname "$resolved")" != "$workspace_root" ]; then
+		echo "fix-workspace-perms: refusing to touch '$ws' (not a /workspace/<slug> bind mount; resolved to '$resolved')." >&2
+		status=1
+		continue
+	fi
+	ws="$resolved"
 	if [ ! -d "$ws" ]; then
 		echo "fix-workspace-perms: '$ws' is not a directory; skipping." >&2
 		continue

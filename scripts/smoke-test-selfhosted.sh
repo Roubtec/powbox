@@ -281,21 +281,23 @@ printf '%s' "$ssh_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz
 	fail "ssh:// GitHub URL was not normalised to https before cloning"
 ok "ssh:// GitHub URL is normalised to https before cloning"
 
-# ... and an explicit-port ssh:// URL (ssh://git@github.com:22/owner/repo.git — the
-# form git emits for an origin on a custom SSH port) is normalised too: the entrypoint
-# insteadOf is a prefix rewrite that cannot strip the :port, so clone_url must, or it
-# would fall through to a keyless SSH clone and fail. Same fast-fail proof as above.
+# ... and an explicit-port, bare-host ssh:// URL (ssh://github.com:22/owner/repo.git —
+# no git@ user, the form git emits for an origin on a custom SSH port) is normalised
+# too. This covers the OTHER two normalisation axes the git@-form ssh test above does
+# not: a missing git@ user AND a :port the entrypoint insteadOf (a prefix rewrite)
+# cannot strip — so clone_url must, or it would fall through to a keyless SSH clone and
+# fail. Same fast-fail proof as above.
 docker volume create "${WSVOL}-sshp" >/dev/null
 sshp_out="$(docker run --rm --user root \
 	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
 	-e GH_TOKEN= -e GITHUB_TOKEN= \
-	-e 'POWBOX_CLONE_REPO=ssh://git@github.com:22/this-org-does-not-exist-zzz/nope-9999.git' \
+	-e 'POWBOX_CLONE_REPO=ssh://github.com:22/this-org-does-not-exist-zzz/nope-9999.git' \
 	-v "${WSVOL}-sshp:/ws" \
 	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
 docker volume rm -f "${WSVOL}-sshp" >/dev/null 2>&1 || true
 printf '%s' "$sshp_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
-	fail "ported ssh:// GitHub URL (with :22) was not normalised to https before cloning"
-ok "ported ssh:// GitHub URL (explicit :port) is normalised to https before cloning"
+	fail "bare-host ported ssh:// GitHub URL (no git@, with :22) was not normalised to https before cloning"
+ok "bare-host ported ssh:// GitHub URL (no git@, explicit :port) is normalised to https before cloning"
 
 # scp-style GitHub remotes (git@github.com:owner/repo.git — the form inferred from a
 # typical local checkout's origin) are normalised to HTTPS too: the insteadOf rewrite

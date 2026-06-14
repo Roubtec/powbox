@@ -21,9 +21,14 @@
 # chown a tree owned by some OTHER non-node uid, because that would strip a real,
 # non-root host user of ownership of their own repo; that case is warned about instead,
 # with remedies, leaving host state untouched. The tree is chowned to node:node bounded
-# with `find -xdev` so it stays on the bind mount and does NOT descend into the
-# separately mounted, already-node-owned node_modules / .worktrees volumes. -h chowns
-# symlinks themselves, never their targets. Idempotent: once the host files are uid 1000
+# so it stays on the bind mount and does NOT descend into the separately mounted,
+# already-node-owned node_modules / .worktrees volumes: each real mountpoint nested under
+# the workspace is pruned explicitly (from /proc/self/mountinfo), with `find -xdev` as a
+# backstop. -xdev alone is insufficient — it only refuses to cross onto a DIFFERENT
+# filesystem, but a Docker volume whose backing store shares the bind-mount source's
+# filesystem (e.g. both under / on a native-Linux host) has the SAME st_dev, so -xdev
+# would walk straight into it. -h chowns symlinks themselves, never their targets.
+# Idempotent: once the host files are uid 1000
 # a later launch's write probe passes and this never runs again. Mirrors
 # init-firewall.sh / shadow-mounts.sh: a narrowly scoped, image-immutable,
 # sudoers-allowed root helper that refuses to act outside /workspace/.
@@ -69,14 +74,24 @@ for ws in "$@"; do
 		# the entrypoint only passes workspaces node cannot write). Chowning to node
 		# would lock that host user out of their own repo, so refuse and explain.
 		echo "fix-workspace-perms: $ws is owned by host uid ${owner_uid:-?} (not root) and the agent (uid 1000) cannot write it." >&2
-		echo "fix-workspace-perms: NOT changing its ownership (that would lock out that host user). Remedies: run powbox as root or as uid 1000, chown the repo to uid 1000 on the host, or use --isolated (self-hosted) mode." >&2
+		echo "fix-workspace-perms: NOT changing its ownership (that would lock out that host user). Remedies: chown the repo to uid 1000 (node) on the host, or relaunch in --isolated (self-hosted) mode, which clones into a private node-owned volume instead of bind-mounting this tree." >&2
 		status=1
 		continue
 	fi
 	echo "fix-workspace-perms: claiming root-owned $ws for $NODE_OWNER so the agent can write it (git, edits) ..." >&2
-	# -xdev keeps the chown on the bind mount; the nested node_modules / .worktrees
-	# volume mounts are separate filesystems (already node-owned) and are left alone.
-	if ! find "$ws" -xdev -print0 2>/dev/null | xargs -0 --no-run-if-empty chown -h "$NODE_OWNER" 2>/dev/null; then
+	# Keep the chown ON the bind mount and OFF the separately mounted, already-node-owned
+	# node_modules / .worktrees / tmpfs volumes nested under it. `find -xdev` is NOT
+	# enough on its own (it only refuses to cross onto a DIFFERENT filesystem, and a
+	# Docker volume sharing the bind-mount source's filesystem presents the same st_dev),
+	# so enumerate the real mountpoints nested under $ws and -prune them explicitly; -xdev
+	# stays as a backstop for the genuinely-different-filesystem case.
+	prune=()
+	while IFS= read -r _mp; do
+		case "$_mp" in
+		"$ws"/?*) prune+=(-path "$_mp" -prune -o) ;;
+		esac
+	done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
+	if ! find "$ws" -xdev "${prune[@]}" -print0 2>/dev/null | xargs -0 --no-run-if-empty chown -h "$NODE_OWNER" 2>/dev/null; then
 		echo "fix-workspace-perms: warning: could not fully chown $ws; some files may remain unwritable by node." >&2
 		status=1
 	fi

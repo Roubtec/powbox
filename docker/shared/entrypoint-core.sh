@@ -61,12 +61,17 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue
 		_dir="${_dir%/}"
-		# Probe write access as node: create+remove a temp file. `[ -w ]` only reads
-		# the mode bits, which can disagree with what the host FS actually permits
-		# (e.g. Docker Desktop's FUSE); an actual write is the ground truth.
-		_probe="${_dir}/.powbox-write-probe.$$"
-		if (: >"$_probe") 2>/dev/null; then
-			rm -f "$_probe"
+		# Probe write access as node by actually creating a file: `[ -w ]` only reads
+		# the mode bits, which can disagree with what the host FS truly permits (e.g.
+		# Docker Desktop's FUSE), so a real write is the ground truth. Use mktemp rather
+		# than a fixed `: >.powbox-write-probe.$PID`: that predictable name lives in a
+		# workspace dir we do not yet trust, so a planted symlink/collision could make
+		# the probe follow it and truncate the target as node — or report a false
+		# "unwritable" if the name pre-exists unwritable. mktemp creates a freshly,
+		# randomly named file with O_EXCL: it never clobbers or follows an existing path
+		# and succeeds only on a genuinely writable directory.
+		if _probe="$(mktemp "${_dir}/.powbox-write-probe.XXXXXX" 2>/dev/null)"; then
+			rm -f "$_probe" || echo "Warning: could not remove write-probe file $_probe; continuing." >&2
 		else
 			_unwritable+=("$_dir")
 		fi

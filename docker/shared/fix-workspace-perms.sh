@@ -20,8 +20,11 @@
 # is safe: root keeps full host-side access (it bypasses DAC). We deliberately do NOT
 # chown a tree owned by some OTHER non-node uid, because that would strip a real,
 # non-root host user of ownership of their own repo; that case is warned about instead,
-# with remedies, leaving host state untouched. The tree is chowned to node:node bounded
-# so it stays on the bind mount and does NOT descend into the separately mounted,
+# with remedies, leaving host state untouched. The same protection holds WITHIN a claimed
+# tree: the recursive chown matches only root-owned entries (find -uid 0), so a nested
+# file/dir owned by some other host uid (e.g. a service user's cache or artifact) keeps
+# its owner rather than being silently re-owned to node. The tree is chowned to node:node
+# bounded so it stays on the bind mount and does NOT descend into the separately mounted,
 # already-node-owned node_modules / .worktrees volumes: each real mountpoint nested under
 # the workspace is pruned explicitly (from /proc/self/mountinfo), with `find -xdev` as a
 # backstop. -xdev alone is insufficient — it only refuses to cross onto a DIFFERENT
@@ -91,7 +94,13 @@ for ws in "$@"; do
 		"$ws"/?*) prune+=(-path "$_mp" -prune -o) ;;
 		esac
 	done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
-	if ! find "$ws" -xdev "${prune[@]}" -print0 2>/dev/null | xargs -0 --no-run-if-empty chown -h "$NODE_OWNER" 2>/dev/null; then
+	# Restrict the recursive chown to ROOT-owned entries (-uid 0). The gate above only
+	# checks $ws itself; a root-owned tree can still hold files/dirs created by another
+	# host uid (a service user's caches or artifacts). Chowning those to node would strip
+	# that user — exactly what the root-level refusal avoids — so claim only uid-0 entries
+	# and leave any foreign-owned ones to their owner. (find still descends through a
+	# foreign-owned dir, so root-owned files nested inside it are still claimed.)
+	if ! find "$ws" -xdev "${prune[@]}" -uid 0 -print0 2>/dev/null | xargs -0 --no-run-if-empty chown -h "$NODE_OWNER" 2>/dev/null; then
 		echo "fix-workspace-perms: warning: could not fully chown $ws; some files may remain unwritable by node." >&2
 		status=1
 	fi

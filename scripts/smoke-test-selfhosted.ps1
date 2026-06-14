@@ -188,6 +188,7 @@ $wsSsh = "$wsVol-ssh"
 $wsSshp = "$wsVol-sshp"
 $wsScp = "$wsVol-scp"
 $wsSlug = "$wsVol-slug"
+$wsRef = "$wsVol-ref"
 try {
   docker volume create $wsVol *> $null
 
@@ -223,6 +224,19 @@ try {
   docker run --rm -v "${wsVol}:/ws" --entrypoint /bin/sh $Image -c '[ ! -e /ws/SMOKE_MARKER ] && [ -e /ws/.git ]' *> $null
   if ($LASTEXITCODE -ne 0) { Fail "-Reclone wipe + re-clone did not produce a clean checkout" }
   Ok "-Reclone (launcher empties the volume) yields a fresh clone"
+
+  # A bogus -Ref does NOT fail the clone: seed clones the default branch first, then the
+  # post-clone checkout of the ref fails BENIGNLY - warn + stay on default, still a valid
+  # checkout (vs. the old `clone --branch` form, which aborted the whole clone).
+  docker volume create $wsRef *> $null
+  $refOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e "POWBOX_CLONE_REPO=$publicRepo" -e "POWBOX_CLONE_REF=no-such-ref-zzz-9999" `
+    -v "${wsRef}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  docker run --rm -v "${wsRef}:/ws" --entrypoint /bin/sh $Image -c '[ -e /ws/.git ]' *> $null
+  if ($LASTEXITCODE -ne 0) { Fail "a bogus -Ref aborted the clone (should fall back to the default branch)" }
+  if ($refOut -notmatch "POWBOX --ref WARNING") { Fail "a bogus -Ref did not print the fallback warning" }
+  Ok "a bogus -Ref falls back to the default branch with a warning (clone still succeeds)"
 
   # unauthenticated/failed clone -> loud announcement + non-zero exit
   docker volume create $wsFail *> $null
@@ -305,7 +319,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $wsSlug $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $wsSlug $wsRef $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

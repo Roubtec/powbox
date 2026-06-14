@@ -12,7 +12,11 @@
 # life):
 #   POWBOX_SELF_HOSTED   "1" enables this script; anything else is a no-op (exit 0)
 #   POWBOX_CLONE_REPO    repo spec — an owner/repo slug or a clone URL (required)
-#   POWBOX_CLONE_REF     optional branch/tag to start on (default: the repo default)
+#   POWBOX_CLONE_REF     optional branch/tag/commit to start on (default: the repo
+#                        default). Applied as a post-clone checkout, NOT `clone
+#                        --branch`, so it accepts a raw commit SHA too and a ref that
+#                        cannot be resolved degrades to "stay on the default branch
+#                        with a warning" instead of failing the whole clone.
 #   POWBOX_WORKSPACE_DIR target dir (the workspace mount); defaults to $PWD
 #
 # Reuse semantics: clone once when the workspace has no .git; on a restart of a
@@ -155,28 +159,61 @@ fi
 find "$WS" -mindepth 1 -delete 2>/dev/null || true
 
 echo "seed-workspace: cloning $(redact_url "$URL") into $WS ..." >&2
-clone_args=(clone)
-[ -n "$REF" ] && clone_args+=(--branch "$REF")
-clone_args+=("$URL" "$WS")
 
-# Capture git's own exit status: after a completed `if git …; then …; fi` the
-# value of $? is the if-statement's (0), not the failed clone's, so a failure
-# would otherwise be reported as "exit 0". `|| clone_rc=$?` also keeps set -e
-# from aborting before the loud announcement runs.
+# Clone the repo's DEFAULT branch unconditionally; an optional --ref is applied as a
+# post-clone checkout below. This deliberately does NOT use `git clone --branch "$REF"`:
+# that form rejects a raw commit SHA (only a branch/tag name), and it couples clone
+# success to ref validity — a typo'd ref would abort the whole clone and drop the
+# container to a plain shell. A full clone already fetches every branch and tag plus
+# all reachable commits, so the post-clone checkout resolves a branch, tag, OR SHA
+# uniformly, and a bad ref degrades to a benign warning (the working tree is still a
+# valid default-branch checkout).
 #
-# GIT_TERMINAL_PROMPT=0 forces a missing/expired credential to FAIL rather than
-# block: a self-hosted launch runs with a TTY, so a private clone reaching here
-# without gh auth would otherwise hang on git's interactive username/password
-# prompt — clone_rc never gets set, and the loud failure banner + plain-shell
-# fallback below never run. Disabling the prompt routes that auth failure straight
-# to announce_failure (git-scm.com documents this for HTTP auth terminal prompts).
+# Capture git's own exit status: after a completed `if git …; then …; fi` the value of
+# $? is the if-statement's (0), not the failed clone's, so a failure would otherwise be
+# reported as "exit 0". `|| clone_rc=$?` also keeps set -e from aborting before the loud
+# announcement runs.
+#
+# GIT_TERMINAL_PROMPT=0 forces a missing/expired credential to FAIL rather than block: a
+# self-hosted launch runs with a TTY, so a private clone reaching here without gh auth
+# would otherwise hang on git's interactive username/password prompt — clone_rc never
+# gets set, and the loud failure banner + plain-shell fallback below never run. Disabling
+# the prompt routes that auth failure straight to announce_failure (git-scm.com documents
+# this for HTTP auth terminal prompts).
 clone_rc=0
-GIT_TERMINAL_PROMPT=0 git "${clone_args[@]}" || clone_rc=$?
-if [ "$clone_rc" -eq 0 ]; then
-	echo "seed-workspace: clone complete." >&2
-	exit 0
+GIT_TERMINAL_PROMPT=0 git clone "$URL" "$WS" || clone_rc=$?
+if [ "$clone_rc" -ne 0 ]; then
+	echo "seed-workspace: clone FAILED (exit $clone_rc)." >&2
+	announce_failure "$URL"
+	exit 1
 fi
+echo "seed-workspace: clone complete." >&2
 
-echo "seed-workspace: clone FAILED (exit $clone_rc)." >&2
-announce_failure "$URL"
-exit 1
+# Optional starting ref. A plain `git checkout` resolves a branch (onto a local tracking
+# branch, matching the old --branch behaviour), a tag, or a commit SHA (detached HEAD)
+# from the objects the full clone already holds. A failure here is BENIGN by design — the
+# tree is a valid default-branch checkout — so warn loudly and continue rather than
+# dropping to the failure banner: the agent/user is told to confirm the ref before
+# starting work (a self-hosted launch then typically cuts its own task branch anyway).
+if [ -n "$REF" ]; then
+	if git -C "$WS" checkout "$REF"; then
+		echo "seed-workspace: checked out ref '$REF'." >&2
+	else
+		cat >&2 <<EOF
+
+================================================================================
+  POWBOX --ref WARNING: could not check out '$REF'
+================================================================================
+  The clone succeeded, so the workspace is on the repository's DEFAULT branch
+  instead of the ref you asked for. Confirm where you are before starting work:
+
+      git -C "$WS" status -sb
+
+  (A --ref is applied only on the FIRST clone; pass a valid branch, tag, or
+  commit SHA, or just check out what you need now that the repo is cloned.)
+================================================================================
+
+EOF
+	fi
+fi
+exit 0

@@ -302,7 +302,7 @@ Flags (`cc`/`cx`, the `commands/*-container.*` scripts, and `scripts/launch-agen
 - `--isolated` / `-Isolated` — select self-hosted mode (default stays dir-mounted).
 - `--repo <spec>` / `-Repo <spec>` — the repo to clone (`owner/repo` or a URL). The positional argument is re-interpreted as this in self-hosted mode; `--repo` is the explicit form and wins.
 - `--name <label>` / `-Name <label>` — instance discriminator. **Named instances are deterministic and reusable**: the same `--name` re-attaches the same clone and the same Claude session history across launches (amortising the clone). **Unnamed instances get a fresh timestamp every launch** — a new clone and fresh history each time (inherently single-session).
-- `--ref <branch>` / `-Ref <branch>` — branch/tag to check out on first clone (default: the repo's default branch).
+- `--ref <ref>` / `-Ref <ref>` — branch, tag, **or commit SHA** to check out on first clone (default: the repo's default branch). Applied as a post-clone `git checkout`, so an unresolvable ref does not fail the clone — the container stays on the default branch and prints a warning to confirm where you landed. Only the **first** clone honours it; a reused/`--resume`d container keeps whatever is checked out (use `--reclone` to re-clone at a new ref, or just switch branches inside the container).
 - `--reclone` / `-Reclone` (alias `--fresh` / `-Fresh`) — wipe the instance's working tree and re-seed from a fresh clone. On an existing stopped container this recreates it so the clone step re-runs; the `agent-ws-*` volume itself is kept and re-cloned into.
 
 ### How it works

@@ -204,7 +204,7 @@ WSVOL="powbox-smoke-ws-$$"
 HV1="powbox-smoke-hl-a-$$"
 HV2="powbox-smoke-hl-b-$$"
 cleanup() {
-	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-sshp" "${WSVOL}-scp" "${WSVOL}-slug" "${WSVOL}-fail" >/dev/null 2>&1 || true
+	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-sshp" "${WSVOL}-scp" "${WSVOL}-slug" "${WSVOL}-fail" "${WSVOL}-ref" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker volume create "$WSVOL" >/dev/null
@@ -245,6 +245,25 @@ run_seed -e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" >/dev/null 2>&1 ||
 docker run --rm -v "${WSVOL}:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ ! -e /ws/SMOKE_MARKER ] && [ -e /ws/.git ]' ||
 	fail "--reclone wipe + re-clone did not produce a clean checkout"
 ok "--reclone (launcher empties the volume) yields a fresh clone"
+
+# A bogus --ref does NOT fail the clone: seed clones the default branch first, then the
+# post-clone checkout of the ref fails BENIGNLY — warn + stay on the default branch, still
+# a valid checkout (vs. the old `clone --branch` form, which aborted the whole clone). A
+# valid ref's happy path is just `git checkout`, exercised implicitly by the default clone.
+docker volume create "${WSVOL}-ref" >/dev/null
+ref_out="$(docker run --rm --user root \
+	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+	-e GH_TOKEN= -e GITHUB_TOKEN= \
+	-e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" \
+	-e "POWBOX_CLONE_REF=no-such-ref-zzz-9999" \
+	-v "${WSVOL}-ref:/ws" \
+	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+docker run --rm -v "${WSVOL}-ref:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ -e /ws/.git ]' ||
+	fail "a bogus --ref aborted the clone (should fall back to the default branch)"
+printf '%s' "$ref_out" | grep -q "POWBOX --ref WARNING" ||
+	fail "a bogus --ref did not print the fallback warning"
+docker volume rm -f "${WSVOL}-ref" >/dev/null 2>&1 || true
+ok "a bogus --ref falls back to the default branch with a warning (clone still succeeds)"
 
 # unauthenticated/failed clone → loud announcement + non-zero exit
 docker volume create "${WSVOL}-fail" >/dev/null

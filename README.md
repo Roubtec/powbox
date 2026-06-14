@@ -57,6 +57,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
+- `compose.selfhosted.yml`: [self-hosted mode](#self-hosted-mode---isolated) overlay — replaces the host workspace bind mount with a per-instance named volume the container clones into itself (added to the `-f` chain only with `--isolated`)
 - `docker-bake.hcl`: named Bake targets for `base`, `agent`, and `all`
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
@@ -197,6 +198,8 @@ The launcher also creates **per-project** volumes, keyed by project so a project
 - `agent-nm-<project>` → the root `node_modules`
 - `agent-wt-<project>` → the `.worktrees` tree, which **also holds the per-project pnpm store** (`.worktrees/.pnpm-store`)
 
+In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the store as subdirs); it is keyed per container, like the Podman storage volume below.
+
 > The pnpm store moved from a single shared `agent-pnpm-store` volume to a per-project store inside each `agent-wt-<project>` volume so that worktree `pnpm install` can **hardlink** package files from it instead of copying them (the store and the worktree `node_modules` must share one mount — see [Git Worktree Parallel Development](#git-worktree-parallel-development)). The old shared `agent-pnpm-store` volume is no longer mounted and can be removed with `prune-volumes`.
 
 Agent-specific state volumes remain separate, and both are always mounted regardless of which agent is primary (required so the primary agent can invoke the other in-container — see [Cross-Agent Delegation](#cross-agent-delegation)):
@@ -246,6 +249,88 @@ The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal
 Each project is mounted at `/workspace/<project>-<hash>` inside the container instead of a shared `/workspace` path.
 This gives every project a unique absolute path, which prevents tools that cache by path (Claude project memory, build caches, etc.) from colliding across projects.
 The container's working directory is set to the project-specific path automatically.
+
+## Self-Hosted Mode (`--isolated`)
+
+By default PowBox runs in **dir-mounted** mode: it bind-mounts your host working directory at `/workspace/<slug>` and the agent edits it in place, so you watch and co-edit live.
+**Self-hosted** mode (`--isolated`) is an opt-in second mode in which the container **clones the repo into a private per-instance volume itself** instead of bind-mounting a host directory.
+
+The point is to run **many containers for the same repo at once**, each on its own independent checkout — isolation stronger than git worktrees, with no host filesystem shared between containers. Because the host never sees the working tree, the deliverable is a **pushed branch / PR** via the container's `gh` auth (egress = push/PR).
+
+| Aspect | Dir-mounted (default) | Self-hosted (`--isolated`) |
+|---|---|---|
+| Workspace source | Host bind mount at `/workspace/<slug>` | `git clone` into a per-instance volume |
+| Identity discriminator | `SHA256(host path)` | `--name <label>`, else a timestamp |
+| Many per repo at once | No (same path → same container) | Yes (each `--name`/timestamp is a new instance) |
+| How work leaves | Host sees edits live | `git push` / open a PR from inside |
+| node_modules / .worktrees | Separate shadow volumes | Plain subdirs of the one workspace volume |
+| Session history | Per host path | Per instance (distinct cwd slug) |
+
+### Usage
+
+The repo is a **required** input in this mode (the container must know what to clone) — an `owner/repo` slug or a clone URL. Give it as the positional argument or with `--repo`; if you omit it while standing inside a git repo, the launcher infers it from `git remote get-url origin`.
+
+```bash
+# Two named instances of the same repo, running concurrently on independent checkouts:
+cc --isolated owner/repo --name feature-a
+cc --isolated owner/repo --name feature-b
+
+# Explicit --repo form (and an unnamed, ephemeral-by-nature instance):
+cc --isolated --repo https://github.com/owner/repo.git
+
+# Infer the repo from the origin of the repo you are standing in:
+cd ~/code/myrepo && cc --isolated
+
+# Start on a non-default branch; the agent then cuts its own task branch:
+cc --isolated owner/repo --name hotfix --ref release/2.x
+
+# Re-seed an existing named instance from a fresh clone (wipes its working tree):
+cc --isolated owner/repo --name feature-a --reclone
+```
+
+Flags (`cc`/`cx`, the `commands/*-container.*` scripts, and `scripts/launch-agent.*`):
+
+- `--isolated` / `-Isolated` — select self-hosted mode (default stays dir-mounted).
+- `--repo <spec>` / `-Repo <spec>` — the repo to clone (`owner/repo` or a URL). The positional argument is re-interpreted as this in self-hosted mode; `--repo` is the explicit form and wins.
+- `--name <label>` / `-Name <label>` — instance discriminator. **Named instances are deterministic and reusable**: the same `--name` re-attaches the same clone and the same Claude session history across launches (amortising the clone). **Unnamed instances get a fresh timestamp every launch** — a new clone and fresh history each time (inherently single-session).
+- `--ref <branch>` / `-Ref <branch>` — branch/tag to check out on first clone (default: the repo's default branch).
+- `--reclone` / `-Reclone` (alias `--fresh` / `-Fresh`) — wipe the instance's working tree and re-seed from a fresh clone. On an existing stopped container this recreates it so the clone step re-runs; the `agent-ws-*` volume itself is kept and re-cloned into.
+
+### How it works
+
+- **One workspace volume.** A per-instance `agent-ws-<container>` volume is mounted at `/workspace/<slug>` and holds the clone plus `node_modules`, `.worktrees`, and the pnpm store as ordinary subdirectories. The separate `agent-nm-*` / `agent-wt-*` shadow volumes are **not** created in this mode (there is no host filesystem underneath to shadow). Because the store, the worktrees, and the root `node_modules` now share **one** mount, `pnpm install` **hardlinks** everywhere — including the root `node_modules`, which falls back to copying in dir-mounted mode (separate mount → `link(2)` `EXDEV`).
+- **Identity.** `PROJECT_NAME = <repo-slug>-<instance-hash>`, where `instance-hash = SHA256(label-or-timestamp)[:12]` — the same shape as the dir-mounted name. So the container is `claude-<repo-slug>-<instance-hash>` and the workspace mount is `/workspace/<repo-slug>-<instance-hash>`. Session-history isolation comes entirely from the workspace path being distinct per **container** (Claude derives `~/.claude/projects/<slug>` from the cwd), so the named `instance-hash` folds in the **agent** as well as the repo: the same repo + `--name` launched with both `cc` and `cx` resolves to distinct paths (and distinct `agent-ws-<container>` volumes), preventing a delegated peer agent — both agents' config volumes are always mounted — from resuming one clone's session history against the other's working tree.
+- **Shared auth, isolated workspace.** The config volumes (`claude-config`, `codex-config`, `agent-gh-config`, `agent-zsh-history`) stay globally shared — no re-auth per container, skills seeded once. Only the workspace and the per-container Podman storage are per-instance.
+- **Worktrees still work.** The `.worktrees/<container>/<slug>` convention and the `wt-bootstrap`/`wt-enter`/`wt-remove` helpers work unchanged; they just root in the one workspace volume (which hardlinks better). `wt-bootstrap`'s root-safety check recognises self-hosted mode and verifies the workspace volume itself is container-local rather than expecting per-directory tmpfs shadows.
+
+### Upgrading an existing install needs a base-image rebuild
+
+The clone helper (`seed-workspace.sh`) and the entrypoint logic that runs it live in the **base** image layer (`docker/base/Dockerfile`), not the agent layer.
+
+Rebuilding only the agent image — the common `cc --build` / `cx --build` path, and `agent-update` when just an agent binary changed — therefore layers a new agent on an **old base** that has no clone step, so `--isolated` would create the workspace volume but the entrypoint never clones into it (you land in an empty checkout).
+
+When adopting this feature on a machine that already has the images, rebuild the base too: `agent-update-base`, or `build.sh all` (see [Build Modes](#build-modes)). A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
+
+> A follow-up task tracks making `agent-update` / `agent-check-updates` flag a base rebuild automatically when the base layer's powbox source changes (today they only detect a stale **upstream** base), so this becomes a hands-off upgrade.
+
+### gh auth must be ready before the clone
+
+The clone (and any private-repo access) depends on `gh` credentials, so the entrypoint establishes `gh auth` **before** cloning. There is deliberately **no clone/auth failsafe and no retry** — `gh auth` is a one-time manual setup that holds until the token expires. If `gh` is not authenticated when a self-hosted launch needs to clone, the container **announces it loudly** and drops to a plain `zsh` (rather than execing the agent into an empty workspace), stating the three remedies:
+
+1. use normal (dir-mounted) mode instead, or
+2. fix it once in that shell (`gh auth login`) and relaunch the same command, or
+3. seed the shared `agent-gh-config` volume from an already-authenticated machine.
+
+### Lifecycle and cleanup
+
+Self-hosted containers are **not** auto-removed (`--rm`) by default — an ephemeral container removed before the agent pushes would lose work. They and their `agent-ws-*` / `agent-podman-*` volumes accumulate, especially unnamed/timestamped ones, so tear down with the prune tooling: `agent-prune-stopped` removes stopped agent containers, and `agent-prune-volumes` then drops orphaned `agent-ws-*` volumes whose container is gone (alongside the existing `agent-nm-*` / `agent-wt-*` / `agent-podman-*` pruning). `agent-prune` does both.
+
+Self-hosted containers are flagged with a trailing `[self-hosted]` marker in `cc-list` / `cx-list` / `agent-list` (they otherwise share the `claude-` / `codex-` name prefix with dir-mounted ones) and carry a `powbox.self-hosted=true` label, so `docker ps --filter label=powbox.self-hosted=true` also lists just them.
+
+### Known limitations
+
+- A local-only repo with no fetchable remote cannot be used in this mode — the container clones over the network via `gh`/HTTPS, so there must be something to clone. Use dir-mounted mode for purely-local trees.
+- There is no host⇄container sync; egress is push/PR by design (syncing back to the host would defeat the isolation goal).
 
 ## Read-Only Context Volume
 
@@ -376,7 +461,7 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `build.sh` and `build.ps1` at the repo root for image builds
 - `commands/claude-container.*` and `commands/codex-container.*` for launches
 - `commands/smoke-test.*` for smoke-testing the unified agent image
-- `commands/prune-volumes.*` for orphaned `agent-nm-*` / `agent-wt-*` / `agent-podman-*` cleanup
+- `commands/prune-volumes.*` for orphaned `agent-nm-*` / `agent-wt-*` / `agent-ws-*` / `agent-podman-*` cleanup
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `docker/shared/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
@@ -438,8 +523,8 @@ The repo ships a pair of shell libraries — `shell/powbox.sh` (bash/zsh) and `s
 
 Functions exposed by both libraries:
 
-- `cc`, `cx` — launch Claude or Codex in the current directory (or a given path), forwarding every flag to the underlying `commands/*-container.*` script
-- `cc-list`, `cx-list`, `agent-list` — list agent containers
+- `cc`, `cx` — launch Claude or Codex in the current directory (or a given path), forwarding every flag to the underlying `commands/*-container.*` script. Add `--isolated`/`-Isolated` (with a repo positional or `--repo`/`-Repo`) for [self-hosted mode](#self-hosted-mode---isolated); the positional is then a repo spec, not a path, so the cd-after-launch is suppressed
+- `cc-list`, `cx-list`, `agent-list` — list agent containers (self-hosted ones get a trailing `[self-hosted]` marker)
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-trixie-slim` registry digest
@@ -487,6 +572,9 @@ cx
 
 # Run Codex headless
 cx -Exec "fix the failing tests"
+
+# Self-hosted: clone the repo into a private volume (see "Self-Hosted Mode")
+cc -Isolated owner/repo -Name feature-a
 
 # Launch either agent with a read-only reference volume at /ctx
 cc -Ctx C:\Docs\specs
@@ -563,6 +651,9 @@ cx
 # Run Codex headless
 cx --exec "fix the failing tests"
 
+# Self-hosted: clone the repo into a private volume (see "Self-Hosted Mode")
+cc --isolated owner/repo --name feature-a
+
 # Launch either agent with a read-only reference volume at /ctx
 cc --ctx ~/docs/specs
 
@@ -635,7 +726,7 @@ Smoke test the built image with:
 ./commands/smoke-test.sh
 ```
 
-This runs three stages: a fast presence sweep over every expected CLI; a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't); and a rootless-Podman engine test that runs the image with the launch-time device + security wiring and exercises a nested container run, a bridge published port, and the `podman compose` subcommand (so a base/Podman bump that regresses the engine is caught — see [docs/rootless-podman.md](docs/rootless-podman.md)). On a host that cannot expose `/dev/net/tun` (e.g. the Docker Desktop VM under the default `auto`), the Podman stage still validates the static engine wiring (engine present, the `containers.conf` drop-in, `podman info`, the `compose` subcommand) but skips only the nested-run/published-port checks; force the full check with `POWBOX_PODMAN=on`. A genuinely broken image (missing engine, dropped drop-in) fails the stage on any host. Skip the DB stage with `POWBOX_SMOKE_SKIP_DB=1` and the Podman stage with `POWBOX_SMOKE_SKIP_PODMAN=1` — these are independent, so set both for a Stage 1 tools-only presence sweep (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman`).
+This runs four stages: a fast presence sweep over every expected CLI; a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't); a rootless-Podman engine test that runs the image with the launch-time device + security wiring and exercises a nested container run, a bridge published port, and the `podman compose` subcommand (so a base/Podman bump that regresses the engine is caught — see [docs/rootless-podman.md](docs/rootless-podman.md)); and a self-hosted (`--isolated`) launch test that checks the launcher's identity contract (no image, daemon, or network needed) and — only when the agent image is present — the baked `seed-workspace.sh` clone/reuse/`--reclone`/failure and single-mount hardlink behavior (it self-skips that image-dependent half when the image is absent). On a host that cannot expose `/dev/net/tun` (e.g. the Docker Desktop VM under the default `auto`), the Podman stage still validates the static engine wiring (engine present, the `containers.conf` drop-in, `podman info`, the `compose` subcommand) but skips only the nested-run/published-port checks; force the full check with `POWBOX_PODMAN=on`. A genuinely broken image (missing engine, dropped drop-in) fails the stage on any host. Skip the DB stage with `POWBOX_SMOKE_SKIP_DB=1`, the Podman stage with `POWBOX_SMOKE_SKIP_PODMAN=1`, and the self-hosted stage with `POWBOX_SMOKE_SKIP_SELFHOSTED=1` — these are independent, so set all three for a Stage 1 tools-only presence sweep that touches no network or container (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted`).
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
 

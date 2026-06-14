@@ -52,14 +52,24 @@ function cc {
         [switch]$Resume,
         [switch]$Continue,
         [switch]$Volatile,
-        [string]$Ctx = ""
+        [string]$Ctx = "",
+        [switch]$Isolated,
+        [string]$Repo = "",
+        [string]$Name = "",
+        [string]$Ref = "",
+        # -Fresh: documented alias for -Reclone (parity with bash --reclone | --fresh).
+        [Alias("Fresh")]
+        [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Ctx $Ctx
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
+        -Ctx $Ctx `
+        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
+    # never Set-Location into it.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath
     }
 }
@@ -75,14 +85,24 @@ function cx {
         [switch]$Continue,
         [switch]$Volatile,
         [string]$Exec = "",
-        [string]$Ctx = ""
+        [string]$Ctx = "",
+        [switch]$Isolated,
+        [string]$Repo = "",
+        [string]$Name = "",
+        [string]$Ref = "",
+        # -Fresh: documented alias for -Reclone (parity with bash --reclone | --fresh).
+        [Alias("Fresh")]
+        [switch]$Reclone
     )
     & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
         -ProjectPath $ProjectPath `
         -Build:$Build -Detach:$Detach -Shell:$Shell `
         -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Exec $Exec -Ctx $Ctx
-    if ($PSBoundParameters.ContainsKey('ProjectPath') -and $? -and (_Powbox-ShouldCd)) {
+        -Exec $Exec -Ctx $Ctx `
+        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
+    # never Set-Location into it.
+    if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {
         Set-Location -LiteralPath $ProjectPath
     }
 }
@@ -371,16 +391,41 @@ function agent-update {
     if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
 }
 
+# Print the standard 'docker ps' table for the given filters, appending a
+# "[self-hosted]" marker to the rows of self-hosted (-Isolated) containers so they
+# are visible at a glance. The self-hosted set is resolved with a label FILTER
+# (docker ps --filter label=powbox.self-hosted=true) rather than a per-key
+# '{{.Label ...}}' template column, because podman's docker shim rejects the
+# method-with-arg template form; the filter and the 'table' output are both
+# portable. The header and dir-mounted rows pass through unchanged, so the output
+# is identical to before when no self-hosted container exists.
+function _Powbox-AgentList {
+    param([string[]]$Filters)
+    $selfHosted = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    docker ps -a @Filters --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}" | ForEach-Object {
+        $line = $_
+        # Names is field 2 of the table (ID NAMES STATUS IMAGE), and a container name
+        # never contains whitespace, so the 2nd whitespace-delimited token is the
+        # row's exact name. Compare it for EQUALITY: matching the whole line by
+        # substring would mislabel a row when one container name is a substring of
+        # another (claude-foo vs claude-foo-bar) or appears in another column. The
+        # header row's field 2 ("ID") matches no container, so it passes through.
+        $rowName = ($line.TrimStart() -split '\s+', 3)[1]
+        $marked = if ($selfHosted -contains $rowName) { " [self-hosted]" } else { "" }
+        "$line$marked"
+    }
+}
+
 function cc-list {
-    docker ps -a --filter "name=claude-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=claude-")
 }
 
 function cx-list {
-    docker ps -a --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=codex-")
 }
 
 function agent-list {
-    docker ps -a --filter "name=claude-" --filter "name=codex-" --format "table {{.ID}}`t{{.Names}}`t{{.Status}}`t{{.Image}}"
+    _Powbox-AgentList -Filters @("--filter", "name=claude-", "--filter", "name=codex-")
 }
 
 function agent-volumes {

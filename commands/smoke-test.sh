@@ -101,4 +101,15 @@ else
 	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 fi
 
+# Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's
+# self-hosted identity contract (always, no image needed) and the baked
+# seed-workspace.sh clone/reuse/reclone/failure + single-mount hardlink behavior
+# against the image (self-skips when the image is absent). Skip the whole stage
+# with POWBOX_SMOKE_SKIP_SELFHOSTED=1; see scripts/smoke-test-selfhosted.sh.
+if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED:-}" ]; then
+	echo "Skipping self-hosted smoke test (POWBOX_SMOKE_SKIP_SELFHOSTED is set)."
+else
+	"${ROOT_DIR}/scripts/smoke-test-selfhosted.sh" "$IMAGE"
+fi
+
 echo "Smoke test complete."

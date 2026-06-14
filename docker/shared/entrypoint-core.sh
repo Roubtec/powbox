@@ -83,14 +83,33 @@ if command -v gh >/dev/null 2>&1 && gh auth status &>/dev/null; then
 	if ! (cd "$HOME" && gh auth setup-git); then
 		echo "Warning: gh auth is present, but git credential helper setup failed; continuing without automatic gh git integration." >&2
 	else
-		# Route SSH-form GitHub remotes (git@github.com:...) through HTTPS so the
-		# gh credential helper above authenticates them — host-mounted repos often
-		# carry an SSH origin, and the container has no SSH keys. This rewrite is
-		# written only to the container-local GIT_CONFIG_GLOBAL; the host repo's
-		# remote URL is left untouched.
-		if ! git config --global url."https://github.com/".insteadOf "git@github.com:"; then
+		# Route SSH-form GitHub remotes through HTTPS so the gh credential helper
+		# above authenticates them — host-mounted repos often carry an SSH origin,
+		# and the container has no SSH keys. Both the scp-style (git@github.com:…)
+		# and ssh:// (ssh://git@github.com/…) forms are rewritten to the same
+		# https://github.com/ base; the ssh:// form also covers a self-hosted clone
+		# whose --repo/origin is an ssh:// URL. Because the two map to one base they
+		# are values of one multi-valued insteadOf key — reset-then-add keeps it
+		# idempotent across container restarts (a plain `git config <key> <value>`
+		# errors once the key holds multiple values). Written only to the
+		# container-local GIT_CONFIG_GLOBAL; the host repo's remote URL is untouched.
+		git config --global --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
+		if ! git config --global --add url."https://github.com/".insteadOf "git@github.com:" ||
+			! git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"; then
 			echo "Warning: failed to configure SSH→HTTPS rewrite for GitHub remotes; continuing." >&2
 		fi
+	fi
+fi
+
+# Self-hosted ("--isolated") mode: clone the repo into the per-instance workspace
+# volume. Runs AFTER gh auth (above) so a private clone has credentials, and BEFORE
+# the shadow/pnpm steps below. On any clone failure seed-workspace.sh announces the
+# remedies (loudly) and exits non-zero; we then drop to a plain zsh rather than
+# execing the agent into an empty workspace — no retry by design. A no-op when not
+# self-hosted (including the image-store writer role).
+if [ "${POWBOX_SELF_HOSTED:-}" = "1" ]; then
+	if ! /usr/local/bin/seed-workspace.sh; then
+		exec zsh
 	fi
 fi
 
@@ -99,17 +118,24 @@ fi
 # The root node_modules is already shadowed by a Docker volume mount;
 # this covers subpackage directories detected from pnpm-workspace.yaml,
 # package.json workspaces, or .powbox.yml.  See README.md for details.
-for _dir in /workspace/*/; do
-	[ -d "$_dir" ] || continue
-	_dir="${_dir%/}"
-	mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
-	if [ "${#_targets[@]}" -gt 0 ]; then
-		if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
-			echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
+#
+# Skipped entirely in self-hosted mode: there is no host filesystem to shadow (the
+# whole workspace is one container-local volume), and a tmpfs over a subpackage's
+# node_modules would break the hardlinking that the single-volume layout exists to
+# enable (the store and every node_modules already share one mount).
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
+	for _dir in /workspace/*/; do
+		[ -d "$_dir" ] || continue
+		_dir="${_dir%/}"
+		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
+		if [ "${#_targets[@]}" -gt 0 ]; then
+			if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+				echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
+			fi
 		fi
-	fi
-done
-unset _dir _targets
+	done
+	unset _dir _targets
+fi
 
 # Co-locate the pnpm store with the per-project worktrees volume so that
 # `pnpm install` inside a worktree HARDLINKS package files from the store

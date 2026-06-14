@@ -56,14 +56,33 @@ _powbox_should_cd() {
     esac
 }
 
+# True if the given args contain a flag (used to suppress the cd-after-launch when
+# the positional is a self-hosted repo spec, not a host path).
+_powbox_arg_present() {
+    local needle="$1"; shift
+    local a
+    for a in "$@"; do
+        [ "$a" = "$needle" ] && return 0
+    done
+    return 1
+}
+
 cc() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+    # Self-hosted: the positional (if any) is a repo spec, not a host path, so the
+    # launcher resolves the repo from --isolated's positional or --repo. Never inject
+    # $PWD here — for the documented "cc --isolated owner/repo --name foo" form that
+    # would pass TWO positionals ($PWD and owner/repo) and fail. Never cd afterward.
+    if _powbox_arg_present --isolated "$@"; then
+        "$POWBOX_ROOT/commands/claude-container.sh" "$@"
+    elif [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/claude-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift
         "$POWBOX_ROOT/commands/claude-container.sh" "$target" "$@"
         local rc=$?
-        if [ $rc -eq 0 ] && _powbox_should_cd; then
+        # In self-hosted (--isolated) mode the positional is a repo spec, not a
+        # path, so never cd into it.
+        if [ $rc -eq 0 ] && _powbox_should_cd && ! _powbox_arg_present --isolated "$@"; then
             cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc
@@ -71,13 +90,21 @@ cc() {
 }
 
 cx() {
-    if [ $# -eq 0 ] || [[ "$1" == -* ]]; then
+    # Self-hosted: the positional (if any) is a repo spec, not a host path, so the
+    # launcher resolves the repo from --isolated's positional or --repo. Never inject
+    # $PWD here — for the documented "cx --isolated owner/repo --name foo" form that
+    # would pass TWO positionals ($PWD and owner/repo) and fail. Never cd afterward.
+    if _powbox_arg_present --isolated "$@"; then
+        "$POWBOX_ROOT/commands/codex-container.sh" "$@"
+    elif [ $# -eq 0 ] || [[ "$1" == -* ]]; then
         "$POWBOX_ROOT/commands/codex-container.sh" "$PWD" "$@"
     else
         local target="$1"; shift
         "$POWBOX_ROOT/commands/codex-container.sh" "$target" "$@"
         local rc=$?
-        if [ $rc -eq 0 ] && _powbox_should_cd; then
+        # In self-hosted (--isolated) mode the positional is a repo spec, not a
+        # path, so never cd into it.
+        if [ $rc -eq 0 ] && _powbox_should_cd && ! _powbox_arg_present --isolated "$@"; then
             cd "$target" || echo "powbox: warning: could not cd into '$target'" >&2
         fi
         return $rc
@@ -323,16 +350,53 @@ agent-update() {
     return "$rc"
 }
 
+# Print the standard `docker ps` table for the given filters, appending a
+# "[self-hosted]" marker to the rows of self-hosted (--isolated) containers so
+# they are visible at a glance. The self-hosted set is resolved with a label
+# FILTER (docker ps --filter label=powbox.self-hosted=true) rather than a
+# `{{.Label "key"}}` template column, because podman's docker shim rejects the
+# method-with-arg template form; the filter and the no-clobber `table` output are
+# both portable. The header and dir-mounted rows pass through unchanged, so the
+# output is byte-identical to before when no self-hosted container exists. Names
+# are read into an array (not word-split) so this behaves identically under bash
+# and zsh.
+_powbox_agent_list() {
+    local name self_hosted=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && self_hosted+=("$name")
+    done < <(docker ps -a "$@" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
+
+    local line row_name marked
+    while IFS= read -r line; do
+        # The Names column is field 2 of the table (ID NAMES STATUS IMAGE), and a
+        # container name never contains whitespace, so the 2nd whitespace-delimited
+        # token is the row's exact name. Compare it for EQUALITY: matching the whole
+        # formatted line by substring would mislabel a row when one container name is
+        # a substring of another (claude-foo vs claude-foo-bar) or when a name shows
+        # up in another column. The header row's field 2 ("ID") matches no container,
+        # so it passes through unmarked.
+        row_name="$(printf '%s\n' "$line" | awk '{print $2}')"
+        marked=""
+        for name in "${self_hosted[@]}"; do
+            if [ "$row_name" = "$name" ]; then
+                marked=" [self-hosted]"
+                break
+            fi
+        done
+        printf '%s%s\n' "$line" "$marked"
+    done < <(docker ps -a "$@" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}')
+}
+
 cc-list() {
-    docker ps -a --filter "name=claude-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=claude-"
 }
 
 cx-list() {
-    docker ps -a --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=codex-"
 }
 
 agent-list() {
-    docker ps -a --filter "name=claude-" --filter "name=codex-" --format $'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+    _powbox_agent_list --filter "name=claude-" --filter "name=codex-"
 }
 
 agent-volumes() {

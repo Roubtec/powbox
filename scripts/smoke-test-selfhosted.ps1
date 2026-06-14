@@ -116,6 +116,15 @@ Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
 if (-not $credRejected) { Fail "a clone URL with embedded credentials should be rejected" }
 Ok "embedded-credential clone URLs are rejected"
 
+# ... and the scheme match is case-insensitive (RFC 3986), so an UPPERCASE scheme
+# cannot smuggle the credential past the reject.
+$env:POWBOX_PRINT_IDENTITY = "1"
+& pwsh -NoProfile -File $launcher -Agent claude -Isolated -Repo 'HTTPS://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
+$credRejectedUpper = ($LASTEXITCODE -ne 0)
+Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
+if (-not $credRejectedUpper) { Fail "an embedded-credential clone URL with an uppercase scheme should still be rejected" }
+Ok "embedded-credential URLs with an uppercase scheme are rejected"
+
 # ... while an ssh:// spec (benign git@ SSH user, no secret; normalised to https in the
 # container) is accepted and passed through unchanged, not mistaken for a credential.
 $sshId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "ssh://git@github.com/owner/repo.git", "-Name", "sshok")

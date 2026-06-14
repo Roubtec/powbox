@@ -141,6 +141,14 @@ if POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated \
 fi
 ok "embedded-credential clone URLs are rejected"
 
+# ... and the scheme match is case-insensitive (RFC 3986), so an UPPERCASE scheme
+# cannot smuggle the credential past the reject.
+if POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated \
+	--repo 'HTTPS://x-access-token:ghp_smoketoken@github.com/owner/repo.git' --name credtest >/dev/null 2>&1; then
+	fail "an embedded-credential clone URL with an uppercase scheme should still be rejected"
+fi
+ok "embedded-credential URLs with an uppercase scheme are rejected"
+
 # ... while an ssh:// spec (benign git@ SSH user, no secret; normalised to https in
 # the container) is accepted and passed through unchanged, not mistaken for a credential.
 SSHID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo ssh://git@github.com/owner/repo.git --name sshok 2>/dev/null)"

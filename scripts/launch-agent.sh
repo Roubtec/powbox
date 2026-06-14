@@ -270,20 +270,32 @@ if [ "$ISOLATED" = true ]; then
 	# never needed — fail fast. Only http(s) userinfo is a secret; an ssh:// URL's
 	# `git@` is a benign SSH user (key auth) and is normalised to HTTPS in the
 	# container, so it is left alone. The error never echoes the userinfo itself.
+	#
+	# URL schemes are case-insensitive (RFC 3986), so the scheme is lower-cased before
+	# matching — otherwise HTTPS://<token>@host/… would slip past a case-sensitive
+	# http(s) pattern and the secret would be frozen into the env anyway. (The
+	# PowerShell launcher's -match/-replace are case-insensitive by default, so this
+	# keeps the two in parity.)
 	case "$REPO_SPEC" in
-	http://*@*/* | https://*@*/* | http://*@* | https://*@*)
-		_ru_authority="${REPO_SPEC#*://}"
-		_ru_authority="${_ru_authority%%/*}"
-		case "$_ru_authority" in
-		*@*)
-			echo "Error: the clone URL embeds a credential in its authority (userinfo before '@')." >&2
-			echo "Self-hosted containers are kept, so this would persist the secret in the container" >&2
-			echo "environment (visible via 'docker inspect'). The container authenticates via gh, so" >&2
-			echo "drop the credential and pass a plain URL or slug, e.g. --repo owner/repo." >&2
-			exit 1
+	*://*)
+		_ru_scheme="$(printf '%s' "${REPO_SPEC%%://*}" | tr '[:upper:]' '[:lower:]')"
+		case "$_ru_scheme" in
+		http | https)
+			_ru_authority="${REPO_SPEC#*://}"
+			_ru_authority="${_ru_authority%%/*}"
+			case "$_ru_authority" in
+			*@*)
+				echo "Error: the clone URL embeds a credential in its authority (userinfo before '@')." >&2
+				echo "Self-hosted containers are kept, so this would persist the secret in the container" >&2
+				echo "environment (visible via 'docker inspect'). The container authenticates via gh, so" >&2
+				echo "drop the credential and pass a plain URL or slug, e.g. --repo owner/repo." >&2
+				exit 1
+				;;
+			esac
+			unset _ru_authority
 			;;
 		esac
-		unset _ru_authority
+		unset _ru_scheme
 		;;
 	esac
 

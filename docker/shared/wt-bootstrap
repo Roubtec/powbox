@@ -102,7 +102,18 @@ done
 # the gh credential helper; never rewrite the host repo's remote URL.
 ORIGIN_URL="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
 case "$ORIGIN_URL" in
-git@github.com:*) git config --global url."https://github.com/".insteadOf "git@github.com:" ;;
+git@github.com:*)
+	# The startup entrypoint already adds this rewrite (plus the ssh:// form) when gh
+	# is authenticated, leaving the key MULTI-valued; a plain `git config <key> <value>`
+	# then fails ("cannot overwrite multiple values with a single value") and, under
+	# `set -e`, would abort the bootstrap before the remote probe can fall back.
+	# `--replace-all` with a value regex is the multi-value-safe, idempotent write: it
+	# sets exactly the scp-style value (adding it if absent, creating the key if none)
+	# while leaving the ssh:// value untouched.
+	git config --global --replace-all \
+		url."https://github.com/".insteadOf "git@github.com:" '^git@github\.com:$' ||
+		echo "Warning: failed to configure SSH→HTTPS rewrite for origin; remote probe may fall back." >&2
+	;;
 esac
 REMOTE=false
 if [ -n "$ORIGIN_URL" ] && git -C "$ROOT" ls-remote --heads origin >/dev/null 2>&1; then

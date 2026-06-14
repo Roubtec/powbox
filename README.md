@@ -250,6 +250,15 @@ Each project is mounted at `/workspace/<project>-<hash>` inside the container in
 This gives every project a unique absolute path, which prevents tools that cache by path (Claude project memory, build caches, etc.) from colliding across projects.
 The container's working directory is set to the project-specific path automatically.
 
+## Host File Ownership (dir-mounted mode)
+
+In dir-mounted mode the agent runs as the in-container `node` user (uid 1000) but edits the host tree in place. On **Windows/WSL and macOS** this just works — those bind mounts honour writes from any container uid regardless of the displayed owner. On a **native-Linux host** the bind mount keeps its host uid/gid, so if the repo is owned by someone other than uid 1000 the agent cannot write the working tree or `.git`, and every `git pull`/`commit`/`checkout` and file edit fails with `EACCES`.
+
+PowBox handles this at startup, gated on a real write-probe — so it is a no-op whenever `node` can already write (all Windows/WSL/macOS launches, and Linux hosts whose mount uid already matches `node`):
+
+- **Root-owned tree (uid 0)** — the common case (a repo under `/root`, or a host that runs powbox as root). The first launch automatically `chown`s the tree to `node:node` via a narrowly-scoped, sudo-allowlisted root helper (`docker/shared/fix-workspace-perms.sh`) so the agent can write it. This is safe and one-time: root keeps full host-side access (it bypasses DAC), and once the files are uid 1000 later launches skip the step. The chown stays on the bind mount and never descends into the separate `node_modules` / `.worktrees` volumes, and it claims only the *root-owned* entries — any file nested in the tree but owned by another host uid (e.g. a service user's cache or artifact) is left to its owner, not re-owned to node.
+- **Tree owned by another non-root host uid** — PowBox does **not** chown it (that would strip a real host user of ownership of their own repo). The launch warns and leaves host state untouched; resolve it by `chown`-ing the repo to uid 1000 on the host, or use [self-hosted mode](#self-hosted-mode---isolated) (`--isolated`), which clones into a private node-owned volume and never touches the host tree.
+
 ## Self-Hosted Mode (`--isolated`)
 
 By default PowBox runs in **dir-mounted** mode: it bind-mounts your host working directory at `/workspace/<slug>` and the agent edits it in place, so you watch and co-edit live.

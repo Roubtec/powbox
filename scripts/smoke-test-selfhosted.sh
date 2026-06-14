@@ -200,7 +200,7 @@ WSVOL="powbox-smoke-ws-$$"
 HV1="powbox-smoke-hl-a-$$"
 HV2="powbox-smoke-hl-b-$$"
 cleanup() {
-	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-fail" >/dev/null 2>&1 || true
+	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-scp" "${WSVOL}-fail" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker volume create "$WSVOL" >/dev/null

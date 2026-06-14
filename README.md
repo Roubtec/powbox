@@ -383,6 +383,15 @@ The entrypoint scans for workspace declarations in this order:
 All matched directories get a tmpfs overlay.
 If none of these files exist, the feature is a no-op.
 
+### Mid-Session Packages
+
+Auto-detection runs once, at container start, so it only shadows the subpackages that exist then.
+A package scaffolded *during* a session (create `packages/foo`, write its `package.json`, then `pnpm install`) is not shadowed yet, so its `node_modules` would be created and populated straight onto the host bind mount — re-introducing the exact Linux/host binary and ownership mix this feature exists to prevent, and breaking the host's own `pnpm install` with `EACCES`.
+
+To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked into the image: before any node_modules-writing subcommand (`install`, `add`, `update`, …) it re-runs detection so a freshly added package's `node_modules` is tmpfs-shadowed *before* pnpm writes into it, then delegates to the real pnpm.
+Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure (e.g. self-hosted mode, where there is no host filesystem to shadow) never blocks the command.
+You can still run `shadow-refresh.sh` by hand at any time.
+
 ### Custom Shadow Paths (`.powbox.yml`)
 
 For paths that auto-detection does not cover, add a `.powbox.yml` to the project root:

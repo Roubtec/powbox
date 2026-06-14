@@ -288,13 +288,17 @@ try {
   Ok "a trailing-slash owner/repo slug is normalised to a clean https URL before cloning"
 
   # Single-mount hardlink invariant: within ONE volume link(2) succeeds; ACROSS two
-  # volumes it EXDEVs (the dir-mounted root-node_modules case the layout fixes).
+  # volumes it EXDEVs (the dir-mounted root-node_modules case the layout fixes). Run as
+  # root (like every other volume-writing step above): a fresh empty named volume's
+  # root is root-owned, and unlike a real launch this test does not run the launcher's
+  # chown pre-seed of the workspace volume (launch-agent.sh), so node could not mkdir
+  # here. The link(2)/EXDEV result is a filesystem property, independent of the uid.
   docker volume create $hv1 *> $null
   docker volume create $hv2 *> $null
-  docker run --rm -v "${hv1}:/ws" --entrypoint /bin/sh $Image -c 'set -e; mkdir -p /ws/.worktrees/.pnpm-store /ws/node_modules /ws/.worktrees/task/node_modules; echo pkg > /ws/.worktrees/.pnpm-store/f; ln /ws/.worktrees/.pnpm-store/f /ws/node_modules/f; ln /ws/.worktrees/.pnpm-store/f /ws/.worktrees/task/node_modules/f; [ "$(stat -c %h /ws/.worktrees/.pnpm-store/f)" -ge 3 ]' *> $null
+  docker run --rm --user root -v "${hv1}:/ws" --entrypoint /bin/sh $Image -c 'set -e; mkdir -p /ws/.worktrees/.pnpm-store /ws/node_modules /ws/.worktrees/task/node_modules; echo pkg > /ws/.worktrees/.pnpm-store/f; ln /ws/.worktrees/.pnpm-store/f /ws/node_modules/f; ln /ws/.worktrees/.pnpm-store/f /ws/.worktrees/task/node_modules/f; [ "$(stat -c %h /ws/.worktrees/.pnpm-store/f)" -ge 3 ]' *> $null
   if ($LASTEXITCODE -ne 0) { Fail "hardlink within one workspace volume failed (root + worktree node_modules)" }
   Ok "store hardlinks into BOTH the root and a worktree node_modules (one mount)"
-  docker run --rm -v "${hv1}:/store" -v "${hv2}:/nm" --entrypoint /bin/sh $Image -c 'echo x > /store/g; if ln /store/g /nm/g 2>/dev/null; then exit 1; fi; exit 0' *> $null
+  docker run --rm --user root -v "${hv1}:/store" -v "${hv2}:/nm" --entrypoint /bin/sh $Image -c 'echo x > /store/g; if ln /store/g /nm/g 2>/dev/null; then exit 1; fi; exit 0' *> $null
   if ($LASTEXITCODE -ne 0) { Fail "cross-volume hardlink unexpectedly succeeded (EXDEV invariant broken)" }
   Ok "cross-mount hardlink EXDEVs (confirms why dir-mounted root node_modules copies)"
 

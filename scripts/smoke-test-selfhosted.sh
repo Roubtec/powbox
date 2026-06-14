@@ -335,10 +335,14 @@ ok "a trailing-slash owner/repo slug is normalised to a clean https URL before c
 
 # Single-mount hardlink invariant: within ONE volume (store + node_modules as
 # subdirs, the self-hosted layout) link(2) succeeds; ACROSS two volumes it EXDEVs
-# (the dir-mounted root-node_modules case the one-volume layout fixes).
+# (the dir-mounted root-node_modules case the one-volume layout fixes). Run as root
+# (like every other volume-writing step above): a fresh empty named volume's root is
+# root-owned, and unlike a real launch this test does not run the launcher's chown
+# pre-seed of the workspace volume (launch-agent.sh) — so node could not mkdir here.
+# The link(2)/EXDEV result is a filesystem property, independent of the writing uid.
 docker volume create "$HV1" >/dev/null
 docker volume create "$HV2" >/dev/null
-docker run --rm -v "${HV1}:/ws" --entrypoint /bin/sh "$IMAGE" -c '
+docker run --rm --user root -v "${HV1}:/ws" --entrypoint /bin/sh "$IMAGE" -c '
 set -e
 mkdir -p /ws/.worktrees/.pnpm-store /ws/node_modules /ws/.worktrees/task/node_modules
 echo pkg > /ws/.worktrees/.pnpm-store/f
@@ -347,7 +351,7 @@ ln /ws/.worktrees/.pnpm-store/f /ws/.worktrees/task/node_modules/f
 [ "$(stat -c %h /ws/.worktrees/.pnpm-store/f)" -ge 3 ]' ||
 	fail "hardlink within one workspace volume failed (root + worktree node_modules)"
 ok "store hardlinks into BOTH the root and a worktree node_modules (one mount)"
-docker run --rm -v "${HV1}:/store" -v "${HV2}:/nm" --entrypoint /bin/sh "$IMAGE" -c '
+docker run --rm --user root -v "${HV1}:/store" -v "${HV2}:/nm" --entrypoint /bin/sh "$IMAGE" -c '
 echo x > /store/g
 if ln /store/g /nm/g 2>/dev/null; then exit 1; fi
 exit 0' ||

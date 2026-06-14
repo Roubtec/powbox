@@ -204,7 +204,7 @@ WSVOL="powbox-smoke-ws-$$"
 HV1="powbox-smoke-hl-a-$$"
 HV2="powbox-smoke-hl-b-$$"
 cleanup() {
-	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-sshp" "${WSVOL}-scp" "${WSVOL}-fail" >/dev/null 2>&1 || true
+	docker volume rm -f "$WSVOL" "$HV1" "$HV2" "${WSVOL}-ssh" "${WSVOL}-sshp" "${WSVOL}-scp" "${WSVOL}-slug" "${WSVOL}-fail" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 docker volume create "$WSVOL" >/dev/null
@@ -314,6 +314,24 @@ docker volume rm -f "${WSVOL}-scp" >/dev/null 2>&1 || true
 printf '%s' "$scp_out" | grep -q 'https://github.com/this-org-does-not-exist-zzz/nope-9999.git' ||
 	fail "scp-style git@github.com: URL was not normalised to https before cloning"
 ok "scp-style git@github.com: URL is normalised to https before cloning"
+
+# A bare owner/repo slug with a TRAILING SLASH (e.g. owner/repo/ — a copied/pasted
+# spec) is normalised to the canonical https://github.com/owner/repo.git: the slug
+# branch trims trailing slashes BEFORE appending .git, so it cannot emit the invalid
+# https://github.com/.../nope-9999/.git. The dot is ESCAPED here so the buggy form
+# (.../nope-9999/.git) cannot satisfy the assertion via grep's '.' wildcard. Same
+# fast-fail proof as the ssh:// case above.
+docker volume create "${WSVOL}-slug" >/dev/null
+slug_out="$(docker run --rm --user root \
+	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+	-e GH_TOKEN= -e GITHUB_TOKEN= \
+	-e 'POWBOX_CLONE_REPO=this-org-does-not-exist-zzz/nope-9999/' \
+	-v "${WSVOL}-slug:/ws" \
+	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+docker volume rm -f "${WSVOL}-slug" >/dev/null 2>&1 || true
+printf '%s' "$slug_out" | grep -q 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git' ||
+	fail "a trailing-slash owner/repo slug was not normalised to a clean https URL (saw .../nope-9999/.git?)"
+ok "a trailing-slash owner/repo slug is normalised to a clean https URL before cloning"
 
 # Single-mount hardlink invariant: within ONE volume (store + node_modules as
 # subdirs, the self-hosted layout) link(2) succeeds; ACROSS two volumes it EXDEVs

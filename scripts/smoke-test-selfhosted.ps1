@@ -22,6 +22,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Reuse the PowerShell engine running THIS script for the launcher child processes,
+# instead of hard-coding `pwsh`. On Windows PowerShell 5.1 (Desktop) without
+# PowerShell 7 on PATH, a bare `pwsh` would fail before any launcher check runs; the
+# launcher .ps1 keeps 5.1 compatibility, so whichever host is running us can run it
+# too. (Get-Process -Id $PID).Path is the exact current host exe (PowerShell adds
+# .Path to process objects on both editions); fall back to an edition-based name if
+# the process path is unavailable.
+$psExe = (Get-Process -Id $PID).Path
+if (-not $psExe) { $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell' } }
+
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $launcher = Join-Path $rootDir "scripts/launch-agent.ps1"
 # A tiny, stable public repo - no gh auth needed to clone it.
@@ -37,7 +47,7 @@ function Get-Identity {
   param([string[]]$LauncherArgs)
   $env:POWBOX_PRINT_IDENTITY = "1"
   try {
-    $out = & pwsh -NoProfile -File $launcher @LauncherArgs 2>$null
+    $out = & $psExe -NoProfile -File $launcher @LauncherArgs 2>$null
   }
   finally {
     Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
@@ -113,7 +123,7 @@ Ok "cross-agent identity is distinct (claude vs codex, same repo/name, differ in
 # kept self-hosted container would expose the secret via docker inspect). The
 # print-identity hook runs AFTER this check, so a rejected spec exits non-zero here.
 $env:POWBOX_PRINT_IDENTITY = "1"
-& pwsh -NoProfile -File $launcher -Agent claude -Isolated -Repo 'https://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
+& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo 'https://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
 $credRejected = ($LASTEXITCODE -ne 0)
 Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
 if (-not $credRejected) { Fail "a clone URL with embedded credentials should be rejected" }
@@ -122,7 +132,7 @@ Ok "embedded-credential clone URLs are rejected"
 # ... and the scheme match is case-insensitive (RFC 3986), so an UPPERCASE scheme
 # cannot smuggle the credential past the reject.
 $env:POWBOX_PRINT_IDENTITY = "1"
-& pwsh -NoProfile -File $launcher -Agent claude -Isolated -Repo 'HTTPS://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
+& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo 'HTTPS://x-access-token:ghp_smoketoken@github.com/owner/repo.git' -Name credtest *> $null
 $credRejectedUpper = ($LASTEXITCODE -ne 0)
 Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
 if (-not $credRejectedUpper) { Fail "an embedded-credential clone URL with an uppercase scheme should still be rejected" }
@@ -148,7 +158,7 @@ Ok "unnamed instances are fresh each launch"
 
 # --- self-hosted-only flags require -Isolated ---------------------------------
 $env:POWBOX_PRINT_IDENTITY = "1"
-& pwsh -NoProfile -File $launcher -Agent claude -Name foo *> $null
+& $psExe -NoProfile -File $launcher -Agent claude -Name foo *> $null
 $rejected = ($LASTEXITCODE -ne 0)
 Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
 if (-not $rejected) { Fail "-Name without -Isolated should error" }
@@ -177,6 +187,7 @@ $wsFail = "$wsVol-fail"
 $wsSsh = "$wsVol-ssh"
 $wsSshp = "$wsVol-sshp"
 $wsScp = "$wsVol-scp"
+$wsSlug = "$wsVol-slug"
 try {
   docker volume create $wsVol *> $null
 
@@ -263,6 +274,19 @@ try {
   if ($scpOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "scp-style git@github.com: URL was not normalised to https before cloning" }
   Ok "scp-style git@github.com: URL is normalised to https before cloning"
 
+  # A bare owner/repo slug with a TRAILING SLASH (e.g. owner/repo/ - a copied/pasted
+  # spec) is normalised to the canonical https://github.com/owner/repo.git: the slug
+  # branch trims trailing slashes BEFORE appending .git, so it cannot emit the invalid
+  # https://github.com/.../nope-9999/.git. The dots are escaped so the buggy form
+  # (.../nope-9999/.git) cannot satisfy the -match. Same fast-fail proof as above.
+  docker volume create $wsSlug *> $null
+  $slugOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e 'POWBOX_CLONE_REPO=this-org-does-not-exist-zzz/nope-9999/' `
+    -v "${wsSlug}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  if ($slugOut -notmatch 'https://github\.com/this-org-does-not-exist-zzz/nope-9999\.git') { Fail "a trailing-slash owner/repo slug was not normalised to a clean https URL (saw .../nope-9999/.git?)" }
+  Ok "a trailing-slash owner/repo slug is normalised to a clean https URL before cloning"
+
   # Single-mount hardlink invariant: within ONE volume link(2) succeeds; ACROSS two
   # volumes it EXDEVs (the dir-mounted root-node_modules case the layout fixes).
   docker volume create $hv1 *> $null
@@ -277,7 +301,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $wsSlug $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

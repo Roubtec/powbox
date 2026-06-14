@@ -66,11 +66,16 @@ clone_url() {
 	git@github.com:*) printf 'https://github.com/%s' "${spec#git@github.com:}" ;;
 	*://* | git@*) printf '%s' "$spec" ;;
 	*)
-		# owner/repo slug → canonical HTTPS clone URL. Strip a trailing .git of ANY
-		# case first — POSIX ${spec%.git} is case-sensitive, so a slug like
-		# owner/repo.GIT would otherwise yield the invalid .GIT.git. Matches the
-		# launchers' case-insensitive .git handling (the launcher passes the raw,
-		# un-normalised spec as POWBOX_CLONE_REPO).
+		# owner/repo slug → canonical HTTPS clone URL. Trim any trailing slashes
+		# FIRST — a copied spec like owner/repo/ or owner/repo.git/ would otherwise
+		# yield the invalid https://github.com/owner/repo/.git (the .git strip below
+		# can't match a trailing-slash value either). Matches the launchers' trailing-
+		# slash trim for identity reuse, so the same spec reattaches AND clones.
+		# Then strip a trailing .git of ANY case — POSIX ${spec%.git} is
+		# case-sensitive, so a slug like owner/repo.GIT would otherwise yield the
+		# invalid .GIT.git. Matches the launchers' case-insensitive .git handling
+		# (the launcher passes the raw, un-normalised spec as POWBOX_CLONE_REPO).
+		while [ "${spec%/}" != "$spec" ]; do spec="${spec%/}"; done
 		case "$spec" in
 		*.[Gg][Ii][Tt]) spec="${spec%.???}" ;;
 		esac

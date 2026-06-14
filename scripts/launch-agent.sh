@@ -341,7 +341,16 @@ if [ "$ISOLATED" = true ]; then
 		INSTANCE_LABEL="ts-$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}${RANDOM}"
 	fi
 	INSTANCE_HASH="$(project_hash "$INSTANCE_LABEL")"
-	PROJECT_NAME="${REPO_SLUG}-${INSTANCE_HASH}"
+	# Cosmetic, human-readable slug from --name, folded into PROJECT_NAME so the
+	# container/workspace name and `cc-list` show WHICH instance without an inspect. It
+	# does NOT own identity: the 12-char hash above (which hashes the RAW --name) does,
+	# so two --names that slugify alike — "Feature A" and "feature/a" both → feature-a —
+	# stay distinct containers (told apart by the hash and the powbox.instance-name
+	# label). Sanitise to the repo-slug shape, cap the length, and drop it entirely if it
+	# empties out so a punctuation-only name never weakens the hash-based identity. Empty
+	# for unnamed launches (no --name → no slug, so PROJECT_NAME is unchanged there).
+	NAME_SLUG="$(printf '%s' "$INSTANCE_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^[-.]*//; s/[-.]*$//' | cut -c1-32 | sed 's/[-.]*$//')"
+	PROJECT_NAME="${REPO_SLUG}${NAME_SLUG:+-${NAME_SLUG}}-${INSTANCE_HASH}"
 else
 	# --- Dir-mounted identity (unchanged) ------------------------------------
 	# On Windows (MSYS/Cygwin), the filesystem is typically case-insensitive and the terminal
@@ -475,6 +484,9 @@ if [ "$RESUME" = true ]; then
 	if [ "$RECLONE" = true ]; then
 		echo "Note: --reclone is ignored with --resume; the existing checkout is left untouched. Omit --resume to wipe and re-clone." >&2
 	fi
+	if [ -n "$CLONE_REF" ]; then
+		echo "Note: --ref is ignored on resume; the existing checkout is left untouched." >&2
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
 fi
 
@@ -496,6 +508,18 @@ if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$VOLATILE" != true ] &&
 		fi
 	fi
 	CONTAINER_EXISTS=false
+fi
+
+# --ref only takes effect on a FRESH clone (a brand-new instance or a --reclone): a
+# reused container keeps whatever the agent has checked out, and seed-workspace skips
+# cloning when the workspace volume already holds a .git. So when --ref is passed but
+# we are about to reuse an existing container, WARN (don't act) rather than silently
+# implying the ref will be applied. Benign by design — these are attended launches and
+# the agent/user can switch refs in-container. Placed AFTER the --reclone block, so a
+# --reclone (which sets CONTAINER_EXISTS=false to force a fresh clone) correctly skips
+# the warning because the ref WILL be applied then.
+if [ "$ISOLATED" = true ] && [ -n "$CLONE_REF" ] && [ "$CONTAINER_EXISTS" = true ] && [ "$RECLONE" != true ]; then
+	echo "Note: --ref '${CLONE_REF}' is not applied on resume; ${CONTAINER_NAME} keeps its current checkout. Use --reclone to re-clone at this ref, or switch branches inside the container." >&2
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
@@ -834,8 +858,17 @@ if [ "$ISOLATED" = true ]; then
 		-e "POWBOX_WORKSPACE_DIR=$WORKSPACE_MOUNT"
 	)
 	# Label self-hosted containers so tooling/lists can distinguish them from
-	# dir-mounted ones (they already share the claude-/codex- name prefix).
-	SELFHOSTED_LABEL=(--label "powbox.self-hosted=true")
+	# dir-mounted ones (they already share the claude-/codex- name prefix). The
+	# instance-name label stores the --name verbatim (as entered, pre-slugify) so
+	# cc-list/agent-list can tell apart two names that slugify alike; repo + ref give
+	# the list enough to reconstruct the exact resume command. ref records what was
+	# REQUESTED at creation and is not re-applied on resume (see the --ref warning).
+	SELFHOSTED_LABEL=(
+		--label "powbox.self-hosted=true"
+		--label "powbox.instance-name=${INSTANCE_NAME}"
+		--label "powbox.repo=${REPO_SPEC}"
+		--label "powbox.ref=${CLONE_REF}"
+	)
 fi
 
 # In dir-mounted mode the root node_modules and .worktrees are separate per-project

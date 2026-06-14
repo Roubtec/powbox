@@ -84,6 +84,28 @@ if ($n1["CONTAINER_NAME"] -ne $n2["CONTAINER_NAME"]) { Fail "named instance is n
 if ($n1["WORKSPACE_MOUNT"] -ne $n2["WORKSPACE_MOUNT"]) { Fail "named instance workspace path (-> Claude session slug) is not stable" }
 Ok "named instance is deterministic (same workspace path / session slug on relaunch)"
 
+# --- the -Name slug is visible in the container name (so cc-list / docker ps show WHICH
+# instance), sitting between the repo slug and the trailing hash.
+if ($n1["CONTAINER_NAME"] -notlike "*-foo-*") { Fail "named instance does not surface the -Name slug: $($n1["CONTAINER_NAME"])" }
+Ok "named instance surfaces the -Name slug in the container name"
+
+# --- two -Names that SLUGIFY ALIKE stay DISTINCT (the hash folds in the RAW name), so a
+# slug collision never merges two instances - yet both show the SAME visible slug, so the
+# raw powbox.instance-name label (not asserted here; no Docker) is the tiebreaker.
+$c1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "Feature A")
+$c2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "feature/a")
+if ($c1["CONTAINER_NAME"] -eq $c2["CONTAINER_NAME"]) { Fail "two -Names that slugify alike collided (the hash must fold in the raw name)" }
+if ($c1["CONTAINER_NAME"] -notlike "*-feature-a-*") { Fail "slug 'feature-a' not derived from 'Feature A'" }
+if ($c2["CONTAINER_NAME"] -notlike "*-feature-a-*") { Fail "slug 'feature-a' not derived from 'feature/a'" }
+Ok "slug collisions stay distinct (raw name in the hash) while sharing the visible slug"
+
+# --- -Ref is VOLATILE and must NOT enter the identity hash: a re-run with a different
+# -Ref has to reuse the SAME container (not fork a new clone per ref).
+$r1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "refstable", "-Ref", "main")
+$r2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "refstable", "-Ref", "dev")
+if ($r1["CONTAINER_NAME"] -ne $r2["CONTAINER_NAME"]) { Fail "-Ref changed the container identity (it must not enter the hash)" }
+Ok "-Ref does not enter the container identity (same name reuses one container across refs)"
+
 # --- named identity is PER-REPO: same -Name on a different repo must not collide
 # Two remotes that share a basename (owner1/app, owner2/app) launched with the same
 # -Name must resolve to DISTINCT identities; otherwise the second launch would

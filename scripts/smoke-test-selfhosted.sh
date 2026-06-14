@@ -94,6 +94,32 @@ N2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.gi
 	fail "named instance workspace path (→ Claude session slug) is not stable"
 ok "named instance is deterministic (same workspace path / session slug on relaunch)"
 
+# --- the --name slug is visible in the container name (so cc-list / docker ps show
+# WHICH instance), sitting between the repo slug and the trailing hash.
+case "$(id_field "$N1" CONTAINER_NAME)" in
+*-foo-*) ok "named instance surfaces the --name slug in the container name" ;;
+*) fail "named instance does not surface the --name slug: $(id_field "$N1" CONTAINER_NAME)" ;;
+esac
+
+# --- two --names that SLUGIFY ALIKE stay DISTINCT (the hash folds in the RAW name), so
+# a slug collision never merges two instances — yet both show the SAME visible slug, so
+# the raw powbox.instance-name label (not asserted here; no Docker) is the tiebreaker.
+C1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name 'Feature A' 2>/dev/null)"
+C2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name 'feature/a' 2>/dev/null)"
+[ "$(id_field "$C1" CONTAINER_NAME)" != "$(id_field "$C2" CONTAINER_NAME)" ] ||
+	fail "two --names that slugify alike collided (the hash must fold in the raw name)"
+case "$(id_field "$C1" CONTAINER_NAME)" in *-feature-a-*) : ;; *) fail "slug 'feature-a' not derived from 'Feature A'" ;; esac
+case "$(id_field "$C2" CONTAINER_NAME)" in *-feature-a-*) : ;; *) fail "slug 'feature-a' not derived from 'feature/a'" ;; esac
+ok "slug collisions stay distinct (raw name in the hash) while sharing the visible slug"
+
+# --- --ref is VOLATILE and must NOT enter the identity hash: a re-run with a different
+# --ref has to reuse the SAME container (not fork a new clone per ref).
+R1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name refstable --ref main 2>/dev/null)"
+R2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name refstable --ref dev 2>/dev/null)"
+[ "$(id_field "$R1" CONTAINER_NAME)" = "$(id_field "$R2" CONTAINER_NAME)" ] ||
+	fail "--ref changed the container identity (it must not enter the hash)"
+ok "--ref does not enter the container identity (same name reuses one container across refs)"
+
 # --- named identity is PER-REPO: same --name on a different repo must not collide
 # Two remotes that share a basename (owner1/app, owner2/app) launched with the same
 # --name must resolve to DISTINCT identities; otherwise the second launch would

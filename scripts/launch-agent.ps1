@@ -172,7 +172,16 @@ if ($Isolated) {
     $instanceLabel = "ts-" + [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfffffff") + "-" + $PID + "-" + $rand
   }
   $instanceHash = Get-Powbox-Hash12 $instanceLabel
-  $projectSlug = "$repoSlug-$instanceHash"
+  # Cosmetic, human-readable slug from -Name, folded into $projectSlug so the
+  # container/workspace name and cc-list show WHICH instance without an inspect. It does
+  # NOT own identity: the 12-char hash above (which hashes the RAW -Name) does, so two
+  # -Names that slugify alike ("Feature A" and "feature/a" both -> feature-a) stay
+  # distinct containers (told apart by the hash and the powbox.instance-name label).
+  # Sanitise to the repo-slug shape, cap the length, and drop it if it empties out so a
+  # punctuation-only name never weakens the hash-based identity. Empty for unnamed.
+  $nameSlug = (($Name.ToLowerInvariant() -replace '[^a-z0-9_.-]', '-') -replace '-+', '-').Trim('-', '.')
+  if ($nameSlug.Length -gt 32) { $nameSlug = $nameSlug.Substring(0, 32).TrimEnd('-', '.') }
+  $projectSlug = if ($nameSlug) { "$repoSlug-$nameSlug-$instanceHash" } else { "$repoSlug-$instanceHash" }
 }
 else {
   # --- Dir-mounted identity (unchanged) --------------------------------------
@@ -323,6 +332,9 @@ if ($Resume) {
   if ($Reclone) {
     Write-Host "Note: -Reclone is ignored with -Resume; the existing checkout is left untouched. Omit -Resume to wipe and re-clone." -ForegroundColor Yellow
   }
+  if ($Ref -ne "") {
+    Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
+  }
 
   docker start -ai $containerName
   exit $LASTEXITCODE
@@ -348,6 +360,17 @@ if ($Isolated -and $Reclone -and -not $Volatile -and $containerExists) {
     }
   }
   $containerExists = $false
+}
+
+# -Ref only takes effect on a FRESH clone (a brand-new instance or a -Reclone): a reused
+# container keeps whatever the agent has checked out, and seed-workspace skips cloning
+# when the workspace volume already holds a .git. So warn (don't act) when -Ref is passed
+# but we are about to reuse an existing container. Benign by design - these are attended
+# launches and the agent/user can switch refs in-container. Placed AFTER the -Reclone
+# block, so a -Reclone (which sets $containerExists=$false to force a fresh clone)
+# correctly skips the warning because the ref WILL be applied then.
+if ($Isolated -and $Ref -ne "" -and $containerExists -and -not $Reclone) {
+  Write-Host "Note: -Ref '$Ref' is not applied on resume; $containerName keeps its current checkout. Use -Reclone to re-clone at this ref, or switch branches inside the container." -ForegroundColor Yellow
 }
 
 if (-not $Volatile -and $containerExists) {
@@ -777,9 +800,17 @@ if ($Isolated) {
     "-e", "POWBOX_CLONE_REF=$Ref",
     "-e", "POWBOX_WORKSPACE_DIR=$workspaceMount"
   )
-  # Label self-hosted containers so tooling/lists can distinguish them from
-  # dir-mounted ones (they already share the claude-/codex- name prefix).
-  $envArgs += @("--label", "powbox.self-hosted=true")
+  # Label self-hosted containers so tooling/lists can distinguish them from dir-mounted
+  # ones (they already share the claude-/codex- name prefix). instance-name stores -Name
+  # verbatim (pre-slugify) so cc-list/agent-list tell apart two names that slugify alike;
+  # repo + ref give the list enough to reconstruct the resume command. ref records what
+  # was REQUESTED at creation and is not re-applied on resume (see the -Ref warning).
+  $envArgs += @(
+    "--label", "powbox.self-hosted=true",
+    "--label", "powbox.instance-name=$Name",
+    "--label", "powbox.repo=$repoSpec",
+    "--label", "powbox.ref=$Ref"
+  )
 }
 else {
   $workspaceVolArgs = @(

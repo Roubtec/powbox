@@ -360,10 +360,25 @@ agent-update() {
 # via `docker inspect --format {{index ...}}` — both portable, unlike the `{{.Label
 # "key"}}` template column podman's docker shim rejects. The name shown is the RAW
 # --name (the powbox.instance-name label), which is what disambiguates two names that
-# slugify to the same container-name shape. The header and dir-mounted rows pass through
-# unchanged, so the output is byte-identical to before when no self-hosted container
-# exists. Names/entries are read into arrays (not word-split) so this behaves
-# identically under bash and zsh.
+# slugify to the same container-name shape. A field value containing whitespace or shell
+# metacharacters is single-quoted (e.g. name='Feature A') so the marker stays unambiguous
+# and pastes straight back into --name; the raw value is preserved, so its identity hash
+# still recomputes. The header and dir-mounted rows pass through unchanged, so the output
+# is byte-identical to before when no self-hosted container exists. Names/entries are read
+# into arrays (not word-split) so this behaves identically under bash and zsh.
+
+# Render one marker field value: verbatim when "simple" (only characters that survive a
+# copy-paste back into the shell unquoted — so repo specs/refs with slashes, colons, @,
+# dots stay readable), else POSIX single-quoted so a value with spaces/metacharacters is
+# unambiguous and pasteable into a resume command. Embedded single quotes use the '\''
+# splice. The raw value is never altered, only how it is displayed.
+_powbox_marker_field() {
+    case $1 in
+    *[!A-Za-z0-9._/@:+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+    esac
+}
+
 _powbox_agent_list() {
     local name cand=()
     while IFS= read -r name; do
@@ -390,9 +405,9 @@ _powbox_agent_list() {
             [ "$irepo" = "<no value>" ] && irepo=""
             [ "$iref" = "<no value>" ] && iref=""
             marker=" [self-hosted"
-            [ -n "$iname" ] && marker="$marker name=$iname"
-            [ -n "$irepo" ] && marker="$marker repo=$irepo"
-            [ -n "$iref" ] && marker="$marker ref=$iref"
+            [ -n "$iname" ] && marker="$marker name=$(_powbox_marker_field "$iname")"
+            [ -n "$irepo" ] && marker="$marker repo=$(_powbox_marker_field "$irepo")"
+            [ -n "$iref" ] && marker="$marker ref=$(_powbox_marker_field "$iref")"
             marker="$marker]"
             entries+=("$name"$'\t'"$marker")
         done < <(docker inspect \

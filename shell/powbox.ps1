@@ -400,9 +400,22 @@ function agent-update {
 # name/repo/ref come from the powbox.instance-name/repo/ref labels via `docker inspect
 # --format {{index ...}}` — both portable, unlike the '{{.Label ...}}' column podman's
 # docker shim rejects. The name shown is the RAW -Name (the powbox.instance-name label),
-# which disambiguates two names that slugify to the same container-name shape. The header
-# and dir-mounted rows pass through unchanged, so the output is identical to before when
-# no self-hosted container exists.
+# which disambiguates two names that slugify to the same container-name shape. A field
+# value containing whitespace or shell metacharacters is single-quoted (e.g.
+# name='Feature A') so the marker stays unambiguous and pastes straight back into -Name;
+# the raw value is preserved, so its identity hash still recomputes. The header and
+# dir-mounted rows pass through unchanged, so the output is identical to before when no
+# self-hosted container exists.
+
+# Render one marker field value (see powbox.sh _powbox_marker_field): verbatim when
+# "simple" (repo specs/refs with slashes, colons, @, dots stay readable), else single-
+# quoted so a value with spaces/metacharacters is unambiguous and pasteable into a resume
+# command. PowerShell single-quote escaping doubles an embedded quote. The raw value is
+# never altered, only how it is displayed.
+function _Powbox-MarkerField([string]$v) {
+    if ($v -match '[^A-Za-z0-9._/@:+-]') { "'" + $v.Replace("'", "''") + "'" } else { $v }
+}
+
 function _Powbox-AgentList {
     param([string[]]$Filters)
     $cand = @(docker ps -a @Filters --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
@@ -427,9 +440,9 @@ function _Powbox-AgentList {
             $irepo = if ($parts.Count -ge 3 -and $parts[2] -ne '<no value>') { $parts[2] } else { '' }
             $iref = if ($parts.Count -ge 4 -and $parts[3] -ne '<no value>') { $parts[3] } else { '' }
             $m = " [self-hosted"
-            if ($iname) { $m += " name=$iname" }
-            if ($irepo) { $m += " repo=$irepo" }
-            if ($iref) { $m += " ref=$iref" }
+            if ($iname) { $m += " name=$(_Powbox-MarkerField $iname)" }
+            if ($irepo) { $m += " repo=$(_Powbox-MarkerField $irepo)" }
+            if ($iref) { $m += " ref=$(_Powbox-MarkerField $iref)" }
             $m += "]"
             $markers[$n] = $m
         }

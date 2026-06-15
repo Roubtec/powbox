@@ -24,7 +24,22 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LAUNCHER="${ROOT_DIR}/scripts/launch-agent.sh"
 IMAGE="${1:-powbox-agent:latest}"
 # A tiny, stable public repo — no gh auth needed to clone it.
-PUBLIC_REPO="${POWBOX_SMOKE_PUBLIC_REPO:-https://github.com/octocat/Hello-World.git}"
+DEFAULT_PUBLIC_REPO="https://github.com/octocat/Hello-World.git"
+PUBLIC_REPO="${POWBOX_SMOKE_PUBLIC_REPO:-$DEFAULT_PUBLIC_REPO}"
+# Two of the Stage-B ref cases assert against contents specific to the default repo:
+# a tracked top-level path that is NOT a ref (octocat/Hello-World ships "README"),
+# and a valid non-default branch ("test"). They are configurable so a custom
+# POWBOX_SMOKE_PUBLIC_REPO fixture can still exercise them, but the Hello-World
+# defaults apply ONLY to the default repo — so against any other repo with neither
+# override set, each case self-skips rather than failing on a fixture mismatch. (The
+# bogus-ref fallback case is repo-agnostic: every repo lacks "no-such-ref-zzz-9999".)
+if [ "$PUBLIC_REPO" = "$DEFAULT_PUBLIC_REPO" ]; then
+	REF_PATH="${POWBOX_SMOKE_REF_PATH:-README}"
+	REF_BRANCH="${POWBOX_SMOKE_REF_BRANCH:-test}"
+else
+	REF_PATH="${POWBOX_SMOKE_REF_PATH:-}"
+	REF_BRANCH="${POWBOX_SMOKE_REF_BRANCH:-}"
+fi
 
 pass=0
 fail() {
@@ -291,49 +306,59 @@ printf '%s' "$ref_out" | grep -q "POWBOX --ref WARNING" ||
 docker volume rm -f "${WSVOL}-ref" >/dev/null 2>&1 || true
 ok "a bogus --ref falls back to the default branch with a warning (clone still succeeds)"
 
-# A --ref that is a TYPO matching a tracked PATH (octocat/Hello-World ships a top-level
-# "README" file, which is NOT a ref) must ALSO fall back: a bare `git checkout README`
-# would succeed as a path checkout and silently strand the tree on the default branch, so
-# the ref is resolved to a commit first and an unresolved name degrades to the warning.
-docker volume create "${WSVOL}-path" >/dev/null
-path_out="$(docker run --rm --user root \
-	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
-	-e GH_TOKEN= -e GITHUB_TOKEN= \
-	-e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" \
-	-e "POWBOX_CLONE_REF=README" \
-	-v "${WSVOL}-path:/ws" \
-	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
-docker run --rm -v "${WSVOL}-path:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ -e /ws/.git ]' ||
-	fail "a path-matching --ref aborted the clone (should fall back to the default branch)"
-printf '%s' "$path_out" | grep -q "POWBOX --ref WARNING" ||
-	fail "a path-matching --ref was silently checked out as a pathspec instead of warning"
-if printf '%s' "$path_out" | grep -q "checked out ref 'README'"; then
-	fail "a path-matching --ref reported a successful ref checkout (pathspec ambiguity not rejected)"
+# A --ref that is a TYPO matching a tracked PATH ($REF_PATH; octocat/Hello-World ships a
+# top-level "README" file, which is NOT a ref) must ALSO fall back: a bare `git checkout
+# README` would succeed as a path checkout and silently strand the tree on the default
+# branch, so the ref is resolved to a commit first and an unresolved name degrades to the
+# warning. Skipped when no tracked-non-ref path is known for a custom repo (see REF_PATH).
+if [ -n "$REF_PATH" ]; then
+	docker volume create "${WSVOL}-path" >/dev/null
+	path_out="$(docker run --rm --user root \
+		-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+		-e GH_TOKEN= -e GITHUB_TOKEN= \
+		-e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" \
+		-e "POWBOX_CLONE_REF=${REF_PATH}" \
+		-v "${WSVOL}-path:/ws" \
+		--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+	docker run --rm -v "${WSVOL}-path:/ws" --entrypoint /bin/sh "$IMAGE" -c '[ -e /ws/.git ]' ||
+		fail "a path-matching --ref aborted the clone (should fall back to the default branch)"
+	printf '%s' "$path_out" | grep -q "POWBOX --ref WARNING" ||
+		fail "a path-matching --ref was silently checked out as a pathspec instead of warning"
+	if printf '%s' "$path_out" | grep -q "checked out ref '${REF_PATH}'"; then
+		fail "a path-matching --ref reported a successful ref checkout (pathspec ambiguity not rejected)"
+	fi
+	docker volume rm -f "${WSVOL}-path" >/dev/null 2>&1 || true
+	ok "a path-matching --ref typo falls back with a warning (pathspec is not mistaken for a ref)"
+else
+	echo "  skip: path-matching --ref typo case (set POWBOX_SMOKE_REF_PATH to a tracked non-ref path for a custom repo)"
 fi
-docker volume rm -f "${WSVOL}-path" >/dev/null 2>&1 || true
-ok "a path-matching --ref typo falls back with a warning (pathspec is not mistaken for a ref)"
 
-# A valid NON-DEFAULT branch by bare name (octocat/Hello-World ships a "test" branch) is the
-# primary --ref use case and MUST check out: a fresh clone materializes only the default
-# branch as a local head, so the ref-resolution guard has to accept the refs/remotes/origin/*
-# form too — verifying only the bare name would wrongly strand the user on the default branch.
-docker volume create "${WSVOL}-branch" >/dev/null
-branch_out="$(docker run --rm --user root \
-	-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
-	-e GH_TOKEN= -e GITHUB_TOKEN= \
-	-e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" \
-	-e "POWBOX_CLONE_REF=test" \
-	-v "${WSVOL}-branch:/ws" \
-	--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
-printf '%s' "$branch_out" | grep -q "checked out ref 'test'" ||
-	fail "a valid non-default branch --ref was not checked out (origin/ tracking form rejected?)"
-if printf '%s' "$branch_out" | grep -q "POWBOX --ref WARNING"; then
-	fail "a valid non-default branch --ref printed the fallback warning instead of checking out"
+# A valid NON-DEFAULT branch by bare name ($REF_BRANCH; octocat/Hello-World ships a "test"
+# branch) is the primary --ref use case and MUST check out: a fresh clone materializes only
+# the default branch as a local head, so the ref-resolution guard has to accept the
+# refs/remotes/origin/* form too — verifying only the bare name would wrongly strand the
+# user on the default branch. Skipped when no non-default branch is known for a custom repo.
+if [ -n "$REF_BRANCH" ]; then
+	docker volume create "${WSVOL}-branch" >/dev/null
+	branch_out="$(docker run --rm --user root \
+		-e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws \
+		-e GH_TOKEN= -e GITHUB_TOKEN= \
+		-e "POWBOX_CLONE_REPO=${PUBLIC_REPO}" \
+		-e "POWBOX_CLONE_REF=${REF_BRANCH}" \
+		-v "${WSVOL}-branch:/ws" \
+		--entrypoint /usr/local/bin/seed-workspace.sh "$IMAGE" 2>&1 || true)"
+	printf '%s' "$branch_out" | grep -q "checked out ref '${REF_BRANCH}'" ||
+		fail "a valid non-default branch --ref was not checked out (origin/ tracking form rejected?)"
+	if printf '%s' "$branch_out" | grep -q "POWBOX --ref WARNING"; then
+		fail "a valid non-default branch --ref printed the fallback warning instead of checking out"
+	fi
+	[ "$(docker run --rm -v "${WSVOL}-branch:/ws" --entrypoint git "$IMAGE" -C /ws rev-parse --abbrev-ref HEAD 2>/dev/null)" = "${REF_BRANCH}" ] ||
+		fail "a valid non-default branch --ref did not leave HEAD on that branch"
+	docker volume rm -f "${WSVOL}-branch" >/dev/null 2>&1 || true
+	ok "a valid non-default branch --ref checks out (remote-tracking ref is resolved, not rejected)"
+else
+	echo "  skip: non-default branch --ref case (set POWBOX_SMOKE_REF_BRANCH to a valid non-default branch for a custom repo)"
 fi
-[ "$(docker run --rm -v "${WSVOL}-branch:/ws" --entrypoint git "$IMAGE" -C /ws rev-parse --abbrev-ref HEAD 2>/dev/null)" = "test" ] ||
-	fail "a valid non-default branch --ref did not leave HEAD on that branch"
-docker volume rm -f "${WSVOL}-branch" >/dev/null 2>&1 || true
-ok "a valid non-default branch --ref checks out (remote-tracking ref is resolved, not rejected)"
 
 # unauthenticated/failed clone → loud announcement + non-zero exit
 docker volume create "${WSVOL}-fail" >/dev/null

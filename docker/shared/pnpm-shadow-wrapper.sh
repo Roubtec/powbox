@@ -40,16 +40,39 @@ refresh_shadows() {
 	# Self-hosted (--isolated) mode has no host filesystem underneath to shadow,
 	# and shadow-mounts.sh is skipped there entirely; mirror that here.
 	[ "${POWBOX_SELF_HOSTED:-}" = "1" ] && return 0
+	command -v shadow-refresh.sh >/dev/null 2>&1 || return 0
+
+	# Resolve pnpm's EFFECTIVE directory, honoring `-C, --dir <dir>` ("Change to
+	# directory <dir>", per `pnpm install --help`). A `pnpm -C /workspace/<repo>
+	# install` (or `--dir`) invoked from OUTSIDE /workspace still writes node_modules
+	# into that project, so the /workspace guard and the project-scoping walk below
+	# must key off that target rather than the raw $PWD — otherwise the early return
+	# here would skip the very refresh this wrapper exists to do. pnpm accepts
+	# `-C <dir>`, `--dir <dir>`, and the `=`-joined forms; a later flag wins.
+	local effdir="$PWD" prev="" a
+	for a in "$@"; do
+		case "$prev" in
+			-C | --dir) effdir="$a" ;;
+		esac
+		case "$a" in
+			-C=* | --dir=*) effdir="${a#*=}" ;;
+		esac
+		prev="$a"
+	done
+	# Canonicalize: resolve a relative `-C` (pnpm interprets it against $PWD), strip
+	# `..`, and confirm the target exists — all in a subshell, so the wrapper's own
+	# cwd is untouched. A bogus `-C` is pnpm's error to report, so just skip here.
+	effdir="$(cd "$effdir" 2>/dev/null && pwd -P)" || return 0
+
 	# Only meaningful inside a /workspace project.
-	case "$PWD" in
+	case "$effdir" in
 		/workspace/?*) ;;
 		*) return 0 ;;
 	esac
-	command -v shadow-refresh.sh >/dev/null 2>&1 || return 0
 
 	# Scope the scan to this project: resolve the direct child of /workspace that
-	# contains $PWD by walking up until the parent is /workspace.
-	local ws="$PWD"
+	# contains $effdir by walking up until the parent is /workspace.
+	local ws="$effdir"
 	while [ "$(dirname "$ws")" != "/workspace" ]; do
 		ws="$(dirname "$ws")"
 		[ "$ws" = "/" ] && return 0
@@ -68,7 +91,7 @@ refresh_shadows() {
 for arg in "$@"; do
 	case "$arg" in
 		install | i | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln)
-			refresh_shadows
+			refresh_shadows "$@"
 			break
 			;;
 	esac

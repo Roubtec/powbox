@@ -90,7 +90,7 @@ refresh_shadows() {
 # catching everything that writes node_modules.
 for arg in "$@"; do
 	case "$arg" in
-		install | i | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln)
+		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln)
 			refresh_shadows "$@"
 			break
 			;;

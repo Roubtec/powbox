@@ -205,29 +205,37 @@ echo "seed-workspace: clone complete." >&2
 # ^{commit} also rejects a non-commit object (a blob/tree SHA) that a bare checkout would itself
 # refuse.
 #
-# But check BOTH the bare name AND the remote-tracking form: a fresh `git clone` only
-# materializes a local head for the DEFAULT branch, so a non-default branch like `dev` exists
-# only as refs/remotes/origin/dev. `git rev-parse dev` does NOT DWIM that (it checks
-# refs/remotes/dev, not .../origin/dev). The default branch, tags, and SHAs resolve via the bare
-# form; non-default branches resolve via the origin/ form; a path matches neither.
+# Probe THREE ref namespaces in a deliberate precedence — local branch, then remote-tracking
+# branch, then any-commit (tag or SHA) — because a fresh `git clone` only materializes a local
+# head for the DEFAULT branch, so a non-default branch like `dev` exists only as
+# refs/remotes/origin/dev (`git rev-parse dev` does NOT DWIM that — it checks refs/remotes/dev,
+# not .../origin/dev). The ordering matters and mirrors `git clone --branch <name>`: when a
+# non-default BRANCH and a TAG share a name (e.g. release branch `release` AND tag `release`,
+# both materialized — the branch as origin/release, the tag as refs/tags/release), the BRANCH
+# must win. A bare `rev-parse "$REF"` would resolve the tag first and detach there, silently
+# starting the workspace from the wrong commit; checking the origin/ form BEFORE the bare form
+# selects the branch, matching `git clone --branch`. The default branch is caught by the local
+# head before either, so it is never mis-handled as a tracking-branch create.
 #
 # The resolution alone is not enough — the checkout itself must also be path-immune. When the
 # requested branch name ALSO exists as a tracked path (e.g. branch `docs` AND a `docs/` dir, or
 # branch `README` AND a `README` file), a bare `git checkout "$REF"` aborts with "could be both
 # a local file and a tracking branch" and strands the tree on the default branch even though the
-# branch genuinely exists. So dispatch on WHICH form resolved and use an explicit, unambiguous
-# checkout for each:
-#   - bare name resolved (default branch / tag / SHA) → `git checkout "$REF" --`; the trailing
-#     `--` forces ref interpretation so a same-named path can't hijack it (branch → switch,
-#     tag/SHA → detached HEAD).
-#   - only the origin/ form resolved (non-default branch) → `git checkout -b "$REF" --track
+# branch genuinely exists. So each arm uses an explicit, unambiguous checkout:
+#   - local branch (the default branch) → `git checkout "$REF" --`; the trailing `--` forces ref
+#     interpretation so a same-named path can't hijack it.
+#   - remote-tracking branch (non-default branch) → `git checkout -b "$REF" --track
 #     refs/remotes/origin/$REF`; an explicit start-point is never a pathspec and recreates the
 #     local tracking branch the old `git clone --branch "$REF"` produced.
+#   - tag or SHA → `git checkout "$REF" --`; the `--` keeps a same-named path from hijacking it
+#     (detached HEAD).
 if [ -n "$REF" ]; then
-	if { git -C "$WS" rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1 &&
+	if { git -C "$WS" rev-parse --verify --quiet "refs/heads/${REF}^{commit}" >/dev/null 2>&1 &&
 		git -C "$WS" checkout "$REF" --; } ||
 		{ git -C "$WS" rev-parse --verify --quiet "refs/remotes/origin/${REF}^{commit}" >/dev/null 2>&1 &&
-			git -C "$WS" checkout -b "$REF" --track "refs/remotes/origin/${REF}"; }; then
+			git -C "$WS" checkout -b "$REF" --track "refs/remotes/origin/${REF}"; } ||
+		{ git -C "$WS" rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1 &&
+			git -C "$WS" checkout "$REF" --; }; then
 		echo "seed-workspace: checked out ref '$REF'." >&2
 	else
 		cat >&2 <<EOF

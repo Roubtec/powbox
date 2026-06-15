@@ -305,6 +305,23 @@ if [ "$ISOLATED" = true ]; then
 		;;
 	esac
 
+	# Reject control characters in any value frozen into a container label. cc-list /
+	# agent-list parse the labels back with a \x1f field separator and one-container-
+	# per-line reads, so a newline or a literal \x1f in --name/--repo/--ref would split
+	# a record or shift fields and corrupt the listing (display quoting can't undo a real
+	# newline). No legitimate repo spec, ref, or name contains a control char, so fail
+	# fast here rather than at display time. The flag-name prefix is split on the FIRST
+	# ':' only, so a repo spec's own ':' (https://…, git@host:path) is preserved.
+	for _cc_pair in "--name:$INSTANCE_NAME" "--repo:$REPO_SPEC" "--ref:$CLONE_REF"; do
+		case "${_cc_pair#*:}" in
+		*[[:cntrl:]]*)
+			echo "Error: ${_cc_pair%%:*} must not contain control characters (newlines, tabs, etc.)." >&2
+			exit 1
+			;;
+		esac
+	done
+	unset _cc_pair
+
 	# repo-slug: basename, strip a trailing .git, lowercase + sanitise — the same
 	# shape as the dir-mounted PROJECT_BASENAME handling above. Lowercase BEFORE the
 	# .git strip so an uppercase .GIT/.Git extension is removed too (POSIX %.git is

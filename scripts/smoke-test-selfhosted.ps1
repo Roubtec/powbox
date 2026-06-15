@@ -182,6 +182,24 @@ $sshId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "ssh://git@git
 if ($sshId["REPO_SPEC"] -ne "ssh://git@github.com/owner/repo.git") { Fail "ssh:// GitHub spec was rejected or altered by the launcher (should pass through)" }
 Ok "ssh:// GitHub spec is accepted (normalised to https in-container, not treated as a credential)"
 
+# --- control characters in identity inputs are rejected before they freeze into labels.
+# cc-list/agent-list parse the labels back with a \x1f field separator and one-container-
+# per-line reads, so a newline or a literal \x1f in -Name/-Repo/-Ref would corrupt the
+# listing; the launcher rejects them. The print-identity hook runs AFTER this check.
+$env:POWBOX_PRINT_IDENTITY = "1"
+& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo owner/repo -Name "bad`nname" *> $null
+$nlRejected = ($LASTEXITCODE -ne 0)
+Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
+if (-not $nlRejected) { Fail "a -Name containing a newline should be rejected" }
+Ok "control characters in -Name are rejected"
+
+$env:POWBOX_PRINT_IDENTITY = "1"
+& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo owner/repo -Name ok -Ref ("a" + [char]31 + "b") *> $null
+$usRejected = ($LASTEXITCODE -ne 0)
+Remove-Item Env:POWBOX_PRINT_IDENTITY -ErrorAction SilentlyContinue
+if (-not $usRejected) { Fail "a -Ref containing a \x1f unit separator should be rejected" }
+Ok "control characters in -Ref are rejected"
+
 if (-not $n1["PROJECT_NAME"].StartsWith("repo-")) { Fail "repo-slug derivation wrong: $($n1["PROJECT_NAME"])" }
 Ok "repo-slug strips .git and lowercases (Repo.git -> repo)"
 if ($n1["WS_VOLUME"] -ne "agent-ws-$($n1["CONTAINER_NAME"])") { Fail "WS_VOLUME is not agent-ws-<container>" }

@@ -201,6 +201,22 @@ SSHID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo ssh://git@
 	fail "ssh:// GitHub spec was rejected or altered by the launcher (should pass through)"
 ok "ssh:// GitHub spec is accepted (normalised to https in-container, not treated as a credential)"
 
+# --- control characters in identity inputs are rejected before they freeze into labels.
+# cc-list/agent-list parse the labels back with a \x1f field separator and one-container-
+# per-line reads, so a newline or a literal \x1f in --name/--repo/--ref would corrupt the
+# listing; the launcher rejects them. The print-identity hook runs AFTER this check, so a
+# rejected value exits non-zero here.
+if POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/repo \
+	--name "$(printf 'bad\nname')" >/dev/null 2>&1; then
+	fail "a --name containing a newline should be rejected"
+fi
+ok "control characters in --name are rejected"
+if POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/repo --name ok \
+	--ref "$(printf 'a\x1fb')" >/dev/null 2>&1; then
+	fail "a --ref containing a \\x1f unit separator should be rejected"
+fi
+ok "control characters in --ref are rejected"
+
 # repo-slug: .git stripped, lowercased.
 case "$(id_field "$N1" PROJECT_NAME)" in
 repo-*) ok "repo-slug strips .git and lowercases (Repo.git → repo)" ;;

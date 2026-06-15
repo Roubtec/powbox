@@ -138,6 +138,18 @@ if ($Isolated) {
     }
   }
 
+  # Reject control characters in any value frozen into a container label. cc-list /
+  # agent-list parse the labels back with a \x1f field separator and one-container-per-
+  # line reads, so a newline or a literal \x1f in -Name/-Repo/-Ref would split a record
+  # or shift fields and corrupt the listing (display quoting can't undo a real newline).
+  # No legitimate repo spec, ref, or name contains a control char, so fail fast here.
+  foreach ($pair in @(@('-Name', $Name), @('-Repo', $repoSpec), @('-Ref', $Ref))) {
+    if ($pair[1] -match '[\x00-\x1F\x7F]') {
+      Write-Error "$($pair[0]) must not contain control characters (newlines, tabs, etc.)."
+      exit 1
+    }
+  }
+
   # repo-slug: leaf after the last '/', strip a trailing .git, lowercase + sanitise
   # (the same shape as the dir-mounted project basename handling).
   $repoBasename = ($repoSpec.TrimEnd('/') -split '/')[-1]

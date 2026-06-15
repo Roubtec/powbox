@@ -510,16 +510,19 @@ if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$VOLATILE" != true ] &&
 	CONTAINER_EXISTS=false
 fi
 
-# --ref only takes effect on a FRESH clone (a brand-new instance or a --reclone): a
-# reused container keeps whatever the agent has checked out, and seed-workspace skips
-# cloning when the workspace volume already holds a .git. So when --ref is passed but
-# we are about to reuse an existing container, WARN (don't act) rather than silently
-# implying the ref will be applied. Benign by design — these are attended launches and
-# the agent/user can switch refs in-container. Placed AFTER the --reclone block, so a
-# --reclone (which sets CONTAINER_EXISTS=false to force a fresh clone) correctly skips
-# the warning because the ref WILL be applied then.
-if [ "$ISOLATED" = true ] && [ -n "$CLONE_REF" ] && [ "$CONTAINER_EXISTS" = true ] && [ "$RECLONE" != true ]; then
-	echo "Note: --ref '${CLONE_REF}' is not applied on resume; ${CONTAINER_NAME} keeps its current checkout. Use --reclone to re-clone at this ref, or switch branches inside the container." >&2
+# --ref only takes effect when seed-workspace actually CLONES, and it clones only when
+# the per-instance workspace volume holds no checkout: a brand-new instance, or a
+# --reclone (whose prep empties the volume). Whenever that volume is already populated,
+# seed-workspace keeps the existing checkout and --ref is silently ignored — so WARN.
+# Gate on the VOLUME, not CONTAINER_EXISTS: that also covers a container pruned while its
+# agent-ws-* volume survived (e.g. agent-prune-stopped), and stays correct when a later
+# block recreates the container (the kept volume is reused, so --ref still won't apply).
+# The volume is created by the prep step further below, so on a genuine first launch it
+# does not exist yet here and no warning fires. Benign by design — these are attended
+# launches and the agent/user can switch refs in-container.
+if [ "$ISOLATED" = true ] && [ -n "$CLONE_REF" ] && [ "$RECLONE" != true ] &&
+	docker volume inspect "$WS_VOLUME" >/dev/null 2>&1; then
+	echo "Note: --ref '${CLONE_REF}' applies only to a fresh clone; ${CONTAINER_NAME} keeps the existing checkout in its workspace volume. Use --reclone to re-clone at this ref, or switch branches inside the container." >&2
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then

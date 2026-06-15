@@ -381,6 +381,14 @@ _powbox_agent_list() {
         while IFS=$'\x1f' read -r name iname irepo iref; do
             name="${name#/}" # docker inspect's .Name is /-prefixed
             [ -n "$name" ] || continue
+            # A missing label can surface as the literal "<no value>" (Docker renders a
+            # nil labels map that way for `index`), so an old/pre-label container would
+            # otherwise show "name=<no value> repo=<no value> ...". Treat it as empty so
+            # such a container shows a bare [self-hosted], matching how the repo
+            # normalizes label reads elsewhere (commands/check-updates.sh, build-image.sh).
+            [ "$iname" = "<no value>" ] && iname=""
+            [ "$irepo" = "<no value>" ] && irepo=""
+            [ "$iref" = "<no value>" ] && iref=""
             marker=" [self-hosted"
             [ -n "$iname" ] && marker="$marker name=$iname"
             [ -n "$irepo" ] && marker="$marker repo=$irepo"

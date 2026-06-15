@@ -189,14 +189,32 @@ if [ "$clone_rc" -ne 0 ]; then
 fi
 echo "seed-workspace: clone complete." >&2
 
-# Optional starting ref. A plain `git checkout` resolves a branch (onto a local tracking
-# branch, matching the old --branch behaviour), a tag, or a commit SHA (detached HEAD)
-# from the objects the full clone already holds. A failure here is BENIGN by design — the
-# tree is a valid default-branch checkout — so warn loudly and continue rather than
-# dropping to the failure banner: the agent/user is told to confirm the ref before
-# starting work (a self-hosted launch then typically cuts its own task branch anyway).
+# Optional starting ref. A resolved `git checkout` selects a branch (onto a local tracking
+# branch, matching the old --branch behaviour), a tag, or a commit SHA (detached HEAD) from
+# the objects the full clone already holds. A failure here is BENIGN by design — the tree is
+# a valid default-branch checkout — so warn loudly and continue rather than dropping to the
+# failure banner: the agent/user is told to confirm the ref before starting work (a
+# self-hosted launch then typically cuts its own task branch anyway).
+#
+# Resolve the ref to a commit FIRST, then check it out. A bare `git checkout "$REF"` is
+# ambiguous: a typo that happens to name a tracked PATH (e.g. "README", "docs") is taken as
+# a path checkout — it exits 0, silently leaves the tree on the default branch, and we'd
+# report success, defeating the very warning below. `git rev-parse --verify "<ref>^{commit}"`
+# succeeds only for a name that resolves to a commit and never for a pathspec, so a path-only
+# typo falls through to the warning; peeling to ^{commit} also rejects a non-commit object (a
+# blob/tree SHA) that a bare checkout would itself refuse.
+#
+# But check BOTH the bare name AND the remote-tracking form: a fresh `git clone` only
+# materializes a local head for the DEFAULT branch, so a non-default branch like `dev` exists
+# only as refs/remotes/origin/dev. `git rev-parse dev` does NOT DWIM that (it checks
+# refs/remotes/dev, not .../origin/dev), yet `git checkout dev` DOES auto-create the tracking
+# branch — so verifying only the bare name would wrongly reject the primary --ref use case
+# (starting on a non-default branch). The default branch, tags, and SHAs resolve via the bare
+# form; non-default branches resolve via the origin/ form; a path matches neither.
 if [ -n "$REF" ]; then
-	if git -C "$WS" checkout "$REF"; then
+	if { git -C "$WS" rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1 ||
+		git -C "$WS" rev-parse --verify --quiet "refs/remotes/origin/${REF}^{commit}" >/dev/null 2>&1; } &&
+		git -C "$WS" checkout "$REF"; then
 		echo "seed-workspace: checked out ref '$REF'." >&2
 	else
 		cat >&2 <<EOF

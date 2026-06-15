@@ -362,15 +362,20 @@ if ($Isolated -and $Reclone -and -not $Volatile -and $containerExists) {
   $containerExists = $false
 }
 
-# -Ref only takes effect on a FRESH clone (a brand-new instance or a -Reclone): a reused
-# container keeps whatever the agent has checked out, and seed-workspace skips cloning
-# when the workspace volume already holds a .git. So warn (don't act) when -Ref is passed
-# but we are about to reuse an existing container. Benign by design - these are attended
-# launches and the agent/user can switch refs in-container. Placed AFTER the -Reclone
-# block, so a -Reclone (which sets $containerExists=$false to force a fresh clone)
-# correctly skips the warning because the ref WILL be applied then.
-if ($Isolated -and $Ref -ne "" -and $containerExists -and -not $Reclone) {
-  Write-Host "Note: -Ref '$Ref' is not applied on resume; $containerName keeps its current checkout. Use -Reclone to re-clone at this ref, or switch branches inside the container." -ForegroundColor Yellow
+# -Ref only takes effect when seed-workspace actually CLONES, and it clones only when the
+# per-instance workspace volume holds no checkout: a brand-new instance, or a -Reclone
+# (whose prep empties the volume). Whenever that volume is already populated, seed-workspace
+# keeps the existing checkout and -Ref is silently ignored - so warn. Gate on the VOLUME,
+# not $containerExists: that also covers a container pruned while its agent-ws-* volume
+# survived (e.g. agent-prune-stopped), and stays correct when a later block recreates the
+# container (the kept volume is reused). The volume is created by the prep step below, so on
+# a genuine first launch it does not exist yet here and no warning fires. Benign by design -
+# attended launches can switch refs in-container.
+if ($Isolated -and $Ref -ne "" -and -not $Reclone) {
+  docker volume inspect $workspaceVolume *> $null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "Note: -Ref '$Ref' applies only to a fresh clone; $containerName keeps the existing checkout in its workspace volume. Use -Reclone to re-clone at this ref, or switch branches inside the container." -ForegroundColor Yellow
+  }
 }
 
 if (-not $Volatile -and $containerExists) {

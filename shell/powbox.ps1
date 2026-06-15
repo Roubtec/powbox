@@ -418,10 +418,18 @@ function _Powbox-AgentList {
             $parts = $_.Split($sep)
             $n = $parts[0].TrimStart('/') # docker inspect's .Name is /-prefixed
             if (-not $n) { return }
+            # A missing label can surface as the literal "<no value>" (Docker renders a
+            # nil labels map that way for `index`), so an old/pre-label container would
+            # otherwise show "name=<no value> repo=<no value> ...". Treat it as empty so
+            # such a container shows a bare [self-hosted], matching the repo's other label
+            # reads (commands/check-updates.ps1, build-image.ps1).
+            $iname = if ($parts.Count -ge 2 -and $parts[1] -ne '<no value>') { $parts[1] } else { '' }
+            $irepo = if ($parts.Count -ge 3 -and $parts[2] -ne '<no value>') { $parts[2] } else { '' }
+            $iref = if ($parts.Count -ge 4 -and $parts[3] -ne '<no value>') { $parts[3] } else { '' }
             $m = " [self-hosted"
-            if ($parts.Count -ge 2 -and $parts[1]) { $m += " name=$($parts[1])" }
-            if ($parts.Count -ge 3 -and $parts[2]) { $m += " repo=$($parts[2])" }
-            if ($parts.Count -ge 4 -and $parts[3]) { $m += " ref=$($parts[3])" }
+            if ($iname) { $m += " name=$iname" }
+            if ($irepo) { $m += " repo=$irepo" }
+            if ($iref) { $m += " ref=$iref" }
             $m += "]"
             $markers[$n] = $m
         }

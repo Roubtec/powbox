@@ -211,6 +211,8 @@ $wsSshp = "$wsVol-sshp"
 $wsScp = "$wsVol-scp"
 $wsSlug = "$wsVol-slug"
 $wsRef = "$wsVol-ref"
+$wsPath = "$wsVol-path"
+$wsBranch = "$wsVol-branch"
 try {
   docker volume create $wsVol *> $null
 
@@ -259,6 +261,36 @@ try {
   if ($LASTEXITCODE -ne 0) { Fail "a bogus -Ref aborted the clone (should fall back to the default branch)" }
   if ($refOut -notmatch "POWBOX --ref WARNING") { Fail "a bogus -Ref did not print the fallback warning" }
   Ok "a bogus -Ref falls back to the default branch with a warning (clone still succeeds)"
+
+  # A -Ref that is a TYPO matching a tracked PATH (octocat/Hello-World ships a top-level
+  # "README" file, which is NOT a ref) must ALSO fall back: a bare `git checkout README`
+  # would succeed as a path checkout and silently strand the tree on the default branch, so
+  # the ref is resolved to a commit first and an unresolved name degrades to the warning.
+  docker volume create $wsPath *> $null
+  $pathOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e "POWBOX_CLONE_REPO=$publicRepo" -e "POWBOX_CLONE_REF=README" `
+    -v "${wsPath}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  docker run --rm -v "${wsPath}:/ws" --entrypoint /bin/sh $Image -c '[ -e /ws/.git ]' *> $null
+  if ($LASTEXITCODE -ne 0) { Fail "a path-matching -Ref aborted the clone (should fall back to the default branch)" }
+  if ($pathOut -notmatch "POWBOX --ref WARNING") { Fail "a path-matching -Ref was silently checked out as a pathspec instead of warning" }
+  if ($pathOut -match "checked out ref 'README'") { Fail "a path-matching -Ref reported a successful ref checkout (pathspec ambiguity not rejected)" }
+  Ok "a path-matching -Ref typo falls back with a warning (pathspec is not mistaken for a ref)"
+
+  # A valid NON-DEFAULT branch by bare name (octocat/Hello-World ships a "test" branch) is the
+  # primary -Ref use case and MUST check out: a fresh clone materializes only the default
+  # branch as a local head, so the ref-resolution guard has to accept the refs/remotes/origin/*
+  # form too - verifying only the bare name would wrongly strand the user on the default branch.
+  docker volume create $wsBranch *> $null
+  $branchOut = docker run --rm --user root `
+    -e POWBOX_SELF_HOSTED=1 -e POWBOX_WORKSPACE_DIR=/ws -e GH_TOKEN= -e GITHUB_TOKEN= `
+    -e "POWBOX_CLONE_REPO=$publicRepo" -e "POWBOX_CLONE_REF=test" `
+    -v "${wsBranch}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
+  if ($branchOut -notmatch "checked out ref 'test'") { Fail "a valid non-default branch -Ref was not checked out (origin/ tracking form rejected?)" }
+  if ($branchOut -match "POWBOX --ref WARNING") { Fail "a valid non-default branch -Ref printed the fallback warning instead of checking out" }
+  $branchHead = (docker run --rm -v "${wsBranch}:/ws" --entrypoint git $Image -C /ws rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
+  if ($branchHead -ne "test") { Fail "a valid non-default branch -Ref did not leave HEAD on that branch" }
+  Ok "a valid non-default branch -Ref checks out (remote-tracking ref is resolved, not rejected)"
 
   # unauthenticated/failed clone -> loud announcement + non-zero exit
   docker volume create $wsFail *> $null
@@ -341,7 +373,7 @@ try {
   Write-Host "Stage B passed."
 }
 finally {
-  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $wsSlug $wsRef $hv1 $hv2 *> $null
+  docker volume rm -f $wsVol $wsFail $wsSsh $wsSshp $wsScp $wsSlug $wsRef $wsPath $wsBranch $hv1 $hv2 *> $null
 }
 
 Write-Host "Self-hosted smoke test passed."

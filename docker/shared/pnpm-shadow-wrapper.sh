@@ -28,9 +28,13 @@
 # block the actual command.
 set -uo pipefail
 
-# npm always unpacks a global package at lib/node_modules/<name>, so this entry
-# point is stable across pnpm versions.
-REAL_PNPM="/usr/local/lib/node_modules/pnpm/bin/pnpm.mjs"
+# npm always unpacks a global package at lib/node_modules/<name>, so this directory
+# is stable across pnpm versions. pnpm's package `bin` entry is the executable ESM
+# launcher bin/pnpm.mjs (verified for the installed pnpm); some builds also ship a
+# non-executable bin/pnpm.cjs shim that re-imports it for older Corepack. The exec
+# block at the end prefers .mjs and falls back to .cjs so the wrapper degrades
+# gracefully rather than failing every call if that layout ever shifts.
+PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
 
 refresh_shadows() {
 	# Self-hosted (--isolated) mode has no host filesystem underneath to shadow,
@@ -70,8 +74,16 @@ for arg in "$@"; do
 	esac
 done
 
-if [ ! -x "$REAL_PNPM" ]; then
-	echo "pnpm-shadow-wrapper: real pnpm not found at $REAL_PNPM" >&2
-	exit 127
+# Delegate to the real pnpm. Keep the proven happy path (exec the executable .mjs)
+# and add fallbacks: run a non-executable entry via `node` (the .cjs shim isn't
+# chmod +x), and try the .cjs shim if the .mjs is absent. node is always on PATH in
+# this image, just as the .mjs's `#!/usr/bin/env node` shebang already requires.
+if [ -x "$PNPM_BINDIR/pnpm.mjs" ]; then
+	exec "$PNPM_BINDIR/pnpm.mjs" "$@"
+elif [ -f "$PNPM_BINDIR/pnpm.mjs" ]; then
+	exec node "$PNPM_BINDIR/pnpm.mjs" "$@"
+elif [ -f "$PNPM_BINDIR/pnpm.cjs" ]; then
+	exec node "$PNPM_BINDIR/pnpm.cjs" "$@"
 fi
-exec "$REAL_PNPM" "$@"
+echo "pnpm-shadow-wrapper: real pnpm not found under $PNPM_BINDIR" >&2
+exit 127

@@ -126,8 +126,8 @@ and labelled). Honor any clarifying push-back before locking it — maintainers 
 introduces or leans on a non-obvious invariant (e.g. "a record may stay `ACTIVE` past its
 soft-expiry"), do not just implement it — first **sweep every other consumer of that invariant** and
 report whether any mishandles it. This turns "fix this one spot" into "confirm the whole subsystem
-agrees", and is frequently the most valuable thing the skill does. Use `grep` / an Explore fan-out;
-report findings before proceeding.
+agrees", and is frequently the most valuable thing the skill does. Use `rg` (per `AGENTS.md`, never
+recursive `grep`) and, for broad sweeps, an Explore fan-out; report findings before proceeding.
 
 ### 5. Apply the decision
 
@@ -206,7 +206,9 @@ and scan recent run reports / commit messages for discovered findings.
   tip, so the push is a normal **fast-forward** (not a lease rewrite). Then post a **follow-up reply
   on the now-implemented thread** ("now implemented in `<sha>`" — append "task moved to
   `tasks/done/`" only when the commit actually archived it; a partially-satisfied task stays in
-  `tasks/` and its thread stays open), a Summary comment, and re-ping bots if requested
+  `tasks/` and its thread is left as it stands — do **not** reopen a thread a prior run already
+  resolved, since a re-review (codex especially) re-raises anything still unaddressed and rewriting
+  historical resolutions is needless and messy), a Summary comment, and re-ping bots if requested
   (`@codex`/`@claude` via comment; Copilot via `gh pr edit <PR#> --add-reviewer @copilot`, never an
   `@copilot review` comment).
 

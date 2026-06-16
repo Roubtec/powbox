@@ -46,8 +46,13 @@ guess, this skill is where those parked questions get answered.
   work-list from that source (for the review case, see the review layer), then proceed identically.
 
 Optional trailing flags, honored only by the review layer's apply phase for items chosen to fix now,
-mirror the review skills: `push` (default on for fix-now items — a resolution that writes code is
-meant to ship), `ping-codex` / `ping-claude` / `ping-copilot` (re-request bot review after the follow-up push).
+mirror the review skills: `push` and `ping-codex` / `ping-claude` / `ping-copilot` (re-request bot
+review after the follow-up push). This is a **fully interactive** skill, so it does **not** assume
+publication: even for a fix-now item it **asks the maintainer to confirm before pushing and before
+editing any review threads** (the flags merely pre-answer that prompt). `ping-codex` / `ping-claude`
+post an `@codex` / `@claude` review comment; **`ping-copilot` requests review via
+`gh pr edit <PR#> --add-reviewer @copilot`** — never an `@copilot review` comment, which drives
+Copilot's coding agent rather than its reviewer.
 
 ## The core loop
 
@@ -187,14 +192,23 @@ and scan recent run reports / commit messages for discovered findings.
   **isolated DB**, a clean commit, **no push**. When the fix **fully satisfies** the task, that same
   commit must also **move the task file to `tasks/done/`** so a later round cannot pick up a stale
   copy of work already done; when it only **partially** satisfies the task, leave the file in
-  `tasks/` for a follow-up round and do **not** claim the thread as done.
+  `tasks/` for a follow-up round and do **not** claim the thread as done. Archiving inside the
+  *same* commit/PR is deliberate, not a violation of `tasks/AGENTS.md`'s "move to `done/` after
+  merge" rule: a fix-now item pulled into another PR's scope has **no branch of its own**, so its
+  `tasks/done/` move can only ride that PR — if the PR never merges, the move is discarded with it
+  and nothing is lost. That is distinct from a task **selected for its own implementation**, which
+  stays in `tasks/` for a final review under the one-task-one-branch model.
 - Run a **fresh-eyes reviewer** per change (it edits nothing; PASS or numbered issues); fix-up
   rounds as needed.
-- **Publish** each passing change: these are commits *on top of* an already-pushed tip, so the push
-  is a normal **fast-forward** (not a lease rewrite). Then post a **follow-up reply on the
-  now-implemented thread** ("now implemented in `<sha>`" — append "task moved to `tasks/done/`" only
-  when the commit actually archived it; a partially-satisfied task stays in `tasks/` and its thread
-  stays open), a Summary comment, and re-ping bots if requested.
+- **Publish** each passing change *only after the maintainer confirms the push* — this interactive
+  skill never pushes or edits review threads unprompted (a one-line "publish these fixes now?"
+  question, pre-answered by a `push`/`ping-*` flag): these are commits *on top of* an already-pushed
+  tip, so the push is a normal **fast-forward** (not a lease rewrite). Then post a **follow-up reply
+  on the now-implemented thread** ("now implemented in `<sha>`" — append "task moved to
+  `tasks/done/`" only when the commit actually archived it; a partially-satisfied task stays in
+  `tasks/` and its thread stays open), a Summary comment, and re-ping bots if requested
+  (`@codex`/`@claude` via comment; Copilot via `gh pr edit <PR#> --add-reviewer @copilot`, never an
+  `@copilot review` comment).
 
 **Deferred items → task hygiene** (no code, but leave nothing dangling):
 

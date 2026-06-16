@@ -346,7 +346,7 @@ The clone (and any private-repo access) depends on `gh` credentials, so the entr
 
 Self-hosted containers are **not** auto-removed (`--rm`) by default — an ephemeral container removed before the agent pushes would lose work. They and their `agent-ws-*` / `agent-podman-*` volumes accumulate, especially unnamed/timestamped ones, so tear down with the prune tooling: `agent-prune-stopped` removes stopped agent containers, and `agent-prune-volumes` then drops orphaned `agent-ws-*` volumes whose container is gone (alongside the existing `agent-nm-*` / `agent-wt-*` / `agent-podman-*` pruning). `agent-prune` does both.
 
-Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with a trailing `[self-hosted name=<--name as entered> repo=<spec> ref=<ref>]` marker (they otherwise share the `claude-` / `codex-` name prefix with dir-mounted ones) — enough to read off the instance and reconstruct its resume command (`cc --isolated <repo> --name <name>`) without an inspect. The `name=` is the **raw** `--name` (from the `powbox.instance-name` label), so two names that slugify to the same container-name shape are still told apart; empty fields are omitted, and a pre-label container shows a bare `[self-hosted]`. They also carry a `powbox.self-hosted=true` label, so `docker ps --filter label=powbox.self-hosted=true` lists just them.
+Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with a trailing `[self-hosted name=<--name as entered> repo=<spec> ref=<ref>]` marker (they otherwise share the `claude-` / `codex-` name prefix with dir-mounted ones) — enough to read off the instance and reconstruct its resume command (`cc --isolated <repo> --name <name>`) without an inspect. The `cci <name>` / `cxi <name>` shortcuts do that lookup for named Claude/Codex instances and complain if the name matches more than one repo. The `name=` is the **raw** `--name` (from the `powbox.instance-name` label), so two names that slugify to the same container-name shape are still told apart; empty fields are omitted, and a pre-label container shows a bare `[self-hosted]`. They also carry a `powbox.self-hosted=true` label, so `docker ps --filter label=powbox.self-hosted=true` lists just them.
 
 ### Known limitations
 
@@ -554,6 +554,7 @@ The repo ships a pair of shell libraries — `shell/powbox.sh` (bash/zsh) and `s
 Functions exposed by both libraries:
 
 - `cc`, `cx` — launch Claude or Codex in the current directory (or a given path), forwarding every flag to the underlying `commands/*-container.*` script. Add `--isolated`/`-Isolated` (with a repo positional or `--repo`/`-Repo`) for [self-hosted mode](#self-hosted-mode---isolated); the positional is then a repo spec, not a path, so the cd-after-launch is suppressed
+- `cci`, `cxi` — resume a named self-hosted Claude or Codex instance by `--name`/`-Name` alone, using the stored repo label to reconstruct the isolated launch; if the name is ambiguous across repos, they list the matches and stop
 - `cc-list`, `cx-list`, `agent-list` — list agent containers (self-hosted ones get a trailing `[self-hosted name=… repo=… ref=…]` marker so you can resume an instance by its `--name` without an inspect)
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
@@ -605,6 +606,9 @@ cx -Exec "fix the failing tests"
 
 # Self-hosted: clone the repo into a private volume (see "Self-Hosted Mode")
 cc -Isolated owner/repo -Name feature-a
+
+# Resume that named self-hosted Claude instance later
+cci feature-a
 
 # Launch either agent with a read-only reference volume at /ctx
 cc -Ctx C:\Docs\specs

@@ -107,6 +107,79 @@ function cx {
     }
 }
 
+function _Powbox-GetIsolatedByName {
+    param(
+        [string]$AgentPrefix,
+        [string]$InstanceName
+    )
+
+    $cand = @(docker ps -a --filter "name=$AgentPrefix" --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    if ($cand.Count -eq 0) { return @() }
+
+    $sep = [char]31
+    $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels "powbox.instance-name"}}' + $sep + '{{index .Config.Labels "powbox.repo"}}' + $sep + '{{index .Config.Labels "powbox.ref"}}' + $sep + '{{.State.Status}}'
+    @(docker inspect --format $fmt @cand 2>$null | ForEach-Object {
+        $parts = $_.Split($sep)
+        if ($parts.Count -lt 5) { return }
+        $iname = if ($parts[1] -ne '<no value>') { $parts[1] } else { '' }
+        if ($iname -ne $InstanceName) { return }
+        [pscustomobject]@{
+            Container = $parts[0].TrimStart('/')
+            Name = $iname
+            Repo = if ($parts[2] -ne '<no value>') { $parts[2] } else { '' }
+            Ref = if ($parts[3] -ne '<no value>') { $parts[3] } else { '' }
+            Status = $parts[4]
+        }
+    })
+}
+
+function _Powbox-ResumeIsolatedByName {
+    param(
+        [string]$AgentLabel,
+        [string]$AgentPrefix,
+        [string]$Shortcut,
+        [string]$InstanceName
+    )
+
+    $matches = @(_Powbox-GetIsolatedByName -AgentPrefix $AgentPrefix -InstanceName $InstanceName)
+    if ($matches.Count -eq 0) {
+        Write-Error "No self-hosted $AgentLabel container found with -Name $(_Powbox-MarkerField $InstanceName). Use $Shortcut-list to see known instances."
+        return
+    }
+    if ($matches.Count -gt 1) {
+        Write-Error "-Name $(_Powbox-MarkerField $InstanceName) matches multiple self-hosted $AgentLabel containers. Relaunch one explicitly with -Repo, or prune the stale instance."
+        $matches | Sort-Object Repo, Container | ForEach-Object {
+            $ref = if ($_.Ref) { " -Ref $(_Powbox-MarkerField $_.Ref)" } else { "" }
+            Write-Host "  $($_.Container) [$($_.Status)] repo=$(_Powbox-MarkerField $_.Repo)$ref" -ForegroundColor Yellow
+        }
+        return
+    }
+
+    $match = $matches[0]
+    if (-not $match.Repo) {
+        Write-Error "Container $($match.Container) has -Name $(_Powbox-MarkerField $InstanceName) but no powbox.repo label, so $Shortcut cannot reconstruct the isolated resume command. Use: docker start -ai $($match.Container)"
+        return
+    }
+
+    & $Shortcut -Isolated -Repo $match.Repo -Name $match.Name -Resume
+}
+
+function cci {
+    param(
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$Name
+    )
+    _Powbox-ResumeIsolatedByName -AgentLabel "Claude" -AgentPrefix "claude-" -Shortcut "cc" -InstanceName $Name
+}
+
+function cxi {
+    param(
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$Name
+    )
+    _Powbox-ResumeIsolatedByName -AgentLabel "Codex" -AgentPrefix "codex-" -Shortcut "cx" -InstanceName $Name
+}
+
 function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }

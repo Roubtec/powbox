@@ -28,13 +28,13 @@ All arguments are optional and parsing is **lenient** — accept commas, `&`, an
 | `hands-off` | Run with no user interaction — best-effort to completion, documenting every skipped/blocked item in the final report. See "Hands-off mode". Typically how a parallel review orchestrator invokes this skill in a subagent. |
 | `ping-codex` | After a push that advances the PR branch (new commits or rewritten history), post a dedicated top-level `@codex review` comment to summon a fresh review round. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
 | `ping-claude` | After a push that advances the PR branch, post a dedicated top-level `@claude review` comment. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
-| `ping-copilot` | After a push that advances the PR branch, post a dedicated top-level `@copilot review` comment. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
+| `ping-copilot` | After a push that advances the PR branch, request a fresh Copilot review via `gh pr edit <PR#> --add-reviewer @copilot` (the canonical CLI request; needs gh ≥ 2.88.0) — **not** an `@copilot review` comment, which drives Copilot's coding agent (it can start editing the branch) rather than its reviewer. **Implies `push`**, but skip on an "Everything up-to-date" no-op push. Caveat: GitHub exposes no CLI/API to *re*-request a review Copilot already gave (only the web reviewer-menu button), so on an already-reviewed PR this may be a no-op — acceptable, and it never misfires into the coding agent. |
 
 ### Flag interactions
 
 - **`ping-*` implies `push`.** If `ping-codex`, `ping-claude`, or `ping-copilot` is present without `push`, push anyway — a re-review of unpushed work is meaningless.
 - **A ping fires only when the push actually advanced the branch.** A `ping-*` summons a *fresh* review, which is only meaningful if new commits (or a rewritten history) were just pushed. If this run produces nothing new to push — every disposition was already-addressed or push-back, or the branch was already up to date — **skip the pings even though `ping-*` was supplied.** Re-requesting a review with nothing new to look at would spin the review → address → review cycle forever; the resolved threads and Summary comment already record the outcome.
-- **Multiple pings present** → one separate comment per named bot (never a single comment mentioning several). They are also separate from the Summary comment.
+- **Multiple pings present** → perform each as its own dedicated action (a separate comment per named bot; the `gh pr edit --add-reviewer @copilot` request for Copilot), never a single comment mentioning several. They are also separate from the Summary comment.
 - **`hands-off` + `rebase`** is uncommon and the riskiest combination: a non-trivial rebase conflict has no one to consult, so you abort cleanly and stop rather than guess (see "Hands-off mode" and step 2).
 - **No `push` and no `ping`** → a local-only run. Make commits, but **do not mutate the PR at all** (no replies, no resolves, no summary comment). The final report captures every disposition so a later "push now" turn can replay it.
 
@@ -188,7 +188,7 @@ In `publish-reviewed` mode, first require the supplied review packet, a fresh ex
    - *Ambiguous/skipped* → **leave open**, list it in the summary as needing a decision.
    Before replying, inspect the thread for an equivalent prior reply from the authenticated user (for example, a previous run replied but failed to resolve) and avoid posting duplicates. Resolve only after the reply succeeds; record any communication failure and leave that thread open.
 5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, a **"Deferred to follow-up tasks" section** listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude`/`@copilot` mentions (write "codex"/"claude"/"copilot" plain) so only the dedicated ping comments below trigger a review.
-6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`; `ping-copilot` → a dedicated comment whose body is `@copilot review`. If more than one, post a separate comment per bot. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
+6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`; `ping-copilot` → request a Copilot review with `gh pr edit <PR#> --add-reviewer @copilot` (never an `@copilot review` comment — a bare `@copilot` mention drives Copilot's coding agent, not its reviewer; and GitHub offers no CLI/API to *re*-request a review it already gave, so on an already-reviewed PR this may be a harmless no-op). If more than one, perform each as its own dedicated action. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
 
 ### Step 8 — Final report
 
@@ -248,13 +248,18 @@ gh api --method POST repos/{owner}/{repo}/pulls/NUMBER/comments/COMMENT_DATABASE
 gh api graphql -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }' -F id=THREAD_NODE_ID
 ```
 
-**Top-level comments** (summary and pings):
+**Top-level comments** (summary and codex/claude pings):
 
 ```sh
 gh pr comment NUMBER --body '...'        # Summary of Review Fixes
 gh pr comment NUMBER --body '@codex review'
 gh pr comment NUMBER --body '@claude review'
-gh pr comment NUMBER --body '@copilot review'
+```
+
+**Request a Copilot review** (canonical CLI; needs gh ≥ 2.88.0 — never `@copilot review` as a comment, which drives Copilot's coding agent rather than its reviewer):
+
+```sh
+gh pr edit NUMBER --add-reviewer @copilot
 ```
 
 **Read context:** `gh pr view NUMBER --json reviews,comments,headRefName,headRefOid,headRepositoryOwner,baseRefName,url,state` and `gh api --paginate repos/{owner}/{repo}/issues/NUMBER/comments`.
@@ -270,6 +275,6 @@ gh pr comment NUMBER --body '@copilot review'
 - [ ] Deferred items recorded as standalone task files per `write-tasks` conventions, numbered into the repo's task folder, committed on the current branch separately from code fixes.
 - [ ] Worktree clean and every intended change committed before review and publication.
 - [ ] Fresh independent reviewer checked every disposition after commits landed; feedback loop capped at 3 reviewer rounds.
-- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; deferred threads replied with their committed task file; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated comments only after summary success **and only when new commits were actually pushed** (skip pings on a no-op push so an automated loop can terminate).
+- [ ] Push run: PR head and exact push target re-verified; normal push used for fast-forward or explicit expected-OID lease used for rewrite (never bare `--force`); threads re-read after push; replies + resolves applied idempotently; push-backs resolved and flagged; deferred threads replied with their committed task file; ambiguous/new items left open; Summary comment posted without stray `@` mentions; pings as separate dedicated actions (codex/claude → a comment; copilot → `gh pr edit --add-reviewer @copilot`, never an `@copilot review` comment) only after summary success **and only when new commits were actually pushed** (skip pings on a no-op push so an automated loop can terminate).
 - [ ] No-push run: zero PR mutations; final report maps every thread to its disposition for a later push turn.
 - [ ] Final report covers rebase outcome, dispositions with stable refs, push-backs, proactive fixes, reviewer result, and blocked/skipped items.

@@ -2,7 +2,8 @@ param(
   [string]$Image = "powbox-agent:latest",
   [switch]$SkipDb,
   [switch]$SkipPodman,
-  [switch]$SkipSelfHosted
+  [switch]$SkipSelfHosted,
+  [switch]$RequireImage
 )
 
 # The agent image is unified: both claude and codex (and codex's bwrap sandbox)
@@ -11,6 +12,23 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
+
+# Image-gated stages (1-4) need the agent image. Detect it once up front so a run
+# with no image fails loudly here instead of self-skipping into a false "all
+# green". -RequireImage (or POWBOX_SMOKE_REQUIRE_IMAGE=1, used by CI) turns an
+# absent image into a hard error before any stage runs; the env var is also set so
+# the sub-scripts that otherwise self-skip their image-gated checks (e.g. the
+# self-hosted clone stage) fail instead. $skipped collects every stage we skip so
+# the end-of-run banner can report that the run was partial.
+if ($RequireImage) { $env:POWBOX_SMOKE_REQUIRE_IMAGE = '1' }
+$skipped = [System.Collections.Generic.List[string]]::new()
+docker image inspect $Image *> $null
+if ($LASTEXITCODE -ne 0) {
+  if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
+    throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - refusing to run a partial (image-skipping) smoke test. Build it first (./build.ps1 agent) or drop -RequireImage."
+  }
+  Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and the self-hosted clone stage self-skips. Build it (./build.ps1 agent), or pass -RequireImage to fail fast instead of partway through."
+}
 
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
@@ -70,6 +88,7 @@ $rootDir = Split-Path -Parent $scriptDir
 # also supplied; pass both for a Stage 1 presence-only run).
 if ($SkipDb) {
   Write-Host "Skipping pg-dev-up functional test (-SkipDb)."
+  $skipped.Add("Stage 2: pg-dev-up functional (-SkipDb)")
 }
 else {
   Write-Host "Running pg-dev-up functional test against $Image ..."
@@ -117,6 +136,7 @@ if ($LASTEXITCODE -ne 0) {
 # propagates that up.
 if ($SkipPodman) {
   Write-Host "Skipping Podman smoke test (-SkipPodman)."
+  $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
 }
 else {
   & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
@@ -130,9 +150,21 @@ else {
 # on failure, so $ErrorActionPreference = "Stop" propagates that up.
 if ($SkipSelfHosted) {
   Write-Host "Skipping self-hosted smoke test (-SkipSelfHosted)."
+  $skipped.Add("Stage 4: self-hosted launch mode (-SkipSelfHosted)")
 }
 else {
   & (Join-Path $rootDir "scripts/smoke-test-selfhosted.ps1") -Image $Image
 }
 
-Write-Host "Smoke test complete."
+if ($skipped.Count -gt 0) {
+  Write-Host ""
+  Write-Host "================ SMOKE TEST: STAGES SKIPPED ================"
+  foreach ($s in $skipped) { Write-Host "  - $s" }
+  Write-Host "This was a PARTIAL smoke test - the stages above did not run."
+  Write-Host "For a full run (e.g. in CI) drop the -Skip* switches; pass"
+  Write-Host "-RequireImage to also fail on a missing image."
+  Write-Host "==========================================================="
+}
+else {
+  Write-Host "Smoke test complete (all stages ran)."
+}

@@ -87,6 +87,20 @@ Examples:
 ./build.sh base --no-cache --pull
 ```
 
+### Iterating on a baked script without a rebuild
+
+The shared helper scripts in `docker/shared/` (e.g. `entrypoint-core.sh`, `seed-workspace.sh`, `fix-workspace-perms.sh`) are `COPY`d into the **base** image at `/usr/local/bin/`, so the normal way to test an edit is a base rebuild (~13 min). For a faster behavioral loop on a single script, bind-mount your host copy over the baked path with a raw `docker run` instead of rebuilding:
+
+```bash
+# Drive one baked script directly against the current image, with your edit live.
+docker run --rm \
+  -v "$PWD/docker/shared/seed-workspace.sh:/usr/local/bin/seed-workspace.sh:ro" \
+  --entrypoint /usr/local/bin/seed-workspace.sh \
+  powbox-agent:latest <args...>
+```
+
+This is how the self-hosted smoke test exercises `seed-workspace.sh` (`scripts/smoke-test-selfhosted.sh`, Stage B). It validates one script in isolation, not the full entrypoint chain — once the behavior looks right, do a real `./build.sh base` before relying on it.
+
 ## Updating Agent Instructions
 
 Container instructions for both agents are generated from a single shared template (`docker/shared/container-agent.md.tmpl`).

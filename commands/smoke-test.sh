@@ -8,6 +8,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IMAGE="${1:-powbox-agent:latest}"
 
+# Image-gated stages (1–4) need the agent image. Detect it once up front so a
+# run with no image fails loudly here instead of self-skipping into a false
+# "all green". POWBOX_SMOKE_REQUIRE_IMAGE=1 (used by CI) turns an absent image
+# into a hard error before any stage runs; it is also exported so the sub-scripts
+# that otherwise self-skip their image-gated checks (e.g. the self-hosted clone
+# stage) fail instead. Track every stage we skip so the end-of-run banner can
+# report that the run was partial.
+skipped=()
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	if [ -n "${POWBOX_SMOKE_REQUIRE_IMAGE:-}" ]; then
+		echo "ERROR: image '$IMAGE' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set — refusing to run a partial (image-skipping) smoke test." >&2
+		echo "       Build it first (./build.sh agent) or unset POWBOX_SMOKE_REQUIRE_IMAGE." >&2
+		exit 1
+	fi
+	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and the self-hosted clone stage self-skips."
+	echo "         Build it (./build.sh agent), or set POWBOX_SMOKE_REQUIRE_IMAGE=1 to fail fast instead of partway through."
+fi
+export POWBOX_SMOKE_REQUIRE_IMAGE
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store.
@@ -63,6 +82,7 @@ IMAGE="${1:-powbox-agent:latest}"
 # POWBOX_SMOKE_SKIP_PODMAN is also set; set both for a Stage 1 presence-only run).
 if [ -n "${POWBOX_SMOKE_SKIP_DB:-}" ]; then
 	echo "Skipping pg-dev-up functional test (POWBOX_SMOKE_SKIP_DB is set)."
+	skipped+=("Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)")
 else
 	echo "Running pg-dev-up functional test against $IMAGE ..."
 	docker run --rm \
@@ -97,6 +117,7 @@ fi
 # scripts/smoke-test-podman.sh for what it covers.
 if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
+	skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
 else
 	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 fi
@@ -108,8 +129,21 @@ fi
 # with POWBOX_SMOKE_SKIP_SELFHOSTED=1; see scripts/smoke-test-selfhosted.sh.
 if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED:-}" ]; then
 	echo "Skipping self-hosted smoke test (POWBOX_SMOKE_SKIP_SELFHOSTED is set)."
+	skipped+=("Stage 4: self-hosted launch mode (POWBOX_SMOKE_SKIP_SELFHOSTED)")
 else
 	"${ROOT_DIR}/scripts/smoke-test-selfhosted.sh" "$IMAGE"
 fi
 
-echo "Smoke test complete."
+if [ "${#skipped[@]}" -gt 0 ]; then
+	echo
+	echo "================ SMOKE TEST: STAGES SKIPPED ================"
+	for s in "${skipped[@]}"; do
+		echo "  - $s"
+	done
+	echo "This was a PARTIAL smoke test — the stages above did not run."
+	echo "For a full run (e.g. in CI) unset the POWBOX_SMOKE_SKIP_* vars; set"
+	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image."
+	echo "==========================================================="
+else
+	echo "Smoke test complete (all stages ran)."
+fi

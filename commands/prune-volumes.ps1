@@ -1,5 +1,10 @@
-﻿[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
-param()
+﻿# -Yes skips the batch confirmation prompt (mirrors prune-volumes.sh --yes), for
+# scripted/agent-driven GC. -WhatIf previews removals without touching anything
+# (the sh --dry-run); -Confirm prompts per volume via ShouldProcess.
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+param(
+    [switch]$Yes
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -53,10 +58,11 @@ Write-Host 'Prune candidates:'
 $pruneCandidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
 
 # Confirm once for the whole batch, mirroring prune-volumes.sh. Skip the prompt
-# when -WhatIf is in effect (the ShouldProcess call below previews each removal
-# instead) or when -Confirm was passed explicitly (ShouldProcess then prompts
-# per volume, so a batch prompt would just double up).
-if (-not $WhatIfPreference -and -not $PSBoundParameters.ContainsKey('Confirm')) {
+# when -Yes was passed (non-interactive removal), when -WhatIf is in effect (the
+# ShouldProcess call below previews each removal instead), or when -Confirm was
+# passed explicitly (ShouldProcess then prompts per volume, so a batch prompt
+# would just double up).
+if (-not $Yes -and -not $WhatIfPreference -and -not $PSBoundParameters.ContainsKey('Confirm')) {
     $answer = Read-Host "`nRemove these volumes? [y/N]"
     if ($answer -notmatch '^[yY]') {
         Write-Host 'Aborted.'

@@ -8,13 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IMAGE="${1:-powbox-agent:latest}"
 
-# Image-gated stages (1–4) need the agent image. Detect it once up front so a
-# run with no image fails loudly here instead of self-skipping into a false
-# "all green". POWBOX_SMOKE_REQUIRE_IMAGE=1 (used by CI) turns an absent image
-# into a hard error before any stage runs; it is also exported so the sub-scripts
-# that otherwise self-skip their image-gated checks (e.g. the self-hosted clone
-# stage) fail instead. Track every stage we skip so the end-of-run banner can
-# report that the run was partial.
+# The image-gated checks in stages 1–3 (and Stage 4's clone behavior) need the
+# agent image; Stage 4's self-hosted identity contract runs without it. Detect
+# the image once up front so a missing one is reported clearly here rather than
+# as a raw docker error at Stage 1. POWBOX_SMOKE_REQUIRE_IMAGE=1 (used by CI)
+# turns an absent image into a hard error before any stage runs; it is also
+# exported so a sub-script invoked directly (e.g. the self-hosted clone stage)
+# fails instead of self-skipping its image-gated checks into a false "all green".
+# Track every stage we skip so the end-of-run banner can report a partial run.
 skipped=()
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	if [ -n "${POWBOX_SMOKE_REQUIRE_IMAGE:-}" ]; then
@@ -22,8 +23,8 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		echo "       Build it first (./build.sh agent) or unset POWBOX_SMOKE_REQUIRE_IMAGE." >&2
 		exit 1
 	fi
-	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and the self-hosted clone stage self-skips."
-	echo "         Build it (./build.sh agent), or set POWBOX_SMOKE_REQUIRE_IMAGE=1 to fail fast instead of partway through."
+	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2–4) runs, so you get no partial coverage."
+	echo "         Build it (./build.sh agent), or set POWBOX_SMOKE_REQUIRE_IMAGE=1 to fail fast here with a clear message instead of a raw docker error at Stage 1."
 fi
 export POWBOX_SMOKE_REQUIRE_IMAGE
 

@@ -195,13 +195,17 @@ and scan recent run reports / commit messages for discovered findings.
 - Delegate the implementation to a fresh subagent with the worktree contract, the task-file spec,
   and the decided option. Require: real **tests** (deterministic, clock-injected where the bug is a
   race — they verify the fix even when the production trigger is dormant), validation on an
-  **isolated DB**, a clean commit, **no push**.
+  **isolated DB**, a clean commit, **no push**. When the fix **fully satisfies** the task, that same
+  commit must also **move the task file to `tasks/done/`** so a later round cannot pick up a stale
+  copy of work already done; when it only **partially** satisfies the task, leave the file in
+  `tasks/` for a follow-up round and do **not** claim the thread as done.
 - Run a **fresh-eyes reviewer** per change (it edits nothing; PASS or numbered issues); fix-up
   rounds as needed.
 - **Publish** each passing change: these are commits *on top of* an already-pushed tip, so the push
   is a normal **fast-forward** (not a lease rewrite). Then post a **follow-up reply on the
-  now-implemented thread** ("now implemented in `<sha>`, task moved to `tasks/done/`"), a Summary
-  comment, and re-ping bots if requested.
+  now-implemented thread** ("now implemented in `<sha>`" — append "task moved to `tasks/done/`" only
+  when the commit actually archived it; a partially-satisfied task stays in `tasks/` and its thread
+  stays open), a Summary comment, and re-ping bots if requested.
 
 **Deferred items → task hygiene** (no code, but leave nothing dangling):
 

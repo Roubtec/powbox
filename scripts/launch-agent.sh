@@ -504,6 +504,20 @@ if [ "$RESUME" = true ]; then
 	if [ -n "$CLONE_REF" ]; then
 		echo "Note: --ref is ignored on resume; the existing checkout is left untouched." >&2
 	fi
+	# A running container (e.g. launched --detach, or its terminal was lost)
+	# can't be `docker start`ed — that errors — so reattach instead. Mirrors the
+	# reuse path below; cci/cxi reach this with --resume against a named instance
+	# that may well still be running.
+	if [ "$CONTAINER_RUNNING" = true ]; then
+		if [ "$DETACH" = true ]; then
+			echo "Container ${CONTAINER_NAME} is already running."
+			exit 0
+		fi
+		exec docker attach "$CONTAINER_NAME"
+	fi
+	if [ "$DETACH" = true ]; then
+		exec docker start "$CONTAINER_NAME"
+	fi
 	exec docker start -ai "$CONTAINER_NAME"
 fi
 

@@ -10,7 +10,7 @@
  * so an automated review -> address -> review loop can terminate.
  *
  * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [push]
- * [ping-codex] [ping-claude]`.
+ * [ping-codex] [ping-claude] [ping-copilot]`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------
@@ -192,7 +192,7 @@ function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 Request (lenient parsing — commas, &, free word order): ${JSON.stringify(input)}
-Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
+Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
 
 Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 1. Working tree clean (\`git status --porcelain\` empty). Do not auto-stash.
@@ -288,8 +288,8 @@ Report a STRUCTURED result: set \`published: true\` ONLY if the push and every r
      - ambiguous-skipped → leave open.
    - \`standalone\` items (no thread to resolve): address them only in the Summary comment below; do NOT call \`resolveReviewThread\`. Record their outcome by \`url\`.
    Avoid duplicate replies (check for an equivalent prior reply by the authed user); resolve only after the reply succeeds.
-5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, a "Deferred to follow-up tasks" section listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
-6. Pings (only after push + summary succeeded, AND only when the push ACTUALLY advanced the remote branch with new commits or rewritten history — never on an \`Everything up-to-date\` no-op push): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${!flags.pingCodex && !flags.pingClaude ? "none requested. " : "If both, post two separate comments. "}If nothing new was pushed this run (the remote ref already pointed at your HEAD — e.g. every disposition was already-addressed/push-back, or the branch was up to date), SKIP all pings even if requested above: re-requesting a review with nothing new to look at would spin the review->address->review loop forever. Set \`pushedNewCommits\` to whether the push advanced the branch, and record which pings (if any) you posted in \`pings\`.
+5. Summary comment: post a top-level "Summary of Review Fixes" (\`gh pr comment\`) — what was fixed (with proactive same-pattern fixes), a prominent "Pushed back — please re-examine" section, a "Deferred to follow-up tasks" section listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), and any ambiguous/skipped or newly-arrived items. Write "codex"/"claude"/"copilot" plain (no bare @-mentions) so only the dedicated pings below trigger a re-review. Put its URL in \`summaryCommentUrl\`.
+6. Pings (only after push + summary succeeded, AND only when the push ACTUALLY advanced the remote branch with new commits or rewritten history — never on an \`Everything up-to-date\` no-op push): ${flags.pingCodex ? "post a dedicated comment \`@codex review\`. " : ""}${flags.pingClaude ? "post a dedicated comment \`@claude review\`. " : ""}${flags.pingCopilot ? "request a fresh Copilot review with \`gh pr edit <PR#> --add-reviewer @copilot\` (the canonical CLI request; needs gh >= 2.88.0). Do NOT post an \`@copilot review\` comment — a bare \`@copilot\` mention drives Copilot's coding agent (it can start editing the branch), not its reviewer. The add-reviewer request re-triggers Copilot's review even on a PR it already reviewed (tested working — not a silent no-op), and never misfires into the coding agent. GUARD: before issuing it, confirm the installed \`gh\` supports the \`@copilot\` reviewer value (gh >= 2.88.0 — e.g. check \`gh --version\`); on an older powbox base image where \`gh pr edit --add-reviewer @copilot\` errors, SKIP the Copilot request WITHOUT failing publication — the push and summary already succeeded, so this is non-fatal: keep \`published: true\`, record it in \`pings\` as 'copilot: skipped (gh too old)', and note that the base image needs refreshing (\`agent-update\`) or a one-off manual re-request from the PR's web reviewer menu." : ""}${!flags.pingCodex && !flags.pingClaude && !flags.pingCopilot ? "none requested. " : "If more than one ping was requested, perform each as its own dedicated action (never one comment mentioning several bots). "}If nothing new was pushed this run (the remote ref already pointed at your HEAD — e.g. every disposition was already-addressed/push-back, or the branch was up to date), SKIP all pings even if requested above: re-requesting a review with nothing new to look at would spin the review->address->review loop forever. Set \`pushedNewCommits\` to whether the push advanced the branch, and record which pings (if any) you posted in \`pings\`.
 
 ## Dispositions to publish
 
@@ -301,8 +301,8 @@ Record each item's outcome with its stable reference (file:line, author, threadI
 // --- Flag parsing (the only logic the script does itself; no shell needed) ---
 // `args` may arrive as a string OR, per the workflow docs, as structured data
 // (array / object). Flatten any shape into the words it contains so `push` /
-// `ping-codex` / `ping-claude` survive `Run /wf-address-review on #38 with push`
-// being delivered as an object — `String(args)` would yield "[object Object]".
+// `ping-codex` / `ping-claude` / `ping-copilot` survive `Run /wf-address-review on
+// #38 with push` being delivered as an object — `String(args)` would yield "[object Object]".
 function flattenArgs(a) {
   if (a == null) return "";
   if (typeof a === "string") return a;
@@ -323,11 +323,13 @@ const pushNegated =
   /\bno-push\b/.test(lower) || /\b(?:no|not|never|without|skip|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
 const pingCodex = /\bping-?codex\b/.test(lower);
 const pingClaude = /\bping-?claude\b/.test(lower);
-const wantPush = pingCodex || pingClaude || (/\bpush\b/.test(pushWords) && !pushNegated);
+const pingCopilot = /\bping-?copilot\b/.test(lower);
+const wantPush = pingCodex || pingClaude || pingCopilot || (/\bpush\b/.test(pushWords) && !pushNegated);
 const flags = {
   push: wantPush,
   pingCodex,
   pingClaude,
+  pingCopilot,
 };
 
 phase("Gather");
@@ -455,6 +457,7 @@ const publishFlags = {
   ...flags,
   pingCodex: flags.pingCodex && !knownNoNewCommits,
   pingClaude: flags.pingClaude && !knownNoNewCommits,
+  pingCopilot: flags.pingCopilot && !knownNoNewCommits,
 };
 
 phase("Publish");
@@ -465,7 +468,7 @@ const publishReport = await agent(publishPrompt(packet, dispositions.disposition
 
 phase("Summary");
 const published = !!(publishReport && publishReport.published);
-const pingsRequested = flags.pingCodex || flags.pingClaude;
+const pingsRequested = flags.pingCodex || flags.pingClaude || flags.pingCopilot;
 const nothingNewPushed = knownNoNewCommits || (publishReport && publishReport.pushedNewCommits === false);
 return {
   status: published ? "fixed-published" : "fixed-publish-failed",

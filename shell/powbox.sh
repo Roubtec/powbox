@@ -119,14 +119,14 @@ _powbox_isolated_by_name() {
     done < <(docker ps -a --filter "name=$agent_prefix" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
     [ "${#cand[@]}" -gt 0 ] || return 0
 
-    local iname irepo iref status
-    while IFS=$'\x1f' read -r name iname irepo iref status; do
+    local iname irepo iref cstatus
+    while IFS=$'\x1f' read -r name iname irepo iref cstatus; do
         name="${name#/}"
         [ "$iname" = "<no value>" ] && iname=""
         [ "$irepo" = "<no value>" ] && irepo=""
         [ "$iref" = "<no value>" ] && iref=""
         [ "$iname" = "$lookup_name" ] || continue
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$iname" "$irepo" "$iref" "$status"
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$iname" "$irepo" "$iref" "$cstatus"
     done < <(docker inspect \
         --format $'{{.Name}}\x1f{{index .Config.Labels "powbox.instance-name"}}\x1f{{index .Config.Labels "powbox.repo"}}\x1f{{index .Config.Labels "powbox.ref"}}\x1f{{.State.Status}}' \
         "${cand[@]}" 2>/dev/null)
@@ -147,18 +147,18 @@ _powbox_resume_isolated_by_name() {
     if [ "${#matches[@]}" -gt 1 ]; then
         echo "powbox: --name $(_powbox_marker_field "$lookup_name") matches multiple self-hosted $agent_label containers. Relaunch one explicitly with --repo, or prune the stale instance." >&2
         for match in "${matches[@]}"; do
-            local name iname irepo iref status ref_text=""
-            IFS=$'\x1f' read -r name iname irepo iref status <<< "$match"
+            local name iname irepo iref cstatus ref_text=""
+            IFS=$'\x1f' read -r name iname irepo iref cstatus <<< "$match"
             [ -n "$iref" ] && ref_text=" --ref $(_powbox_marker_field "$iref")"
-            echo "  $name [$status] repo=$(_powbox_marker_field "$irepo")$ref_text" >&2
+            echo "  $name [$cstatus] repo=$(_powbox_marker_field "$irepo")$ref_text" >&2
         done
         return 1
     fi
 
     local first
     for first in "${matches[@]}"; do break; done
-    local name iname irepo iref status
-    IFS=$'\x1f' read -r name iname irepo iref status <<< "$first"
+    local name iname irepo iref cstatus
+    IFS=$'\x1f' read -r name iname irepo iref cstatus <<< "$first"
     if [ -z "$irepo" ]; then
         echo "powbox: container $name has --name $(_powbox_marker_field "$lookup_name") but no powbox.repo label, so $shortcut cannot reconstruct the isolated resume command. Use: docker start -ai $name" >&2
         return 1
@@ -300,9 +300,9 @@ _powbox_agent_porcelain() {
 _powbox_build_from_table() {
     local table="$1" force=" $2 " target="$3"
     shift 3
-    local name status baked latest ver
+    local name cstatus baked latest ver
     local claude_ver="" codex_ver=""
-    while IFS=$'\t' read -r name status baked latest; do
+    while IFS=$'\t' read -r name cstatus baked latest; do
         [ -n "$name" ] || continue
         [ "$name" = base ] && continue
         case "$force" in
@@ -402,10 +402,10 @@ agent-update() {
         return "$rc"
     fi
 
-    local name status rest stale=""
-    while IFS=$'\t' read -r name status rest; do
+    local name cstatus rest stale=""
+    while IFS=$'\t' read -r name cstatus rest; do
         case "$name" in
-            claude|codex) [ "$status" = stale ] && stale="$stale $name" ;;
+            claude|codex) [ "$cstatus" = stale ] && stale="$stale $name" ;;
         esac
     done < <(printf '%s\n' "$table")
     stale="${stale# }"

@@ -5,7 +5,7 @@ description: Address maintainer-vetted review feedback on several pull requests 
 
 Address the review feedback on **several pull requests at once**, fanning each PR out into its own git worktree so they progress concurrently without polluting each other.
 
-**Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude]`
+**Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude] [ping-copilot]`
 
 This skill is the parallel batch front-end for `address-review`.
 It does **not** re-implement review-addressing — it sets up one isolated worktree per entry and uses `address-review`'s delegated fix and publish procedures, with a fresh orchestrator-owned reviewer between them.
@@ -35,6 +35,7 @@ Parsing is **lenient** — accept commas, `&`, `#` prefixes, and free word order
 | `push` | Passed through to every passing entry's publisher: push the fixed branch (normal fast-forward or exact expected-OID lease for a rewrite) and do the PR-side communication (replies, resolves, Summary comment). |
 | `ping-codex` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@codex review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
 | `ping-claude` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@claude review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
+| `ping-copilot` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@copilot review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
 
 **Classifying each entry:** a bare integer or `#`-prefixed integer is a **PR number**; anything else (contains a `/`, letters, etc.) is a **branch name**. A branch literally named like an integer is the one ambiguous case — name it with an explicit `refs/heads/` prefix or just pass its PR number instead.
 
@@ -156,7 +157,7 @@ Allow at most 3 reviewer rounds total; an entry still failing after round 3 is b
 ### Publication
 
 For each passing entry on a `push`/`ping-*` run, spawn a fresh publisher with its final packet and Pass verdict.
-Tell it to invoke `/address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?>`.
+Tell it to invoke `/address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?> <ping-copilot?>`.
 It edits no code and returns the full final report, including per-thread dispositions, push/ping outcome, and blockers.
 
 Do **not** give any subagent another PR's context — strict per-PR isolation.

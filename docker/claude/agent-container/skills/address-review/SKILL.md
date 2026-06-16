@@ -5,9 +5,9 @@ description: Address the maintainer-vetted review feedback on one pull request �
 
 Address the review feedback on a single pull request, end to end.
 
-**Arguments:** `[PR#] [rebase on top of <branch>] [push] [hands-off] [ping-codex] [ping-claude]`
+**Arguments:** `[PR#] [rebase on top of <branch>] [push] [hands-off] [ping-codex] [ping-claude] [ping-copilot]`
 
-A maintainer triggers this skill once a PR has been reviewed (by bots like `@codex`/`@claude` and/or humans) and they have decided the outstanding feedback is ready to be acted upon.
+A maintainer triggers this skill once a PR has been reviewed (by bots like `@codex`/`@claude`/`@copilot` and/or humans) and they have decided the outstanding feedback is ready to be acted upon.
 Your job is to work through every **unresolved** review thread — fix what is right, push back on what is wrong, confirm what is already handled, defer what is real but out of scope into a committed follow-up task — keep the thread state tidy, and optionally publish the result and summon a fresh review round.
 
 The maintainer signals intent through GitHub's own resolved/unresolved state, not a custom marker.
@@ -26,12 +26,13 @@ All arguments are optional and parsing is **lenient** — accept commas, `&`, an
 | `hands-off` | Run with no user interaction — best-effort to completion, documenting every skipped/blocked item in the final report. See "Hands-off mode". Typically how a parallel review orchestrator invokes this skill in a subagent. |
 | `ping-codex` | After a push that advances the PR branch (new commits or rewritten history), post a dedicated top-level `@codex review` comment to summon a fresh review round. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
 | `ping-claude` | After a push that advances the PR branch, post a dedicated top-level `@claude review` comment. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
+| `ping-copilot` | After a push that advances the PR branch, post a dedicated top-level `@copilot review` comment. **Implies `push`**, but skip the ping on an "Everything up-to-date" no-op push. |
 
 ### Flag interactions
 
-- **`ping-*` implies `push`.** If `ping-codex` or `ping-claude` is present without `push`, push anyway — a re-review of unpushed work is meaningless.
+- **`ping-*` implies `push`.** If `ping-codex`, `ping-claude`, or `ping-copilot` is present without `push`, push anyway — a re-review of unpushed work is meaningless.
 - **A ping fires only when the push actually advanced the branch.** A `ping-*` summons a *fresh* review, which is only meaningful if new commits (or a rewritten history) were just pushed. If this run produces nothing new to push — every disposition was already-addressed or push-back, or the branch was already up to date — **skip the pings even though `ping-*` was supplied.** Re-requesting a review with nothing new to look at would spin the review → address → review cycle forever; the resolved threads and Summary comment already record the outcome.
-- **Both pings present** → two separate comments, one per bot (never a single comment mentioning both). They are also separate from the Summary comment.
+- **Multiple pings present** → one separate comment per named bot (never a single comment mentioning several). They are also separate from the Summary comment.
 - **`hands-off` + `rebase`** is uncommon and the riskiest combination: a non-trivial rebase conflict has no one to consult, so you abort cleanly and stop rather than guess (see "Hands-off mode" and step 2).
 - **No `push` and no `ping`** → a local-only run. Make commits, but **do not mutate the PR at all** (no replies, no resolves, no summary comment). The final report captures every disposition so a later "push now" turn can replay it.
 
@@ -172,8 +173,8 @@ In `publish-reviewed` mode, first require the supplied review packet, a fresh ex
    - *Push-back* → reply with the rationale and flag it prominently in the summary. Resolve a bot-authored thread after independent review validates the push-back. Leave a human-authored thread unresolved unless the maintainer explicitly authorized resolving it, so unattended runs do not silently close a person's objection.
    - *Ambiguous/skipped* → **leave open**, list it in the summary as needing a decision.
    Before replying, inspect the thread for an equivalent prior reply from the authenticated user (for example, a previous run replied but failed to resolve) and avoid posting duplicates. Resolve only after the reply succeeds; record any communication failure and leave that thread open.
-5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, a **"Deferred to follow-up tasks" section** listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude` mentions (write "codex"/"claude" plain) so only the dedicated ping comments below trigger a review.
-6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`. If both, post two separate comments. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
+5. **Summary comment** — post a top-level **"Summary of Review Fixes"** (`gh pr comment`). Structure: what was fixed (with proactive same-pattern fixes called out), a **prominent "Pushed back — please re-examine" section** for every push-back with its rationale, a **"Deferred to follow-up tasks" section** listing each deferral with its committed task file (agent-proposed deferrals flagged for confirmation), any ambiguous/skipped or newly-arrived items still needing a decision, and (in hands-off runs) every automatic low-stakes decision and every item skipped for lack of feedback. In this comment, avoid bare `@codex`/`@claude`/`@copilot` mentions (write "codex"/"claude"/"copilot" plain) so only the dedicated ping comments below trigger a review.
+6. **Pings** — only after the push and summary succeeded **and only when the push actually introduced new commits or rewritten history** (the branch tip advanced — not an "Everything up-to-date" no-op push): `ping-codex` → a dedicated comment whose body is `@codex review`; `ping-claude` → a dedicated comment whose body is `@claude review`; `ping-copilot` → a dedicated comment whose body is `@copilot review`. If more than one, post a separate comment per bot. **If nothing new was pushed this run, skip the pings entirely even when `ping-*` was supplied** (see "Flag interactions") — otherwise an automated review → address → review cycle never terminates.
 
 ### Step 8 — Final report
 
@@ -239,6 +240,7 @@ gh api graphql -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:
 gh pr comment NUMBER --body '...'        # Summary of Review Fixes
 gh pr comment NUMBER --body '@codex review'
 gh pr comment NUMBER --body '@claude review'
+gh pr comment NUMBER --body '@copilot review'
 ```
 
 **Read context:** `gh pr view NUMBER --json reviews,comments,headRefName,headRefOid,headRepositoryOwner,baseRefName,url,state` and `gh api --paginate repos/{owner}/{repo}/issues/NUMBER/comments`.

@@ -47,7 +47,7 @@ guess, this skill is where those parked questions get answered.
 
 Optional trailing flags, honored only by the review layer's apply phase for items chosen to fix now,
 mirror the review skills: `push` (default on for fix-now items — a resolution that writes code is
-meant to ship), `ping-codex` / `ping-claude` (re-request bot review after the follow-up push).
+meant to ship), `ping-codex` / `ping-claude` / `ping-copilot` (re-request bot review after the follow-up push).
 
 ## The core loop
 

@@ -16,17 +16,17 @@ description: >-
 # resolve-open-questions
 
 Put the human in the loop on a **batch of decisions**, served **one at a time**. Any non-trivial
-process — addressing a review, executing a plan, untangling a migration, even keeping the books —
-throws off forks where several legitimate paths exist and only the maintainer can pick. This skill
-exists to take that pile of contentious calls and, instead of dumping them or guessing, present each
-as a tight, grounded brief and capture the decision — then apply it.
+process — addressing a review, executing a plan, untangling a migration, or coordinating an
+operational change — can produce forks where several legitimate paths exist and only the maintainer
+can pick. This skill takes that pile of contentious calls and, instead of dumping them or guessing,
+presents each as a tight, grounded brief, captures the decision, then applies it.
 
 The agent does the unattended part (research, grounding, an adjacent-invariant audit, and once a
 call is locked, the implementation); the **human makes every judgment call**. The agent only
 recommends.
 
 This is the **interactive counterpart** to the hands-off skills. Where `address-review`,
-`address-reviews-worktrees`, and batch executors *document and stop* on anything they shouldn't
+`address-reviews-worktrees`, and batch executors *document and stop* on anything they should not
 guess, this skill is where those parked questions get answered.
 
 > **Generic core, review-aware layer.** Sections 1–5 below are domain-neutral and apply to any list

@@ -1,28 +1,25 @@
 ---
 name: resolve-open-questions
 description: >-
-  Work through a list of outstanding decisions / open questions with the maintainer ONE AT A TIME
-  (or a few as a single multiple-choice question when trivial) — each grounded in the real
-  artifacts, with a concrete trigger example, the candidate resolutions as distinct outcomes, and a
-  recommendation — then apply each decision. Generic over any decision list. Its primary, fully
-  specified application is the open questions an address-review / address-reviews-worktrees pass
-  leaves behind (agent-proposed deferrals, hands-off blockers, discovered findings, cross-branch
-  issues), which it can fix-now via worktree → fresh review → fast-forward publish, or refine/defer
-  as a committed task. Trigger when the user wants to go through open questions / decision points one
-  by one, resolve the deferred/open items from a review pass, decide fix-now-vs-defer on a stack's
-  follow-ups, or unblock progress on a set of contentious calls. Pass NOTHING to use the
-  just-completed run's in-context items, or a pointer to the list (PR numbers, a file, a description)
-  to re-derive it in a fresh session. Do NOT trigger to address fresh review threads (use
-  address-review / address-reviews-worktrees) or to rebase a stack (use rebase-stack).
+  Resolve outstanding decisions or open questions with the maintainer, one at a time, by grounding
+  each item in real artifacts, showing a concrete trigger example, presenting distinct resolution
+  outcomes with a recommendation, capturing the maintainer's choice, and applying it. Use for
+  generic decision lists and especially for deferred/open items left by address-review or
+  address-reviews-worktrees runs: agent-proposed deferrals, hands-off blockers, discovered findings,
+  and cross-branch issues. Trigger when the user wants to work through decision points, decide
+  fix-now-vs-defer on follow-ups, or unblock PR/implementation progress. With no arguments, use the
+  just-completed run's in-context items; with a pointer (PRs, task file, issue list, doc), re-derive
+  the list. Do not trigger to address fresh review threads (use address-review or
+  address-reviews-worktrees) or to rebase a stack (use rebase-stack).
 ---
 
 # resolve-open-questions
 
 Put the human in the loop on a **batch of decisions**, served **one at a time**. Any non-trivial
-process — addressing a review, executing a plan, untangling a migration, even keeping the books —
-throws off forks where several legitimate paths exist and only the maintainer can pick. This skill
-exists to take that pile of contentious calls and, instead of dumping them or guessing, present each
-as a tight, grounded brief and capture the decision — then apply it.
+process — addressing a review, executing a plan, untangling a migration, or coordinating an
+operational change — can produce forks where several legitimate paths exist and only the maintainer
+can pick. This skill takes that pile of contentious calls and, instead of dumping them or guessing,
+presents each as a tight, grounded brief, captures the decision, then applies it.
 
 The agent does the unattended part (research, grounding, an adjacent-invariant audit, and once a
 call is locked, the implementation); the **human makes every judgment call**. The agent only
@@ -30,9 +27,9 @@ recommends.
 
 Explicit Codex invocation uses `$resolve-open-questions`; natural-language equivalents are fine.
 
-This is the **interactive counterpart** to the hands-off skills. Where `address-review(s)` and
-batch executors *document and stop* on anything they shouldn't guess, this skill is where those
-parked questions get answered.
+This is the **interactive counterpart** to the hands-off skills. Where `address-review`,
+`address-reviews-worktrees`, and batch executors *document and stop* on anything they should not
+guess, this skill is where those parked questions get answered.
 
 > **Generic core, review-aware layer.** Sections 1–5 below are domain-neutral and apply to any list
 > of open questions. The later **"When the items come from a review-addressing pass"** section adds
@@ -118,16 +115,25 @@ parts:
    on something only the maintainer knows ("do you ever change this cadence live?"), say so and make
    the recommendation conditional on their answer.
 
-Then **present the resolutions as a numbered multiple-choice list** (recommended one first and
-labelled) and ask the maintainer to pick; wait for their answer before locking it. Honor any
-clarifying push-back first — maintainers often refine the *mechanism*, not just the yes/no.
+Then capture the decision through the best interaction surface Codex exposes:
+
+- If a structured user-input tool is available, use it for short multiple-choice choices: one
+  question for the current item, 2-3 mutually exclusive options, recommended first and labelled
+  "(Recommended)". A single request may contain up to three trivial independent questions, but only
+  when batching does not hide context or tradeoffs.
+- If no structured tool is available, ask in chat with a numbered list and wait for the maintainer
+  to pick.
+
+Wait for the answer before locking the decision. Honor clarifying push-back first — maintainers
+often refine the *mechanism*, not just the yes/no.
 
 **Sub-step — audit adjacent code/data when the decision relies on an invariant.** If a resolution
 introduces or leans on a non-obvious invariant (e.g. "a record may stay `ACTIVE` past its
 soft-expiry"), do not just implement it — first **sweep every other consumer of that invariant** and
 report whether any mishandles it. This turns "fix this one spot" into "confirm the whole subsystem
-agrees", and is frequently the most valuable thing the skill does. Use `grep` / an Explore fan-out;
-report findings before proceeding.
+agrees", and is frequently the most valuable thing the skill does. Use `rg` and, for broad sweeps, a
+focused `explorer` subagent when the current session exposes subagents; report findings before
+proceeding.
 
 ### 5. Apply the decision
 
@@ -216,7 +222,8 @@ and scan recent run reports / commit messages for discovered findings.
 
 - **New review threads that arrived mid-run.** A bot re-review triggered by the *original* push may
   have posted fresh threads while this session ran; publishers will report them. Surface them
-  prominently — they are a *new* round, **not this skill's scope** (point at address-review(s)).
+  prominently — they are a *new* round, **not this skill's scope** (point at `address-review` /
+  `address-reviews-worktrees`).
 - **Stack state.** Fix-now follow-ups make a stacked chain leafier; inherited-code fixes and
   consolidated tasks **collapse at restack**. Point at `rebase-stack` for the integration pass.
 
@@ -262,7 +269,7 @@ and scan recent run reports / commit messages for discovered findings.
       `gitcat`); gap re-confirmed; reachability classified.
 - [ ] Coupled items grouped; order set; served **one at a time** (trivial independents may share one
       multiple-choice round) with context + trigger example + options-as-outcomes + recommendation;
-      decision captured by asking the maintainer to pick from the numbered options.
+      decision captured through the best available Codex interaction surface.
 - [ ] Adjacent-invariant audit run whenever a resolution relies on/introduces one; findings reported
       before implementing.
 - [ ] Code-writing decisions verified (tests, build, isolated validation) through a fresh review;

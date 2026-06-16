@@ -1,19 +1,16 @@
 ---
 name: resolve-open-questions
 description: >-
-  Work through a list of outstanding decisions / open questions with the maintainer ONE AT A TIME
-  (or a few as a single multiple-choice question when trivial) — each grounded in the real
-  artifacts, with a concrete trigger example, the candidate resolutions as distinct outcomes, and a
-  recommendation — then apply each decision. Generic over any decision list. Its primary, fully
-  specified application is the open questions an address-review / address-reviews-worktrees pass
-  leaves behind (agent-proposed deferrals, hands-off blockers, discovered findings, cross-branch
-  issues), which it can fix-now via worktree → fresh review → fast-forward publish, or refine/defer
-  as a committed task. Trigger when the user wants to go through open questions / decision points one
-  by one, resolve the deferred/open items from a review pass, decide fix-now-vs-defer on a stack's
-  follow-ups, or unblock progress on a set of contentious calls. Pass NOTHING to use the
-  just-completed run's in-context items, or a pointer to the list (PR numbers, a file, a description)
-  to re-derive it in a fresh session. Do NOT trigger to address fresh review threads (use
-  address-review / address-reviews-worktrees) or to rebase a stack (use rebase-stack).
+  Resolve outstanding decisions or open questions with the maintainer, one at a time, by grounding
+  each item in real artifacts, showing a concrete trigger example, presenting distinct resolution
+  outcomes with a recommendation, capturing the maintainer's choice, and applying it. Use for
+  generic decision lists and especially for deferred/open items left by address-review or
+  address-reviews-worktrees runs: agent-proposed deferrals, hands-off blockers, discovered findings,
+  and cross-branch issues. Trigger when the user wants to work through decision points, decide
+  fix-now-vs-defer on follow-ups, or unblock PR/implementation progress. With no arguments, use the
+  just-completed run's in-context items; with a pointer (PRs, task file, issue list, doc), re-derive
+  the list. Do not trigger to address fresh review threads (use address-review or
+  address-reviews-worktrees) or to rebase a stack (use rebase-stack).
 ---
 
 # resolve-open-questions
@@ -28,9 +25,9 @@ The agent does the unattended part (research, grounding, an adjacent-invariant a
 call is locked, the implementation); the **human makes every judgment call**. The agent only
 recommends.
 
-This is the **interactive counterpart** to the hands-off skills. Where `address-review(s)` and
-batch executors *document and stop* on anything they shouldn't guess, this skill is where those
-parked questions get answered.
+This is the **interactive counterpart** to the hands-off skills. Where `address-review`,
+`address-reviews-worktrees`, and batch executors *document and stop* on anything they shouldn't
+guess, this skill is where those parked questions get answered.
 
 > **Generic core, review-aware layer.** Sections 1–5 below are domain-neutral and apply to any list
 > of open questions. The later **"When the items come from a review-addressing pass"** section adds
@@ -214,7 +211,8 @@ and scan recent run reports / commit messages for discovered findings.
 
 - **New review threads that arrived mid-run.** A bot re-review triggered by the *original* push may
   have posted fresh threads while this session ran; publishers will report them. Surface them
-  prominently — they are a *new* round, **not this skill's scope** (point at address-review(s)).
+  prominently — they are a *new* round, **not this skill's scope** (point at `address-review` /
+  `address-reviews-worktrees`).
 - **Stack state.** Fix-now follow-ups make a stacked chain leafier; inherited-code fixes and
   consolidated tasks **collapse at restack**. Point at `rebase-stack` for the integration pass.
 

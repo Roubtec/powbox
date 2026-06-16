@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resolve Open Questions"
+  short_description: "Decide and apply open follow-ups"
+  default_prompt: "Use $resolve-open-questions to work through the open decisions from the latest review pass."

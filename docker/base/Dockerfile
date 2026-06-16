@@ -260,12 +260,22 @@ COPY --chmod=755 \
     docker/shared/shadow-mounts.sh \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
+    docker/shared/pnpm-shadow-wrapper.sh \
     docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \
     docker/shared/seed-workspace.sh \
     docker/shared/fix-workspace-perms.sh \
     /usr/local/bin/
+
+# Route pnpm (and its `pn` short alias) through the shadow wrapper so a package
+# scaffolded mid-session gets its node_modules tmpfs-shadowed before pnpm can
+# populate it on the host bind mount. The wrapper delegates to the real global
+# pnpm; `pnpx`/`pnx` (dlx) are left alone — they don't write workspace
+# node_modules. Must run after `npm install -g pnpm` created these symlinks and
+# after the wrapper was copied above.
+RUN ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pnpm \
+    && ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pn
 
 USER node
 

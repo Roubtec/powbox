@@ -138,6 +138,18 @@ if ($Isolated) {
     }
   }
 
+  # Reject control characters in any value frozen into a container label. cc-list /
+  # agent-list parse the labels back with a \x1f field separator and one-container-per-
+  # line reads, so a newline or a literal \x1f in -Name/-Repo/-Ref would split a record
+  # or shift fields and corrupt the listing (display quoting can't undo a real newline).
+  # No legitimate repo spec, ref, or name contains a control char, so fail fast here.
+  foreach ($pair in @(@('-Name', $Name), @('-Repo', $repoSpec), @('-Ref', $Ref))) {
+    if ($pair[1] -match '[\x00-\x1F\x7F]') {
+      Write-Error "$($pair[0]) must not contain control characters (newlines, tabs, etc.)."
+      exit 1
+    }
+  }
+
   # repo-slug: leaf after the last '/', strip a trailing .git, lowercase + sanitise
   # (the same shape as the dir-mounted project basename handling).
   $repoBasename = ($repoSpec.TrimEnd('/') -split '/')[-1]
@@ -172,7 +184,16 @@ if ($Isolated) {
     $instanceLabel = "ts-" + [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfffffff") + "-" + $PID + "-" + $rand
   }
   $instanceHash = Get-Powbox-Hash12 $instanceLabel
-  $projectSlug = "$repoSlug-$instanceHash"
+  # Cosmetic, human-readable slug from -Name, folded into $projectSlug so the
+  # container/workspace name and cc-list show WHICH instance without an inspect. It does
+  # NOT own identity: the 12-char hash above (which hashes the RAW -Name) does, so two
+  # -Names that slugify alike ("Feature A" and "feature/a" both -> feature-a) stay
+  # distinct containers (told apart by the hash and the powbox.instance-name label).
+  # Sanitise to the repo-slug shape, cap the length, and drop it if it empties out so a
+  # punctuation-only name never weakens the hash-based identity. Empty for unnamed.
+  $nameSlug = (($Name.ToLowerInvariant() -replace '[^a-z0-9_.-]', '-') -replace '-+', '-').Trim('-', '.')
+  if ($nameSlug.Length -gt 32) { $nameSlug = $nameSlug.Substring(0, 32).TrimEnd('-', '.') }
+  $projectSlug = if ($nameSlug) { "$repoSlug-$nameSlug-$instanceHash" } else { "$repoSlug-$instanceHash" }
 }
 else {
   # --- Dir-mounted identity (unchanged) --------------------------------------
@@ -323,6 +344,9 @@ if ($Resume) {
   if ($Reclone) {
     Write-Host "Note: -Reclone is ignored with -Resume; the existing checkout is left untouched. Omit -Resume to wipe and re-clone." -ForegroundColor Yellow
   }
+  if ($Ref -ne "") {
+    Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
+  }
 
   docker start -ai $containerName
   exit $LASTEXITCODE
@@ -348,6 +372,22 @@ if ($Isolated -and $Reclone -and -not $Volatile -and $containerExists) {
     }
   }
   $containerExists = $false
+}
+
+# -Ref only takes effect when seed-workspace actually CLONES, and it clones only when the
+# per-instance workspace volume holds no checkout: a brand-new instance, or a -Reclone
+# (whose prep empties the volume). Whenever that volume is already populated, seed-workspace
+# keeps the existing checkout and -Ref is silently ignored - so warn. Gate on the VOLUME,
+# not $containerExists: that also covers a container pruned while its agent-ws-* volume
+# survived (e.g. agent-prune-stopped), and stays correct when a later block recreates the
+# container (the kept volume is reused). The volume is created by the prep step below, so on
+# a genuine first launch it does not exist yet here and no warning fires. Benign by design -
+# attended launches can switch refs in-container.
+if ($Isolated -and $Ref -ne "" -and -not $Reclone) {
+  docker volume inspect $workspaceVolume *> $null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "Note: -Ref '$Ref' applies only to a fresh clone; $containerName keeps the existing checkout in its workspace volume. Use -Reclone to re-clone at this ref, or switch branches inside the container." -ForegroundColor Yellow
+  }
 }
 
 if (-not $Volatile -and $containerExists) {
@@ -777,9 +817,17 @@ if ($Isolated) {
     "-e", "POWBOX_CLONE_REF=$Ref",
     "-e", "POWBOX_WORKSPACE_DIR=$workspaceMount"
   )
-  # Label self-hosted containers so tooling/lists can distinguish them from
-  # dir-mounted ones (they already share the claude-/codex- name prefix).
-  $envArgs += @("--label", "powbox.self-hosted=true")
+  # Label self-hosted containers so tooling/lists can distinguish them from dir-mounted
+  # ones (they already share the claude-/codex- name prefix). instance-name stores -Name
+  # verbatim (pre-slugify) so cc-list/agent-list tell apart two names that slugify alike;
+  # repo + ref give the list enough to reconstruct the resume command. ref records what
+  # was REQUESTED at creation and is not re-applied on resume (see the -Ref warning).
+  $envArgs += @(
+    "--label", "powbox.self-hosted=true",
+    "--label", "powbox.instance-name=$Name",
+    "--label", "powbox.repo=$repoSpec",
+    "--label", "powbox.ref=$Ref"
+  )
 }
 else {
   $workspaceVolArgs = @(

@@ -350,23 +350,72 @@ agent-update() {
     return "$rc"
 }
 
-# Print the standard `docker ps` table for the given filters, appending a
-# "[self-hosted]" marker to the rows of self-hosted (--isolated) containers so
-# they are visible at a glance. The self-hosted set is resolved with a label
-# FILTER (docker ps --filter label=powbox.self-hosted=true) rather than a
-# `{{.Label "key"}}` template column, because podman's docker shim rejects the
-# method-with-arg template form; the filter and the no-clobber `table` output are
-# both portable. The header and dir-mounted rows pass through unchanged, so the
-# output is byte-identical to before when no self-hosted container exists. Names
-# are read into an array (not word-split) so this behaves identically under bash
-# and zsh.
+# Print the standard `docker ps` table for the given filters, appending a marker to
+# each self-hosted (--isolated) row so you can tell WHICH instance it is and resume it
+# without an inspect:  [self-hosted name=<--name as entered> repo=<spec> ref=<ref>]
+# (fields are omitted when empty, so an unnamed instance shows just repo/ref and an
+# old container with none of the labels shows a bare [self-hosted]). The self-hosted
+# set is resolved with a label FILTER (docker ps --filter label=powbox.self-hosted=true)
+# and the per-row name/repo/ref are read from the powbox.instance-name/repo/ref labels
+# via `docker inspect --format {{index ...}}` — both portable, unlike the `{{.Label
+# "key"}}` template column podman's docker shim rejects. The name shown is the RAW
+# --name (the powbox.instance-name label), which is what disambiguates two names that
+# slugify to the same container-name shape. A field value containing whitespace or shell
+# metacharacters is single-quoted (e.g. name='Feature A') so the marker stays unambiguous
+# and pastes straight back into --name; the raw value is preserved, so its identity hash
+# still recomputes. The header and dir-mounted rows pass through unchanged, so the output
+# is byte-identical to before when no self-hosted container exists. Names/entries are read
+# into arrays (not word-split) so this behaves identically under bash and zsh.
+
+# Render one marker field value: verbatim when "simple" (only characters that survive a
+# copy-paste back into the shell unquoted — so repo specs/refs with slashes, colons, @,
+# dots stay readable), else POSIX single-quoted so a value with spaces/metacharacters is
+# unambiguous and pasteable into a resume command. Embedded single quotes use the '\''
+# splice. The raw value is never altered, only how it is displayed.
+_powbox_marker_field() {
+    case $1 in
+    *[!A-Za-z0-9._/@:+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+    esac
+}
+
 _powbox_agent_list() {
-    local name self_hosted=()
+    local name cand=()
     while IFS= read -r name; do
-        [ -n "$name" ] && self_hosted+=("$name")
+        [ -n "$name" ] && cand+=("$name")
     done < <(docker ps -a "$@" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
 
-    local line row_name marked
+    # entries[]: one "NAME<TAB>MARKER" per self-hosted container, built from its labels in
+    # a single inspect (output is in input order, but we match by name, not index, so a
+    # container that vanishes between the two calls is simply skipped).
+    # Field separator is \x1f (US), NOT a tab: tab is IFS-whitespace, so `read` would
+    # collapse an EMPTY field (an unnamed instance's blank instance-name) and shift the
+    # remaining columns left. \x1f is non-whitespace, so empty fields are preserved.
+    local entries=() iname irepo iref marker
+    if [ "${#cand[@]}" -gt 0 ]; then
+        while IFS=$'\x1f' read -r name iname irepo iref; do
+            name="${name#/}" # docker inspect's .Name is /-prefixed
+            [ -n "$name" ] || continue
+            # A missing label can surface as the literal "<no value>" (Docker renders a
+            # nil labels map that way for `index`), so an old/pre-label container would
+            # otherwise show "name=<no value> repo=<no value> ...". Treat it as empty so
+            # such a container shows a bare [self-hosted], matching how the repo
+            # normalizes label reads elsewhere (commands/check-updates.sh, build-image.sh).
+            [ "$iname" = "<no value>" ] && iname=""
+            [ "$irepo" = "<no value>" ] && irepo=""
+            [ "$iref" = "<no value>" ] && iref=""
+            marker=" [self-hosted"
+            [ -n "$iname" ] && marker="$marker name=$(_powbox_marker_field "$iname")"
+            [ -n "$irepo" ] && marker="$marker repo=$(_powbox_marker_field "$irepo")"
+            [ -n "$iref" ] && marker="$marker ref=$(_powbox_marker_field "$iref")"
+            marker="$marker]"
+            entries+=("$name"$'\t'"$marker")
+        done < <(docker inspect \
+            --format $'{{.Name}}\x1f{{index .Config.Labels "powbox.instance-name"}}\x1f{{index .Config.Labels "powbox.repo"}}\x1f{{index .Config.Labels "powbox.ref"}}' \
+            "${cand[@]}" 2>/dev/null)
+    fi
+
+    local line row_name marked entry
     while IFS= read -r line; do
         # The Names column is field 2 of the table (ID NAMES STATUS IMAGE), and a
         # container name never contains whitespace, so the 2nd whitespace-delimited
@@ -377,9 +426,9 @@ _powbox_agent_list() {
         # so it passes through unmarked.
         row_name="$(printf '%s\n' "$line" | awk '{print $2}')"
         marked=""
-        for name in "${self_hosted[@]}"; do
-            if [ "$row_name" = "$name" ]; then
-                marked=" [self-hosted]"
+        for entry in "${entries[@]}"; do
+            if [ "$row_name" = "${entry%%$'\t'*}" ]; then
+                marked="${entry#*$'\t'}"
                 break
             fi
         done

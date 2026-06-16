@@ -12,7 +12,11 @@
 # life):
 #   POWBOX_SELF_HOSTED   "1" enables this script; anything else is a no-op (exit 0)
 #   POWBOX_CLONE_REPO    repo spec — an owner/repo slug or a clone URL (required)
-#   POWBOX_CLONE_REF     optional branch/tag to start on (default: the repo default)
+#   POWBOX_CLONE_REF     optional branch/tag/commit to start on (default: the repo
+#                        default). Applied as a post-clone checkout, NOT `clone
+#                        --branch`, so it accepts a raw commit SHA too and a ref that
+#                        cannot be resolved degrades to "stay on the default branch
+#                        with a warning" instead of failing the whole clone.
 #   POWBOX_WORKSPACE_DIR target dir (the workspace mount); defaults to $PWD
 #
 # Reuse semantics: clone once when the workspace has no .git; on a restart of a
@@ -155,28 +159,100 @@ fi
 find "$WS" -mindepth 1 -delete 2>/dev/null || true
 
 echo "seed-workspace: cloning $(redact_url "$URL") into $WS ..." >&2
-clone_args=(clone)
-[ -n "$REF" ] && clone_args+=(--branch "$REF")
-clone_args+=("$URL" "$WS")
 
-# Capture git's own exit status: after a completed `if git …; then …; fi` the
-# value of $? is the if-statement's (0), not the failed clone's, so a failure
-# would otherwise be reported as "exit 0". `|| clone_rc=$?` also keeps set -e
-# from aborting before the loud announcement runs.
+# Clone the repo's DEFAULT branch unconditionally; an optional --ref is applied as a
+# post-clone checkout below. This deliberately does NOT use `git clone --branch "$REF"`:
+# that form rejects a raw commit SHA (only a branch/tag name), and it couples clone
+# success to ref validity — a typo'd ref would abort the whole clone and drop the
+# container to a plain shell. A full clone already fetches every branch and tag plus
+# all reachable commits, so the post-clone checkout resolves a branch, tag, OR SHA
+# uniformly, and a bad ref degrades to a benign warning (the working tree is still a
+# valid default-branch checkout).
 #
-# GIT_TERMINAL_PROMPT=0 forces a missing/expired credential to FAIL rather than
-# block: a self-hosted launch runs with a TTY, so a private clone reaching here
-# without gh auth would otherwise hang on git's interactive username/password
-# prompt — clone_rc never gets set, and the loud failure banner + plain-shell
-# fallback below never run. Disabling the prompt routes that auth failure straight
-# to announce_failure (git-scm.com documents this for HTTP auth terminal prompts).
+# Capture git's own exit status: after a completed `if git …; then …; fi` the value of
+# $? is the if-statement's (0), not the failed clone's, so a failure would otherwise be
+# reported as "exit 0". `|| clone_rc=$?` also keeps set -e from aborting before the loud
+# announcement runs.
+#
+# GIT_TERMINAL_PROMPT=0 forces a missing/expired credential to FAIL rather than block: a
+# self-hosted launch runs with a TTY, so a private clone reaching here without gh auth
+# would otherwise hang on git's interactive username/password prompt — clone_rc never
+# gets set, and the loud failure banner + plain-shell fallback below never run. Disabling
+# the prompt routes that auth failure straight to announce_failure (git-scm.com documents
+# this for HTTP auth terminal prompts).
 clone_rc=0
-GIT_TERMINAL_PROMPT=0 git "${clone_args[@]}" || clone_rc=$?
-if [ "$clone_rc" -eq 0 ]; then
-	echo "seed-workspace: clone complete." >&2
-	exit 0
+GIT_TERMINAL_PROMPT=0 git clone "$URL" "$WS" || clone_rc=$?
+if [ "$clone_rc" -ne 0 ]; then
+	echo "seed-workspace: clone FAILED (exit $clone_rc)." >&2
+	announce_failure "$URL"
+	exit 1
 fi
+echo "seed-workspace: clone complete." >&2
 
-echo "seed-workspace: clone FAILED (exit $clone_rc)." >&2
-announce_failure "$URL"
-exit 1
+# Optional starting ref. A resolved `git checkout` selects a branch (onto a local tracking
+# branch, matching the old --branch behaviour), a tag, or a commit SHA (detached HEAD) from
+# the objects the full clone already holds. A failure here is BENIGN by design — the tree is
+# a valid default-branch checkout — so warn loudly and continue rather than dropping to the
+# failure banner: the agent/user is told to confirm the ref before starting work (a
+# self-hosted launch then typically cuts its own task branch anyway).
+#
+# Resolve the ref to a commit FIRST, then check it out via a form that can NEVER be taken as
+# a pathspec. A bare `git checkout "$REF"` is ambiguous: a typo that happens to name a tracked
+# PATH (e.g. "README", "docs") is taken as a path checkout — it exits 0, silently leaves the
+# tree on the default branch, and we'd report success, defeating the very warning below.
+# `git rev-parse --verify "<ref>^{commit}"` succeeds only for a name that resolves to a commit
+# and never for a pathspec, so a path-only typo falls through to the warning; peeling to
+# ^{commit} also rejects a non-commit object (a blob/tree SHA) that a bare checkout would itself
+# refuse.
+#
+# Probe THREE ref namespaces in a deliberate precedence — local branch, then remote-tracking
+# branch, then any-commit (tag or SHA) — because a fresh `git clone` only materializes a local
+# head for the DEFAULT branch, so a non-default branch like `dev` exists only as
+# refs/remotes/origin/dev (`git rev-parse dev` does NOT DWIM that — it checks refs/remotes/dev,
+# not .../origin/dev). The ordering matters and mirrors `git clone --branch <name>`: when a
+# non-default BRANCH and a TAG share a name (e.g. release branch `release` AND tag `release`,
+# both materialized — the branch as origin/release, the tag as refs/tags/release), the BRANCH
+# must win. A bare `rev-parse "$REF"` would resolve the tag first and detach there, silently
+# starting the workspace from the wrong commit; checking the origin/ form BEFORE the bare form
+# selects the branch, matching `git clone --branch`. The default branch is caught by the local
+# head before either, so it is never mis-handled as a tracking-branch create.
+#
+# The resolution alone is not enough — the checkout itself must also be path-immune. When the
+# requested branch name ALSO exists as a tracked path (e.g. branch `docs` AND a `docs/` dir, or
+# branch `README` AND a `README` file), a bare `git checkout "$REF"` aborts with "could be both
+# a local file and a tracking branch" and strands the tree on the default branch even though the
+# branch genuinely exists. So each arm uses an explicit, unambiguous checkout:
+#   - local branch (the default branch) → `git checkout "$REF" --`; the trailing `--` forces ref
+#     interpretation so a same-named path can't hijack it.
+#   - remote-tracking branch (non-default branch) → `git checkout -b "$REF" --track
+#     refs/remotes/origin/$REF`; an explicit start-point is never a pathspec and recreates the
+#     local tracking branch the old `git clone --branch "$REF"` produced.
+#   - tag or SHA → `git checkout "$REF" --`; the `--` keeps a same-named path from hijacking it
+#     (detached HEAD).
+if [ -n "$REF" ]; then
+	if { git -C "$WS" rev-parse --verify --quiet "refs/heads/${REF}^{commit}" >/dev/null 2>&1 &&
+		git -C "$WS" checkout "$REF" --; } ||
+		{ git -C "$WS" rev-parse --verify --quiet "refs/remotes/origin/${REF}^{commit}" >/dev/null 2>&1 &&
+			git -C "$WS" checkout -b "$REF" --track "refs/remotes/origin/${REF}"; } ||
+		{ git -C "$WS" rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1 &&
+			git -C "$WS" checkout "$REF" --; }; then
+		echo "seed-workspace: checked out ref '$REF'." >&2
+	else
+		cat >&2 <<EOF
+
+================================================================================
+  POWBOX --ref WARNING: could not check out '$REF'
+================================================================================
+  The clone succeeded, so the workspace is on the repository's DEFAULT branch
+  instead of the ref you asked for. Confirm where you are before starting work:
+
+      git -C "$WS" status -sb
+
+  (A --ref is applied only on the FIRST clone; pass a valid branch, tag, or
+  commit SHA, or just check out what you need now that the repo is cloned.)
+================================================================================
+
+EOF
+	fi
+fi
+exit 0

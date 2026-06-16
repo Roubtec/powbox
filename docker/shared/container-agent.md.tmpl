@@ -50,7 +50,7 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 |------|------------|
 | `/workspace/<project-slug>` | Project source (bind-mounted from host, read-write); the working directory (slug is `<name>-<hash>`) |
 | `/workspace/<project-slug>/node_modules` | Per-project Docker volume (Linux packages, separate from host) |
-| `/workspace/<project-slug>/<subpackage>/node_modules` | Ephemeral tmpfs shadow (auto-detected for monorepo workspaces; run `shadow-refresh.sh` after adding new packages) |
+| `/workspace/<project-slug>/<subpackage>/node_modules` | Ephemeral tmpfs shadow (auto-detected for monorepo workspaces; the `pnpm`/`pn` wrapper re-shadows before installs, so a package added mid-session is covered automatically — run `shadow-refresh.sh` by hand only if you populate `node_modules` another way) |
 | `/workspace/<project-slug>/.worktrees` | Per-project Docker volume for git worktrees; also holds the pnpm store at `.worktrees/.pnpm-store`, so worktree `pnpm install` hardlinks from it |
 | `/ctx` | Optional read-only context volume (reference code/data, mounted via `--ctx`) |
 | `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |

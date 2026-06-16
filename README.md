@@ -302,13 +302,13 @@ Flags (`cc`/`cx`, the `commands/*-container.*` scripts, and `scripts/launch-agen
 - `--isolated` / `-Isolated` — select self-hosted mode (default stays dir-mounted).
 - `--repo <spec>` / `-Repo <spec>` — the repo to clone (`owner/repo` or a URL). The positional argument is re-interpreted as this in self-hosted mode; `--repo` is the explicit form and wins.
 - `--name <label>` / `-Name <label>` — instance discriminator. **Named instances are deterministic and reusable**: the same `--name` re-attaches the same clone and the same Claude session history across launches (amortising the clone). **Unnamed instances get a fresh timestamp every launch** — a new clone and fresh history each time (inherently single-session).
-- `--ref <branch>` / `-Ref <branch>` — branch/tag to check out on first clone (default: the repo's default branch).
+- `--ref <ref>` / `-Ref <ref>` — branch, tag, **or commit SHA** to check out on first clone (default: the repo's default branch). Applied as a post-clone `git checkout`, so an unresolvable ref does not fail the clone — the container stays on the default branch and prints a warning to confirm where you landed. Only the **first** clone honours it; a reused/`--resume`d container keeps whatever is checked out (use `--reclone` to re-clone at a new ref, or just switch branches inside the container).
 - `--reclone` / `-Reclone` (alias `--fresh` / `-Fresh`) — wipe the instance's working tree and re-seed from a fresh clone. On an existing stopped container this recreates it so the clone step re-runs; the `agent-ws-*` volume itself is kept and re-cloned into.
 
 ### How it works
 
 - **One workspace volume.** A per-instance `agent-ws-<container>` volume is mounted at `/workspace/<slug>` and holds the clone plus `node_modules`, `.worktrees`, and the pnpm store as ordinary subdirectories. The separate `agent-nm-*` / `agent-wt-*` shadow volumes are **not** created in this mode (there is no host filesystem underneath to shadow). Because the store, the worktrees, and the root `node_modules` now share **one** mount, `pnpm install` **hardlinks** everywhere — including the root `node_modules`, which falls back to copying in dir-mounted mode (separate mount → `link(2)` `EXDEV`).
-- **Identity.** `PROJECT_NAME = <repo-slug>-<instance-hash>`, where `instance-hash = SHA256(label-or-timestamp)[:12]` — the same shape as the dir-mounted name. So the container is `claude-<repo-slug>-<instance-hash>` and the workspace mount is `/workspace/<repo-slug>-<instance-hash>`. Session-history isolation comes entirely from the workspace path being distinct per **container** (Claude derives `~/.claude/projects/<slug>` from the cwd), so the named `instance-hash` folds in the **agent** as well as the repo: the same repo + `--name` launched with both `cc` and `cx` resolves to distinct paths (and distinct `agent-ws-<container>` volumes), preventing a delegated peer agent — both agents' config volumes are always mounted — from resuming one clone's session history against the other's working tree.
+- **Identity.** `PROJECT_NAME = <repo-slug>[-<name-slug>]-<instance-hash>`, where `instance-hash = SHA256(label-or-timestamp)[:12]` — the same hash shape as the dir-mounted name. The `name-slug` is a sanitised, length-capped rendering of `--name` inserted purely so the container/workspace name and `cc-list` show **which** instance at a glance; it is cosmetic and never owns identity — the hash (which folds in the **raw** `--name`, the repo, and the agent) does. So two `--name`s that slugify alike (`Feature A` and `feature/a` both → `feature-a`) stay distinct containers, told apart by the hash and the `powbox.instance-name` label that records the name **verbatim**. `--ref` is deliberately **excluded** from the hash (it is volatile — re-launching the same name with a different ref must reuse the one container, not fork a clone per ref). Each self-hosted container also carries `powbox.instance-name` / `powbox.repo` / `powbox.ref` labels (the last is the ref *requested at creation*) so `cc-list` can print enough to reconstruct the exact resume command. Session-history isolation comes entirely from the workspace path being distinct per **container** (Claude derives `~/.claude/projects/<slug>` from the cwd), so the `instance-hash` folds in the **agent** as well as the repo: the same repo + `--name` launched with both `cc` and `cx` resolves to distinct paths (and distinct `agent-ws-<container>` volumes), preventing a delegated peer agent — both agents' config volumes are always mounted — from resuming one clone's session history against the other's working tree.
 - **Shared auth, isolated workspace.** The config volumes (`claude-config`, `codex-config`, `agent-gh-config`, `agent-zsh-history`) stay globally shared — no re-auth per container, skills seeded once. Only the workspace and the per-container Podman storage are per-instance.
 - **Worktrees still work.** The `.worktrees/<container>/<slug>` convention and the `wt-bootstrap`/`wt-enter`/`wt-remove` helpers work unchanged; they just root in the one workspace volume (which hardlinks better). `wt-bootstrap`'s root-safety check recognises self-hosted mode and verifies the workspace volume itself is container-local rather than expecting per-directory tmpfs shadows.
 
@@ -334,7 +334,7 @@ The clone (and any private-repo access) depends on `gh` credentials, so the entr
 
 Self-hosted containers are **not** auto-removed (`--rm`) by default — an ephemeral container removed before the agent pushes would lose work. They and their `agent-ws-*` / `agent-podman-*` volumes accumulate, especially unnamed/timestamped ones, so tear down with the prune tooling: `agent-prune-stopped` removes stopped agent containers, and `agent-prune-volumes` then drops orphaned `agent-ws-*` volumes whose container is gone (alongside the existing `agent-nm-*` / `agent-wt-*` / `agent-podman-*` pruning). `agent-prune` does both.
 
-Self-hosted containers are flagged with a trailing `[self-hosted]` marker in `cc-list` / `cx-list` / `agent-list` (they otherwise share the `claude-` / `codex-` name prefix with dir-mounted ones) and carry a `powbox.self-hosted=true` label, so `docker ps --filter label=powbox.self-hosted=true` also lists just them.
+Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with a trailing `[self-hosted name=<--name as entered> repo=<spec> ref=<ref>]` marker (they otherwise share the `claude-` / `codex-` name prefix with dir-mounted ones) — enough to read off the instance and reconstruct its resume command (`cc --isolated <repo> --name <name>`) without an inspect. The `name=` is the **raw** `--name` (from the `powbox.instance-name` label), so two names that slugify to the same container-name shape are still told apart; empty fields are omitted, and a pre-label container shows a bare `[self-hosted]`. They also carry a `powbox.self-hosted=true` label, so `docker ps --filter label=powbox.self-hosted=true` lists just them.
 
 ### Known limitations
 
@@ -382,6 +382,15 @@ The entrypoint scans for workspace declarations in this order:
 
 All matched directories get a tmpfs overlay.
 If none of these files exist, the feature is a no-op.
+
+### Mid-Session Packages
+
+Auto-detection runs once, at container start, so it only shadows the subpackages that exist then.
+A package scaffolded *during* a session (create `packages/foo`, write its `package.json`, then `pnpm install`) is not shadowed yet, so its `node_modules` would be created and populated straight onto the host bind mount — re-introducing the exact Linux/host binary and ownership mix this feature exists to prevent, and breaking the host's own `pnpm install` with `EACCES`.
+
+To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked into the image: before any node_modules-writing subcommand (`install`, `add`, `update`, …) it re-runs detection so a freshly added package's `node_modules` is tmpfs-shadowed *before* pnpm writes into it, then delegates to the real pnpm.
+Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure (e.g. self-hosted mode, where there is no host filesystem to shadow) never blocks the command.
+You can still run `shadow-refresh.sh` by hand at any time.
 
 ### Custom Shadow Paths (`.powbox.yml`)
 
@@ -533,7 +542,7 @@ The repo ships a pair of shell libraries — `shell/powbox.sh` (bash/zsh) and `s
 Functions exposed by both libraries:
 
 - `cc`, `cx` — launch Claude or Codex in the current directory (or a given path), forwarding every flag to the underlying `commands/*-container.*` script. Add `--isolated`/`-Isolated` (with a repo positional or `--repo`/`-Repo`) for [self-hosted mode](#self-hosted-mode---isolated); the positional is then a repo spec, not a path, so the cd-after-launch is suppressed
-- `cc-list`, `cx-list`, `agent-list` — list agent containers (self-hosted ones get a trailing `[self-hosted]` marker)
+- `cc-list`, `cx-list`, `agent-list` — list agent containers (self-hosted ones get a trailing `[self-hosted name=… repo=… ref=…]` marker so you can resume an instance by its `--name` without an inspect)
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-trixie-slim` registry digest

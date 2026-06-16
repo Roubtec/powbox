@@ -242,6 +242,18 @@ This is deliberately **not** Docker-in-Docker or a mounted host socket — both 
 - **Storage driver:** fuse-overlayfs when `/dev/fuse` is available, otherwise the slower `vfs` driver. The driver is **pinned per `agent-podman-*` volume on first init** (recorded on the volume) and honoured on every later launch — it is not re-chosen each start, so a store first initialised on `vfs` (or moved to a host without `/dev/fuse`) won't silently flip; switching needs a clean store (`podman system reset` or dropping the volume).
 - **Devices:** rootless Podman needs two host devices — `/dev/fuse` (overlay storage driver) and `/dev/net/tun` (nested-container networking; without it default `podman run` can't bring up its network). Both are passed through under the single `POWBOX_PODMAN` gate: `auto` attaches each when the host exposes it, `on` forces both (Docker Desktop), `off` skips both.
 
+If `auto` cannot see devices that the Docker daemon or VM can still expose, force the Podman device overlays from your PowerShell profile before sourcing the PowBox helpers:
+
+```powershell
+$env:POWBOX_PODMAN = 'on'
+```
+
+There is no reliable host-wide environment variable for `/dev/fuse`; the thorough check is to ask Docker to pass the device into a throwaway container and verify it is a character device:
+
+```bash
+docker run --rm --device /dev/fuse alpine sh -lc 'test -c /dev/fuse && echo yes || echo no'
+```
+
 The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal to move that workload to a dedicated VM. See [docs/rootless-podman.md](docs/rootless-podman.md) for design notes and a validation procedure.
 
 ## Per-Project Workspace Paths

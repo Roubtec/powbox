@@ -145,21 +145,24 @@ function _Powbox-ResumeIsolatedByName {
         [string]$InstanceName
     )
 
-    $matches = @(_Powbox-GetIsolatedByName -AgentPrefix $AgentPrefix -InstanceName $InstanceName)
-    if ($matches.Count -eq 0) {
+    # Not $matches: that is a PowerShell automatic variable populated by the -match
+    # operator, so reassigning it is fragile (a later -match/switch -regex in scope
+    # would clobber it).
+    $found = @(_Powbox-GetIsolatedByName -AgentPrefix $AgentPrefix -InstanceName $InstanceName)
+    if ($found.Count -eq 0) {
         Write-Error "No self-hosted $AgentLabel container found with -Name $(_Powbox-MarkerField $InstanceName). Use $Shortcut-list to see known instances."
         return
     }
-    if ($matches.Count -gt 1) {
+    if ($found.Count -gt 1) {
         Write-Error "-Name $(_Powbox-MarkerField $InstanceName) matches multiple self-hosted $AgentLabel containers. Relaunch one explicitly with -Repo, or prune the stale instance."
-        $matches | Sort-Object Repo, Container | ForEach-Object {
+        $found | Sort-Object Repo, Container | ForEach-Object {
             $ref = if ($_.Ref) { " -Ref $(_Powbox-MarkerField $_.Ref)" } else { "" }
             Write-Host "  $($_.Container) [$($_.Status)] repo=$(_Powbox-MarkerField $_.Repo)$ref" -ForegroundColor Yellow
         }
         return
     }
 
-    $match = $matches[0]
+    $match = $found[0]
     if (-not $match.Repo) {
         Write-Error "Container $($match.Container) has -Name $(_Powbox-MarkerField $InstanceName) but no powbox.repo label, so $Shortcut cannot reconstruct the isolated resume command. Use: docker start -ai $($match.Container)"
         return

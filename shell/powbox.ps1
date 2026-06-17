@@ -214,8 +214,16 @@ function _Powbox-PruneExited {
 function agent-prune-stopped {
     # Honor -WhatIf so `agent-prune -WhatIf` previews the stopped-container removal
     # instead of deleting exited (named self-hosted) instances before the forwarded
-    # volume dry-run reports nothing was touched.
-    $dryRun = $args -contains '-WhatIf'
+    # volume dry-run reports nothing was touched. Parse $args explicitly: a plain
+    # `-contains '-WhatIf'` would coerce the Boolean element of any colon-switch
+    # (e.g. -Confirm:$true tokenizes as '-Confirm:' followed by $true) and falsely
+    # preview. -WhatIf:$true/$false tokenizes as '-WhatIf:' followed by the Boolean.
+    $dryRun = $false
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        $tok = [string]$args[$i]
+        if ($tok -eq '-WhatIf') { $dryRun = $true }
+        elseif ($tok -eq '-WhatIf:') { $dryRun = ($i + 1 -lt $args.Count) -and [bool]$args[$i + 1] }
+    }
     _Powbox-PruneExited -Prefix "claude-" -DryRun $dryRun
     _Powbox-PruneExited -Prefix "codex-" -DryRun $dryRun
 }

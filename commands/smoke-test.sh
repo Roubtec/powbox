@@ -120,7 +120,14 @@ if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
 	skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
 else
+	# smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
+	# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice. Mirror
+	# that gate so the banner records the partial run instead of claiming all stages
+	# ran. The child still prints the skip message; we only track it here.
 	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
+	if [ "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" = "off" ]; then
+		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+	fi
 fi
 
 # Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's
@@ -133,6 +140,12 @@ if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED:-}" ]; then
 	skipped+=("Stage 4: self-hosted launch mode (POWBOX_SMOKE_SKIP_SELFHOSTED)")
 else
 	"${ROOT_DIR}/scripts/smoke-test-selfhosted.sh" "$IMAGE"
+	# POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE=1 runs Stage A (launcher identity) but skips
+	# Stage B (clone behavior) inside the child, which still exits 0. Record that
+	# partial coverage so the banner does not claim all stages ran.
+	if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE:-}" ]; then
+		skipped+=("Stage 4: self-hosted clone behavior (POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE)")
+	fi
 fi
 
 if [ "${#skipped[@]}" -gt 0 ]; then

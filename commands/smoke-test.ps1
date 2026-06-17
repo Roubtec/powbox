@@ -141,7 +141,15 @@ if ($SkipPodman) {
   $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
 }
 else {
+  # smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
+  # POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice. Mirror
+  # that gate so the banner records the partial run instead of claiming all stages
+  # ran. The child still prints the skip message; we only track it here.
   & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+  $podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
+  if ($podmanRequest -eq "off") {
+    $skipped.Add("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+  }
 }
 
 # Stage 4 - self-hosted ("-Isolated") launch mode. Validates the launcher's
@@ -156,6 +164,12 @@ if ($SkipSelfHosted) {
 }
 else {
   & (Join-Path $rootDir "scripts/smoke-test-selfhosted.ps1") -Image $Image
+  # POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE=1 runs Stage A (launcher identity) but skips
+  # Stage B (clone behavior) inside the child, which still returns success. Record
+  # that partial coverage so the banner does not claim all stages ran.
+  if ($env:POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE) {
+    $skipped.Add("Stage 4: self-hosted clone behavior (POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE)")
+  }
 }
 
 if ($skipped.Count -gt 0) {

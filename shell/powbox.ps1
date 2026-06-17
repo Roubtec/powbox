@@ -122,7 +122,11 @@ function _Powbox-GetIsolatedByName {
         $parts = $_.Split($sep)
         if ($parts.Count -lt 5) { return }
         $iname = if ($parts[1] -ne '<no value>') { $parts[1] } else { '' }
-        if ($iname -ne $InstanceName) { return }
+        # Case-sensitive (-cne): the launcher hashes the raw -Name, so case-only
+        # variants (feature vs Feature) are distinct valid instances. Matching them
+        # case-insensitively would resume the wrong one or report a false ambiguity;
+        # keep parity with the bash shortcut's `[ "$iname" = "$lookup_name" ]`.
+        if ($iname -cne $InstanceName) { return }
         [pscustomobject]@{
             Container = $parts[0].TrimStart('/')
             Name = $iname

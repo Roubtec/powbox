@@ -140,7 +140,7 @@ _powbox_resume_isolated_by_name() {
     done < <(_powbox_isolated_by_name "$agent_prefix" "$lookup_name")
 
     if [ "${#matches[@]}" -eq 0 ]; then
-        echo "powbox: no self-hosted $agent_label container found with --name $(_powbox_marker_field "$lookup_name"). Use $shortcut-list to see known instances." >&2
+        echo "powbox: no self-hosted $agent_label container found with --name $(_powbox_marker_field "$lookup_name"). Use ${shortcut}-list to see known instances." >&2
         return 1
     fi
 

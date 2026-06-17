@@ -11,8 +11,31 @@ $ErrorActionPreference = 'Stop'
 $containerNames = @(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 $expectedVolumes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
+# When invoked via `agent-prune`, the stopped-container prune removes exited
+# claude-*/codex- containers before us. In a real run they are already gone from
+# `docker ps -a` here, but in a -WhatIf preview nothing was removed, so agent-prune
+# passes their names in POWBOX_PRUNE_REMOVED_CONTAINERS and we treat them as
+# already-removed — otherwise the preview would count their full-name-keyed
+# agent-ws-*/agent-podman-* volumes as expected and hide removals a real run would
+# perform. Unset (standalone prune-volumes) -> every existing container, exited or
+# not, still pins its volumes (Docker would refuse to remove them). Exact,
+# case-sensitive match (Ordinal), mirroring the shell.
+$removedContainers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+if ($env:POWBOX_PRUNE_REMOVED_CONTAINERS) {
+    foreach ($removedName in ($env:POWBOX_PRUNE_REMOVED_CONTAINERS -split "`n")) {
+        $trimmed = $removedName.Trim()
+        if ($trimmed) { [void]$removedContainers.Add($trimmed) }
+    }
+}
+
 foreach ($containerName in $containerNames) {
     if ([string]::IsNullOrWhiteSpace($containerName)) {
+        continue
+    }
+
+    # Skip containers agent-prune is removing this run so their volumes are
+    # correctly reported as orphans.
+    if ($removedContainers.Contains($containerName)) {
         continue
     }
 

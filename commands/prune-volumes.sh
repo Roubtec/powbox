@@ -39,6 +39,23 @@ EOF
 	esac
 done
 
+# When invoked via `agent-prune`, the stopped-container prune removes exited
+# claude-*/codex- containers before us. In a real run they are already gone from
+# `docker ps -a` here, but in a --dry-run nothing was removed, so agent-prune
+# passes their names in POWBOX_PRUNE_REMOVED_CONTAINERS and we treat them as
+# already-removed — otherwise the preview would count their full-name-keyed
+# agent-ws-*/agent-podman-* volumes as expected and hide removals a real --yes
+# would perform. Unset (standalone prune-volumes) -> every existing container,
+# exited or not, still pins its volumes (Docker would refuse to remove them).
+removed_containers=()
+if [ -n "${POWBOX_PRUNE_REMOVED_CONTAINERS:-}" ]; then
+	while IFS= read -r rname; do
+		[ -n "$rname" ] && removed_containers+=("$rname")
+	done <<-EOF
+		${POWBOX_PRUNE_REMOVED_CONTAINERS}
+	EOF
+fi
+
 # Collect expected volumes from all existing claude-*/codex-* containers. Each
 # container expects an nm and a wt volume for its project (project-keyed, shared
 # between the project's two agents) plus its own agent-podman-* store and (for a
@@ -49,6 +66,11 @@ done
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
+	# Skip containers agent-prune is removing this run so their volumes are
+	# correctly reported as orphans (exact, case-sensitive match, as in the shell).
+	for removed in "${removed_containers[@]}"; do
+		[ "$name" = "$removed" ] && continue 2
+	done
 	case "$name" in
 	claude-*) suffix="${name#claude-}" ;;
 	codex-*) suffix="${name#codex-}" ;;

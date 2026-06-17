@@ -195,13 +195,25 @@ function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }
 
+function _Powbox-ListExited {
+    param([string]$Prefix)
+    # docker's name filter is a substring match; keep only true ${Prefix}* containers
+    # so an unrelated user container (e.g. my-claude-tool) is never listed and the
+    # other agent's slug is not swept in.
+    @(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$Prefix" |
+        Where-Object { $_ -and $_.StartsWith($Prefix) })
+}
+
+# Every exited claude-*/codex- container name agent-prune-stopped would remove.
+# agent-prune feeds this to the volume prune so its -WhatIf preview does not count
+# those soon-to-be-removed containers' volumes as still-expected.
+function _Powbox-ListExitedAgent {
+    @(_Powbox-ListExited -Prefix "claude-") + @(_Powbox-ListExited -Prefix "codex-")
+}
+
 function _Powbox-PruneExited {
     param([string]$Prefix, [bool]$DryRun)
-    # docker's name filter is a substring match; keep only true ${Prefix}* containers
-    # so an unrelated user container (e.g. my-claude-tool) is never removed and the
-    # other agent's slug is not swept in.
-    $names = @(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$Prefix" |
-        Where-Object { $_ -and $_.StartsWith($Prefix) })
+    $names = @(_Powbox-ListExited -Prefix $Prefix)
     if ($names.Count -eq 0) { return }
     if ($DryRun) {
         foreach ($n in $names) { Write-Host "Would remove exited container: $n" }
@@ -230,9 +242,27 @@ function agent-prune-stopped {
 
 function agent-prune {
     # Forward flags to both halves so -WhatIf previews the whole operation and
-    # -Yes/-Confirm apply to the volume prune.
+    # -Yes/-Confirm apply to the volume prune. The stopped-container prune removes
+    # exited claude-*/codex- containers; capture their names first and hand them to
+    # the volume prune so its orphan calculation treats them as gone. Without this a
+    # -WhatIf under-reports: the exited containers are still present (the preview
+    # didn't remove them), so prune-volumes counts their full-name-keyed
+    # agent-ws-*/agent-podman-* volumes as expected and hides removals a real run
+    # would perform after deleting the containers. The env var is process-level
+    # (prune-volumes.ps1 runs in-process), so restore it in a finally to avoid
+    # leaking into the user's session — mirroring the -RequireImage handling.
+    $removed = (_Powbox-ListExitedAgent) -join "`n"
     agent-prune-stopped @args
-    agent-prune-volumes @args
+    $hadVar = Test-Path Env:\POWBOX_PRUNE_REMOVED_CONTAINERS
+    $prev = if ($hadVar) { $env:POWBOX_PRUNE_REMOVED_CONTAINERS } else { $null }
+    $env:POWBOX_PRUNE_REMOVED_CONTAINERS = $removed
+    try {
+        agent-prune-volumes @args
+    }
+    finally {
+        if ($hadVar) { $env:POWBOX_PRUNE_REMOVED_CONTAINERS = $prev }
+        else { Remove-Item Env:\POWBOX_PRUNE_REMOVED_CONTAINERS -ErrorAction SilentlyContinue }
+    }
 }
 
 function agent-check-updates {

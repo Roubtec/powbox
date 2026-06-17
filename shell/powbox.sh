@@ -193,24 +193,40 @@ agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh" "$@"
 }
 
+# Print the exited container names matching the given prefix, one per line.
+# docker's name filter is a substring match, so we re-anchor to true ${prefix}*
+# names — an unrelated user container (e.g. my-claude-tool) is never listed and
+# the other agent's slug is not swept in. Process substitution (rather than a
+# pipe) keeps the loop in the current shell, matching the consumers below.
+_powbox_list_exited() {
+    local prefix="$1" name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case "$name" in
+        "$prefix"*) printf '%s\n' "$name" ;;
+        esac
+    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$prefix")
+}
+
+# Print every exited claude-*/codex- container name agent-prune-stopped would
+# remove. agent-prune feeds this to the volume prune so its dry-run does not count
+# those soon-to-be-removed containers' volumes as still-expected.
+_powbox_list_exited_agents() {
+    _powbox_list_exited "claude-"
+    _powbox_list_exited "codex-"
+}
+
 # Remove all exited containers whose name matches the given prefix filter.
 # Names are read line-by-line into an array so this behaves identically under
 # bash and zsh. zsh does not word-split unquoted expansions, so the older
 # `docker rm $names` form silently passed every name as a single argument and
-# failed when more than one container matched. Process substitution (rather
-# than a pipe) keeps the loop in the current shell so the array survives.
+# failed when more than one container matched.
 _powbox_prune_exited() {
     local prefix="$1" dry_run="${2:-false}"
     local name names=()
     while IFS= read -r name; do
-        # docker's name filter is a substring match; keep only true ${prefix}*
-        # containers so an unrelated user container (e.g. my-claude-tool) is never
-        # removed and the other agent's slug is not swept in.
-        [ -n "$name" ] || continue
-        case "$name" in
-        "$prefix"*) names+=("$name") ;;
-        esac
-    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$prefix")
+        names+=("$name")
+    done < <(_powbox_list_exited "$prefix")
     [ "${#names[@]}" -gt 0 ] || return 0
     if [ "$dry_run" = true ]; then
         printf 'Would remove exited container: %s\n' "${names[@]}"
@@ -235,9 +251,18 @@ agent-prune-stopped() {
 
 agent-prune() {
     # Forward flags to both halves so --dry-run previews the whole operation and
-    # --yes/--force apply to the volume prune.
+    # --yes/--force apply to the volume prune. The stopped-container prune removes
+    # exited claude-*/codex- containers; capture their names first and hand them to
+    # the volume prune so its orphan calculation treats them as gone. Without this a
+    # `--dry-run` under-reports: the exited containers are still present (the dry-run
+    # didn't remove them), so prune-volumes counts their full-name-keyed
+    # agent-ws-*/agent-podman-* volumes as expected and hides removals a real
+    # `--yes` would perform after deleting the containers. The prefix assignment
+    # exports the list only for this call (verified non-persistent in bash and zsh).
+    local removed
+    removed="$(_powbox_list_exited_agents)"
     agent-prune-stopped "$@"
-    agent-prune-volumes "$@"
+    POWBOX_PRUNE_REMOVED_CONTAINERS="$removed" agent-prune-volumes "$@"
 }
 
 agent-check-updates() {

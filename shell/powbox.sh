@@ -115,7 +115,13 @@ _powbox_isolated_by_name() {
     local agent_prefix="$1" lookup_name="$2"
     local name cand=()
     while IFS= read -r name; do
-        [ -n "$name" ] && cand+=("$name")
+        # Docker's name filter is a substring match, not an anchored prefix, so
+        # name=claude- also matches a self-hosted codex-claude-... slug (and vice
+        # versa). Post-filter to a strict prefix so cci/cxi never pick up the other
+        # agent's container and report a false ambiguity or resume the wrong one.
+        case "$name" in
+        "$agent_prefix"*) cand+=("$name") ;;
+        esac
     done < <(docker ps -a --filter "name=$agent_prefix" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
     [ "${#cand[@]}" -gt 0 ] || return 0
 
@@ -194,21 +200,43 @@ agent-prune-volumes() {
 # failed when more than one container matched. Process substitution (rather
 # than a pipe) keeps the loop in the current shell so the array survives.
 _powbox_prune_exited() {
+    local prefix="$1" dry_run="${2:-false}"
     local name names=()
     while IFS= read -r name; do
-        [ -n "$name" ] && names+=("$name")
-    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$1")
-    [ "${#names[@]}" -gt 0 ] && docker rm "${names[@]}" 2>/dev/null
+        # docker's name filter is a substring match; keep only true ${prefix}*
+        # containers so an unrelated user container (e.g. my-claude-tool) is never
+        # removed and the other agent's slug is not swept in.
+        [ -n "$name" ] || continue
+        case "$name" in
+        "$prefix"*) names+=("$name") ;;
+        esac
+    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$prefix")
+    [ "${#names[@]}" -gt 0 ] || return 0
+    if [ "$dry_run" = true ]; then
+        printf 'Would remove exited container: %s\n' "${names[@]}"
+    else
+        docker rm "${names[@]}" 2>/dev/null
+    fi
 }
 
 agent-prune-stopped() {
-    _powbox_prune_exited "claude-"
-    _powbox_prune_exited "codex-"
+    # Honor a dry-run flag so `agent-prune --dry-run` previews the stopped-container
+    # removal instead of deleting exited (named self-hosted) instances before the
+    # forwarded volume dry-run reports "nothing was touched".
+    local dry_run=false arg
+    for arg in "$@"; do
+        case "$arg" in
+        -n | --dry-run) dry_run=true ;;
+        esac
+    done
+    _powbox_prune_exited "claude-" "$dry_run"
+    _powbox_prune_exited "codex-" "$dry_run"
 }
 
 agent-prune() {
-    agent-prune-stopped
-    # Forward any flags (e.g. --dry-run/--force) on to prune-volumes.sh.
+    # Forward flags to both halves so --dry-run previews the whole operation and
+    # --yes/--force apply to the volume prune.
+    agent-prune-stopped "$@"
     agent-prune-volumes "$@"
 }
 

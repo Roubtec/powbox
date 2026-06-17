@@ -113,7 +113,11 @@ function _Powbox-GetIsolatedByName {
         [string]$InstanceName
     )
 
-    $cand = @(docker ps -a --filter "name=$AgentPrefix" --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ })
+    # Docker's name filter is a substring match, not an anchored prefix, so
+    # name=claude- also matches a self-hosted codex-claude-... slug (and vice versa).
+    # Post-filter to a strict prefix so cci/cxi never pick up the other agent's
+    # container and report a false ambiguity or resume the wrong one.
+    $cand = @(docker ps -a --filter "name=$AgentPrefix" --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ -and $_.StartsWith($AgentPrefix) })
     if ($cand.Count -eq 0) { return @() }
 
     $sep = [char]31
@@ -191,20 +195,35 @@ function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }
 
-function agent-prune-stopped {
-    $claudeNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-"
-    if ($claudeNames) {
-        docker rm $claudeNames
+function _Powbox-PruneExited {
+    param([string]$Prefix, [bool]$DryRun)
+    # docker's name filter is a substring match; keep only true ${Prefix}* containers
+    # so an unrelated user container (e.g. my-claude-tool) is never removed and the
+    # other agent's slug is not swept in.
+    $names = @(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$Prefix" |
+        Where-Object { $_ -and $_.StartsWith($Prefix) })
+    if ($names.Count -eq 0) { return }
+    if ($DryRun) {
+        foreach ($n in $names) { Write-Host "Would remove exited container: $n" }
     }
-    $codexNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-"
-    if ($codexNames) {
-        docker rm $codexNames
+    else {
+        docker rm $names
     }
 }
 
+function agent-prune-stopped {
+    # Honor -WhatIf so `agent-prune -WhatIf` previews the stopped-container removal
+    # instead of deleting exited (named self-hosted) instances before the forwarded
+    # volume dry-run reports nothing was touched.
+    $dryRun = $args -contains '-WhatIf'
+    _Powbox-PruneExited -Prefix "claude-" -DryRun $dryRun
+    _Powbox-PruneExited -Prefix "codex-" -DryRun $dryRun
+}
+
 function agent-prune {
-    agent-prune-stopped
-    # Forward any flags (e.g. -WhatIf/-Force) on to prune-volumes.ps1.
+    # Forward flags to both halves so -WhatIf previews the whole operation and
+    # -Yes/-Confirm apply to the volume prune.
+    agent-prune-stopped @args
     agent-prune-volumes @args
 }
 

@@ -22,7 +22,14 @@ $rootDir = Split-Path -Parent $scriptDir
 # stage) fails instead of self-skipping its image-gated checks into a false "all
 # green". $skipped collects every stage we skip so the end-of-run banner can
 # report that the run was partial.
+# -RequireImage writes the *process* environment ($env:), which in an interactive
+# session persists after this script returns (unlike the bash wrapper, whose
+# exported var dies with the child process). Save the prior value and restore it in
+# the finally below so later direct calls to the smoke sub-scripts in the same
+# session behave as before instead of inheriting a sticky REQUIRE_IMAGE=1.
+$prevRequireImage = $env:POWBOX_SMOKE_REQUIRE_IMAGE
 if ($RequireImage) { $env:POWBOX_SMOKE_REQUIRE_IMAGE = '1' }
+try {
 $skipped = [System.Collections.Generic.List[string]]::new()
 docker image inspect $Image *> $null
 if ($LASTEXITCODE -ne 0) {
@@ -183,4 +190,17 @@ if ($skipped.Count -gt 0) {
 }
 else {
   Write-Host "Smoke test complete (all stages ran)."
+}
+}
+finally {
+  # Restore only if we set it: a CI run that exported POWBOX_SMOKE_REQUIRE_IMAGE
+  # directly (without -RequireImage) must keep its own value untouched.
+  if ($RequireImage) {
+    if ($null -eq $prevRequireImage) {
+      Remove-Item Env:\POWBOX_SMOKE_REQUIRE_IMAGE -ErrorAction SilentlyContinue
+    }
+    else {
+      $env:POWBOX_SMOKE_REQUIRE_IMAGE = $prevRequireImage
+    }
+  }
 }

@@ -35,8 +35,8 @@ See README "Layout" for the repo file map. Rules that map does not state:
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
-| `/workspace/<project-slug>/node_modules` | Per-project package volume (`agent-nm-<project>`); dir-mounted mode only |
-| `/workspace/<project-slug>/.worktrees` | Per-project worktrees volume (`agent-wt-<project>`); also holds the per-project pnpm store at `.worktrees/.pnpm-store`; dir-mounted mode only |
+| `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted mode only |
+| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the per-container pnpm store at `.worktrees/.pnpm-store`; dir-mounted mode only |
 | `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
@@ -64,7 +64,7 @@ There are two launch modes; the launchers (`scripts/launch-agent.{sh,ps1}`) bran
 
 ## Volumes and Stores
 
-See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm can only **hardlink** from its store when the store and the target `node_modules` share **one mount** (not merely one device — `link(2)` returns `EXDEV` across mount points even on the same filesystem). So the per-project pnpm store lives *inside* the `.worktrees` volume (`agent-wt-<project>`) alongside every `.worktrees/<task>/node_modules`, and `package-import-method=auto` lets pnpm hardlink there and transparently fall back to copying for the root `node_modules` (a separate mount). The launcher passes `PNPM_STORE_DIR` and `entrypoint-core.sh` points pnpm at it per project.
+See README "Workspace Shadow Mounts" and "Runtime" for volume behavior. The non-obvious constraint: pnpm can only **hardlink** from its store when the store and the target `node_modules` share **one mount** (not merely one device — `link(2)` returns `EXDEV` across mount points even on the same filesystem). So the per-container pnpm store lives *inside* the `.worktrees` volume (`agent-wt-<agent>-<project>`) alongside every `.worktrees/<task>/node_modules`, and `package-import-method=auto` lets pnpm hardlink there and transparently fall back to copying for the root `node_modules` (a separate mount). The launcher passes `PNPM_STORE_DIR` and `entrypoint-core.sh` points pnpm at it per project.
 
 In **self-hosted (`--isolated`)** mode this three-mount layout collapses to **one**: a single per-instance `agent-ws-<container>` volume mounted at `/workspace/<slug>` holds the clone plus `node_modules`, `.worktrees`, and the pnpm store as ordinary subdirs. The dir-mounted `agent-nm-*` / `agent-wt-*` shadow volumes are omitted (no host FS underneath to shadow), the workspace bind mount is replaced via `compose.selfhosted.yml` (merged by target path, mirroring the fuse/netdev overlays), and `shadow-mounts.sh` is skipped entirely in `entrypoint-core.sh`. Because everything shares one mount, pnpm hardlinks everywhere — including the root `node_modules`, which falls back to copying in dir-mounted mode. The `agent-ws-*` and per-container `agent-podman-*` volumes are keyed by the full container name (part of the container identity); prune tooling (`commands/prune-volumes.*`) GCs orphaned `agent-ws-*` volumes alongside the others.
 

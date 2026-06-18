@@ -207,14 +207,14 @@ Shared volume names are kept stable to preserve existing data:
 - `agent-gh-config`
 - `agent-zsh-history`
 
-The launcher also creates **per-project** volumes, keyed by project so a project's Claude and Codex containers share them:
+The launcher also creates **per-container** volumes, keyed by the full container name (agent + project) so a project's Claude and Codex containers each get their own copy (not shared):
 
-- `agent-nm-<project>` → the root `node_modules`
-- `agent-wt-<project>` → the `.worktrees` tree, which **also holds the per-project pnpm store** (`.worktrees/.pnpm-store`)
+- `agent-nm-<agent>-<project>` → the root `node_modules`
+- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the per-container pnpm store** (`.worktrees/.pnpm-store`)
 
 In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the store as subdirs); it is keyed per container, like the Podman storage volume below.
 
-> The pnpm store moved from a single shared `agent-pnpm-store` volume to a per-project store inside each `agent-wt-<project>` volume so that worktree `pnpm install` can **hardlink** package files from it instead of copying them (the store and the worktree `node_modules` must share one mount — see [Git Worktree Parallel Development](#git-worktree-parallel-development)). The old shared `agent-pnpm-store` volume is no longer mounted and can be removed with `prune-volumes`.
+> The pnpm store moved from a single shared `agent-pnpm-store` volume to a per-container store inside each `agent-wt-<agent>-<project>` volume so that worktree `pnpm install` can **hardlink** package files from it instead of copying them (the store and the worktree `node_modules` must share one mount — see [Git Worktree Parallel Development](#git-worktree-parallel-development)). The old shared `agent-pnpm-store` volume is no longer mounted and can be removed with `prune-volumes`.
 
 Agent-specific state volumes remain separate, and both are always mounted regardless of which agent is primary (required so the primary agent can invoke the other in-container — see [Cross-Agent Delegation](#cross-agent-delegation)):
 
@@ -393,7 +393,7 @@ To apply a ctx change, omit `--resume` and let the script auto-detect and recrea
 ## Workspace Shadow Mounts
 
 When the host OS differs from the container OS (e.g. Windows host, Linux container), Node.js native binaries compiled for one platform break on the other.
-The root `node_modules` is already handled by a per-project Docker volume, but monorepo subpackages each have their own `node_modules` that would otherwise be shared through the bind mount.
+The root `node_modules` is already handled by a per-container Docker volume, but monorepo subpackages each have their own `node_modules` that would otherwise be shared through the bind mount.
 
 At container start, the entrypoint auto-detects workspace subpackages and mounts tmpfs over each nested `node_modules` directory.
 This shadows the host content inside the container so that `pnpm install` (or `npm install`) writes Linux-native binaries into an ephemeral filesystem that never touches the host.
@@ -448,11 +448,11 @@ shadow:
 
 These directories are gitignored and absent on a fresh checkout. `.claude/worktrees` and `.git/worktrees` are literal shadow paths, so they are auto-created and tmpfs-shadowed at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
 
-**`.worktrees` is backed by a volume, not tmpfs.** The launcher mounts the per-project `agent-wt-<project>` ext4 volume at `.worktrees`, so that mount (not a tmpfs shadow) is what shadows the host path. The `.worktrees` entry in `.powbox.yml` is then a harmless **fallback**: `shadow-mounts.sh` skips it because the path is already a mountpoint, so existing `.powbox.yml` files keep working unchanged, and `.worktrees` still gets tmpfs-shadowed if the container is ever launched without the volume.
+**`.worktrees` is backed by a volume, not tmpfs.** The launcher mounts the per-container `agent-wt-<agent>-<project>` ext4 volume at `.worktrees`, so that mount (not a tmpfs shadow) is what shadows the host path. The `.worktrees` entry in `.powbox.yml` is then a harmless **fallback**: `shadow-mounts.sh` skips it because the path is already a mountpoint, so existing `.powbox.yml` files keep working unchanged, and `.worktrees` still gets tmpfs-shadowed if the container is ever launched without the volume.
 
 **Why a volume.** The volume also holds the pnpm store at `.worktrees/.pnpm-store`. Because the store and every `.worktrees/<task>/node_modules` live under that **one mount**, `pnpm install` inside a worktree **hardlinks** package files from the store instead of copying them — `link(2)` only works within a single mount, so co-location is the whole point. Worktree installs drop from a full ~425 MB–1.1 GB copy to tens of MB of metadata, there is **no shared 2 GB cap**, and many worktrees can install concurrently. The volume is on the Docker VM's ext4 (disk, hundreds of GB), not RAM.
 
-**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The `.worktrees` **volume persists** across recycles too — keeping the pnpm store warm — but the per-worktree `.git/worktrees/<name>` metadata is ephemeral tmpfs. So after a recycle a leftover `.worktrees/<owner>/<task>` working dir can be orphaned (its `.git` pointer dangles); the image-baked `wt-bootstrap` helper (run by the worktree skills and workflows) prunes such orphans while preserving `.pnpm-store`. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa. Because the volume is project-keyed, the project's Claude and Codex containers share it; each namespaces its worktrees under `.worktrees/$CONTAINER_NAME/` and prunes only its own subdir, so one agent's cleanup can never delete the other's in-progress worktrees.
+**Durability model.** The common `.git` directory (commit objects and branch refs) is *not* shadowed, so it lives on the host bind mount and survives container recycle: committed work is durable. The `.worktrees` **volume persists** across recycles too — keeping the pnpm store warm — but the per-worktree `.git/worktrees/<name>` metadata is ephemeral tmpfs. So after a recycle a leftover `.worktrees/<owner>/<task>` working dir can be orphaned (its `.git` pointer dangles); the image-baked `wt-bootstrap` helper (run by the worktree skills and workflows) prunes such orphans while preserving `.pnpm-store`. Shadowing `.git/worktrees` also keeps the host's (Windows-absolute-path) worktree registrations out of the container, and vice-versa. Because the volume is now per-container (agent + project), the project's Claude and Codex containers no longer share it — each gets its own private copy. Each container still namespaces its worktrees under `.worktrees/$CONTAINER_NAME/` and prunes only its own subdir; with the volume private this is defensive scoping rather than a necessity, but it keeps cleanup robust so one agent's cleanup could never delete the other's in-progress worktrees even if a volume were ever shared.
 
 **Discipline.** Commit and push often. Since only the common `.git` persists to the host, push committed work to the remote, then `git pull` on the host to sync — a worktree's uncommitted working-tree changes are not durable.
 
@@ -474,10 +474,10 @@ Already-mounted paths are skipped.
 ### Lifecycle
 
 Subpackage shadow mounts are **ephemeral** — they use tmpfs (memory-backed) and are lost when the container stops.
-After restarting (or resuming) a container, run `pnpm install` to repopulate subpackage `node_modules` from the per-project pnpm store.
+After restarting (or resuming) a container, run `pnpm install` to repopulate subpackage `node_modules` from the per-container pnpm store.
 With a warm store this typically takes only a few seconds.
 
-The root `node_modules` (`agent-nm-<project>`) and the `.worktrees` tree with its pnpm store (`agent-wt-<project>`) are **Docker volumes**, not tmpfs — they persist across restarts, so the store stays warm and worktree installs stay cheap.
+The root `node_modules` (`agent-nm-<agent>-<project>`) and the `.worktrees` tree with its pnpm store (`agent-wt-<agent>-<project>`) are **Docker volumes**, not tmpfs — they persist across restarts, so the store stays warm and worktree installs stay cheap.
 
 ### Configuration
 
@@ -776,7 +776,7 @@ Smoke test the built image with:
 
 This runs four stages: a fast presence sweep over every expected CLI; a `pg-dev-up` functional test that stands up a throwaway PostgreSQL cluster and connects through the emitted `DATABASE_URL` (exercising role/db creation, URL encoding, and host binding — things the presence check alone can't); a rootless-Podman engine test that runs the image with the launch-time device + security wiring and exercises a nested container run, a bridge published port, and the `podman compose` subcommand (so a base/Podman bump that regresses the engine is caught — see [docs/rootless-podman.md](docs/rootless-podman.md)); and a self-hosted (`--isolated`) launch test that checks the launcher's identity contract (no image, daemon, or network needed) and — only when the agent image is present — the baked `seed-workspace.sh` clone/reuse/`--reclone`/failure and single-mount hardlink behavior (it self-skips that image-dependent half when the image is absent). On a host that cannot expose `/dev/net/tun` (e.g. the Docker Desktop VM under the default `auto`), the Podman stage still validates the static engine wiring (engine present, the `containers.conf` drop-in, `podman info`, the `compose` subcommand) but skips only the nested-run/published-port checks; force the full check with `POWBOX_PODMAN=on`. A genuinely broken image (missing engine, dropped drop-in) fails the stage on any host. Skip the DB stage with `POWBOX_SMOKE_SKIP_DB=1`, the Podman stage with `POWBOX_SMOKE_SKIP_PODMAN=1`, and the self-hosted stage with `POWBOX_SMOKE_SKIP_SELFHOSTED=1` — these are independent, so set all three for a Stage 1 tools-only presence sweep that touches no network or container (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted`).
 
-After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-project `agent-nm-<project>` and `agent-wt-<project>` volumes, a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
+After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-container `agent-nm-<agent>-<project>` and `agent-wt-<agent>-<project>` volumes, a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
 
 ## Runtime Sanity Check
 
@@ -804,7 +804,7 @@ Expected results:
 
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
-- the pnpm store is per-project at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
+- the pnpm store is per-container at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 
@@ -832,7 +832,7 @@ Expected results:
 - user is `node`
 - `CODEX_CONFIG_DIR` is `/home/node/.codex`
 - `bwrap` is available
-- the pnpm store is per-project at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
+- the pnpm store is per-container at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 

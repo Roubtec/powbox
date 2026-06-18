@@ -221,12 +221,22 @@ else {
 
   $safeProject = (($projectName.ToLowerInvariant() -replace '[^a-z0-9_.-]', '-') -replace '-+', '-').Trim('-')
   $projectSlug = "$safeProject-$projectHash"
-  $nodeModulesVolume = "agent-nm-$projectSlug"
-  # Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+  # Root node_modules and the worktrees+store volumes are keyed by the OUTER container
+  # (agent + project) = "$Agent-$projectSlug" = $containerName (set just below), NOT
+  # just the project. This MUST match agent-podman-*'s per-container keying: a project's
+  # Claude and Codex containers can run at the same time and mount these volumes at the
+  # SAME in-container paths. Two live agents sharing one writable node_modules tree (or
+  # one pnpm store) corrupt each other — concurrent installs race, and a build in one
+  # reads a tree the other is relinking. Per-container volumes give each agent its own
+  # node_modules, virtual store, pnpm store, and worktree disk budget; the cost is lost
+  # cross-agent dedup, which correctness for simultaneous agents is worth. Subpackage
+  # node_modules are already per-container (tmpfs shadows).
+  $nodeModulesVolume = "agent-nm-$Agent-$projectSlug"
+  # Per-container worktrees volume. Holds the git worktrees AND the pnpm store under
   # ONE mount so pnpm hardlinks package files into per-worktree node_modules
-  # instead of copying them. ext4, persistent, container-local, and shared between
-  # this project's Claude and Codex containers (project-keyed, like the nm volume).
-  $worktreesVolume = "agent-wt-$projectSlug"
+  # instead of copying them. ext4, persistent, container-local, and (now) private to
+  # this one container — so two agents never overcommit one shared worktree volume.
+  $worktreesVolume = "agent-wt-$Agent-$projectSlug"
 }
 
 $containerName = "$Agent-$projectSlug"

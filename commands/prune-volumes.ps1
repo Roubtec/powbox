@@ -16,7 +16,7 @@ $expectedVolumes = [System.Collections.Generic.HashSet[string]]::new([System.Str
 # `docker ps -a` here, but in a -WhatIf preview nothing was removed, so agent-prune
 # passes their names in POWBOX_PRUNE_REMOVED_CONTAINERS and we treat them as
 # already-removed — otherwise the preview would count their full-name-keyed
-# agent-ws-*/agent-podman-* volumes as expected and hide removals a real run would
+# agent-{nm,wt,ws,podman}-* volumes as expected and hide removals a real run would
 # perform. Unset (standalone prune-volumes) -> every existing container, exited or
 # not, still pins its volumes (Docker would refuse to remove them). Exact,
 # case-sensitive match (Ordinal), mirroring the shell.
@@ -39,23 +39,15 @@ foreach ($containerName in $containerNames) {
         continue
     }
 
-    $projectSuffix = $null
-    if ($containerName -like 'claude-*') {
-        $projectSuffix = $containerName -replace '^claude-', ''
-    } elseif ($containerName -like 'codex-*') {
-        $projectSuffix = $containerName -replace '^codex-', ''
-    }
-
-    if ($projectSuffix) {
-        # Each container expects an nm (node_modules) and a wt (worktrees + pnpm
-        # store) volume for its project (project-keyed, shared between the
-        # project's two agents) plus its own agent-podman-* store and (for a
-        # self-hosted container) its agent-ws-* workspace, both keyed by the FULL
-        # container name so a project's concurrently-running Claude and Codex
-        # containers never share one. agent-ws-* is over-expected for dir-mounted
-        # containers too (which never create one), which is harmless.
-        [void]$expectedVolumes.Add("agent-nm-$projectSuffix")
-        [void]$expectedVolumes.Add("agent-wt-$projectSuffix")
+    if ($containerName -like 'claude-*' -or $containerName -like 'codex-*') {
+        # Every agent volume is now keyed by the FULL container name (agent +
+        # project), so a container named claude-<slug> expects
+        # agent-{nm,wt,ws,podman}-claude-<slug> — i.e. agent-<kind>-$containerName.
+        # A shared writable node_modules / pnpm store would corrupt two live agents,
+        # so nm/wt are per-container like ws/podman. agent-ws-* is over-expected for
+        # dir-mounted containers (which never create one), which is harmless.
+        [void]$expectedVolumes.Add("agent-nm-$containerName")
+        [void]$expectedVolumes.Add("agent-wt-$containerName")
         [void]$expectedVolumes.Add("agent-ws-$containerName")
         [void]$expectedVolumes.Add("agent-podman-$containerName")
     }

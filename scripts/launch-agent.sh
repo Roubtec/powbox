@@ -386,12 +386,23 @@ else
 	esac
 	PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
 	PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
-	NM_VOLUME="agent-nm-${PROJECT_NAME}"
-	# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+	# Root node_modules and the worktrees+store volumes are keyed by the OUTER
+	# container (agent + project), NOT just the project — i.e. "${AGENT}-${PROJECT_NAME}",
+	# which is CONTAINER_NAME (defined just below). This MUST match agent-podman-*'s
+	# per-container keying: a project's Claude and Codex containers can run at the same
+	# time, and they mount these volumes at the SAME in-container paths. Two live agents
+	# sharing one writable node_modules tree (or one pnpm store) corrupt each other —
+	# concurrent installs race, and a build in one agent reads a tree the other is
+	# relinking. Per-container volumes give each agent its own node_modules, virtual
+	# store, pnpm store, and worktree disk budget. The cost is lost cross-agent dedup
+	# (two stores, two node_modules per project); correctness for simultaneous agents
+	# is worth it. The subpackage node_modules are already per-container (tmpfs shadows).
+	NM_VOLUME="agent-nm-${AGENT}-${PROJECT_NAME}"
+	# Per-container worktrees volume. Holds the git worktrees AND the pnpm store under
 	# ONE mount so pnpm hardlinks package files into per-worktree node_modules
-	# instead of copying them. ext4, persistent, container-local, and shared between
-	# this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
-	WT_VOLUME="agent-wt-${PROJECT_NAME}"
+	# instead of copying them. ext4, persistent, container-local, and (now) private to
+	# this one container — so two agents never overcommit one shared worktree volume.
+	WT_VOLUME="agent-wt-${AGENT}-${PROJECT_NAME}"
 fi
 
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"

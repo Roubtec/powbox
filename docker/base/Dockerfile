@@ -261,6 +261,7 @@ COPY --chmod=755 \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \
     docker/shared/pnpm-shadow-wrapper.sh \
+    docker/shared/pnpm-shadow-doctor \
     docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \

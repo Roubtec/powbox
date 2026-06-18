@@ -174,7 +174,28 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
 		_dir="${_dir%/}"
 		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
 		if [ "${#_targets[@]}" -gt 0 ]; then
-			if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+			if sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+				# The subpackage node_modules just (re)mounted above are ephemeral tmpfs:
+				# empty at every container start. The ROOT node_modules, however, is a
+				# persistent named volume, so it still carries pnpm's workspace-state
+				# cache (node_modules/.pnpm-workspace-state-v1.json) from a prior
+				# lifecycle. With that cache present and the lockfile unchanged, EVERY
+				# flavor of `pnpm install` (--frozen-lockfile, --force, ...) short-circuits
+				# to "Already up to date" and never relinks the now-empty subpackage
+				# shadows — so vitest/tsc/eslint/next and friends fail to resolve, and no
+				# reinstall repairs it. The cache is stale BY CONSTRUCTION here (the shadows
+				# it claims are populated were just wiped), so drop it: the agent's next
+				# natural `pnpm install` then does a real, relinking install. We deliberately
+				# do NOT run an install ourselves — many sessions never build/test (or never
+				# touch a repo at all), so forcing one at start would be wasted work. This is
+				# a no-op on a cold/first-lifecycle volume (no cache file yet) and on
+				# single-package repos (no subpackage shadows, so we never enter this branch);
+				# it only ever touches the MAIN checkout's root node_modules (worktrees keep
+				# their own real node_modules + state on the persistent .worktrees volume).
+				# Gated on the mount succeeding so we never clobber state on a host tree that
+				# went un-shadowed (e.g. missing mount capability).
+				rm -f "$_dir/node_modules/.pnpm-workspace-state-v1.json"
+			else
 				echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
 			fi
 		fi

@@ -107,25 +107,162 @@ function cx {
     }
 }
 
+function _Powbox-GetIsolatedByName {
+    param(
+        [string]$AgentPrefix,
+        [string]$InstanceName
+    )
+
+    # Docker's name filter is a substring match, not an anchored prefix, so
+    # name=claude- also matches a self-hosted codex-claude-... slug (and vice versa).
+    # Post-filter to a strict prefix so cci/cxi never pick up the other agent's
+    # container and report a false ambiguity or resume the wrong one.
+    $cand = @(docker ps -a --filter "name=$AgentPrefix" --filter "label=powbox.self-hosted=true" --format "{{.Names}}" | Where-Object { $_ -and $_.StartsWith($AgentPrefix) })
+    if ($cand.Count -eq 0) { return @() }
+
+    $sep = [char]31
+    $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels "powbox.instance-name"}}' + $sep + '{{index .Config.Labels "powbox.repo"}}' + $sep + '{{index .Config.Labels "powbox.ref"}}' + $sep + '{{.State.Status}}'
+    @(docker inspect --format $fmt @cand 2>$null | ForEach-Object {
+        $parts = $_.Split($sep)
+        if ($parts.Count -lt 5) { return }
+        $iname = if ($parts[1] -ne '<no value>') { $parts[1] } else { '' }
+        # Case-sensitive (-cne): the launcher hashes the raw -Name, so case-only
+        # variants (feature vs Feature) are distinct valid instances. Matching them
+        # case-insensitively would resume the wrong one or report a false ambiguity;
+        # keep parity with the bash shortcut's `[ "$iname" = "$lookup_name" ]`.
+        if ($iname -cne $InstanceName) { return }
+        [pscustomobject]@{
+            Container = $parts[0].TrimStart('/')
+            Name = $iname
+            Repo = if ($parts[2] -ne '<no value>') { $parts[2] } else { '' }
+            Ref = if ($parts[3] -ne '<no value>') { $parts[3] } else { '' }
+            Status = $parts[4]
+        }
+    })
+}
+
+function _Powbox-ResumeIsolatedByName {
+    param(
+        [string]$AgentLabel,
+        [string]$AgentPrefix,
+        [string]$Shortcut,
+        [string]$InstanceName
+    )
+
+    # Not $matches: that is a PowerShell automatic variable populated by the -match
+    # operator, so reassigning it is fragile (a later -match/switch -regex in scope
+    # would clobber it).
+    $found = @(_Powbox-GetIsolatedByName -AgentPrefix $AgentPrefix -InstanceName $InstanceName)
+    if ($found.Count -eq 0) {
+        Write-Error "No self-hosted $AgentLabel container found with -Name $(_Powbox-MarkerField $InstanceName). Use $Shortcut-list to see known instances."
+        return
+    }
+    if ($found.Count -gt 1) {
+        Write-Error "-Name $(_Powbox-MarkerField $InstanceName) matches multiple self-hosted $AgentLabel containers. Relaunch one explicitly with -Repo, or prune the stale instance."
+        $found | Sort-Object Repo, Container | ForEach-Object {
+            $ref = if ($_.Ref) { " -Ref $(_Powbox-MarkerField $_.Ref)" } else { "" }
+            Write-Host "  $($_.Container) [$($_.Status)] repo=$(_Powbox-MarkerField $_.Repo)$ref" -ForegroundColor Yellow
+        }
+        return
+    }
+
+    $match = $found[0]
+    if (-not $match.Repo) {
+        Write-Error "Container $($match.Container) has -Name $(_Powbox-MarkerField $InstanceName) but no powbox.repo label, so $Shortcut cannot reconstruct the isolated resume command. Use: docker start -ai $($match.Container)"
+        return
+    }
+
+    & $Shortcut -Isolated -Repo $match.Repo -Name $match.Name -Resume
+}
+
+function cci {
+    param(
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$Name
+    )
+    _Powbox-ResumeIsolatedByName -AgentLabel "Claude" -AgentPrefix "claude-" -Shortcut "cc" -InstanceName $Name
+}
+
+function cxi {
+    param(
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$Name
+    )
+    _Powbox-ResumeIsolatedByName -AgentLabel "Codex" -AgentPrefix "codex-" -Shortcut "cx" -InstanceName $Name
+}
+
 function agent-prune-volumes {
     & "$env:POWBOX_ROOT\commands\prune-volumes.ps1" @args
 }
 
-function agent-prune-stopped {
-    $claudeNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=claude-"
-    if ($claudeNames) {
-        docker rm $claudeNames
+function _Powbox-ListExited {
+    param([string]$Prefix)
+    # docker's name filter is a substring match; keep only true ${Prefix}* containers
+    # so an unrelated user container (e.g. my-claude-tool) is never listed and the
+    # other agent's slug is not swept in.
+    @(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$Prefix" |
+        Where-Object { $_ -and $_.StartsWith($Prefix) })
+}
+
+# Every exited claude-*/codex- container name agent-prune-stopped would remove.
+# agent-prune feeds this to the volume prune so its -WhatIf preview does not count
+# those soon-to-be-removed containers' volumes as still-expected.
+function _Powbox-ListExitedAgent {
+    @(_Powbox-ListExited -Prefix "claude-") + @(_Powbox-ListExited -Prefix "codex-")
+}
+
+function _Powbox-PruneExited {
+    param([string]$Prefix, [bool]$DryRun)
+    $names = @(_Powbox-ListExited -Prefix $Prefix)
+    if ($names.Count -eq 0) { return }
+    if ($DryRun) {
+        foreach ($n in $names) { Write-Host "Would remove exited container: $n" }
     }
-    $codexNames = docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=codex-"
-    if ($codexNames) {
-        docker rm $codexNames
+    else {
+        docker rm $names
     }
 }
 
+function agent-prune-stopped {
+    # Honor -WhatIf so `agent-prune -WhatIf` previews the stopped-container removal
+    # instead of deleting exited (named self-hosted) instances before the forwarded
+    # volume dry-run reports nothing was touched. Parse $args explicitly: a plain
+    # `-contains '-WhatIf'` would coerce the Boolean element of any colon-switch
+    # (e.g. -Confirm:$true tokenizes as '-Confirm:' followed by $true) and falsely
+    # preview. -WhatIf:$true/$false tokenizes as '-WhatIf:' followed by the Boolean.
+    $dryRun = $false
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        $tok = [string]$args[$i]
+        if ($tok -eq '-WhatIf') { $dryRun = $true }
+        elseif ($tok -eq '-WhatIf:') { $dryRun = ($i + 1 -lt $args.Count) -and [bool]$args[$i + 1] }
+    }
+    _Powbox-PruneExited -Prefix "claude-" -DryRun $dryRun
+    _Powbox-PruneExited -Prefix "codex-" -DryRun $dryRun
+}
+
 function agent-prune {
-    agent-prune-stopped
-    # Forward any flags (e.g. -WhatIf/-Force) on to prune-volumes.ps1.
-    agent-prune-volumes @args
+    # Forward flags to both halves so -WhatIf previews the whole operation and
+    # -Yes/-Confirm apply to the volume prune. The stopped-container prune removes
+    # exited claude-*/codex- containers; capture their names first and hand them to
+    # the volume prune so its orphan calculation treats them as gone. Without this a
+    # -WhatIf under-reports: the exited containers are still present (the preview
+    # didn't remove them), so prune-volumes counts their full-name-keyed
+    # agent-ws-*/agent-podman-* volumes as expected and hides removals a real run
+    # would perform after deleting the containers. The env var is process-level
+    # (prune-volumes.ps1 runs in-process), so restore it in a finally to avoid
+    # leaking into the user's session — mirroring the -RequireImage handling.
+    $removed = (_Powbox-ListExitedAgent) -join "`n"
+    agent-prune-stopped @args
+    $hadVar = Test-Path Env:\POWBOX_PRUNE_REMOVED_CONTAINERS
+    $prev = if ($hadVar) { $env:POWBOX_PRUNE_REMOVED_CONTAINERS } else { $null }
+    $env:POWBOX_PRUNE_REMOVED_CONTAINERS = $removed
+    try {
+        agent-prune-volumes @args
+    }
+    finally {
+        if ($hadVar) { $env:POWBOX_PRUNE_REMOVED_CONTAINERS = $prev }
+        else { Remove-Item Env:\POWBOX_PRUNE_REMOVED_CONTAINERS -ErrorAction SilentlyContinue }
+    }
 }
 
 function agent-check-updates {

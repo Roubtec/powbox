@@ -111,33 +111,158 @@ cx() {
     fi
 }
 
+_powbox_isolated_by_name() {
+    local agent_prefix="$1" lookup_name="$2"
+    local name cand=()
+    while IFS= read -r name; do
+        # Docker's name filter is a substring match, not an anchored prefix, so
+        # name=claude- also matches a self-hosted codex-claude-... slug (and vice
+        # versa). Post-filter to a strict prefix so cci/cxi never pick up the other
+        # agent's container and report a false ambiguity or resume the wrong one.
+        case "$name" in
+        "$agent_prefix"*) cand+=("$name") ;;
+        esac
+    done < <(docker ps -a --filter "name=$agent_prefix" --filter "label=powbox.self-hosted=true" --format '{{.Names}}')
+    [ "${#cand[@]}" -gt 0 ] || return 0
+
+    local iname irepo iref cstatus
+    while IFS=$'\x1f' read -r name iname irepo iref cstatus; do
+        name="${name#/}"
+        [ "$iname" = "<no value>" ] && iname=""
+        [ "$irepo" = "<no value>" ] && irepo=""
+        [ "$iref" = "<no value>" ] && iref=""
+        [ "$iname" = "$lookup_name" ] || continue
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$name" "$iname" "$irepo" "$iref" "$cstatus"
+    done < <(docker inspect \
+        --format $'{{.Name}}\x1f{{index .Config.Labels "powbox.instance-name"}}\x1f{{index .Config.Labels "powbox.repo"}}\x1f{{index .Config.Labels "powbox.ref"}}\x1f{{.State.Status}}' \
+        "${cand[@]}" 2>/dev/null)
+}
+
+_powbox_resume_isolated_by_name() {
+    local agent_label="$1" agent_prefix="$2" shortcut="$3" lookup_name="$4"
+    local matches=() match
+    while IFS= read -r match; do
+        [ -n "$match" ] && matches+=("$match")
+    done < <(_powbox_isolated_by_name "$agent_prefix" "$lookup_name")
+
+    if [ "${#matches[@]}" -eq 0 ]; then
+        echo "powbox: no self-hosted $agent_label container found with --name $(_powbox_marker_field "$lookup_name"). Use ${shortcut}-list to see known instances." >&2
+        return 1
+    fi
+
+    if [ "${#matches[@]}" -gt 1 ]; then
+        echo "powbox: --name $(_powbox_marker_field "$lookup_name") matches multiple self-hosted $agent_label containers. Relaunch one explicitly with --repo, or prune the stale instance." >&2
+        for match in "${matches[@]}"; do
+            local name iname irepo iref cstatus ref_text=""
+            IFS=$'\x1f' read -r name iname irepo iref cstatus <<< "$match"
+            [ -n "$iref" ] && ref_text=" --ref $(_powbox_marker_field "$iref")"
+            echo "  $name [$cstatus] repo=$(_powbox_marker_field "$irepo")$ref_text" >&2
+        done
+        return 1
+    fi
+
+    local first
+    for first in "${matches[@]}"; do break; done
+    local name iname irepo iref cstatus
+    IFS=$'\x1f' read -r name iname irepo iref cstatus <<< "$first"
+    if [ -z "$irepo" ]; then
+        echo "powbox: container $name has --name $(_powbox_marker_field "$lookup_name") but no powbox.repo label, so $shortcut cannot reconstruct the isolated resume command. Use: docker start -ai $name" >&2
+        return 1
+    fi
+
+    "$shortcut" --isolated --repo "$irepo" --name "$iname" --resume
+}
+
+cci() {
+    if [ $# -ne 1 ]; then
+        echo "usage: cci <name>" >&2
+        return 2
+    fi
+    _powbox_resume_isolated_by_name "Claude" "claude-" cc "$1"
+}
+
+cxi() {
+    if [ $# -ne 1 ]; then
+        echo "usage: cxi <name>" >&2
+        return 2
+    fi
+    _powbox_resume_isolated_by_name "Codex" "codex-" cx "$1"
+}
+
 agent-prune-volumes() {
     "$POWBOX_ROOT/commands/prune-volumes.sh" "$@"
+}
+
+# Print the exited container names matching the given prefix, one per line.
+# docker's name filter is a substring match, so we re-anchor to true ${prefix}*
+# names — an unrelated user container (e.g. my-claude-tool) is never listed and
+# the other agent's slug is not swept in. Process substitution (rather than a
+# pipe) keeps the loop in the current shell, matching the consumers below.
+_powbox_list_exited() {
+    local prefix="$1" name
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case "$name" in
+        "$prefix"*) printf '%s\n' "$name" ;;
+        esac
+    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$prefix")
+}
+
+# Print every exited claude-*/codex- container name agent-prune-stopped would
+# remove. agent-prune feeds this to the volume prune so its dry-run does not count
+# those soon-to-be-removed containers' volumes as still-expected.
+_powbox_list_exited_agents() {
+    _powbox_list_exited "claude-"
+    _powbox_list_exited "codex-"
 }
 
 # Remove all exited containers whose name matches the given prefix filter.
 # Names are read line-by-line into an array so this behaves identically under
 # bash and zsh. zsh does not word-split unquoted expansions, so the older
 # `docker rm $names` form silently passed every name as a single argument and
-# failed when more than one container matched. Process substitution (rather
-# than a pipe) keeps the loop in the current shell so the array survives.
+# failed when more than one container matched.
 _powbox_prune_exited() {
+    local prefix="$1" dry_run="${2:-false}"
     local name names=()
     while IFS= read -r name; do
-        [ -n "$name" ] && names+=("$name")
-    done < <(docker ps -a --format "{{.Names}}" --filter "status=exited" --filter "name=$1")
-    [ "${#names[@]}" -gt 0 ] && docker rm "${names[@]}" 2>/dev/null
+        names+=("$name")
+    done < <(_powbox_list_exited "$prefix")
+    [ "${#names[@]}" -gt 0 ] || return 0
+    if [ "$dry_run" = true ]; then
+        printf 'Would remove exited container: %s\n' "${names[@]}"
+    else
+        docker rm "${names[@]}" 2>/dev/null
+    fi
 }
 
 agent-prune-stopped() {
-    _powbox_prune_exited "claude-"
-    _powbox_prune_exited "codex-"
+    # Honor a dry-run flag so `agent-prune --dry-run` previews the stopped-container
+    # removal instead of deleting exited (named self-hosted) instances before the
+    # forwarded volume dry-run reports "nothing was touched".
+    local dry_run=false arg
+    for arg in "$@"; do
+        case "$arg" in
+        -n | --dry-run) dry_run=true ;;
+        esac
+    done
+    _powbox_prune_exited "claude-" "$dry_run"
+    _powbox_prune_exited "codex-" "$dry_run"
 }
 
 agent-prune() {
-    agent-prune-stopped
-    # Forward any flags (e.g. --dry-run/--force) on to prune-volumes.sh.
-    agent-prune-volumes "$@"
+    # Forward flags to both halves so --dry-run previews the whole operation and
+    # --yes applies to the volume prune. The stopped-container prune removes
+    # exited claude-*/codex- containers; capture their names first and hand them to
+    # the volume prune so its orphan calculation treats them as gone. Without this a
+    # `--dry-run` under-reports: the exited containers are still present (the dry-run
+    # didn't remove them), so prune-volumes counts their full-name-keyed
+    # agent-ws-*/agent-podman-* volumes as expected and hides removals a real
+    # `--yes` would perform after deleting the containers. The prefix assignment
+    # exports the list only for this call (verified non-persistent in bash and zsh).
+    local removed
+    removed="$(_powbox_list_exited_agents)"
+    agent-prune-stopped "$@"
+    POWBOX_PRUNE_REMOVED_CONTAINERS="$removed" agent-prune-volumes "$@"
 }
 
 agent-check-updates() {
@@ -228,9 +353,9 @@ _powbox_agent_porcelain() {
 _powbox_build_from_table() {
     local table="$1" force=" $2 " target="$3"
     shift 3
-    local name status baked latest ver
+    local name cstatus baked latest ver
     local claude_ver="" codex_ver=""
-    while IFS=$'\t' read -r name status baked latest; do
+    while IFS=$'\t' read -r name cstatus baked latest; do
         [ -n "$name" ] || continue
         [ "$name" = base ] && continue
         case "$force" in
@@ -330,10 +455,10 @@ agent-update() {
         return "$rc"
     fi
 
-    local name status rest stale=""
-    while IFS=$'\t' read -r name status rest; do
+    local name cstatus rest stale=""
+    while IFS=$'\t' read -r name cstatus rest; do
         case "$name" in
-            claude|codex) [ "$status" = stale ] && stale="$stale $name" ;;
+            claude|codex) [ "$cstatus" = stale ] && stale="$stale $name" ;;
         esac
     done < <(printf '%s\n' "$table")
     stale="${stale# }"

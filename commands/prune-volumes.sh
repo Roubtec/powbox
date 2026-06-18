@@ -9,6 +9,53 @@
 # counterpart of prune-volumes.ps1.
 set -euo pipefail
 
+# Parse flags. By default the removal is confirmed once interactively; --yes skips
+# that prompt (for scripted/agent-driven GC) and --dry-run lists the orphans and
+# exits without removing anything. Mirrors prune-volumes.ps1 (-Yes / -WhatIf).
+assume_yes=false
+dry_run=false
+for arg in "$@"; do
+	case "$arg" in
+	-y | --yes) assume_yes=true ;;
+	-n | --dry-run) dry_run=true ;;
+	-h | --help)
+		cat <<'EOF'
+Usage: prune-volumes.sh [-y|--yes] [-n|--dry-run] [-h|--help]
+
+Remove orphaned agent Docker volumes (agent-nm-*/agent-wt-*/agent-ws-*/agent-podman-*
+plus the deprecated agent-pnpm-store) that no longer belong to any existing container.
+
+  -y, --yes       Remove without the interactive confirmation prompt.
+  -n, --dry-run   List the volumes that would be removed, then exit (removes nothing).
+  -h, --help      Show this help and exit.
+EOF
+		exit 0
+		;;
+	*)
+		echo "Unknown argument: $arg" >&2
+		echo "Run 'prune-volumes.sh --help' for usage." >&2
+		exit 2
+		;;
+	esac
+done
+
+# When invoked via `agent-prune`, the stopped-container prune removes exited
+# claude-*/codex- containers before us. In a real run they are already gone from
+# `docker ps -a` here, but in a --dry-run nothing was removed, so agent-prune
+# passes their names in POWBOX_PRUNE_REMOVED_CONTAINERS and we treat them as
+# already-removed — otherwise the preview would count their full-name-keyed
+# agent-ws-*/agent-podman-* volumes as expected and hide removals a real --yes
+# would perform. Unset (standalone prune-volumes) -> every existing container,
+# exited or not, still pins its volumes (Docker would refuse to remove them).
+removed_containers=()
+if [ -n "${POWBOX_PRUNE_REMOVED_CONTAINERS:-}" ]; then
+	while IFS= read -r rname; do
+		[ -n "$rname" ] && removed_containers+=("$rname")
+	done <<-EOF
+		${POWBOX_PRUNE_REMOVED_CONTAINERS}
+	EOF
+fi
+
 # Collect expected volumes from all existing claude-*/codex-* containers. Each
 # container expects an nm and a wt volume for its project (project-keyed, shared
 # between the project's two agents) plus its own agent-podman-* store and (for a
@@ -19,6 +66,11 @@ set -euo pipefail
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
+	# Skip containers agent-prune is removing this run so their volumes are
+	# correctly reported as orphans (exact, case-sensitive match, as in the shell).
+	for removed in "${removed_containers[@]}"; do
+		[ "$name" = "$removed" ] && continue 2
+	done
 	case "$name" in
 	claude-*) suffix="${name#claude-}" ;;
 	codex-*) suffix="${name#codex-}" ;;
@@ -66,8 +118,17 @@ for vol in "${prune[@]}"; do
 	echo "  $vol"
 done
 
-printf '\nRemove these volumes? [y/N] '
-read -r answer
+if [ "$dry_run" = true ]; then
+	printf '\nDry run — %d volume(s) would be removed; nothing was touched. Re-run with --yes (or confirm the prompt) to remove them.\n' "${#prune[@]}"
+	exit 0
+fi
+
+if [ "$assume_yes" = true ]; then
+	answer=y
+else
+	printf '\nRemove these volumes? [y/N] '
+	read -r answer
+fi
 case "$answer" in
 [yY]*)
 	removed=0

@@ -348,6 +348,24 @@ if ($Resume) {
     Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
   }
 
+  # A running container (e.g. launched -Detach, or its terminal was lost) can't be
+  # `docker start`ed - that errors - so reattach instead. Mirrors the reuse path
+  # below; cci/cxi reach this with -Resume against a named instance that may well
+  # still be running.
+  if ($containerRunning) {
+    if ($Detach) {
+      Write-Host "Container $containerName is already running."
+      exit 0
+    }
+    docker attach $containerName
+    exit $LASTEXITCODE
+  }
+
+  if ($Detach) {
+    docker start $containerName
+    exit $LASTEXITCODE
+  }
+
   docker start -ai $containerName
   exit $LASTEXITCODE
 }

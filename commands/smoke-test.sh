@@ -8,6 +8,26 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IMAGE="${1:-powbox-agent:latest}"
 
+# The image-gated checks in stages 1–3 (and Stage 4's clone behavior) need the
+# agent image; Stage 4's self-hosted identity contract runs without it. Detect
+# the image once up front so a missing one is reported clearly here rather than
+# as a raw docker error at Stage 1. POWBOX_SMOKE_REQUIRE_IMAGE=1 (used by CI)
+# turns an absent image into a hard error before any stage runs; it is also
+# exported so a sub-script invoked directly (e.g. the self-hosted clone stage)
+# fails instead of self-skipping its image-gated checks into a false "all green".
+# Track every stage we skip so the end-of-run banner can report a partial run.
+skipped=()
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	if [ -n "${POWBOX_SMOKE_REQUIRE_IMAGE:-}" ]; then
+		echo "ERROR: image '$IMAGE' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set — refusing to run a partial (image-skipping) smoke test." >&2
+		echo "       Build it first (./build.sh agent) or unset POWBOX_SMOKE_REQUIRE_IMAGE." >&2
+		exit 1
+	fi
+	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2–4) runs, so you get no partial coverage."
+	echo "         Build it (./build.sh agent), or set POWBOX_SMOKE_REQUIRE_IMAGE=1 to fail fast here with a clear message instead of a raw docker error at Stage 1."
+fi
+export POWBOX_SMOKE_REQUIRE_IMAGE
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store.
@@ -63,6 +83,7 @@ IMAGE="${1:-powbox-agent:latest}"
 # POWBOX_SMOKE_SKIP_PODMAN is also set; set both for a Stage 1 presence-only run).
 if [ -n "${POWBOX_SMOKE_SKIP_DB:-}" ]; then
 	echo "Skipping pg-dev-up functional test (POWBOX_SMOKE_SKIP_DB is set)."
+	skipped+=("Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)")
 else
 	echo "Running pg-dev-up functional test against $IMAGE ..."
 	docker run --rm \
@@ -97,8 +118,23 @@ fi
 # scripts/smoke-test-podman.sh for what it covers.
 if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
+	skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
 else
+	# smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
+	# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
+	# under auto (the default) on a host without /dev/net/tun it runs the static
+	# engine checks but exits 0 after self-skipping the nested-run + published-port
+	# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+	# gates so the banner records the partial run instead of claiming all stages ran
+	# — the child evaluates the same host /dev/net/tun condition before its docker
+	# run, so the two agree. The child still prints the skip message; we track it here.
+	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
 	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
+	if [ "$podman_gate" = "off" ]; then
+		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
+		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
+	fi
 fi
 
 # Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's
@@ -108,8 +144,27 @@ fi
 # with POWBOX_SMOKE_SKIP_SELFHOSTED=1; see scripts/smoke-test-selfhosted.sh.
 if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED:-}" ]; then
 	echo "Skipping self-hosted smoke test (POWBOX_SMOKE_SKIP_SELFHOSTED is set)."
+	skipped+=("Stage 4: self-hosted launch mode (POWBOX_SMOKE_SKIP_SELFHOSTED)")
 else
 	"${ROOT_DIR}/scripts/smoke-test-selfhosted.sh" "$IMAGE"
+	# POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE=1 runs Stage A (launcher identity) but skips
+	# Stage B (clone behavior) inside the child, which still exits 0. Record that
+	# partial coverage so the banner does not claim all stages ran.
+	if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE:-}" ]; then
+		skipped+=("Stage 4: self-hosted clone behavior (POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE)")
+	fi
 fi
 
-echo "Smoke test complete."
+if [ "${#skipped[@]}" -gt 0 ]; then
+	echo
+	echo "================ SMOKE TEST: STAGES SKIPPED ================"
+	for s in "${skipped[@]}"; do
+		echo "  - $s"
+	done
+	echo "This was a PARTIAL smoke test — the stages above did not run."
+	echo "For a full run (e.g. in CI) unset the POWBOX_SMOKE_SKIP_* vars; set"
+	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image."
+	echo "==========================================================="
+else
+	echo "Smoke test complete (all stages ran)."
+fi

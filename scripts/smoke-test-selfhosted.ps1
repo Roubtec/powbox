@@ -230,6 +230,9 @@ if ($env:POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE) {
 }
 docker image inspect $Image *> $null
 if ($LASTEXITCODE -ne 0) {
+  if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
+    throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - Stage B (clone behavior) requires the image."
+  }
   Write-Host "Stage B skipped: image '$Image' not found (build it to exercise the clone path)."
   Write-Host "Self-hosted smoke test passed (Stage A only)."
   return

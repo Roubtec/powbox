@@ -251,7 +251,7 @@ agent-prune-stopped() {
 
 agent-prune() {
     # Forward flags to both halves so --dry-run previews the whole operation and
-    # --yes/--force apply to the volume prune. The stopped-container prune removes
+    # --yes applies to the volume prune. The stopped-container prune removes
     # exited claude-*/codex- containers; capture their names first and hand them to
     # the volume prune so its orphan calculation treats them as gone. Without this a
     # `--dry-run` under-reports: the exited containers are still present (the dry-run

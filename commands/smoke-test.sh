@@ -121,12 +121,19 @@ if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
 else
 	# smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
-	# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice. Mirror
-	# that gate so the banner records the partial run instead of claiming all stages
-	# ran. The child still prints the skip message; we only track it here.
+	# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
+	# under auto (the default) on a host without /dev/net/tun it runs the static
+	# engine checks but exits 0 after self-skipping the nested-run + published-port
+	# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+	# gates so the banner records the partial run instead of claiming all stages ran
+	# — the child evaluates the same host /dev/net/tun condition before its docker
+	# run, so the two agree. The child still prints the skip message; we track it here.
+	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
 	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
-	if [ "${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}" = "off" ]; then
+	if [ "$podman_gate" = "off" ]; then
 		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
+		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
 	fi
 fi
 

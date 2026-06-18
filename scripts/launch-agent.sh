@@ -242,6 +242,11 @@ normalize_ctx_path() {
 NM_VOLUME=""
 WT_VOLUME=""
 WS_VOLUME=""
+# Whether to mount the dir-mounted node_modules / worktrees volumes. Only set true
+# for a project that actually looks like one that needs them (see below); a non-dev
+# folder mounted for research or file management gets neither, so Docker never
+# auto-creates empty node_modules/ and .worktrees/ mountpoint dirs in the host folder.
+MOUNT_WORKSPACE_VOLUMES=false
 REPO_SPEC=""
 
 if [ "$ISOLATED" = true ]; then
@@ -403,6 +408,18 @@ else
 	# instead of copying them. ext4, persistent, container-local, and (now) private to
 	# this one container — so two agents never overcommit one shared worktree volume.
 	WT_VOLUME="agent-wt-${AGENT}-${PROJECT_NAME}"
+	# Mount those volumes only when the host folder looks like a project that uses
+	# them: a JS/Node project (package.json — covers npm/yarn/pnpm — or
+	# pnpm-workspace.yaml) or one that has opted into powbox via .powbox.yml (e.g. a
+	# non-JS repo that still wants persistent worktrees). A research/file-management
+	# folder matches none of these, so it gets no node_modules/.worktrees mounts and
+	# no host litter. The entrypoint's shadow loop independently finds nothing to
+	# shadow for such a folder, so launcher and entrypoint stay consistent.
+	if [ -f "$PROJECT_PATH/package.json" ] ||
+		[ -f "$PROJECT_PATH/pnpm-workspace.yaml" ] ||
+		[ -f "$PROJECT_PATH/.powbox.yml" ]; then
+		MOUNT_WORKSPACE_VOLUMES=true
+	fi
 fi
 
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
@@ -440,6 +457,7 @@ if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
 	printf 'NM_VOLUME=%s\n' "$NM_VOLUME"
 	printf 'WT_VOLUME=%s\n' "$WT_VOLUME"
 	printf 'WS_VOLUME=%s\n' "$WS_VOLUME"
+	printf 'MOUNT_WORKSPACE_VOLUMES=%s\n' "$MOUNT_WORKSPACE_VOLUMES"
 	printf 'REPO_SPEC=%s\n' "$REPO_SPEC"
 	printf 'CLONE_REF=%s\n' "$CLONE_REF"
 	exit 0
@@ -653,7 +671,7 @@ fi
 # take effect; warn (don't disrupt) if it is currently running. Self-hosted mode has
 # no separate .worktrees mount (it is a subdir of the one workspace volume), so this
 # guard is dir-mounted-only — otherwise it would wrongly recreate every reuse.
-if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$ISOLATED" != true ] && [ "$MOUNT_WORKSPACE_VOLUMES" = true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_WT_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
@@ -837,13 +855,25 @@ if [ "$ISOLATED" = true ]; then
 		agent \
 		-lc "$WS_PREP_CMD"
 else
+	# Always pre-create the per-container Podman store + the global image store; add
+	# the node_modules/worktrees volumes only when this project uses them (see
+	# MOUNT_WORKSPACE_VOLUMES) so a non-dev folder leaves no host litter.
+	PREP_VOL_ARGS=(
+		-v "${PODMAN_VOLUME}:/mnt/containers"
+		-v "agent-podman-imagestore:/mnt/podman-imagestore"
+	)
+	PREP_PATHS="/mnt/containers /mnt/podman-imagestore"
+	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+		PREP_VOL_ARGS+=(
+			-v "${NM_VOLUME}:/mnt/node_modules"
+			-v "${WT_VOLUME}:/mnt/worktrees"
+		)
+		PREP_PATHS="/mnt/node_modules /mnt/worktrees $PREP_PATHS"
+	fi
 	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
-		-v "${NM_VOLUME}:/mnt/node_modules" \
-		-v "${WT_VOLUME}:/mnt/worktrees" \
-		-v "${PODMAN_VOLUME}:/mnt/containers" \
-		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		"${PREP_VOL_ARGS[@]}" \
 		agent \
-		-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
+		-lc "mkdir -p $PREP_PATHS && chown node:node $PREP_PATHS"
 fi
 
 RUN_ARGS=()
@@ -886,7 +916,15 @@ esac
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
 # authenticate too.
-EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT" -e "PNPM_STORE_DIR=$WT_STORE_DIR")
+EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
+# Point pnpm at the co-located store only when this project actually mounts the
+# worktrees volume the store lives in (dir-mounted JS/powbox project) or in
+# self-hosted mode (store is a subdir of the one workspace volume). Omitting it for a
+# non-dev dir-mounted folder stops the entrypoint from mkdir-ing .worktrees/.pnpm-store
+# onto the host bind mount — pnpm just keeps its image-default store there instead.
+if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+	EXTRA_ENV+=(-e "PNPM_STORE_DIR=$WT_STORE_DIR")
+fi
 
 # Self-hosted clone inputs. The entrypoint (after gh auth) clones POWBOX_CLONE_REPO
 # at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and skips the clone when a .git
@@ -916,12 +954,14 @@ if [ "$ISOLATED" = true ]; then
 	)
 fi
 
-# In dir-mounted mode the root node_modules and .worktrees are separate per-project
-# named volumes mounted over the bind mount. In self-hosted mode they are ordinary
-# subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no
-# extra -v args are added here.
+# In dir-mounted mode the root node_modules and .worktrees are separate per-container
+# named volumes mounted over the bind mount — but only for a project that uses them
+# (MOUNT_WORKSPACE_VOLUMES); a non-dev folder gets neither, so Docker never creates
+# empty node_modules/.worktrees mountpoints in the host folder. In self-hosted mode
+# they are ordinary subdirs of the one workspace volume (mounted via
+# compose.selfhosted.yml), so no extra -v args are added here.
 WORKSPACE_VOL_ARGS=()
-if [ "$ISOLATED" != true ]; then
+if [ "$ISOLATED" != true ] && [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 	WORKSPACE_VOL_ARGS=(
 		-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules"
 		-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees"

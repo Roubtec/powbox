@@ -46,13 +46,16 @@ guess, this skill is where those parked questions get answered.
   work-list from that source (for the review case, see the review layer), then proceed identically.
 
 Optional trailing flags, honored only by the review layer's apply phase for items chosen to fix now,
-mirror the review skills: `push` and `ping-codex` / `ping-claude` / `ping-copilot` (re-request bot
-review after the follow-up push). This is a **fully interactive** skill, so it does **not** assume
+mirror the review skills: `push` and `ping-codex` / `ping-claude` / `ping-copilot` / `ping-contributing`
+(re-request bot review after the follow-up push). This is a **fully interactive** skill, so it does **not** assume
 publication: even for a fix-now item it **asks the maintainer to confirm before pushing and before
 editing any review threads** (the flags merely pre-answer that prompt). `ping-codex` / `ping-claude`
 post an `@codex` / `@claude` review comment; **`ping-copilot` requests review via
 `gh pr edit <PR#> --add-reviewer @copilot`** — never an `@copilot review` comment, which drives
-Copilot's coding agent rather than its reviewer.
+Copilot's coding agent rather than its reviewer. **`ping-contributing`** carries the same meaning as in
+`address-review`: re-ping a bot only if it brought a genuinely new finding this round, so a reviewer
+that has gone quiet drops out of the loop — combined with explicit `ping-*` it filters that named set,
+supplied alone it falls back to the bots that reviewed.
 
 ## The core loop
 
@@ -210,7 +213,7 @@ and scan recent run reports / commit messages for discovered findings.
   resolved, since a re-review (codex especially) re-raises anything still unaddressed and rewriting
   historical resolutions is needless and messy), a Summary comment, and re-ping bots if requested
   (`@codex`/`@claude` via comment; Copilot via `gh pr edit <PR#> --add-reviewer @copilot`, never an
-  `@copilot review` comment).
+  `@copilot review` comment; under `ping-contributing`, only the bots that brought a new finding this round).
 
 **Deferred items → task hygiene** (no code, but leave nothing dangling):
 

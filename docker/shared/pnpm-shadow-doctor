@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# pnpm-shadow-doctor — detect (and optionally repair) the empty-shadow trap.
+#
+# The problem
+# -----------
+# In dir-mounted mode each monorepo subpackage's node_modules is an EPHEMERAL
+# tmpfs shadow — empty at every container start — while the ROOT node_modules is
+# a PERSISTENT named volume that keeps pnpm's workspace-state cache
+# (node_modules/.pnpm-workspace-state-v1.json). When that cache is warm and the
+# lockfile is unchanged, pnpm declares "Already up to date" and SKIPS relinking
+# the empty subpackage shadows. The result: `vitest`/`tsc`/`eslint`/`next` and
+# other per-package .bin entries fail to resolve, and NO flavor of reinstall
+# (--frozen-lockfile, --force, --force --frozen-lockfile) repairs it — they all
+# short-circuit on the same cache.
+#
+# entrypoint-core.sh drops that cache file at container start, so a fresh start
+# self-heals on the next `pnpm install`. This doctor is the on-demand counterpart
+# for when you hit the trap mid-session anyway — e.g. you ran `pnpm test`
+# straight after a restart without installing first, or something repopulated the
+# cache. The ONLY repair that works is removing the workspace-state file and then
+# running a real (relinking) install; that is exactly what `--fix` does.
+#
+# Usage:
+#   pnpm-shadow-doctor [--fix] [--quiet] [workspace-dir]
+#
+#   (no args)        Detect only. Prints findings; exits 1 if the trap is present,
+#                    0 if healthy — so it is usable as a guard in scripts.
+#   --fix            Repair: remove the stale workspace-state file and run
+#                    `pnpm install --frozen-lockfile --prefer-offline` to relink the shadows.
+#   --quiet          Suppress the "healthy" message (still prints when a trap is
+#                    found or repaired).
+#   workspace-dir    Project root to inspect; defaults to walking up from $PWD to the
+#                    OUTERMOST enclosing workspace root (or nearest package.json if none).
+set -uo pipefail
+
+FIX=0
+QUIET=0
+START_DIR=""
+for arg in "$@"; do
+	case "$arg" in
+	--fix) FIX=1 ;;
+	--quiet) QUIET=1 ;;
+	-h | --help)
+		sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	-*)
+		echo "pnpm-shadow-doctor: unknown option: $arg" >&2
+		exit 2
+		;;
+	*) START_DIR="$arg" ;;
+	esac
+done
+
+note() { [ "$QUIET" = 1 ] || echo "$@"; }
+
+# Resolve the workspace root: walk up from the start dir and pick the enclosing
+# workspace root — the OUTERMOST workspace declaration (pnpm-workspace.yaml or a
+# workspaces-declaring package.json), or the nearest plain package.json when none
+# declares a workspace (the detailed ranking is in the next comment). This makes the
+# doctor work whether it is run from the repo root or from inside a subpackage, always
+# targeting the monorepo root that holds the shared state. Stops at / so a non-project
+# dir resolves to nothing.
+start="${START_DIR:-$PWD}"
+if ! start="$(cd "$start" 2>/dev/null && pwd -P)"; then
+	echo "pnpm-shadow-doctor: cannot resolve directory '${START_DIR:-$PWD}'." >&2
+	exit 2
+fi
+# Walk all the way up to / collecting candidates, then choose — do NOT break on the first
+# hit. Going upward: keep overwriting ws_ws on every pnpm-workspace.yaml so it ends as the
+# HIGHEST (outermost) one — the true pnpm monorepo root whose root node_modules holds the
+# shared workspace-state cache; likewise keep the HIGHEST package.json that declares a
+# "workspaces" field as ws_npm — the npm/yarn-style monorepo root, so that running from a
+# subpackage of such a repo still resolves to the declaring root (whose root node_modules
+# holds the state) rather than the subpackage itself (which has no .pnpm/state and would
+# falsely scan clean); record ws_pkg only on the FIRST (nearest) package.json so it stays
+# the nearest single-package fallback. Then prefer the highest pnpm-workspace.yaml, else the
+# highest workspaces-declaring package.json, else the nearest package.json. (Breaking on the
+# first hit, or treating every package.json as a root, would wrongly resolve a subpackage
+# instead of the monorepo root for nested repos.)
+ws=""
+ws_ws=""
+ws_npm=""
+ws_pkg=""
+dir="$start"
+while :; do
+	if [ -f "$dir/pnpm-workspace.yaml" ]; then
+		ws_ws="$dir"
+	fi
+	if [ -f "$dir/package.json" ]; then
+		[ -z "$ws_pkg" ] && ws_pkg="$dir"
+		# A real npm/yarn workspace root has top-level "workspaces" as an array, or
+		# the object form {"workspaces":{"packages":[...]}}. Parse with jq (a base-image
+		# dependency the entrypoint's detect-shadows.sh already uses) instead of grepping
+		# for the key, so a dependency or nested key literally named "workspaces" cannot
+		# false-positive the root choice.
+		if jq -e '(.workspaces | type) == "array" or ((.workspaces | type) == "object" and (.workspaces.packages | type) == "array")' "$dir/package.json" >/dev/null 2>&1; then
+			ws_npm="$dir"
+		fi
+	fi
+	[ "$dir" = "/" ] && break
+	dir="$(dirname "$dir")"
+done
+if [ -n "$ws_ws" ]; then
+	ws="$ws_ws"
+elif [ -n "$ws_npm" ]; then
+	ws="$ws_npm"
+else
+	ws="$ws_pkg"
+fi
+
+if [ -z "$ws" ]; then
+	note "pnpm-shadow-doctor: no pnpm/npm workspace found at or above $start — nothing to check."
+	exit 0
+fi
+
+root_nm="$ws/node_modules"
+
+# Collect this workspace's subpackage node_modules via the same detector the
+# entrypoint uses, then keep only real node_modules paths (drop any non-node_modules
+# .powbox.yml custom shadows). A path is "trapped" when it is an EMPTY mountpoint
+# whose package actually expects linked entries (the tmpfs shadow was never relinked);
+# a dependency-free package legitimately stays empty and is not flagged — see below.
+# Worktree node_modules are real dirs on the .worktrees volume, not mountpoints, so
+# they never match. Defined as a function so
+# --fix can re-scan after the reinstall and confirm the shadows actually relinked:
+# pnpm reports "Already up to date" and exits 0 even when a warm cache made it skip
+# relinking, so the install's exit code alone does not prove a repair.
+detect_empty_shadows() {
+	local _p _pkg_json
+	empty_shadows=()
+	while IFS= read -r _p; do
+		[ -z "$_p" ] && continue
+		case "$_p" in
+		*/node_modules) ;;
+		*) continue ;;
+		esac
+		mountpoint -q "$_p" 2>/dev/null || continue
+		# Empty? Use a short-circuiting find that stops at the first entry rather than
+		# `ls -A`, which would materialize the whole listing in the command substitution
+		# when the shadow ISN'T empty — wasteful on a large linked node_modules tree.
+		# `-mindepth 1` excludes $_p itself; like `ls -A`, hidden entries (.bin, .modules.yaml)
+		# count as non-empty.
+		[ -z "$(find "$_p" -mindepth 1 -print -quit 2>/dev/null)" ] || continue
+		# An empty shadow is only a TRAP if the package is SUPPOSED to have linked
+		# entries. A workspace package with no installable dependencies legitimately
+		# keeps an empty node_modules even after a clean install, so flagging it would
+		# make detect mode false-alarm and --fix loop to "STILL TRAPPED" though the
+		# reinstall is a genuine no-op for that package. Treat an empty shadow as
+		# trapped only when its package.json declares at least one runtime/dev/optional
+		# dependency. peerDependencies are excluded: pnpm does not install them into
+		# node_modules, so a peer-only (or dependency-free) package is expected to stay
+		# empty. A shadow with no parseable package.json can't be claimed to expect
+		# entries either, so it is likewise not flagged.
+		_pkg_json="${_p%/node_modules}/package.json"
+		[ -f "$_pkg_json" ] || continue
+		if jq -e '
+			[ (.dependencies // {}), (.devDependencies // {}), (.optionalDependencies // {}) ]
+			| map(length) | add > 0
+		' "$_pkg_json" >/dev/null 2>&1; then
+			empty_shadows+=("$_p")
+		fi
+	done < <(detect-shadows.sh "$ws" 2>/dev/null || true)
+}
+
+detect_empty_shadows
+
+# The empty-shadow trap proper requires THREE things together: an empty subpackage
+# shadow, a populated root virtual store (.pnpm), AND the workspace-state cache file
+# (node_modules/.pnpm-workspace-state-v1.json). That cache file is what actually makes
+# pnpm declare "Already up to date" and skip relinking.
+#
+# In DETECT mode (no --fix) we require all three, so two non-trap states are NOT flagged:
+#   * a cold/first-lifecycle workspace (no .pnpm yet) is just uninstalled, not
+#     trapped — a plain install fixes it; and
+#   * immediately after the entrypoint self-heal (or a prior --fix) removed the
+#     workspace-state file, the shadows are still empty and .pnpm is still populated,
+#     but the cache that causes the short-circuit is GONE, so the next `pnpm install`
+#     WILL relink. Requiring the cache file present avoids a false alarm (especially
+#     under --quiet) in exactly the window the self-heal sets up.
+#
+# In --fix mode we DROP the workspace-state-file requirement. The entrypoint self-heal
+# removes that file at every container start, so a post-restart `pnpm-shadow-doctor --fix`
+# (run before any install) would otherwise see it absent, report OK, and exit WITHOUT
+# relinking — leaving the empty shadows broken (`pnpm test`/`tsc` fail) until a manual
+# install. When the shadows are empty and the root store is populated, --fix must perform
+# the relinking install regardless of whether the cache file is still present.
+needs_repair=1
+if [ "${#empty_shadows[@]}" -eq 0 ] || [ ! -d "$root_nm/.pnpm" ]; then
+	needs_repair=0
+elif [ "$FIX" != 1 ] && [ ! -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
+	needs_repair=0
+fi
+if [ "$needs_repair" -eq 0 ]; then
+	note "pnpm-shadow-doctor: OK — no empty-shadow trap in $ws."
+	exit 0
+fi
+
+echo "pnpm-shadow-doctor: empty-shadow trap detected in $ws" >&2
+echo "  ${#empty_shadows[@]} subpackage node_modules are empty tmpfs shadows while the root virtual store is populated:" >&2
+for p in "${empty_shadows[@]}"; do
+	echo "    - ${p#"$ws"/}" >&2
+done
+if [ -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
+	echo "  pnpm will report 'Already up to date' and refuse to relink them until the" >&2
+	echo "  workspace-state cache is removed." >&2
+else
+	echo "  The workspace-state cache is already gone (entrypoint self-heal), so a real" >&2
+	echo "  'pnpm install' will relink them." >&2
+fi
+
+if [ "$FIX" != 1 ]; then
+	echo >&2
+	echo "  Repair with:  pnpm-shadow-doctor --fix" >&2
+	echo "  (equivalently: rm -f node_modules/.pnpm-workspace-state-v1.json && pnpm install --frozen-lockfile --prefer-offline)" >&2
+	exit 1
+fi
+
+echo >&2
+echo "pnpm-shadow-doctor: repairing — removing workspace-state cache and reinstalling..." >&2
+rm -f "$root_nm/.pnpm-workspace-state-v1.json"
+if ! (cd "$ws" && pnpm install --frozen-lockfile --prefer-offline); then
+	echo "pnpm-shadow-doctor: install failed. If the lockfile is out of sync, run a plain" >&2
+	echo "  'pnpm install' in $ws; otherwise inspect the error above." >&2
+	exit 1
+fi
+
+# Re-scan rather than trusting the install's exit code: pnpm prints "Already up to
+# date" and exits 0 even when the warm cache made it skip relinking, so only a clean
+# scan proves the shadows actually came back. (Removing the workspace-state file
+# above should force a relink, but verify it instead of asserting it.)
+detect_empty_shadows
+if [ "${#empty_shadows[@]}" -eq 0 ]; then
+	echo "pnpm-shadow-doctor: repaired — subpackage shadows relinked." >&2
+	exit 0
+fi
+echo "pnpm-shadow-doctor: STILL TRAPPED after reinstall — ${#empty_shadows[@]} shadow(s) remain empty:" >&2
+for p in "${empty_shadows[@]}"; do
+	echo "    - ${p#"$ws"/}" >&2
+done
+echo "  The reinstall did not relink them. Try a non-frozen 'pnpm install' in $ws," >&2
+echo "  or remove $root_nm entirely and reinstall from scratch." >&2
+exit 1

@@ -88,22 +88,27 @@ works this way).
 
 Keep today's host-bind-mount workflow; only change where worktrees + the store live.
 
-1. **New per-project volume** `agent-wt-<proj>` mounted at
-   `/workspace/<proj>/.worktrees` (ext4, persistent, container-local, shared
-   between the Claude and Codex containers for the same project — volume names
-   are project-keyed, not agent-keyed, exactly like `agent-nm-<proj>`).
+1. **New per-container volume** `agent-wt-<agent>-<proj>` mounted at
+   `/workspace/<proj>/.worktrees` (ext4, persistent, container-local, private to
+   one container — **not** shared between the project's Claude and Codex
+   containers; volume names are keyed by the full container name (agent +
+   project), exactly like `agent-nm-<agent>-<proj>`).
 2. **Relocate the pnpm store into that volume**:
    `store-dir = /workspace/<proj>/.worktrees/.pnpm-store`. Because the store and
    every `.worktrees/<task>/node_modules` are now under the one `.worktrees`
-   mount, pnpm hardlinks. Set per-project at startup (the path depends on the
-   project), e.g. the launcher passes `PNPM_STORE_DIR` and the entrypoint runs
+   mount, pnpm hardlinks. Set at startup (the path is project-specific, inside this
+   container's own `.worktrees` volume), e.g. the launcher passes `PNPM_STORE_DIR` and the entrypoint runs
    `pnpm config --global set store-dir "$PNPM_STORE_DIR"` (guarded, never fatal).
 3. **Stop forcing copy**: set `package-import-method=auto` (Dockerfile).
-4. **Retire the shared `agent-pnpm-store` volume.** The store is now per-project
-   inside `agent-wt-<proj>`. Trade-off: we lose cross-*project* store dedup
-   (a brand-new project re-downloads its deps) in exchange for hardlinks; disk
-   is abundant and each project's store still persists across its own sessions,
-   so the "repeated sessions don't re-copy" win is preserved per project.
+4. **Retire the shared `agent-pnpm-store` volume.** The store is now per-container
+   inside `agent-wt-<agent>-<proj>`. Trade-off: we lose cross-*project* store dedup
+   (a brand-new project re-downloads its deps) — and, with the volume keyed per
+   container, cross-*agent* dedup too (each of a project's agents keeps its own
+   store) — in exchange for hardlinks and per-container correctness (two live
+   agents sharing one writable store / `node_modules` tree race and corrupt each
+   other). Disk is abundant and each container's store still persists across its
+   own sessions, so the "repeated sessions don't re-copy" win is preserved per
+   container.
 5. **`.worktrees` tmpfs shadow becomes a no-op fallback.** When the volume is
    mounted at `.worktrees`, `shadow-mounts.sh` skips it (already a mountpoint),
    so existing project `.powbox.yml` files that list `.worktrees` keep working
@@ -114,7 +119,7 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
   425 MB–1.1 GB copies.
 - Concurrency becomes disk-bound (effectively unlimited for normal use); the
   2 GB / `ENOSPC` cliff for worktrees is gone.
-- Store persists per project; root install still copies once (separate mount) —
+- Store persists per container; root install still copies once (separate mount) —
   fine, it is a one-time, persisted cost on the main checkout.
 
 ### Sub-decision: worktree metadata coherence (`A-simple`, recommended)
@@ -128,19 +133,21 @@ this container's own subdir that `git worktree list` doesn't know about) at
 session start. This keeps the skill's "worktrees are disposable, commit + push"
 model intact.
 
-**Peer-container isolation.** The `.worktrees` volume is *project-keyed*
-(`agent-wt-<proj>`), so the project's Claude and Codex containers mount the same
-volume — but each keeps its own tmpfs `.git/worktrees` metadata. A peer's live
-worktree therefore has no metadata in the other container and is
-indistinguishable from a crash orphan, so a naive "prune everything `git
-worktree list` doesn't know" would `rm -rf` the peer's active working dir and its
-uncommitted work. Fix: each container namespaces its worktrees under
-`.worktrees/$CONTAINER_NAME/` (`$CONTAINER_NAME` = `<agent>-<project>`, which
-Docker keeps unique and which is stable across recycle) and scopes both creation
-and the orphan prune to that subdir. Ownership — not liveness — is what makes
-this safe: a container only ever reaps orphans it owns, so no cross-container
-liveness check or lockfile is needed, and a peer's subdir is never scanned. The
-shared `.pnpm-store` stays at the volume root.
+**Peer-container isolation.** The `.worktrees` volume is now *per-container*
+(`agent-wt-<agent>-<proj>`), so the project's Claude and Codex containers no longer
+mount the same volume — each gets its own copy (and each keeps its own tmpfs
+`.git/worktrees` metadata). The namespacing below predates that split, from when
+the volume was shared between the two agents: with a shared volume a peer's live
+worktree had no metadata in the other container and was indistinguishable from a
+crash orphan, so a naive "prune everything `git worktree list` doesn't know" would
+`rm -rf` the peer's active working dir and its uncommitted work. The fix — kept as
+defensive scoping now that the volume is private — is that each container
+namespaces its worktrees under `.worktrees/$CONTAINER_NAME/` (`$CONTAINER_NAME` =
+`<agent>-<project>`, which Docker keeps unique and which is stable across recycle)
+and scopes both creation and the orphan prune to that subdir. Ownership — not
+liveness — is what makes this safe: a container only ever reaps orphans it owns,
+so no cross-container liveness check or lockfile is needed, and any peer subdir is
+never scanned. The `.pnpm-store` stays at the volume root.
 
 *Alternative `A-coherent`*: also persist `.git/worktrees` (and
 `.claude/worktrees`) on volumes so worktrees fully survive recycle. More volumes
@@ -150,8 +157,8 @@ the "disposable worktree" model.
 ### Files Option A touches
 `scripts/launch-agent.sh` + `scripts/launch-agent.ps1` (new volume + store env),
 `compose.shared.yml` (drop `pnpm-store`), `docker/base/Dockerfile`
-(`package-import-method=auto`), `docker/shared/entrypoint-core.sh` (set per-project
-store-dir), `commands/prune-volumes.{sh,ps1}` (prune `agent-wt-*`), README +
+(`package-import-method=auto`), `docker/shared/entrypoint-core.sh` (set the
+project-specific store-dir at startup), `commands/prune-volumes.{sh,ps1}` (prune `agent-wt-*`), README +
 the worktrees/enable-worktrees skills (tmpfs-sizing / `ENOSPC` guidance is
 superseded), plus a smoke-test assertion that a worktree install hardlinks.
 

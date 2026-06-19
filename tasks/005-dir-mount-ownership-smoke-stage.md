@@ -11,6 +11,7 @@ There is **no automated guard** for this. Like PR #54's Stage B, it is exactly t
 Included:
 - A smoke stage that dir-mounts a **root-owned** throwaway git repo into the agent image and asserts the `node` agent can write it (create a file, and perform a git operation) after the entrypoint runs.
 - A short README/AGENTS note documenting the native-Linux bind-mount uid expectation, next to the existing exec-bit note.
+- **Build the harness to be extensible.** Task [007](007-selfheal-mixed-ownership-dir-mount.md) is sequenced right after 005 and will add a second fixture variant to this harness for the **mixed-ownership** case (a node-owned repo root with nested `root`-owned files — a tracked file plus a `.git/objects/<xx>` dir chowned to root, simulating a host `sudo git pull`). That variant is **delivered and gated by 007, not by 005** (it would be red until 007's self-heal logic exists, since 005's root-level probe alone misses it). 005 only needs to leave the stage easy for 007 to extend.
 
 Out of scope: changing the fix itself (PR #55 shipped it); Windows/macOS uid behavior (the bug is native-Linux-specific).
 
@@ -38,6 +39,7 @@ Out of scope: changing the fix itself (PR #55 shipped it); Windows/macOS uid beh
 
 - New stage runs from `commands/smoke-test.sh`/`.ps1`, is listed in the skipped-stages banner when skipped, and honours `POWBOX_SMOKE_REQUIRE_IMAGE`.
 - Against the current (post-#55) image the stage passes; temporarily reverting the entrypoint chown makes it fail with a clear EACCES-style message.
+- The mixed-ownership fixture variant is **out of scope for 005's own acceptance** — it is delivered and gated by task [007](007-selfheal-mixed-ownership-dir-mount.md), which owns that criterion. 005 ships green on the all-root-owned stage alone.
 - `shellcheck`/`shfmt` clean (sh) and `Invoke-ScriptAnalyzer` clean (ps1).
 - README/AGENTS documents the native-Linux bind-mount uid expectation.
 
@@ -51,4 +53,4 @@ Reviewer confirms the fixture is genuinely root-owned (not just `safe.directory`
 
 ## Status
 
-**Not started.** Feeds task [003](003-native-linux-ci.md) (this stage runs in Tier 1 CI once both land).
+**Not started.** Feeds task [003](003-native-linux-ci.md) (this stage runs in Tier 1 CI once both land). **Sequenced first**, ahead of task [007](007-selfheal-mixed-ownership-dir-mount.md) (maintainer decision, PR #59 session): 005 ships the reusable harness + all-root-owned stage; 007 then adds the mixed-ownership variant to it (007 owns that test — see its scope/acceptance).

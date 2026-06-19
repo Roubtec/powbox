@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Remove orphaned agent Docker volumes that no longer belong to any existing
-# container: agent-nm-* (node_modules) and agent-wt-* (worktrees + pnpm store),
-# both project-keyed (shared by a project's two agents); agent-ws-* (the
-# self-hosted per-instance workspace clone) and agent-podman-* (rootless Podman
-# storage), both keyed per container (agent + project) so Claude and Codex never
-# share one. Also offers the deprecated shared agent-pnpm-store volume (the store
-# is now per-project inside each agent-wt-* volume). This is the Linux/macOS
-# counterpart of prune-volumes.ps1.
+# container: agent-nm-* (node_modules), agent-wt-* (worktrees + pnpm store),
+# agent-ws-* (the self-hosted per-instance workspace clone), and agent-podman-*
+# (rootless Podman storage) — ALL keyed per container (agent + project) so a
+# project's Claude and Codex containers never share one (a shared writable
+# node_modules / pnpm store corrupts two live agents). Also offers the deprecated
+# shared agent-pnpm-store volume (the store is now per-container inside each
+# agent-wt-* volume). This is the Linux/macOS counterpart of prune-volumes.ps1.
 set -euo pipefail
 
 # Parse flags. By default the removal is confirmed once interactively; --yes skips
@@ -56,13 +56,12 @@ if [ -n "${POWBOX_PRUNE_REMOVED_CONTAINERS:-}" ]; then
 	EOF
 fi
 
-# Collect expected volumes from all existing claude-*/codex-* containers. Each
-# container expects an nm and a wt volume for its project (project-keyed, shared
-# between the project's two agents) plus its own agent-podman-* store and (for a
-# self-hosted container) its agent-ws-* workspace, both keyed by the FULL
-# container name so a project's concurrently-running Claude and Codex containers
-# never share one. agent-ws-* is over-expected for dir-mounted containers too
-# (which never create one), which is harmless — nothing by that name exists.
+# Collect expected volumes from all existing claude-*/codex-* containers. Every
+# agent volume is now keyed by the FULL container name (agent + project), so a
+# container named claude-<slug> expects agent-{nm,wt,ws,podman}-claude-<slug> —
+# i.e. agent-<kind>-${name}. agent-ws-* is over-expected for dir-mounted
+# containers (which never create one), which is harmless — nothing by that name
+# exists.
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
@@ -72,11 +71,10 @@ while IFS= read -r name; do
 		[ "$name" = "$removed" ] && continue 2
 	done
 	case "$name" in
-	claude-*) suffix="${name#claude-}" ;;
-	codex-*) suffix="${name#codex-}" ;;
+	claude-* | codex-*) ;;
 	*) continue ;;
 	esac
-	expected+=("agent-nm-${suffix}" "agent-wt-${suffix}" "agent-ws-${name}" "agent-podman-${name}")
+	expected+=("agent-nm-${name}" "agent-wt-${name}" "agent-ws-${name}" "agent-podman-${name}")
 done < <(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 
 # The global shared image store is infra shared by every container (like the

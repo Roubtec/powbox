@@ -53,7 +53,7 @@ fi
 # recursive chown. Self-hosted ("--isolated") mode is exempt: its workspace is a
 # container-local volume the launcher already pre-seeds node-owned. The detached image-
 # store writer (POWBOX_IMAGE_STORE_ROLE=writer) is also exempt: it mounts the workspace
-# but NOT the per-project node_modules/.worktrees volumes, so a recursive chown there
+# but NOT the per-container node_modules/.worktrees volumes, so a recursive chown there
 # would descend into the host's copies of those dirs — and it never writes the workspace
 # anyway. Best-effort: a warning is logged if the claim cannot be completed.
 if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] && command -v sudo >/dev/null 2>&1; then
@@ -168,21 +168,64 @@ fi
 # whole workspace is one container-local volume), and a tmpfs over a subpackage's
 # node_modules would break the hardlinking that the single-volume layout exists to
 # enable (the store and every node_modules already share one mount).
-if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
+#
+# Also skipped for the image-store WRITER role: that short-lived container mounts the
+# host workspace BIND (compose.shared.yml) but NOT the agent-nm-*/agent-wt-* volumes,
+# so here $_dir/node_modules is the host checkout's own tree. Shadowing it (and, worse,
+# deleting its .pnpm-workspace-state-v1.json below) would churn host-side pnpm state on
+# every fuse-enabled launch — and the writer only needs egress + a Podman that can pull.
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ]; then
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue
 		_dir="${_dir%/}"
 		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
 		if [ "${#_targets[@]}" -gt 0 ]; then
-			if ! sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+			if sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+				# The subpackage node_modules just (re)mounted above are ephemeral tmpfs:
+				# empty at every container start. The ROOT node_modules, however, is a
+				# persistent named volume, so it still carries pnpm's workspace-state
+				# cache (node_modules/.pnpm-workspace-state-v1.json) from a prior
+				# lifecycle. With that cache present and the lockfile unchanged, EVERY
+				# flavor of `pnpm install` (--frozen-lockfile, --force, ...) short-circuits
+				# to "Already up to date" and never relinks the now-empty subpackage
+				# shadows — so vitest/tsc/eslint/next and friends fail to resolve, and no
+				# reinstall repairs it. The cache is stale BY CONSTRUCTION here (the shadows
+				# it claims are populated were just wiped), so drop it: the agent's next
+				# natural `pnpm install` then does a real, relinking install. We deliberately
+				# do NOT run an install ourselves — many sessions never build/test (or never
+				# touch a repo at all), so forcing one at start would be wasted work.
+				#
+				# Gated on at least one shadow being a subpackage */node_modules: detect-shadows.sh
+				# can also return non-node_modules custom shadows (.worktrees, .git/worktrees,
+				# .claude/worktrees from .powbox.yml). A repo whose shadows are ALL non-node_modules
+				# (e.g. a single-package repo that only opts into worktree shadows) has no
+				# empty-shadow trap, so dropping its root workspace-state cache would just force a
+				# needless relink on the next install. The empty-shadow trap can only arise when a
+				# subpackage node_modules was wiped, so key the invalidation on exactly that. Also
+				# gated on the mount succeeding so we never clobber state on a host tree that went
+				# un-shadowed (e.g. missing mount capability).
+				_has_nm_shadow=false
+				for _t in "${_targets[@]}"; do
+					case "$_t" in */node_modules) _has_nm_shadow=true; break ;; esac
+				done
+				# Final gate: the ROOT node_modules must itself be a mounted volume. The
+				# invalidation is safe ONLY because that root is the PERSISTENT named
+				# volume carrying a stale workspace-state cache across lifecycles. If it is
+				# NOT a mountpoint — a legacy/misconfigured launch with no agent-nm-* volume,
+				# so $_dir/node_modules is the host checkout's own tree — dropping its cache
+				# would churn host-side pnpm state, the same harm the writer-role skip avoids.
+				if [ "$_has_nm_shadow" = true ] && mountpoint -q "$_dir/node_modules" 2>/dev/null; then
+					rm -f "$_dir/node_modules/.pnpm-workspace-state-v1.json"
+				fi
+			else
 				echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
 			fi
 		fi
 	done
-	unset _dir _targets
+	unset _dir _targets _t _has_nm_shadow
 fi
 
-# Co-locate the pnpm store with the per-project worktrees volume so that
+# Co-locate the pnpm store with the per-container worktrees volume so that
 # `pnpm install` inside a worktree HARDLINKS package files from the store
 # instead of copying them.  pnpm can only hardlink when the store and the
 # target node_modules live under the SAME mount (not merely the same device),

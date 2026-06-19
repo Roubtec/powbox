@@ -242,6 +242,11 @@ normalize_ctx_path() {
 NM_VOLUME=""
 WT_VOLUME=""
 WS_VOLUME=""
+# Whether to mount the dir-mounted node_modules / worktrees volumes. Only set true
+# for a project that actually looks like one that needs them (see below); a non-dev
+# folder mounted for research or file management gets neither, so Docker never
+# auto-creates empty node_modules/ and .worktrees/ mountpoint dirs in the host folder.
+MOUNT_WORKSPACE_VOLUMES=false
 REPO_SPEC=""
 
 if [ "$ISOLATED" = true ]; then
@@ -386,18 +391,41 @@ else
 	esac
 	PROJECT_HASH="$(project_hash "$PROJECT_HASH_INPUT")"
 	PROJECT_NAME="$(printf '%s' "$PROJECT_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-' | sed 's/^-//; s/-$//')-$PROJECT_HASH"
-	NM_VOLUME="agent-nm-${PROJECT_NAME}"
-	# Per-project worktrees volume. Holds the git worktrees AND the pnpm store under
+	# Root node_modules and the worktrees+store volumes are keyed by the OUTER
+	# container (agent + project), NOT just the project — i.e. "${AGENT}-${PROJECT_NAME}",
+	# which is CONTAINER_NAME (defined just below). This MUST match agent-podman-*'s
+	# per-container keying: a project's Claude and Codex containers can run at the same
+	# time, and they mount these volumes at the SAME in-container paths. Two live agents
+	# sharing one writable node_modules tree (or one pnpm store) corrupt each other —
+	# concurrent installs race, and a build in one agent reads a tree the other is
+	# relinking. Per-container volumes give each agent its own node_modules, virtual
+	# store, pnpm store, and worktree disk budget. The cost is lost cross-agent dedup
+	# (two stores, two node_modules per project); correctness for simultaneous agents
+	# is worth it. The subpackage node_modules are already per-container (tmpfs shadows).
+	NM_VOLUME="agent-nm-${AGENT}-${PROJECT_NAME}"
+	# Per-container worktrees volume. Holds the git worktrees AND the pnpm store under
 	# ONE mount so pnpm hardlinks package files into per-worktree node_modules
-	# instead of copying them. ext4, persistent, container-local, and shared between
-	# this project's Claude and Codex containers (project-keyed, like NM_VOLUME).
-	WT_VOLUME="agent-wt-${PROJECT_NAME}"
+	# instead of copying them. ext4, persistent, container-local, and (now) private to
+	# this one container — so two agents never overcommit one shared worktree volume.
+	WT_VOLUME="agent-wt-${AGENT}-${PROJECT_NAME}"
+	# Mount those volumes only when the host folder looks like a project that uses
+	# them: a JS/Node project (package.json — covers npm/yarn/pnpm — or
+	# pnpm-workspace.yaml) or one that has opted into powbox via .powbox.yml (e.g. a
+	# non-JS repo that still wants persistent worktrees). A research/file-management
+	# folder matches none of these, so it gets no node_modules/.worktrees mounts and
+	# no host litter. The entrypoint's shadow loop independently finds nothing to
+	# shadow for such a folder, so launcher and entrypoint stay consistent.
+	if [ -f "$PROJECT_PATH/package.json" ] ||
+		[ -f "$PROJECT_PATH/pnpm-workspace.yaml" ] ||
+		[ -f "$PROJECT_PATH/.powbox.yml" ]; then
+		MOUNT_WORKSPACE_VOLUMES=true
+	fi
 fi
 
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path under the workspace mount (same mount as .worktrees/<task> in
-# both modes — a per-project volume in dir-mounted mode, the one workspace volume
+# both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
@@ -429,6 +457,7 @@ if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
 	printf 'NM_VOLUME=%s\n' "$NM_VOLUME"
 	printf 'WT_VOLUME=%s\n' "$WT_VOLUME"
 	printf 'WS_VOLUME=%s\n' "$WS_VOLUME"
+	printf 'MOUNT_WORKSPACE_VOLUMES=%s\n' "$MOUNT_WORKSPACE_VOLUMES"
 	printf 'REPO_SPEC=%s\n' "$REPO_SPEC"
 	printf 'CLONE_REF=%s\n' "$CLONE_REF"
 	exit 0
@@ -634,21 +663,60 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
-# Detect whether the existing container predates the per-project .worktrees volume
-# (and its co-located pnpm store). Such a container was created before this change,
-# so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
-# it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
-# stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
-# take effect; warn (don't disrupt) if it is currently running. Self-hosted mode has
-# no separate .worktrees mount (it is a subdir of the one workspace volume), so this
-# guard is dir-mounted-only — otherwise it would wrongly recreate every reuse.
+# Detect whether the existing container's node_modules + .worktrees mounts still match
+# what THIS launch wants, and recreate a stopped container when they do NOT. The expected
+# mount at each destination depends on the host-litter gate:
+#   * dev project ($MOUNT_WORKSPACE_VOLUMES=true)   -> the per-agent volume
+#     agent-{nm,wt}-<container>;
+#   * non-dev folder ($MOUNT_WORKSPACE_VOLUMES=false) -> NO mount at all.
+# This covers three upgrade/mismatch paths:
+	#   * predates the .worktrees volume entirely (no .worktrees mount) — it still
+#     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
+#     installs never hardlink even after the image is rebuilt;
+#   * predates the per-agent volume RENAME — it mounts the old project-keyed
+#     agent-{nm,wt}-<project> instead of agent-{nm,wt}-<container>. A bare `docker start`
+#     keeps the stale source, so a project's Claude and Codex would still share one
+#     writable node_modules / pnpm store and race — exactly what per-agent keying exists
+#     to prevent; and
+#   * predates the host-litter gate, OR the folder is no longer a dev project — it still
+#     mounts node_modules/.worktrees in a non-dev folder, so a bare `docker start` keeps
+#     re-creating empty node_modules/.worktrees dirs in the host folder and the gate never
+#     takes effect for the upgraded container. Recreating without those mounts is what
+#     stops the litter.
+# Mere presence of a .worktrees mount can't distinguish these, so we compare the actual
+# mounted volume NAME at each destination to the expected name (empty = expect no mount).
+# Warn (don't disrupt) if it is currently running. Self-hosted mode is skipped
+# ($ISOLATED): its node_modules/.worktrees are subdirs INSIDE the one workspace volume,
+# not separate mounts, so there is nothing to compare — and a steady-state non-dev reuse
+# (no mounts present, none expected) compares equal and is correctly left alone.
 if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
-	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
-	if [ -z "$HAS_WT_MOUNT" ]; then
-		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to enable hardlinked worktree node_modules." >&2
+	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+		EXPECTED_NM_MOUNT="$NM_VOLUME"
+		EXPECTED_WT_MOUNT="$WT_VOLUME"
+	else
+		EXPECTED_NM_MOUNT=""
+		EXPECTED_WT_MOUNT=""
+	fi
+	WT_MOUNT_NAME="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}{{.Name}}{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	NM_MOUNT_NAME="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/node_modules\"}}{{.Name}}{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ "$WT_MOUNT_NAME" != "$EXPECTED_WT_MOUNT" ] || [ "$NM_MOUNT_NAME" != "$EXPECTED_NM_MOUNT" ]; then
+		RECREATE_STALE_MOUNTS=0
+		if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+			if [ "$CONTAINER_RUNNING" = true ]; then
+				echo "Note: container ${CONTAINER_NAME} uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to migrate to the per-agent volumes." >&2
+			else
+				echo "Container ${CONTAINER_NAME} uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-${CONTAINER_NAME} and worktree installs hardlink from the co-located pnpm store."
+				RECREATE_STALE_MOUNTS=1
+			fi
 		else
-			echo "Container ${CONTAINER_NAME} predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+			if [ "$CONTAINER_RUNNING" = true ]; then
+				echo "Note: container ${CONTAINER_NAME} still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch (or use --volatile) to drop the mounts and leave no host litter." >&2
+			else
+				echo "Container ${CONTAINER_NAME} mounts node_modules/.worktrees but this folder isn't a dev project; recreating it without those mounts so it leaves no host litter."
+				RECREATE_STALE_MOUNTS=1
+			fi
+		fi
+		if [ "$RECREATE_STALE_MOUNTS" = 1 ]; then
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
@@ -826,13 +894,25 @@ if [ "$ISOLATED" = true ]; then
 		agent \
 		-lc "$WS_PREP_CMD"
 else
+	# Always pre-create the per-container Podman store + the global image store; add
+	# the node_modules/worktrees volumes only when this project uses them (see
+	# MOUNT_WORKSPACE_VOLUMES) so a non-dev folder leaves no host litter.
+	PREP_VOL_ARGS=(
+		-v "${PODMAN_VOLUME}:/mnt/containers"
+		-v "agent-podman-imagestore:/mnt/podman-imagestore"
+	)
+	PREP_PATHS="/mnt/containers /mnt/podman-imagestore"
+	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+		PREP_VOL_ARGS+=(
+			-v "${NM_VOLUME}:/mnt/node_modules"
+			-v "${WT_VOLUME}:/mnt/worktrees"
+		)
+		PREP_PATHS="/mnt/node_modules /mnt/worktrees $PREP_PATHS"
+	fi
 	docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps --user root --entrypoint /bin/sh \
-		-v "${NM_VOLUME}:/mnt/node_modules" \
-		-v "${WT_VOLUME}:/mnt/worktrees" \
-		-v "${PODMAN_VOLUME}:/mnt/containers" \
-		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+		"${PREP_VOL_ARGS[@]}" \
 		agent \
-		-lc 'mkdir -p /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/node_modules /mnt/worktrees /mnt/containers /mnt/podman-imagestore'
+		-lc "mkdir -p $PREP_PATHS && chown node:node $PREP_PATHS"
 fi
 
 RUN_ARGS=()
@@ -875,7 +955,15 @@ esac
 # PRIMARY_AGENT selects which agent the unified image runs and seeds as primary.
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
 # authenticate too.
-EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT" -e "PNPM_STORE_DIR=$WT_STORE_DIR")
+EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
+# Point pnpm at the co-located store only when this project actually mounts the
+# worktrees volume the store lives in (dir-mounted JS/powbox project) or in
+# self-hosted mode (store is a subdir of the one workspace volume). Omitting it for a
+# non-dev dir-mounted folder stops the entrypoint from mkdir-ing .worktrees/.pnpm-store
+# onto the host bind mount — pnpm just keeps its image-default store there instead.
+if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
+	EXTRA_ENV+=(-e "PNPM_STORE_DIR=$WT_STORE_DIR")
+fi
 
 # Self-hosted clone inputs. The entrypoint (after gh auth) clones POWBOX_CLONE_REPO
 # at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and skips the clone when a .git
@@ -905,12 +993,14 @@ if [ "$ISOLATED" = true ]; then
 	)
 fi
 
-# In dir-mounted mode the root node_modules and .worktrees are separate per-project
-# named volumes mounted over the bind mount. In self-hosted mode they are ordinary
-# subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no
-# extra -v args are added here.
+# In dir-mounted mode the root node_modules and .worktrees are separate per-container
+# named volumes mounted over the bind mount — but only for a project that uses them
+# (MOUNT_WORKSPACE_VOLUMES); a non-dev folder gets neither, so Docker never creates
+# empty node_modules/.worktrees mountpoints in the host folder. In self-hosted mode
+# they are ordinary subdirs of the one workspace volume (mounted via
+# compose.selfhosted.yml), so no extra -v args are added here.
 WORKSPACE_VOL_ARGS=()
-if [ "$ISOLATED" != true ]; then
+if [ "$ISOLATED" != true ] && [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 	WORKSPACE_VOL_ARGS=(
 		-v "${NM_VOLUME}:${WORKSPACE_MOUNT}/node_modules"
 		-v "${WT_VOLUME}:${WORKSPACE_MOUNT}/.worktrees"

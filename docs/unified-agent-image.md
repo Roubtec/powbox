@@ -73,7 +73,7 @@ Every launch mounts both config volumes regardless of primary agent:
 - `claude-config` → `/home/node/.claude`
 - `codex-config` → `/home/node/.codex` (with `~/.agents` → `~/.codex/agents` as today)
 
-This is a hard requirement for cross-invocation. The other shared volumes (`agent-gh-config`, `agent-zsh-history`) and the per-project `node_modules` volume are unchanged by this image unification. (The former shared `agent-pnpm-store` volume was later retired — the pnpm store is now per-project inside the `agent-wt-<project>` worktrees volume; see [worktree-node-modules-hardlinks.md](worktree-node-modules-hardlinks.md).)
+This is a hard requirement for cross-invocation. The other shared volumes (`agent-gh-config`, `agent-zsh-history`) and the per-container `node_modules` volume are unchanged by this image unification. (The former shared `agent-pnpm-store` volume was later retired — the pnpm store is now per-container inside the `agent-wt-<agent>-<project>` worktrees volume; see [worktree-node-modules-hardlinks.md](worktree-node-modules-hardlinks.md).)
 
 ### Compose
 

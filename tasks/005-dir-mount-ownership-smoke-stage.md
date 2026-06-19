@@ -11,6 +11,7 @@ There is **no automated guard** for this. Like PR #54's Stage B, it is exactly t
 Included:
 - A smoke stage that dir-mounts a **root-owned** throwaway git repo into the agent image and asserts the `node` agent can write it (create a file, and perform a git operation) after the entrypoint runs.
 - A short README/AGENTS note documenting the native-Linux bind-mount uid expectation, next to the existing exec-bit note.
+- **Once task [006](006-selfheal-mixed-ownership-dir-mount.md) lands:** a second fixture variant for the **mixed-ownership** case — a node-owned repo root with nested `root`-owned files (e.g. a tracked file plus a `.git/objects/<xx>` dir chowned to root, simulating a host `sudo git pull`) — asserting the entrypoint re-owns them and a `node` git write succeeds. This guards the 006 self-heal, which the root-level write probe alone would miss. (Until 006 lands, this variant is expected to fail, so add it together with 006, not before.)
 
 Out of scope: changing the fix itself (PR #55 shipped it); Windows/macOS uid behavior (the bug is native-Linux-specific).
 
@@ -38,6 +39,7 @@ Out of scope: changing the fix itself (PR #55 shipped it); Windows/macOS uid beh
 
 - New stage runs from `commands/smoke-test.sh`/`.ps1`, is listed in the skipped-stages banner when skipped, and honours `POWBOX_SMOKE_REQUIRE_IMAGE`.
 - Against the current (post-#55) image the stage passes; temporarily reverting the entrypoint chown makes it fail with a clear EACCES-style message.
+- (With task [006](006-selfheal-mixed-ownership-dir-mount.md)) the mixed-ownership fixture variant also passes against the post-006 image, and fails if 006's nested-uid-0 detection/chown is reverted.
 - `shellcheck`/`shfmt` clean (sh) and `Invoke-ScriptAnalyzer` clean (ps1).
 - README/AGENTS documents the native-Linux bind-mount uid expectation.
 
@@ -51,4 +53,4 @@ Reviewer confirms the fixture is genuinely root-owned (not just `safe.directory`
 
 ## Status
 
-**Not started.** Feeds task [003](003-native-linux-ci.md) (this stage runs in Tier 1 CI once both land).
+**Not started.** Feeds task [003](003-native-linux-ci.md) (this stage runs in Tier 1 CI once both land). The mixed-ownership fixture variant pairs with task [006](006-selfheal-mixed-ownership-dir-mount.md) and should be added alongside it.

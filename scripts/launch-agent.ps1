@@ -535,34 +535,67 @@ if (-not $Volatile -and $containerExists) {
   }
 }
 
-# Detect whether the existing container's node_modules + .worktrees volumes still match
-# this launch's expected per-agent names, and recreate a stopped container when they do
-# NOT. This covers two upgrade paths:
+# Detect whether the existing container's node_modules + .worktrees mounts still match
+# what THIS launch wants, and recreate a stopped container when they do NOT. The expected
+# mount at each destination depends on the host-litter gate:
+#   * dev project ($mountWorkspaceVolumes=$true)   -> the per-agent volume
+#     agent-{nm,wt}-<container>;
+#   * non-dev folder ($mountWorkspaceVolumes=$false) -> NO mount at all.
+# This covers three upgrade/mismatch paths:
 #   * predates the per-project .worktrees volume entirely (no .worktrees mount) — it still
 #     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
-#     installs never hardlink even after the image is rebuilt; and
+#     installs never hardlink even after the image is rebuilt;
 #   * predates the per-agent volume RENAME — it mounts the old project-keyed
 #     agent-{nm,wt}-<project> instead of agent-{nm,wt}-<container>. A bare `docker start`
 #     keeps the stale source, so a project's Claude and Codex would still share one
-#     writable node_modules / pnpm store and race — exactly what per-agent keying prevents.
-#     Mere presence of a .worktrees mount can't distinguish this case, so we compare the
-#     actual mounted volume NAME at each destination to the expected name.
-# Warn (don't disrupt) if it is currently running. Self-hosted mode has no separate
-# .worktrees mount (it is a subdir of the one workspace volume), so this guard is
-# dir-mounted-only ($mountWorkspaceVolumes) — otherwise it would wrongly recreate every reuse.
-if (-not $Isolated -and $mountWorkspaceVolumes -and -not $Volatile -and $containerExists) {
+#     writable node_modules / pnpm store and race — exactly what per-agent keying prevents;
+#     and
+#   * predates the host-litter gate, OR the folder is no longer a dev project — it still
+#     mounts node_modules/.worktrees in a non-dev folder, so a bare `docker start` keeps
+#     re-creating empty node_modules/.worktrees dirs in the host folder and the gate never
+#     takes effect for the upgraded container. Recreating without those mounts stops the litter.
+# Mere presence of a .worktrees mount can't distinguish these, so we compare the actual
+# mounted volume NAME at each destination to the expected name (empty = expect no mount).
+# Warn (don't disrupt) if it is currently running. Self-hosted mode is skipped ($Isolated):
+# its node_modules/.worktrees are subdirs INSIDE the one workspace volume, not separate
+# mounts, so there is nothing to compare — and a steady-state non-dev reuse (no mounts
+# present, none expected) compares equal and is correctly left alone.
+if (-not $Isolated -and -not $Volatile -and $containerExists) {
+  if ($mountWorkspaceVolumes) {
+    $expectedNmMount = $nodeModulesVolume
+    $expectedWtMount = $worktreesVolume
+  }
+  else {
+    $expectedNmMount = ""
+    $expectedWtMount = ""
+  }
   $wtMountName = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/.worktrees`"}}{{.Name}}{{end}}{{end}}" $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $wtMountName = "" }
   $wtMountName = "$wtMountName".Trim()
   $nmMountName = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/node_modules`"}}{{.Name}}{{end}}{{end}}" $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $nmMountName = "" }
   $nmMountName = "$nmMountName".Trim()
-  if ($wtMountName -ne $worktreesVolume -or $nmMountName -ne $nodeModulesVolume) {
-    if ($containerRunning) {
-      Write-Host "Note: container $containerName uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use -Volatile) to migrate to the per-agent volumes." -ForegroundColor Yellow
+  if ($wtMountName -ne $expectedWtMount -or $nmMountName -ne $expectedNmMount) {
+    $recreateStaleMounts = $false
+    if ($mountWorkspaceVolumes) {
+      if ($containerRunning) {
+        Write-Host "Note: container $containerName uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use -Volatile) to migrate to the per-agent volumes." -ForegroundColor Yellow
+      }
+      else {
+        Write-Host "Container $containerName uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-$containerName and worktree installs hardlink from the co-located pnpm store."
+        $recreateStaleMounts = $true
+      }
     }
     else {
-      Write-Host "Container $containerName uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-$containerName and worktree installs hardlink from the co-located pnpm store."
+      if ($containerRunning) {
+        Write-Host "Note: container $containerName still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch (or use -Volatile) to drop the mounts and leave no host litter." -ForegroundColor Yellow
+      }
+      else {
+        Write-Host "Container $containerName mounts node_modules/.worktrees but this folder isn't a dev project; recreating it without those mounts so it leaves no host litter."
+        $recreateStaleMounts = $true
+      }
+    }
+    if ($recreateStaleMounts) {
       docker rm $containerName *> $null
       if ($LASTEXITCODE -ne 0) {
         docker container inspect $containerName *> $null

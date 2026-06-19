@@ -663,21 +663,30 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
-# Detect whether the existing container predates the per-project .worktrees volume
-# (and its co-located pnpm store). Such a container was created before this change,
-# so it still has a tmpfs .worktrees shadow and points pnpm at the old shared store —
-# it never gets the hardlinking store-dir, even after the image is rebuilt. Recreate a
-# stopped container that lacks the agent-wt-* mount so the new mount + PNPM_STORE_DIR
-# take effect; warn (don't disrupt) if it is currently running. Self-hosted mode has
-# no separate .worktrees mount (it is a subdir of the one workspace volume), so this
-# guard is dir-mounted-only — otherwise it would wrongly recreate every reuse.
+# Detect whether the existing container's node_modules + .worktrees volumes still match
+# this launch's expected per-agent names, and recreate a stopped container when they do
+# NOT. This covers two upgrade paths:
+#   * predates the per-project .worktrees volume entirely (no .worktrees mount) — it still
+#     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
+#     installs never hardlink even after the image is rebuilt; and
+#   * predates the per-agent volume RENAME — it mounts the old project-keyed
+#     agent-{nm,wt}-<project> instead of agent-{nm,wt}-<container>. A bare `docker start`
+#     keeps the stale source, so a project's Claude and Codex would still share one
+#     writable node_modules / pnpm store and race — exactly what per-agent keying exists
+#     to prevent. Mere presence of a .worktrees mount can't distinguish this case, so we
+#     compare the actual mounted volume NAME at each destination to the expected name.
+# Warn (don't disrupt) if it is currently running. Self-hosted mode has no separate
+# .worktrees mount (it is a subdir of the one workspace volume), so this guard is
+# dir-mounted-only ($MOUNT_WORKSPACE_VOLUMES) — otherwise it would wrongly recreate every
+# reuse.
 if [ "$ISOLATED" != true ] && [ "$MOUNT_WORKSPACE_VOLUMES" = true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
-	HAS_WT_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
-	if [ -z "$HAS_WT_MOUNT" ]; then
+	WT_MOUNT_NAME="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/.worktrees\"}}{{.Name}}{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	NM_MOUNT_NAME="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${WORKSPACE_MOUNT}/node_modules\"}}{{.Name}}{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
+	if [ "$WT_MOUNT_NAME" != "$WT_VOLUME" ] || [ "$NM_MOUNT_NAME" != "$NM_VOLUME" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} predates the per-project .worktrees volume; it is still using a tmpfs .worktrees and the old pnpm store, so worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to enable hardlinked worktree node_modules." >&2
+			echo "Note: container ${CONTAINER_NAME} uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to migrate to the per-agent volumes." >&2
 		else
-			echo "Container ${CONTAINER_NAME} predates the per-project .worktrees volume; recreating it so worktree node_modules hardlink from the co-located pnpm store."
+			echo "Container ${CONTAINER_NAME} uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-${CONTAINER_NAME} and worktree installs hardlink from the co-located pnpm store."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2

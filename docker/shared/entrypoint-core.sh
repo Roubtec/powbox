@@ -168,7 +168,13 @@ fi
 # whole workspace is one container-local volume), and a tmpfs over a subpackage's
 # node_modules would break the hardlinking that the single-volume layout exists to
 # enable (the store and every node_modules already share one mount).
-if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
+#
+# Also skipped for the image-store WRITER role: that short-lived container mounts the
+# host workspace BIND (compose.shared.yml) but NOT the agent-nm-*/agent-wt-* volumes,
+# so here $_dir/node_modules is the host checkout's own tree. Shadowing it (and, worse,
+# deleting its .pnpm-workspace-state-v1.json below) would churn host-side pnpm state on
+# every fuse-enabled launch — and the writer only needs egress + a Podman that can pull.
+if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ]; then
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue
 		_dir="${_dir%/}"
@@ -187,20 +193,30 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ]; then
 				# it claims are populated were just wiped), so drop it: the agent's next
 				# natural `pnpm install` then does a real, relinking install. We deliberately
 				# do NOT run an install ourselves — many sessions never build/test (or never
-				# touch a repo at all), so forcing one at start would be wasted work. This is
-				# a no-op on a cold/first-lifecycle volume (no cache file yet) and on
-				# single-package repos (no subpackage shadows, so we never enter this branch);
-				# it only ever touches the MAIN checkout's root node_modules (worktrees keep
-				# their own real node_modules + state on the persistent .worktrees volume).
-				# Gated on the mount succeeding so we never clobber state on a host tree that
-				# went un-shadowed (e.g. missing mount capability).
-				rm -f "$_dir/node_modules/.pnpm-workspace-state-v1.json"
+				# touch a repo at all), so forcing one at start would be wasted work.
+				#
+				# Gated on at least one shadow being a subpackage */node_modules: detect-shadows.sh
+				# can also return non-node_modules custom shadows (.worktrees, .git/worktrees,
+				# .claude/worktrees from .powbox.yml). A repo whose shadows are ALL non-node_modules
+				# (e.g. a single-package repo that only opts into worktree shadows) has no
+				# empty-shadow trap, so dropping its root workspace-state cache would just force a
+				# needless relink on the next install. The empty-shadow trap can only arise when a
+				# subpackage node_modules was wiped, so key the invalidation on exactly that. Also
+				# gated on the mount succeeding so we never clobber state on a host tree that went
+				# un-shadowed (e.g. missing mount capability).
+				_has_nm_shadow=false
+				for _t in "${_targets[@]}"; do
+					case "$_t" in */node_modules) _has_nm_shadow=true; break ;; esac
+				done
+				if [ "$_has_nm_shadow" = true ]; then
+					rm -f "$_dir/node_modules/.pnpm-workspace-state-v1.json"
+				fi
 			else
 				echo "Warning: failed to shadow workspace directories in $_dir; continuing." >&2
 			fi
 		fi
 	done
-	unset _dir _targets
+	unset _dir _targets _t _has_nm_shadow
 fi
 
 # Co-locate the pnpm store with the per-project worktrees volume so that

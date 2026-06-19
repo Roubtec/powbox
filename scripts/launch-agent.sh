@@ -670,7 +670,7 @@ fi
 #     agent-{nm,wt}-<container>;
 #   * non-dev folder ($MOUNT_WORKSPACE_VOLUMES=false) -> NO mount at all.
 # This covers three upgrade/mismatch paths:
-#   * predates the per-project .worktrees volume entirely (no .worktrees mount) — it still
+	#   * predates the .worktrees volume entirely (no .worktrees mount) — it still
 #     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
 #     installs never hardlink even after the image is rebuilt;
 #   * predates the per-agent volume RENAME — it mounts the old project-keyed

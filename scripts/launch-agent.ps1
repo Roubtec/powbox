@@ -234,7 +234,7 @@ else {
   # one pnpm store) corrupt each other — concurrent installs race, and a build in one
   # reads a tree the other is relinking. Per-container volumes give each agent its own
   # node_modules, virtual store, pnpm store, and worktree disk budget; the cost is lost
-  # cross-agent dedup, which correctness for simultaneous agents is worth. Subpackage
+  # cross-agent dedup, which correctness for simultaneous agents is worth it. Subpackage
   # node_modules are already per-container (tmpfs shadows).
   $nodeModulesVolume = "agent-nm-$Agent-$projectSlug"
   # Per-container worktrees volume. Holds the git worktrees AND the pnpm store under
@@ -542,7 +542,7 @@ if (-not $Volatile -and $containerExists) {
 #     agent-{nm,wt}-<container>;
 #   * non-dev folder ($mountWorkspaceVolumes=$false) -> NO mount at all.
 # This covers three upgrade/mismatch paths:
-#   * predates the per-project .worktrees volume entirely (no .worktrees mount) — it still
+  #   * predates the .worktrees volume entirely (no .worktrees mount) — it still
 #     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
 #     installs never hardlink even after the image is rebuilt;
 #   * predates the per-agent volume RENAME — it mounts the old project-keyed

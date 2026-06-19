@@ -5,7 +5,10 @@ Generic follow-up from the PR #59 review (per-agent volume isolation). Parked in
 never over-deletes) and the proper fix expands `prune-volumes.{sh,ps1}` in both languages
 plus re-validation, while the branch is defendable as-is.
 
-Review thread: https://github.com/Roubtec/powbox/pull/59#discussion_r3437981137 (codex, P3).
+Review threads:
+- https://github.com/Roubtec/powbox/pull/59#discussion_r3437981137 (codex, P3) — over-protection.
+- https://github.com/Roubtec/powbox/pull/59#discussion_r3439823388 (codex, P3) — under-protection of
+  legacy mounts (re-raised on the follow-up review round; same mount-derivation fix resolves both).
 
 ## Background — the gap
 
@@ -27,8 +30,19 @@ prior launch when the folder still had a `package.json`) is marked "expected" an
 **never listed as an orphan**, even though Docker could remove it and the current launcher
 would not mount it. Net effect: a slice of stale disk usage that prune silently misses.
 
-This is the conservative direction (prune never removes a volume that might be in use), which
-is why it is P3 and deferrable — but it does undercount reclaimable space in the above paths.
+The **inverse** gap exists too, for containers created **before the per-agent volume rename**
+(when nm/wt were keyed per *project*): their actual mounts are still `agent-nm-<project>` /
+`agent-wt-<project>`, but the name-constructed expected set now only protects the new
+`agent-{nm,wt}-<container>` names. So prune marks those genuinely-mounted legacy volumes as
+orphan candidates: `--dry-run`/`-WhatIf` reports them (a misleading preview), and a confirmed
+run tries to remove them and Docker refuses ("volume in use") — harmless but noisy. This bites
+hardest for a *running* pre-rename container, which the launcher only warns about and cannot
+migrate; a *stopped* one is recreated (migrated) on its next launch by the name-comparison
+guard, but until then prune still mislists its legacy mounts.
+
+Both directions are the conservative failure mode (prune never removes a volume that is in use,
+and Docker is the backstop), which is why this is P3 and deferrable — but the first undercounts
+reclaimable space and the second produces inaccurate previews / failed-then-skipped removals.
 
 ## Goal
 
@@ -63,6 +77,9 @@ containers created after the label ships, so A is preferred.
 - A dir-mounted container relaunched without `package.json` (no `nm`/`wt` mounts) leaves any
   leftover `agent-nm-<name>`/`agent-wt-<name>` listed as orphans by `--dry-run`/`-WhatIf`.
 - A normal dir-mounted JS container's mounted `nm`/`wt` volumes are still protected (not listed).
+- A pre-rename container still mounting `agent-nm-<project>`/`agent-wt-<project>` has those
+  legacy volumes **protected** (not listed by `--dry-run`/`-WhatIf`) while it exists, since it
+  actually mounts them — eliminating the misleading preview / failed-removal noise.
 - A self-hosted container protects only its `agent-ws-*`/`agent-podman-*`, not phantom `nm`/`wt`.
 - `agent-prune`'s removed-container preview still reports the to-be-removed containers' volumes
   as orphans (no regression in the `POWBOX_PRUNE_REMOVED_CONTAINERS` path).

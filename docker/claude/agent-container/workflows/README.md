@@ -159,7 +159,7 @@ publish stage gated on flags. That is naturally a workflow. Because workflows
 have no mid-run input, this is structurally the skill's `hands-off` mode:
 low-stakes ambiguity is decided best-effort and recorded; high-stakes ambiguity
 is left open and reported. (A batch-of-PRs front end — today's
-`address-reviews-worktrees` — would be one workflow run per PR.)
+`address-reviews` — would be one workflow run per PR.)
 
 ### Not converted: `rebase-stack`
 

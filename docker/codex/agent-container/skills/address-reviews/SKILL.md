@@ -1,11 +1,13 @@
 ---
-name: address-reviews-worktrees
+name: address-reviews
 description: Address maintainer-vetted review feedback on several pull requests in parallel, one git worktree per entry — supply the batch as PR numbers and/or local branch names; each worktree checks out the chosen branch (your local ref when you name a branch, the PR head when you give a number) and runs the address-review skill in hands-off mode, with push/ping flags passed through, so many PRs are fixed concurrently without cross-talk. Trigger when the user asks to address reviews on multiple PRs or branches at once, fix review comments across many PRs in parallel, or fan out review-addressing with worktrees. Do not trigger for a single PR (use address-review), for implementing new task files (use address-tasks-worktrees), or for rebasing a stack (use rebase-stack).
 ---
 
 Address the review feedback on **several pull requests at once**, fanning each PR out into its own git worktree so they progress concurrently without polluting each other.
 
 **Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude] [ping-copilot] [ping-contributing]`
+
+Explicit Codex invocation uses `$address-reviews`; natural-language equivalents are fine.
 
 This skill is the parallel batch front-end for `address-review`.
 It does **not** re-implement review-addressing — it sets up one isolated worktree per entry and uses `address-review`'s delegated fix and publish procedures, with a fresh orchestrator-owned reviewer between them.
@@ -58,6 +60,20 @@ Two subagents in two worktrees never corrupt each other, so they run **concurren
 The only serialization rule that survives: agents sharing *one* worktree must run one-at-a-time. Across distinct PR head branches, same-phase agents may run concurrently.
 See `address-tasks-worktrees` → "Why worktrees change the rules" and "Durability & host isolation" for the full model.
 The durability rule here is **commit early, but do not push before `address-review`'s reviewed publication step**: committed objects and branch refs survive in the shared `.git`, while premature pushes would publish unreviewed fixes and break no-push runs.
+
+## Codex subagent execution
+
+Use the subagent interface exposed in the current session.
+In tool-enabled sessions this is typically available through tools such as `multi_agent_v1.spawn_agent`, `multi_agent_v1.wait_agent`, and `multi_agent_v1.close_agent`; use those names only when present in the current tool listing.
+Spawn fixers and publishers as `worker` agents and reviewers as `explorer` agents.
+Pass self-contained prompts; do not fork context, and omit model overrides unless the user asks for one.
+After each same-phase batch returns, close those agent threads before advancing the phase.
+No custom agent personas (`~/.codex/agents/*.toml`) are required.
+
+Parallelism is allowed only across subagents assigned distinct worktree paths.
+Within one PR's worktree, wait for and close the fixer before spawning its fresh reviewer, and wait for and close the reviewer before any fix-up or publisher.
+Never continue a fixer thread for review.
+If the session exposes no subagent capability, stop and tell the user this workflow requires Codex multi-agent support.
 
 ## Session Bootstrap (run once, in the main working tree, before any worktree)
 
@@ -123,42 +139,42 @@ The absolute worktree path, the checked-out branch name, the **paired PR number*
 
 ## Per-PR phased subagents
 
-Claude subagents cannot be assumed to spawn their own subagents, so the top-level orchestrator owns every phase.
-For each reviewer round, fan out one same-phase `general-purpose` `Agent` per distinct worktree concurrently, wait for all to return, then advance the phase.
+Codex subagents must not be assumed to spawn their own subagents, so the top-level orchestrator owns every phase.
+For each reviewer round, fan out one same-phase subagent per distinct worktree in one tool-call batch, wait for all to return, close them, then advance the phase.
 
 Every prompt starts with:
 
 - **WORKTREE CONTRACT first:** "Your worktree is `<absolute path>`. Before anything else, `cd` into it and verify `git rev-parse --show-toplevel` prints exactly that path; if not, STOP and report. Do all work inside this worktree only — never `cd` to the repo root or touch sibling worktrees. Other agents are working in other worktrees concurrently; stay in yours."
 - **The assignment:** "You are on branch `<branch>`, paired with PR #N. Confirm the branch with `git branch --show-current`. PR #N is the **authoritative pairing** — treat the supplied number as correct and do not re-derive it. This branch may be a local, possibly-rebased copy of the PR head, so its SHAs can differ from `origin`'s; that is expected, not a wrong-PR signal." (For a branch entry, add: "This is *your local ref*; work it exactly as it stands — do not reset or pull from `origin`.")
 - **Skill path:** pass the absolute path to the seeded `address-review/SKILL.md`; do not make the subagent search across sibling worktrees or guess a config directory.
-- **Repo context:** "Read `AGENTS.md` / `CLAUDE.md` first for conventions."
+- **Repo context:** "Read the repository's agent-context files (`AGENTS.md`, `CLAUDE.md`, or `.github/CLAUDE.md`) first for conventions."
 - **Validation in a worktree:** "If verifying fixes needs a build, install dependencies in this worktree first — cheap on the hardlinked pnpm store. Point Playwright at `/usr/bin/chromium` if used. App-server / `next build` e2e may not run from a nested worktree path; defer it per `address-tasks-worktrees`'s app-server caveat and note that in your report rather than forcing it."
-- **No shared task-tracker:** "Do not use the `TaskCreate`/`TaskUpdate`/`TaskList` tools — their entries leak into the orchestrator's view."
+- **No shared plan tracker:** "Do not write to any shared task or plan tracker; child entries leak into the orchestrator's view."
 
 ### Phase A — initial fix
 
-Prompt one agent per PR to invoke `/address-review #N hands-off delegated-fix <optional rebase target>` (or read the supplied absolute skill path and follow that mode).
+Spawn one `worker` per PR and prompt it to invoke `$address-review #N hands-off delegated-fix <optional rebase target>` (or read the supplied absolute skill path and follow that mode).
 It must make no PR mutations and return the complete review packet defined by `address-review`.
 If it reports a successful no-op because no actionable review items remain, mark that entry complete without a reviewer or publisher.
 
 ### Phase B — fresh review
 
-Only after all Phase-A agents return, spawn one fresh reviewer per PR.
+Only after all Phase-A workers return and are closed, spawn one fresh `explorer` reviewer per PR.
 Give it the verbatim review items and proposed dispositions from that PR's packet, its effective review base, branch, and worktree path — never the fixer's reasoning.
 Use `address-review` step 6's reviewer contract.
 It edits nothing and reports Pass or numbered Issues.
 
 ### Fix-up rounds
 
-For each failed entry, spawn a fresh fix-up agent with that PR's packet and the reviewer's findings verbatim.
+For each failed entry, spawn a fresh `worker` fix-up agent with that PR's packet and the reviewer's findings verbatim.
 It works only in that worktree, addresses each finding directly, runs validation, commits everything, leaves a clean worktree, and returns an updated packet.
-Then spawn a fresh reviewer.
+Wait for and close the worker, then spawn a fresh `explorer` reviewer.
 Allow at most 3 reviewer rounds total; an entry still failing after round 3 is blocked and must not publish.
 
 ### Publication
 
-For each passing entry on a `push`/`ping-*` run, spawn a fresh publisher with its final packet and Pass verdict.
-Tell it to invoke `/address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?> <ping-copilot?> <ping-contributing?>`.
+For each passing entry on a `push`/`ping-*` run, spawn a fresh `worker` publisher with its final packet and Pass verdict.
+Tell it to invoke `$address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?> <ping-copilot?> <ping-contributing?>`.
 It edits no code and returns the full final report, including per-thread dispositions, push/ping outcome, and blockers.
 
 Do **not** give any subagent another PR's context — strict per-PR isolation.
@@ -200,7 +216,7 @@ Aggregate the per-PR `address-review` reports into one batch summary:
 - [ ] Session Bootstrap ran: worktree roots verified container-local, this container's orphans pruned, GitHub/remote access confirmed, `git fetch origin` done.
 - [ ] Batch parsed into entries (each classified PR-number vs branch-name); pass-through flag set (`push`/`ping-*`, incl. `ping-contributing`) captured; `hands-off` force-injected into every `address-review` invocation and equivalent unattended guidance given to reviewers/fix-ups; aliases for one PR de-duplicated and same-head PRs serialized.
 - [ ] Each entry resolved to a `(branch, PR#)` pair and checked out on the right ref — **branch entries use the local ref, never `origin`**; PR-number entries prefer a same-named local branch, else `origin` head; worktrees under `.worktrees/$CONTAINER_NAME/`; un-setup-able / PR-less entries skipped-and-recorded.
-- [ ] Per-PR phases ran in order: `/address-review ... delegated-fix`, fresh external review, fresh fix-up/re-review as needed (3 reviewer rounds max), then `/address-review ... publish-reviewed` only for passing push runs; distinct heads fanned out concurrently but throttled; same-head entries serialized.
+- [ ] Per-PR phases ran in order: `$address-review ... delegated-fix`, fresh `explorer` review, fresh `worker` fix-up/re-review as needed (3 reviewer rounds max), then `$address-review ... publish-reviewed` only for passing push runs; distinct heads fanned out concurrently but throttled; same-head entries serialized.
 - [ ] No new PR head lineage created, no `gh pr create`, no restack performed.
 - [ ] Clean worktrees removed after each subagent returns; dirty/in-progress worktrees preserved and reported; **no PR branch deleted**; main checkout restored to its starting checkout mode after any temporary detach.
 - [ ] Batch summary aggregates outcomes, hands-off blockers (prominently), push-backs, no-push disposition maps, throttling notes, and the `rebase-stack` follow-up pointer.

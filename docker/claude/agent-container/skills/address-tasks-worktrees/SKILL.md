@@ -34,7 +34,7 @@ Crucially, the **common `.git` is NOT shadowed**: commit objects and branch refs
 
 ## Session Bootstrap (run once, before any worktree)
 
-Do this in the **main working tree** before creating worktrees. The mechanics are an image-baked helper shared by every worktree consumer (this skill, `address-reviews-worktrees`, and the Claude dynamic workflows), so they can never drift apart:
+Do this in the **main working tree** before creating worktrees. The mechanics are an image-baked helper shared by every worktree consumer (this skill, `address-reviews`, and the Claude dynamic workflows), so they can never drift apart:
 
 ```bash
 wt-bootstrap   # idempotent; prints one JSON object; exit 1 on a blocker

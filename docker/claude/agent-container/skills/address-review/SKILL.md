@@ -58,7 +58,7 @@ Two top-level subagent roles, both spawned via the `Agent` tool with `subagent_t
 ### Delegated modes for the worktree orchestrator
 
 Claude subagents must not be assumed to spawn nested subagents.
-`address-reviews-worktrees` therefore uses this skill in two internal modes; these are orchestrator controls, not normal user flags:
+`address-reviews` therefore uses this skill in two internal modes; these are orchestrator controls, not normal user flags:
 
 - **`delegated-fix`** — run steps 0–5 directly in the assigned worktree, without spawning helpers, then stop before review/publication and return a complete review packet: PR/head metadata, starting/final SHAs, every item verbatim with stable refs and proposed disposition, validation run, and any blocker.
 - **`publish-reviewed`** — receive that packet plus a fresh external reviewer's Pass verdict, verify the packet still matches the clean committed `HEAD`, then run only step 7 and return step 8's report. Refuse to edit code, re-triage, or publish without the packet and Pass verdict.

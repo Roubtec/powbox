@@ -86,7 +86,12 @@ while :; do
 	fi
 	if [ -f "$dir/package.json" ]; then
 		[ -z "$ws_pkg" ] && ws_pkg="$dir"
-		if grep -Eq '"workspaces"[[:space:]]*:' "$dir/package.json" 2>/dev/null; then
+		# A real npm/yarn workspace root has top-level "workspaces" as an array, or
+		# the object form {"workspaces":{"packages":[...]}}. Parse with jq (a base-image
+		# dependency the entrypoint's detect-shadows.sh already uses) instead of grepping
+		# for the key, so a dependency or nested key literally named "workspaces" cannot
+		# false-positive the root choice.
+		if jq -e '(.workspaces | type) == "array" or ((.workspaces | type) == "object" and (.workspaces.packages | type) == "array")' "$dir/package.json" >/dev/null 2>&1; then
 			ws_npm="$dir"
 		fi
 	fi

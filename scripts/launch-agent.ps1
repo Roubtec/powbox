@@ -885,8 +885,9 @@ if ($Isolated -or $mountWorkspaceVolumes) {
 # -Reclone is NOT one of them on purpose - it is a one-shot launcher action (the prep
 # step empties the volume so the entrypoint clones fresh), so a reused container
 # never re-wipes the agent's work on a later restart. In dir-mounted mode the root
-# node_modules and .worktrees are separate per-project named volumes mounted over the
-# bind mount; in self-hosted mode they are ordinary subdirs of the one workspace
+# node_modules and .worktrees are separate per-container named volumes mounted over the
+# bind mount — but only for a project that uses them ($mountWorkspaceVolumes); a non-dev
+# folder gets neither. In self-hosted mode they are ordinary subdirs of the one workspace
 # volume (mounted via compose.selfhosted.yml), so no extra -v args are added here.
 $workspaceVolArgs = @()
 if ($Isolated) {

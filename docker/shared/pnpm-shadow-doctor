@@ -26,7 +26,7 @@
 #   (no args)        Detect only. Prints findings; exits 1 if the trap is present,
 #                    0 if healthy — so it is usable as a guard in scripts.
 #   --fix            Repair: remove the stale workspace-state file and run
-#                    `pnpm install --frozen-lockfile` to relink the shadows.
+#                    `pnpm install --frozen-lockfile --prefer-offline` to relink the shadows.
 #   --quiet          Suppress the "healthy" message (still prints when a trap is
 #                    found or repaired).
 #   workspace-dir    Project root to inspect; defaults to walking up from $PWD to
@@ -63,30 +63,40 @@ if ! start="$(cd "$start" 2>/dev/null && pwd -P)"; then
 	echo "pnpm-shadow-doctor: cannot resolve directory '${START_DIR:-$PWD}'." >&2
 	exit 2
 fi
-# Walk all the way up to / collecting two candidates, then choose — do NOT break on the
-# first hit. Going upward: keep overwriting ws_ws on every pnpm-workspace.yaml so it ends
-# as the HIGHEST (outermost) one — the true monorepo root whose root node_modules holds
-# the shared workspace-state cache; record ws_pkg only on the FIRST (nearest) package.json
-# so it stays the nearest. Then prefer the highest pnpm-workspace.yaml, falling back to the
-# nearest package.json when there is none. (Breaking on the first pnpm-workspace.yaml would
-# wrongly pick the nearest, and overwriting ws on every package.json would wrongly pick the
-# highest package.json — both contradicted the intent for nested repos.)
+# Walk all the way up to / collecting candidates, then choose — do NOT break on the first
+# hit. Going upward: keep overwriting ws_ws on every pnpm-workspace.yaml so it ends as the
+# HIGHEST (outermost) one — the true pnpm monorepo root whose root node_modules holds the
+# shared workspace-state cache; likewise keep the HIGHEST package.json that declares a
+# "workspaces" field as ws_npm — the npm/yarn-style monorepo root, so that running from a
+# subpackage of such a repo still resolves to the declaring root (whose root node_modules
+# holds the state) rather than the subpackage itself (which has no .pnpm/state and would
+# falsely scan clean); record ws_pkg only on the FIRST (nearest) package.json so it stays
+# the nearest single-package fallback. Then prefer the highest pnpm-workspace.yaml, else the
+# highest workspaces-declaring package.json, else the nearest package.json. (Breaking on the
+# first hit, or treating every package.json as a root, would wrongly resolve a subpackage
+# instead of the monorepo root for nested repos.)
 ws=""
 ws_ws=""
+ws_npm=""
 ws_pkg=""
 dir="$start"
 while :; do
 	if [ -f "$dir/pnpm-workspace.yaml" ]; then
 		ws_ws="$dir"
 	fi
-	if [ -z "$ws_pkg" ] && [ -f "$dir/package.json" ]; then
-		ws_pkg="$dir"
+	if [ -f "$dir/package.json" ]; then
+		[ -z "$ws_pkg" ] && ws_pkg="$dir"
+		if grep -Eq '"workspaces"[[:space:]]*:' "$dir/package.json" 2>/dev/null; then
+			ws_npm="$dir"
+		fi
 	fi
 	[ "$dir" = "/" ] && break
 	dir="$(dirname "$dir")"
 done
 if [ -n "$ws_ws" ]; then
 	ws="$ws_ws"
+elif [ -n "$ws_npm" ]; then
+	ws="$ws_npm"
 else
 	ws="$ws_pkg"
 fi
@@ -123,19 +133,33 @@ detect_empty_shadows() {
 
 detect_empty_shadows
 
-# The trap requires THREE things together: an empty subpackage shadow, a populated
-# root virtual store (.pnpm), AND the workspace-state cache file itself
-# (node_modules/.pnpm-workspace-state-v1.json). That file is what actually makes
-# pnpm declare "Already up to date" and skip relinking — so two non-trap states must
-# NOT be flagged:
+# The empty-shadow trap proper requires THREE things together: an empty subpackage
+# shadow, a populated root virtual store (.pnpm), AND the workspace-state cache file
+# (node_modules/.pnpm-workspace-state-v1.json). That cache file is what actually makes
+# pnpm declare "Already up to date" and skip relinking.
+#
+# In DETECT mode (no --fix) we require all three, so two non-trap states are NOT flagged:
 #   * a cold/first-lifecycle workspace (no .pnpm yet) is just uninstalled, not
 #     trapped — a plain install fixes it; and
 #   * immediately after the entrypoint self-heal (or a prior --fix) removed the
 #     workspace-state file, the shadows are still empty and .pnpm is still populated,
 #     but the cache that causes the short-circuit is GONE, so the next `pnpm install`
-#     WILL relink. Requiring the workspace-state file to be present avoids a false
-#     alarm (especially under --quiet) in exactly the window the self-heal sets up.
-if [ "${#empty_shadows[@]}" -eq 0 ] || [ ! -d "$root_nm/.pnpm" ] || [ ! -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
+#     WILL relink. Requiring the cache file present avoids a false alarm (especially
+#     under --quiet) in exactly the window the self-heal sets up.
+#
+# In --fix mode we DROP the workspace-state-file requirement. The entrypoint self-heal
+# removes that file at every container start, so a post-restart `pnpm-shadow-doctor --fix`
+# (run before any install) would otherwise see it absent, report OK, and exit WITHOUT
+# relinking — leaving the empty shadows broken (`pnpm test`/`tsc` fail) until a manual
+# install. When the shadows are empty and the root store is populated, --fix must perform
+# the relinking install regardless of whether the cache file is still present.
+needs_repair=1
+if [ "${#empty_shadows[@]}" -eq 0 ] || [ ! -d "$root_nm/.pnpm" ]; then
+	needs_repair=0
+elif [ "$FIX" != 1 ] && [ ! -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
+	needs_repair=0
+fi
+if [ "$needs_repair" -eq 0 ]; then
 	note "pnpm-shadow-doctor: OK — no empty-shadow trap in $ws."
 	exit 0
 fi
@@ -145,13 +169,18 @@ echo "  ${#empty_shadows[@]} subpackage node_modules are empty tmpfs shadows whi
 for p in "${empty_shadows[@]}"; do
 	echo "    - ${p#"$ws"/}" >&2
 done
-echo "  pnpm will report 'Already up to date' and refuse to relink them until the" >&2
-echo "  workspace-state cache is removed." >&2
+if [ -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
+	echo "  pnpm will report 'Already up to date' and refuse to relink them until the" >&2
+	echo "  workspace-state cache is removed." >&2
+else
+	echo "  The workspace-state cache is already gone (entrypoint self-heal), so a real" >&2
+	echo "  'pnpm install' will relink them." >&2
+fi
 
 if [ "$FIX" != 1 ]; then
 	echo >&2
 	echo "  Repair with:  pnpm-shadow-doctor --fix" >&2
-	echo "  (equivalently: rm -f node_modules/.pnpm-workspace-state-v1.json && pnpm install --frozen-lockfile)" >&2
+	echo "  (equivalently: rm -f node_modules/.pnpm-workspace-state-v1.json && pnpm install --frozen-lockfile --prefer-offline)" >&2
 	exit 1
 fi
 

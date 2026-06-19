@@ -96,8 +96,8 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
 2. **Relocate the pnpm store into that volume**:
    `store-dir = /workspace/<proj>/.worktrees/.pnpm-store`. Because the store and
    every `.worktrees/<task>/node_modules` are now under the one `.worktrees`
-   mount, pnpm hardlinks. Set per-project at startup (the path depends on the
-   project), e.g. the launcher passes `PNPM_STORE_DIR` and the entrypoint runs
+   mount, pnpm hardlinks. Set at startup (the path is project-specific, inside this
+   container's own `.worktrees` volume), e.g. the launcher passes `PNPM_STORE_DIR` and the entrypoint runs
    `pnpm config --global set store-dir "$PNPM_STORE_DIR"` (guarded, never fatal).
 3. **Stop forcing copy**: set `package-import-method=auto` (Dockerfile).
 4. **Retire the shared `agent-pnpm-store` volume.** The store is now per-container
@@ -119,7 +119,7 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
   425 MB–1.1 GB copies.
 - Concurrency becomes disk-bound (effectively unlimited for normal use); the
   2 GB / `ENOSPC` cliff for worktrees is gone.
-- Store persists per project; root install still copies once (separate mount) —
+- Store persists per container; root install still copies once (separate mount) —
   fine, it is a one-time, persisted cost on the main checkout.
 
 ### Sub-decision: worktree metadata coherence (`A-simple`, recommended)
@@ -157,8 +157,8 @@ the "disposable worktree" model.
 ### Files Option A touches
 `scripts/launch-agent.sh` + `scripts/launch-agent.ps1` (new volume + store env),
 `compose.shared.yml` (drop `pnpm-store`), `docker/base/Dockerfile`
-(`package-import-method=auto`), `docker/shared/entrypoint-core.sh` (set per-project
-store-dir), `commands/prune-volumes.{sh,ps1}` (prune `agent-wt-*`), README +
+(`package-import-method=auto`), `docker/shared/entrypoint-core.sh` (set the
+project-specific store-dir at startup), `commands/prune-volumes.{sh,ps1}` (prune `agent-wt-*`), README +
 the worktrees/enable-worktrees skills (tmpfs-sizing / `ENOSPC` guidance is
 superseded), plus a smoke-test assertion that a worktree install hardlinks.
 

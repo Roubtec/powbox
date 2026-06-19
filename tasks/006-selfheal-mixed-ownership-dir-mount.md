@@ -23,6 +23,7 @@ Two coordinated changes in `docker/shared/`:
 
 1. **Entrypoint detection (`entrypoint-core.sh`).** In addition to the root-level write probe, trigger the helper when a workspace **contains** any uid-0 entry. Keep it cheap and short-circuiting — e.g. `find "$_dir" -uid 0 -print -quit` — and prune the mounted volume paths the same way the helper does so the scan does not walk `node_modules`/`.worktrees`. Add such workspaces to the existing `_unwritable` handoff list. Preserve the self-hosted / writer-role / no-sudo exemptions.
 2. **Helper (`fix-workspace-perms.sh`).** Allow it to act on a workspace whose root dir is node-owned but which contains uid-0 entries, while **keeping every existing safety property**: realpath containment to a `/workspace/<slug>` child; chown **only** `find -uid 0` entries (never another host uid — that scoping is exactly what makes this safe, since root keeps host-side access via DAC bypass); prune the separately-mounted node-owned `node_modules`/`.worktrees` mountpoints (mountinfo + `-xdev` backstop); `-h` for symlinks; idempotent. Consider whether the existing "root-owned root → chown whole tree" path and the new "node-owned root → chown uid-0 entries" path collapse into a single `find -uid 0` re-own (they likely do); simplify if so.
+3. **Smoke-test coverage (REQUIRED — do not skip).** Task 005 ships first and builds the reusable dir-mount smoke harness; this task **must** extend that harness with the mixed-ownership fixture variant (a node-owned repo root plus a nested `root`-owned tracked file and a `.git/objects/<xx>` dir chowned to root) and assert the entrypoint re-owns them and a `node` git write succeeds. **006 is not complete until this smoke stage exists and is green**, and until reverting 006's logic makes it fail. Wire it into the same `commands/smoke-test.{sh,ps1}` stage / `POWBOX_SMOKE_SKIP_*` flag 005 established (see task 005).
 
 ## Acceptance criteria
 
@@ -31,7 +32,8 @@ Two coordinated changes in `docker/shared/`:
 - A workspace containing files owned by a **non-root, non-node** host uid leaves those files untouched (only uid-0 entries re-owned), with the existing warning preserved.
 - The mounted `node_modules`/`.worktrees` volumes are never descended into or re-owned.
 - Negligible startup cost for an already-clean (node-owned) workspace beyond a short-circuiting `find -uid 0 -print -quit`.
-- `shellcheck` / `shfmt` clean.
+- **The mixed-ownership smoke stage (scope item 3) is added to task 005's harness and passes against the post-006 image; reverting 006's detection/chown makes it fail** with a clear EACCES-style message. This task's PR is not mergeable without it.
+- `shellcheck` / `shfmt` clean (including the new smoke stage).
 
 ## Context / references
 
@@ -49,4 +51,4 @@ Reviewer confirms: the detection genuinely catches nested uid-0 entries (not jus
 
 ## Status
 
-**Not started.** Pairs with task [005](005-dir-mount-ownership-smoke-stage.md) (smoke guard) and follows PR #59, which rewrites `entrypoint-core.sh` — branch off the post-#59 `main` to avoid conflicts.
+**Not started.** Sequenced **after** task [005](005-dir-mount-ownership-smoke-stage.md), which builds the reusable smoke harness this task extends (maintainer decision, PR #59 session). 006 carries the obligation to add its own mixed-ownership smoke stage to that harness (scope item 3 / acceptance) — it is not done until that guard is green. Follows PR #59, which rewrites `entrypoint-core.sh`, so branch off the post-#59 `main` to avoid conflicts.

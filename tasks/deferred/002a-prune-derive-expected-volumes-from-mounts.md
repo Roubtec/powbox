@@ -5,6 +5,8 @@ Generic follow-up from the PR #59 review (per-agent volume isolation). Parked in
 Review threads:
 - https://github.com/Roubtec/powbox/pull/59#discussion_r3437981137 (codex, P3) — over-protection.
 - https://github.com/Roubtec/powbox/pull/59#discussion_r3439823388 (codex, P3) — under-protection of legacy mounts (re-raised on the follow-up review round; same mount-derivation fix resolves both).
+- https://github.com/Roubtec/powbox/pull/59#discussion_r3443238126 (copilot) — `prune-volumes.sh`: independently raised the same gap — non-mounting (`MOUNT_WORKSPACE_VOLUMES` off) and self-hosted containers leave leftover `agent-nm`/`agent-wt` volumes unpruned (over-protection), and legacy project-keyed mounts are mis-handled; suggests the same `docker inspect .Mounts` derivation (approach A).
+- https://github.com/Roubtec/powbox/pull/59#discussion_r3443238160 (copilot) — `prune-volumes.ps1`: PowerShell parity of the same concern (stale `nm`/`wt` permanently "protected" and never pruned; self-hosted containers use only `agent-ws-*`).
 
 ## Background — the gap
 

@@ -197,12 +197,13 @@ function shq(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-// Map a comment author login to the known reviewer bot it represents, or null
-// for a human / unrecognized bot. `ping-contributing` uses this to attribute a
-// round's new findings to specific bots so it can re-ping only the ones still
-// adding value. Substring match keeps it robust to the exact app login
-// (e.g. `chatgpt-codex-connector` -> codex, `Copilot` -> copilot).
-function botKindOf(login) {
+// Map a bot comment author login to the known reviewer bot it represents, or
+// null for a human / unrecognized bot. `ping-contributing` uses this to
+// attribute a round's new findings to specific bots so it can re-ping only the
+// ones still adding value. Substring match keeps it robust to the exact app
+// login (e.g. `chatgpt-codex-connector` -> codex, `Copilot` -> copilot).
+function botKindOf(login, authorIsBot) {
+  if (!authorIsBot) return null;
   const s = String(login || "").toLowerCase();
   if (s.includes("codex")) return "codex";
   if (s.includes("copilot")) return "copilot";
@@ -214,7 +215,7 @@ function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 Request (lenient parsing — commas, &, free word order): ${JSON.stringify(input)}
-Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
+Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`, \`ping-contributing\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
 
 Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 1. Working tree clean (\`git status --porcelain\` empty). Do not auto-stash.
@@ -487,22 +488,23 @@ const knownNoNewCommits =
 // only re-raised a deferred item or re-argued a lost push-back contributed no
 // new finding (newFinding=false) and drops out of the ping set — which is how a
 // multi-bot review->address loop winds down reviewer-by-reviewer.
+const reviewingBots = new Set();
 const contributingBots = new Set();
 for (const d of dispositions.dispositions) {
-  if (d && d.newFinding) {
-    const bot = botKindOf(d.author);
-    if (bot) contributingBots.add(bot);
-  }
+  const bot = botKindOf(d && d.author, d && d.authorIsBot);
+  if (!bot) continue;
+  reviewingBots.add(bot);
+  if (d.newFinding) contributingBots.add(bot);
 }
 // Candidate set. Without the modifier it is exactly the bots the user named.
 // With the modifier AND at least one name, it is that named set (then filtered
-// to contributors below); with the modifier supplied ALONE, it falls back to
-// every known bot — so the contributing filter alone decides who gets pinged.
+// to contributors below); with the modifier supplied ALONE, it falls back to the
+// known bots that reviewed this round.
 const anyExplicitPing = flags.pingCodex || flags.pingClaude || flags.pingCopilot;
 const candidate = {
-  codex: flags.pingContributing ? (anyExplicitPing ? flags.pingCodex : true) : flags.pingCodex,
-  claude: flags.pingContributing ? (anyExplicitPing ? flags.pingClaude : true) : flags.pingClaude,
-  copilot: flags.pingContributing ? (anyExplicitPing ? flags.pingCopilot : true) : flags.pingCopilot,
+  codex: flags.pingContributing ? (anyExplicitPing ? flags.pingCodex : reviewingBots.has("codex")) : flags.pingCodex,
+  claude: flags.pingContributing ? (anyExplicitPing ? flags.pingClaude : reviewingBots.has("claude")) : flags.pingClaude,
+  copilot: flags.pingContributing ? (anyExplicitPing ? flags.pingCopilot : reviewingBots.has("copilot")) : flags.pingCopilot,
 };
 // When the modifier is off, `contributes` is always true, so the per-bot ping
 // reduces exactly to the prior `named && !knownNoNewCommits` behavior.
@@ -544,6 +546,7 @@ return {
   pr: packet.pr,
   rounds,
   flags: publishFlags,
+  reviewingBots: [...reviewingBots],
   contributingBots: [...contributingBots],
   dispositions: dispositions.dispositions,
   proactiveFixes: dispositions.proactiveFixes,

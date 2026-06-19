@@ -1,6 +1,6 @@
 ---
 name: address-tasks
-description: Execute a batch of pre-planned task files in parallel using one git worktree per task — schedule independent tasks concurrently, run a sequential implement→review→fix loop inside each task's isolated worktree, open PRs, then create an unpushed local review stack without rewriting the PR branches. Trigger when the user asks to address tasks in parallel, work a task batch with worktrees, or fan out implementation across independent tasks. Do not trigger for one-off coding requests, for planning new tasks, or when strictly sequential single-branch execution is wanted (use `address-tasks-serialized` for that).
+description: Execute a batch of pre-planned task files in parallel using one git worktree per task — schedule independent tasks concurrently, run a sequential implement→review→fix loop inside each task's isolated worktree, open PRs, then create an unpushed local review stack without rewriting the PR branches. This is the default task-batch executor. Trigger when the user asks to address tasks, work through a task batch, kick off implementation of planned work, process a folder of task files, or fan out implementation across independent tasks. Do not trigger for one-off coding requests, for planning new tasks, or when strictly sequential single-branch execution is explicitly wanted (use `address-tasks-serialized` for that).
 ---
 
 Implement a set of pre-planned task files using a **parallel, worktree-isolated** delegated subagent workflow.

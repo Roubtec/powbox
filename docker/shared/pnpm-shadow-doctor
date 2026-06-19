@@ -90,18 +90,26 @@ root_nm="$ws/node_modules"
 # entrypoint uses, then keep only real node_modules paths (drop any non-node_modules
 # .powbox.yml custom shadows). A path is "trapped" when it is an EMPTY mountpoint
 # (the tmpfs shadow was never relinked). Worktree node_modules are real dirs on the
-# .worktrees volume, not mountpoints, so they never match.
-empty_shadows=()
-while IFS= read -r p; do
-	[ -z "$p" ] && continue
-	case "$p" in
-	*/node_modules) ;;
-	*) continue ;;
-	esac
-	if mountpoint -q "$p" 2>/dev/null && [ -z "$(ls -A "$p" 2>/dev/null)" ]; then
-		empty_shadows+=("$p")
-	fi
-done < <(detect-shadows.sh "$ws" 2>/dev/null || true)
+# .worktrees volume, not mountpoints, so they never match. Defined as a function so
+# --fix can re-scan after the reinstall and confirm the shadows actually relinked:
+# pnpm reports "Already up to date" and exits 0 even when a warm cache made it skip
+# relinking, so the install's exit code alone does not prove a repair.
+detect_empty_shadows() {
+	local _p
+	empty_shadows=()
+	while IFS= read -r _p; do
+		[ -z "$_p" ] && continue
+		case "$_p" in
+		*/node_modules) ;;
+		*) continue ;;
+		esac
+		if mountpoint -q "$_p" 2>/dev/null && [ -z "$(ls -A "$_p" 2>/dev/null)" ]; then
+			empty_shadows+=("$_p")
+		fi
+	done < <(detect-shadows.sh "$ws" 2>/dev/null || true)
+}
+
+detect_empty_shadows
 
 # The trap requires BOTH an empty subpackage shadow AND a populated root virtual
 # store (the warm cache that makes pnpm skip relinking). A cold/first-lifecycle
@@ -130,10 +138,25 @@ fi
 echo >&2
 echo "pnpm-shadow-doctor: repairing — removing workspace-state cache and reinstalling..." >&2
 rm -f "$root_nm/.pnpm-workspace-state-v1.json"
-if (cd "$ws" && pnpm install --frozen-lockfile --prefer-offline); then
+if ! (cd "$ws" && pnpm install --frozen-lockfile --prefer-offline); then
+	echo "pnpm-shadow-doctor: install failed. If the lockfile is out of sync, run a plain" >&2
+	echo "  'pnpm install' in $ws; otherwise inspect the error above." >&2
+	exit 1
+fi
+
+# Re-scan rather than trusting the install's exit code: pnpm prints "Already up to
+# date" and exits 0 even when the warm cache made it skip relinking, so only a clean
+# scan proves the shadows actually came back. (Removing the workspace-state file
+# above should force a relink, but verify it instead of asserting it.)
+detect_empty_shadows
+if [ "${#empty_shadows[@]}" -eq 0 ]; then
 	echo "pnpm-shadow-doctor: repaired — subpackage shadows relinked." >&2
 	exit 0
 fi
-echo "pnpm-shadow-doctor: install failed. If the lockfile is out of sync, run a plain" >&2
-echo "  'pnpm install' in $ws; otherwise inspect the error above." >&2
+echo "pnpm-shadow-doctor: STILL TRAPPED after reinstall — ${#empty_shadows[@]} shadow(s) remain empty:" >&2
+for p in "${empty_shadows[@]}"; do
+	echo "    - ${p#"$ws"/}" >&2
+done
+echo "  The reinstall did not relink them. Try a non-frozen 'pnpm install' in $ws," >&2
+echo "  or remove $root_nm entirely and reinstall from scratch." >&2
 exit 1

@@ -208,7 +208,13 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 				for _t in "${_targets[@]}"; do
 					case "$_t" in */node_modules) _has_nm_shadow=true; break ;; esac
 				done
-				if [ "$_has_nm_shadow" = true ]; then
+				# Final gate: the ROOT node_modules must itself be a mounted volume. The
+				# invalidation is safe ONLY because that root is the PERSISTENT named
+				# volume carrying a stale workspace-state cache across lifecycles. If it is
+				# NOT a mountpoint — a legacy/misconfigured launch with no agent-nm-* volume,
+				# so $_dir/node_modules is the host checkout's own tree — dropping its cache
+				# would churn host-side pnpm state, the same harm the writer-role skip avoids.
+				if [ "$_has_nm_shadow" = true ] && mountpoint -q "$_dir/node_modules" 2>/dev/null; then
 					rm -f "$_dir/node_modules/.pnpm-workspace-state-v1.json"
 				fi
 			else

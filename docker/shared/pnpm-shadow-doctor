@@ -116,13 +116,15 @@ root_nm="$ws/node_modules"
 # Collect this workspace's subpackage node_modules via the same detector the
 # entrypoint uses, then keep only real node_modules paths (drop any non-node_modules
 # .powbox.yml custom shadows). A path is "trapped" when it is an EMPTY mountpoint
-# (the tmpfs shadow was never relinked). Worktree node_modules are real dirs on the
-# .worktrees volume, not mountpoints, so they never match. Defined as a function so
+# whose package actually expects linked entries (the tmpfs shadow was never relinked);
+# a dependency-free package legitimately stays empty and is not flagged — see below.
+# Worktree node_modules are real dirs on the .worktrees volume, not mountpoints, so
+# they never match. Defined as a function so
 # --fix can re-scan after the reinstall and confirm the shadows actually relinked:
 # pnpm reports "Already up to date" and exits 0 even when a warm cache made it skip
 # relinking, so the install's exit code alone does not prove a repair.
 detect_empty_shadows() {
-	local _p
+	local _p _pkg_json
 	empty_shadows=()
 	while IFS= read -r _p; do
 		[ -z "$_p" ] && continue
@@ -130,7 +132,24 @@ detect_empty_shadows() {
 		*/node_modules) ;;
 		*) continue ;;
 		esac
-		if mountpoint -q "$_p" 2>/dev/null && [ -z "$(ls -A "$_p" 2>/dev/null)" ]; then
+		mountpoint -q "$_p" 2>/dev/null || continue
+		[ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+		# An empty shadow is only a TRAP if the package is SUPPOSED to have linked
+		# entries. A workspace package with no installable dependencies legitimately
+		# keeps an empty node_modules even after a clean install, so flagging it would
+		# make detect mode false-alarm and --fix loop to "STILL TRAPPED" though the
+		# reinstall is a genuine no-op for that package. Treat an empty shadow as
+		# trapped only when its package.json declares at least one runtime/dev/optional
+		# dependency. peerDependencies are excluded: pnpm does not install them into
+		# node_modules, so a peer-only (or dependency-free) package is expected to stay
+		# empty. A shadow with no parseable package.json can't be claimed to expect
+		# entries either, so it is likewise not flagged.
+		_pkg_json="${_p%/node_modules}/package.json"
+		[ -f "$_pkg_json" ] || continue
+		if jq -e '
+			[ (.dependencies // {}), (.devDependencies // {}), (.optionalDependencies // {}) ]
+			| map(length) | add > 0
+		' "$_pkg_json" >/dev/null 2>&1; then
 			empty_shadows+=("$_p")
 		fi
 	done < <(detect-shadows.sh "$ws" 2>/dev/null || true)

@@ -41,7 +41,7 @@ for arg in "$@"; do
 	--fix) FIX=1 ;;
 	--quiet) QUIET=1 ;;
 	-h | --help)
-		sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	-*)
@@ -123,11 +123,19 @@ detect_empty_shadows() {
 
 detect_empty_shadows
 
-# The trap requires BOTH an empty subpackage shadow AND a populated root virtual
-# store (the warm cache that makes pnpm skip relinking). A cold/first-lifecycle
-# workspace (no .pnpm yet) is just uninstalled, not trapped — a plain install fixes
-# that, so we do not flag it.
-if [ "${#empty_shadows[@]}" -eq 0 ] || [ ! -d "$root_nm/.pnpm" ]; then
+# The trap requires THREE things together: an empty subpackage shadow, a populated
+# root virtual store (.pnpm), AND the workspace-state cache file itself
+# (node_modules/.pnpm-workspace-state-v1.json). That file is what actually makes
+# pnpm declare "Already up to date" and skip relinking — so two non-trap states must
+# NOT be flagged:
+#   * a cold/first-lifecycle workspace (no .pnpm yet) is just uninstalled, not
+#     trapped — a plain install fixes it; and
+#   * immediately after the entrypoint self-heal (or a prior --fix) removed the
+#     workspace-state file, the shadows are still empty and .pnpm is still populated,
+#     but the cache that causes the short-circuit is GONE, so the next `pnpm install`
+#     WILL relink. Requiring the workspace-state file to be present avoids a false
+#     alarm (especially under --quiet) in exactly the window the self-heal sets up.
+if [ "${#empty_shadows[@]}" -eq 0 ] || [ ! -d "$root_nm/.pnpm" ] || [ ! -f "$root_nm/.pnpm-workspace-state-v1.json" ]; then
 	note "pnpm-shadow-doctor: OK — no empty-shadow trap in $ws."
 	exit 0
 fi

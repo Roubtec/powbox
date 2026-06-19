@@ -425,7 +425,7 @@ fi
 CONTAINER_NAME="${AGENT}-${PROJECT_NAME}"
 WORKSPACE_MOUNT="/workspace/${PROJECT_NAME}"
 # pnpm store path under the workspace mount (same mount as .worktrees/<task> in
-# both modes — a per-project volume in dir-mounted mode, the one workspace volume
+# both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
 WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox

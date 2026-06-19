@@ -258,7 +258,7 @@ else {
 
 $containerName = "$Agent-$projectSlug"
 # pnpm store path under the workspace mount (same mount as .worktrees/<task> in
-# both modes — a per-project volume in dir-mounted mode, the one workspace volume
+# both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
 $worktreesStoreDir = "/workspace/$projectSlug/.worktrees/.pnpm-store"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox

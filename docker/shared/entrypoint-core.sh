@@ -53,7 +53,7 @@ fi
 # recursive chown. Self-hosted ("--isolated") mode is exempt: its workspace is a
 # container-local volume the launcher already pre-seeds node-owned. The detached image-
 # store writer (POWBOX_IMAGE_STORE_ROLE=writer) is also exempt: it mounts the workspace
-# but NOT the per-project node_modules/.worktrees volumes, so a recursive chown there
+# but NOT the per-container node_modules/.worktrees volumes, so a recursive chown there
 # would descend into the host's copies of those dirs — and it never writes the workspace
 # anyway. Best-effort: a warning is logged if the claim cannot be completed.
 if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] && command -v sudo >/dev/null 2>&1; then
@@ -219,7 +219,7 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 	unset _dir _targets _t _has_nm_shadow
 fi
 
-# Co-locate the pnpm store with the per-project worktrees volume so that
+# Co-locate the pnpm store with the per-container worktrees volume so that
 # `pnpm install` inside a worktree HARDLINKS package files from the store
 # instead of copying them.  pnpm can only hardlink when the store and the
 # target node_modules live under the SAME mount (not merely the same device),

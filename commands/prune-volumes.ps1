@@ -60,7 +60,7 @@ foreach ($containerName in $containerNames) {
 
 # Candidates: agent-nm-* / agent-wt-* / agent-ws-* / agent-podman-* plus the
 # deprecated shared store (agent-pnpm-store), which nothing mounts anymore now that
-# the store is per-project inside each agent-wt-* volume.
+# the store is per-container inside each agent-wt-* volume.
 $candidateVolumes = @(docker volume ls --format "{{.Name}}" | Where-Object { $_ -like 'agent-nm-*' -or $_ -like 'agent-wt-*' -or $_ -like 'agent-ws-*' -or $_ -like 'agent-podman-*' -or $_ -eq 'agent-pnpm-store' })
 $pruneCandidates = @($candidateVolumes | Where-Object { -not $expectedVolumes.Contains($_) })
 
@@ -89,7 +89,7 @@ $removedCount = 0
 $skippedCount = 0
 
 foreach ($volumeName in ($pruneCandidates | Sort-Object)) {
-    if ($PSCmdlet.ShouldProcess($volumeName, 'Remove orphaned per-project volume')) {
+    if ($PSCmdlet.ShouldProcess($volumeName, 'Remove orphaned agent volume')) {
         # Capture output (merging stderr) and key off the exit code: a volume still
         # referenced by an existing container (e.g. a pre-change container holding the
         # deprecated agent-pnpm-store) can't be removed yet, and docker returns non-zero.

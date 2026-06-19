@@ -59,7 +59,7 @@ The division of labor is three layers, each owning what it is best at:
 | spawned agents | judgment: implement, review, decide, write PR bodies | prompts |
 | `wt-*` helpers | mechanics: worktree lifecycle, root-safety checks, rerun-safe git plumbing | image-baked shell (`wt-bootstrap`, `wt-enter`, `wt-remove`) |
 
-The helpers are the same scripts the `*-worktrees` skills call (baked by the
+The helpers are the same scripts the worktree-running skills call (baked by the
 **agent** image from `docker/shared/`, alongside the entrypoint and hooks, so
 the ordinary `agent-update` / `build.sh agent` rebuild refreshes them in lockstep
 with the workflows and skills — no base rebuild needed), so the hard-won
@@ -88,7 +88,7 @@ things powbox needs:
    implementer's commits from its reviewer.**
 
 So `wf-address-tasks.js` manages worktrees itself, through the same `wt-*` helpers
-the `address-tasks-worktrees` skill calls: a bootstrap agent runs `wt-bootstrap`
+the `address-tasks` skill calls: a bootstrap agent runs `wt-bootstrap`
 (root-safety checks, container-scoped orphan prune, remote probe — one JSON
 result), then each task gets **one** explicit worktree under
 `.worktrees/$CONTAINER_NAME/<slug>`, resolved rerun-safely by `wt-enter`:
@@ -106,9 +106,9 @@ visible to the reviewer and publisher.
 
 ### `wf-address-tasks.js` — the fan-out implement/review loop
 
-The `address-tasks` skill's dominant constraint is that every subagent shares
+The `address-tasks-serialized` skill's dominant constraint is that every subagent shares
 the orchestrator's one working tree, which forces strict one-at-a-time
-sequencing; `address-tasks-worktrees` exists to claw parallelism back with its
+sequencing; `address-tasks` exists to claw parallelism back with its
 own worktree-per-task bootstrap. This workflow folds both into one: it runs the
 same explicit `.worktrees/$CONTAINER_NAME/<slug>` worktree-per-task model (see
 "Worktrees" above), but expresses the orchestration — dependency waves gated on
@@ -145,7 +145,7 @@ an invented divergent name, and stays held for a human. The prose skill document
 the same flow (plus the up-front "give same-kind surfaces distinct names"
 prevention) for the hand-driven path.
 
-**It does not yet fully supersede `address-tasks-worktrees`.** This conversion
+**It does not yet fully supersede `address-tasks`.** This conversion
 stops after per-task PR creation; it omits that skill's post-batch
 `review-stack/...` construction — the integration-conflict check and recommended
 merge-order artifact for batches with two or more mergeable branches. Adding
@@ -176,8 +176,8 @@ would want to call it.
 
 1. **Namespace overlap (resolved).** A workflow and a same-named skill would both
    answer one slash command, so these workflows are prefixed `wf-`
-   (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the Claude
-   `address-tasks` / `address-review` skills, which keep their names. When
+   (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the
+   same-named Claude skills (`address-tasks`, `address-review`). When
    promoting, we'd likely retire the Claude skill copies (the Codex skills stay).
 2. **Agent worktree management under the runtime (confirmed).**
    `wf-address-tasks.js` has its agents run `wt-enter` / `cd` themselves (see

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Address Tasks Worktrees"
-  short_description: "Implement task batches in parallel"
-  default_prompt: "Use $address-tasks-worktrees to implement the task files in <folder-or-glob> in parallel with worktrees."

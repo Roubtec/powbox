@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wt-bootstrap — one-shot session bootstrap for worktree-isolated parallel work.
 #
-# This is the mechanical "Session Bootstrap" shared by the *-worktrees skills
+# This is the mechanical "Session Bootstrap" shared by the worktree-running skills
 # and the Claude dynamic workflows: verify the repo's worktree roots are
 # container-local (never the host bind mount), prune THIS container's orphaned
 # worktrees, probe remote push access, and measure storage headroom. The skills

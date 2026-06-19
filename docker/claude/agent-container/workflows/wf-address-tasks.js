@@ -32,7 +32,7 @@
  *   2. A SEPARATE worktree per agent, started from the default branch, hides an
  *      implementer's commits from its reviewer.
  * So this workflow uses the same explicit worktree model as the
- * `address-tasks-worktrees` skill: each task gets ONE worktree under
+ * `address-tasks` skill: each task gets ONE worktree under
  * `.worktrees/$CONTAINER_NAME/<slug>`, created by its first implementer and
  * REUSED by that task's reviewer and every later round (so the reviewer sees the
  * commits and no agent ever tries to re-check-out a branch already checked out).
@@ -44,7 +44,7 @@
  * three image-baked helpers — `wt-bootstrap` (root-safety checks + orphan prune
  * + remote probe), `wt-enter` (rerun-safe worktree resolve/attach/create), and
  * `wt-remove` (guarded cleanup) — the same single source of truth the
- * *-worktrees skills call. Agents here invoke those scripts and exercise
+ * worktree-running skills call. Agents here invoke those scripts and exercise
  * judgment; they never re-derive the lifecycle from prose.
  *
  * Runtime notes:

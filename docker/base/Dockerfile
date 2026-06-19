@@ -252,7 +252,7 @@ COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d
 # (docker/agent/Dockerfile) copies them so that editing one rebuilds only that
 # cheap layer — see that Dockerfile. The wt-* helpers ride with the agent layer
 # because they evolve in lockstep with the agent-layer assets that consume them
-# (the *-worktrees skills and the Claude workflows), so an `agent-update` /
+# (the worktree-running skills and the Claude workflows), so an `agent-update` /
 # `build.sh agent` rebuild refreshes them without a base rebuild.
 COPY --chmod=755 \
     docker/shared/cid \

@@ -1,11 +1,11 @@
 ---
 name: enable-worktrees
-description: Prepare a repository for git-worktree-based parallel development — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks-worktrees) or for unrelated .gitignore edits.
+description: Prepare a repository for git-worktree-based parallel development — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks) or for unrelated .gitignore edits.
 ---
 
 Prepare the current repository to support the git-worktree parallel-development workflow.
 
-This is the **setup** counterpart to `address-tasks-worktrees`. That skill *runs* a task batch across worktrees and assumes the repo is already prepared; this skill *prepares* the repo's committed config so the workflow works hands-free on every future container. Run it once per repo, and re-run any time to verify or repair.
+This is the **setup** counterpart to `address-tasks`. That skill *runs* a task batch across worktrees and assumes the repo is already prepared; this skill *prepares* the repo's committed config so the workflow works hands-free on every future container. Run it once per repo, and re-run any time to verify or repair.
 
 This is a small, mechanical config task — do it inline yourself. Do **not** spawn implementer/reviewer subagents.
 
@@ -82,5 +82,5 @@ State concisely:
 
 ## Notes
 
-- This skill changes only **repo config** — it does not create worktrees or run tasks. To execute a task batch across worktrees afterward, use `address-tasks-worktrees`.
+- This skill changes only **repo config** — it does not create worktrees or run tasks. To execute a task batch across worktrees afterward, use `address-tasks`.
 - If a harness other than Claude keeps its native worktrees under a different root (a Codex equivalent, say), declare and gitignore that root the same way, alongside the three above.

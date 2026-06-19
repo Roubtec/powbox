@@ -479,6 +479,8 @@ With a warm store this typically takes only a few seconds.
 
 The root `node_modules` (`agent-nm-<agent>-<project>`) and the `.worktrees` tree with its pnpm store (`agent-wt-<agent>-<project>`) are **Docker volumes**, not tmpfs — they persist across restarts, so the store stays warm and worktree installs stay cheap.
 
+Because those subpackage shadows come back **empty** after a restart while the persistent root `node_modules` still carries pnpm's workspace-state cache (`.pnpm-workspace-state-v1.json`), pnpm would otherwise report "Already up to date" and skip relinking them — leaving `vitest`/`tsc`/`eslint` and other per-package `.bin` entries unresolvable until a manual fix. To avoid this **empty-shadow trap**, the entrypoint drops that cache file at container start, so the first `pnpm install` after a restart does a real, relinking install and self-heals automatically. If subpackage binaries are ever still missing — a `pnpm install` reports "Already up to date" yet the per-package `.bin` entries don't resolve, e.g. because something repopulated the cache mid-session — run `pnpm-shadow-doctor` to detect the trap and `pnpm-shadow-doctor --fix` to repair it (it removes the stale cache file and reinstalls to relink the shadows).
+
 ### Configuration
 
 Each tmpfs mount is capped at **2 GB** by default.

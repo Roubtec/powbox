@@ -29,8 +29,8 @@
 #                    `pnpm install --frozen-lockfile --prefer-offline` to relink the shadows.
 #   --quiet          Suppress the "healthy" message (still prints when a trap is
 #                    found or repaired).
-#   workspace-dir    Project root to inspect; defaults to walking up from $PWD to
-#                    the nearest pnpm/npm workspace root.
+#   workspace-dir    Project root to inspect; defaults to walking up from $PWD to the
+#                    OUTERMOST enclosing workspace root (or nearest package.json if none).
 set -uo pipefail
 
 FIX=0
@@ -54,10 +54,13 @@ done
 
 note() { [ "$QUIET" = 1 ] || echo "$@"; }
 
-# Resolve the workspace root: walk up from the start dir to the nearest ancestor
-# that declares a workspace (pnpm-workspace.yaml) or is a package root
-# (package.json). This makes the doctor work whether it is run from the repo root
-# or from inside a subpackage. Stops at / so a non-project dir resolves to nothing.
+# Resolve the workspace root: walk up from the start dir and pick the enclosing
+# workspace root — the OUTERMOST workspace declaration (pnpm-workspace.yaml or a
+# workspaces-declaring package.json), or the nearest plain package.json when none
+# declares a workspace (the detailed ranking is in the next comment). This makes the
+# doctor work whether it is run from the repo root or from inside a subpackage, always
+# targeting the monorepo root that holds the shared state. Stops at / so a non-project
+# dir resolves to nothing.
 start="${START_DIR:-$PWD}"
 if ! start="$(cd "$start" 2>/dev/null && pwd -P)"; then
 	echo "pnpm-shadow-doctor: cannot resolve directory '${START_DIR:-$PWD}'." >&2

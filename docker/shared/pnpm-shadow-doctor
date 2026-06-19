@@ -136,7 +136,12 @@ detect_empty_shadows() {
 		*) continue ;;
 		esac
 		mountpoint -q "$_p" 2>/dev/null || continue
-		[ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+		# Empty? Use a short-circuiting find that stops at the first entry rather than
+		# `ls -A`, which would materialize the whole listing in the command substitution
+		# when the shadow ISN'T empty — wasteful on a large linked node_modules tree.
+		# `-mindepth 1` excludes $_p itself; like `ls -A`, hidden entries (.bin, .modules.yaml)
+		# count as non-empty.
+		[ -z "$(find "$_p" -mindepth 1 -print -quit 2>/dev/null)" ] || continue
 		# An empty shadow is only a TRAP if the package is SUPPOSED to have linked
 		# entries. A workspace package with no installable dependencies legitimately
 		# keeps an empty node_modules even after a clean install, so flagging it would

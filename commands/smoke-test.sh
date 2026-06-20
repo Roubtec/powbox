@@ -23,7 +23,7 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		echo "       Build it first (./build.sh agent) or unset POWBOX_SMOKE_REQUIRE_IMAGE." >&2
 		exit 1
 	fi
-	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2–4) runs, so you get no partial coverage."
+	echo "WARNING: image '$IMAGE' not found — the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2–5) runs, so you get no partial coverage."
 	echo "         Build it (./build.sh agent), or set POWBOX_SMOKE_REQUIRE_IMAGE=1 to fail fast here with a clear message instead of a raw docker error at Stage 1."
 fi
 export POWBOX_SMOKE_REQUIRE_IMAGE
@@ -153,6 +153,23 @@ else
 	if [ -n "${POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE:-}" ]; then
 		skipped+=("Stage 4: self-hosted clone behavior (POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE)")
 	fi
+fi
+
+# Stage 5 - native-Linux dir-mount ownership. A bind-mounted root-owned repo is
+# root:root inside the container, which the node agent (uid 1000) cannot write;
+# entrypoint-core.sh's write probe + the sudo-allowlisted fix-workspace-perms.sh
+# helper (PR #55) chown it to node so git/edits work. This stage builds a
+# genuinely root-owned git fixture and asserts node can write + git-commit it after
+# that fix. It self-skips (exit 0) when the image is absent (honouring
+# POWBOX_SMOKE_REQUIRE_IMAGE), when it cannot create a root-owned fixture (no root /
+# passwordless sudo — the local-dev case; it runs for real on a CI runner), or when
+# the host masks the native-Linux uid bug. Skip the whole stage with
+# POWBOX_SMOKE_SKIP_DIRMOUNT=1; see scripts/smoke-test-dirmount.sh.
+if [ -n "${POWBOX_SMOKE_SKIP_DIRMOUNT:-}" ]; then
+	echo "Skipping dir-mount ownership smoke test (POWBOX_SMOKE_SKIP_DIRMOUNT is set)."
+	skipped+=("Stage 5: dir-mount ownership (POWBOX_SMOKE_SKIP_DIRMOUNT)")
+else
+	"${ROOT_DIR}/scripts/smoke-test-dirmount.sh" "$IMAGE"
 fi
 
 if [ "${#skipped[@]}" -gt 0 ]; then

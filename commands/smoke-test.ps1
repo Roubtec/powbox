@@ -188,19 +188,18 @@ else {
 }
 
 # Stage 5 - native-Linux dir-mount ownership. A bind-mounted root-owned repo is
-# root:root inside the container, which the node agent (uid 1000) cannot write; in
-# production entrypoint-core.sh's write probe + the sudo-allowlisted
-# fix-workspace-perms.sh helper (PR #55) chown it to node so git/edits work. This
-# stage builds a genuinely root-owned git fixture and asserts node can write +
-# git-commit it after running that helper directly - it overrides the image
-# entrypoint, so it guards the baked helper + its sudoers wiring, not
-# entrypoint-core.sh's own write-probe/decision path. It self-skips when the image
-# is absent (honouring -RequireImage / POWBOX_SMOKE_REQUIRE_IMAGE), when the host
-# is not native Linux, when it cannot create a root-owned fixture (no root /
-# passwordless sudo - the local-dev case; it runs for real on a CI runner), or when
-# the host masks the native-Linux uid bug. Skip the whole stage with -SkipDirMount;
-# see scripts/smoke-test-dirmount.ps1. The helper throws on failure, so
-# $ErrorActionPreference = "Stop" propagates that up.
+# root:root inside the container, which the node agent (uid 1000) cannot write;
+# entrypoint-core.sh's write probe + the sudo-allowlisted fix-workspace-perms.sh
+# helper (PR #55) chown it to node so git/edits work. This stage runs two cases: the
+# all-root-owned mount (PR #55) and a mixed-ownership mount (task 007) - a node-owned
+# root that hides nested root-owned files from a host `sudo git pull`, which the
+# entrypoint's nested-uid-0 scan + the helper's uid-0 re-own heal. It asserts node can
+# write + git-commit each after the fix. It self-skips when the image is absent (honouring -RequireImage /
+# POWBOX_SMOKE_REQUIRE_IMAGE), when the host is not native Linux, when it cannot
+# create a root-owned fixture (no root / passwordless sudo - the local-dev case; it
+# runs for real on a CI runner), or when the host masks the native-Linux uid bug.
+# Skip the whole stage with -SkipDirMount; see scripts/smoke-test-dirmount.ps1. The
+# helper throws on failure, so $ErrorActionPreference = "Stop" propagates that up.
 if ($SkipDirMount) {
   Write-Host "Skipping dir-mount ownership smoke test (-SkipDirMount)."
   $skipped.Add("Stage 5: dir-mount ownership (-SkipDirMount)")

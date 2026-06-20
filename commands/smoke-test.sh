@@ -156,17 +156,17 @@ else
 fi
 
 # Stage 5 - native-Linux dir-mount ownership. A bind-mounted root-owned repo is
-# root:root inside the container, which the node agent (uid 1000) cannot write; in
-# production entrypoint-core.sh's write probe + the sudo-allowlisted
-# fix-workspace-perms.sh helper (PR #55) chown it to node so git/edits work. This
-# stage builds a genuinely root-owned git fixture and asserts node can write +
-# git-commit it after running that helper directly — it overrides the image
-# entrypoint, so it guards the baked helper + its sudoers wiring, not
-# entrypoint-core.sh's own write-probe/decision path. It self-skips (exit 0) when
-# the image is absent (honouring POWBOX_SMOKE_REQUIRE_IMAGE), when it cannot create
-# a root-owned fixture (no root / passwordless sudo — the local-dev case; it runs
-# for real on a CI runner), or when the host masks the native-Linux uid bug. Skip
-# the whole stage with POWBOX_SMOKE_SKIP_DIRMOUNT=1; see scripts/smoke-test-dirmount.sh.
+# root:root inside the container, which the node agent (uid 1000) cannot write;
+# entrypoint-core.sh's write probe + the sudo-allowlisted fix-workspace-perms.sh
+# helper (PR #55) chown it to node so git/edits work. This stage runs two cases: the
+# all-root-owned mount (PR #55) and a mixed-ownership mount (task 007) — a node-owned
+# root that hides nested root-owned files from a host `sudo git pull`, which the
+# entrypoint's nested-uid-0 scan + the helper's uid-0 re-own heal. It asserts node can
+# write + git-commit each after the fix. It self-skips (exit 0) when the image is absent (honouring
+# POWBOX_SMOKE_REQUIRE_IMAGE), when it cannot create a root-owned fixture (no root /
+# passwordless sudo — the local-dev case; it runs for real on a CI runner), or when
+# the host masks the native-Linux uid bug. Skip the whole stage with
+# POWBOX_SMOKE_SKIP_DIRMOUNT=1; see scripts/smoke-test-dirmount.sh.
 if [ -n "${POWBOX_SMOKE_SKIP_DIRMOUNT:-}" ]; then
 	echo "Skipping dir-mount ownership smoke test (POWBOX_SMOKE_SKIP_DIRMOUNT is set)."
 	skipped+=("Stage 5: dir-mount ownership (POWBOX_SMOKE_SKIP_DIRMOUNT)")

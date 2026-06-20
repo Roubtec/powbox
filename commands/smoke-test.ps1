@@ -3,6 +3,7 @@ param(
   [switch]$SkipDb,
   [switch]$SkipPodman,
   [switch]$SkipSelfHosted,
+  [switch]$SkipDirMount,
   [switch]$RequireImage
 )
 
@@ -36,7 +37,7 @@ if ($LASTEXITCODE -ne 0) {
   if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
     throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - refusing to run a partial (image-skipping) smoke test. Build it first (./build.ps1 agent) or drop -RequireImage."
   }
-  Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2-4) runs, so you get no partial coverage. Build it (./build.ps1 agent), or pass -RequireImage to fail fast here with a clear message instead of a raw docker error at Stage 1."
+  Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2-5) runs, so you get no partial coverage. Build it (./build.ps1 agent), or pass -RequireImage to fail fast here with a clear message instead of a raw docker error at Stage 1."
 }
 
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
@@ -184,6 +185,44 @@ else {
   if ($env:POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE) {
     $skipped.Add("Stage 4: self-hosted clone behavior (POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE)")
   }
+}
+
+# Stage 5 - native-Linux dir-mount ownership. A bind-mounted root-owned repo is
+# root:root inside the container, which the node agent (uid 1000) cannot write; in
+# production entrypoint-core.sh's write probe + the sudo-allowlisted
+# fix-workspace-perms.sh helper (PR #55) chown it to node so git/edits work. This
+# stage builds a genuinely root-owned git fixture and asserts node can write +
+# git-commit it after running that helper directly - it overrides the image
+# entrypoint, so it guards the baked helper + its sudoers wiring, not
+# entrypoint-core.sh's own write-probe/decision path. It self-skips when the image
+# is absent (honouring -RequireImage / POWBOX_SMOKE_REQUIRE_IMAGE), when the host
+# is not native Linux, when it cannot create a root-owned fixture (no root /
+# passwordless sudo - the local-dev case; it runs for real on a CI runner), or when
+# the host masks the native-Linux uid bug. Skip the whole stage with -SkipDirMount;
+# see scripts/smoke-test-dirmount.ps1. The helper throws on failure, so
+# $ErrorActionPreference = "Stop" propagates that up.
+if ($SkipDirMount) {
+  Write-Host "Skipping dir-mount ownership smoke test (-SkipDirMount)."
+  $skipped.Add("Stage 5: dir-mount ownership (-SkipDirMount)")
+}
+else {
+  # The child still returns success when it self-skips at runtime (non-Linux host,
+  # no root/passwordless sudo, or a host that masks the uid bug), so completion
+  # alone cannot distinguish a real pass from a skip. Hand it a marker file: it
+  # records the skip reason there and we surface it in the banner below, so a
+  # partial run is not reported as "all stages ran". An empty marker means the
+  # stage actually ran.
+  $dirmountMarker = New-TemporaryFile
+  try {
+    $env:POWBOX_SMOKE_SKIP_MARKER = $dirmountMarker.FullName
+    & (Join-Path $rootDir "scripts/smoke-test-dirmount.ps1") -Image $Image
+  }
+  finally {
+    Remove-Item Env:\POWBOX_SMOKE_SKIP_MARKER -ErrorAction SilentlyContinue
+  }
+  $dirmountSkip = Get-Content -LiteralPath $dirmountMarker.FullName -Raw -ErrorAction SilentlyContinue
+  if ($dirmountSkip) { $skipped.Add("Stage 5: dir-mount ownership ($($dirmountSkip.Trim()))") }
+  Remove-Item -LiteralPath $dirmountMarker.FullName -ErrorAction SilentlyContinue
 }
 
 if ($skipped.Count -gt 0) {

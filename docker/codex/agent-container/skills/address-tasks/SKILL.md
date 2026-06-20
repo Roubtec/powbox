@@ -282,9 +282,9 @@ Before creating guide branches, inspect each canonical branch's unique history r
 If the batch used a synthetic multi-parent integration branch, or `git rev-list --merges <pr-base>..<branch>` is non-empty, do not automatically rebase that branch or any dependent suffix: plain `rebase-stack` intentionally linearizes history and could discard merge-only conflict resolutions.
 Build and report the safe prefix, then report the remaining canonical order as not integration-checked and include the integration-branch merge advice already recorded during Scheduling.
 
-Create collision-free guide branch names such as `review-stack/<batch>-<YYYYMMDD-HHMMSSZ>/01-<task-slug>`, using a git-ref-safe UTC timestamp — digits and dashes only, no `:` (ISO-8601 colons are invalid in ref names), matching the `YYYYMMDD-HHMMSS` form `rebase-stack` already uses for pre-rebase refs.
+Create collision-free guide branch names such as `review-stack/<batch>-<YYYYMMDD-HHMMSS>/01-<task-slug>`, using a git-ref-safe UTC timestamp — digits and dashes only, no `:` (ISO-8601 colons are invalid in ref names), matching the `YYYYMMDD-HHMMSS` form `rebase-stack` already uses for pre-rebase refs.
 Point each guide branch `gN` at the captured tip of its canonical branch `bN`; do not check out or move any `bN`.
-Create a dedicated worktree attached to `g1`: `wt-enter _review-stack-<batch>-<YYYYMMDD-HHMMSSZ> <g1>` (same ref-safe timestamp; `g1` already exists, so this attaches it under `$WT_BASE` without creating anything).
+Create a dedicated worktree attached to `g1`: `wt-enter _review-stack-<batch>-<YYYYMMDD-HHMMSS> <g1>` (same ref-safe timestamp; `g1` already exists, so this attaches it under `$WT_BASE` without creating anything).
 Running the restack there keeps the user's main checkout and current branch untouched.
 A fresh worktree has no installed dependencies, so if `rebase-stack`'s post-conflict validation would need a build, install the project's dependencies in this worktree first (cheap on the hardlinked store) — otherwise a resolved trivial conflict that triggers validation false-stops the guide on missing modules rather than a real failure.
 

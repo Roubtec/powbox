@@ -32,7 +32,7 @@ Two coordinated changes in `docker/shared/`:
 - A workspace containing files owned by a **non-root, non-node** host uid leaves those files untouched (only uid-0 entries re-owned), with the existing warning preserved.
 - The mounted `node_modules`/`.worktrees` volumes are never descended into or re-owned.
 - Negligible startup cost for an already-clean (node-owned) workspace beyond a short-circuiting `find -uid 0 -print -quit`.
-- **The mixed-ownership smoke stage (scope item 3) is added to task 005's harness and passes against the post-007 image; reverting 007's detection/chown makes it fail** with a clear EACCES-style message. This task's PR is not mergeable without it.
+- **The mixed-ownership smoke stage (scope item 3) is added to task 005's harness and passes against the post-007 image.** Reverting 007's **helper re-own** (`fix-workspace-perms.sh`'s node-owned-root chown path) makes the stage fail with a clear EACCES-style message, so the substantive new logic is guarded — **this PR is not mergeable without that half.** The **entrypoint detection-scan** half is, like task 005's all-root case, exercised through the helper-in-isolation harness rather than a full entrypoint run, so reverting *only* that scan does not yet fail the smoke. This is a deliberate **relaxation** of the original "reverting 007's detection/chown makes it fail" wording, recorded here after the PR #63 review: closing that remaining gap is tracked as follow-up [007a](007a-smoke-exercise-entrypoint-nested-uid0-scan.md), and **the PR is mergeable with that half deferred.**
 - `shellcheck` / `shfmt` clean (including the new smoke stage).
 
 ## Context / references

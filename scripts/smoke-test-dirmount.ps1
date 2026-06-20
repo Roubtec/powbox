@@ -177,7 +177,7 @@ $assertScriptMixed = @(
   'fi'
   'echo "  ok: node cannot write the nested root-owned tracked file before the fix (EACCES as expected)"'
   'if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then'
-  '  echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 detection/chown reverted, or dropped sudoers entry?)" >&2'
+  '  echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 helper node-owned-root path reverted, or dropped sudoers entry?)" >&2'
   '  exit 1'
   'fi'
   'if ! echo healed >>"$NESTED" 2>/dev/null; then'

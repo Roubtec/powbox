@@ -208,7 +208,7 @@ echo "  ok: node cannot write the nested root-owned tracked file before the fix 
 #    entrypoint-core.sh uses. Pre-007 the helper refuses a non-root root and exits non-zero
 #    (the revert signal); post-007 it re-owns just the nested uid-0 entries.
 if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then
-	echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 detection/chown reverted, or dropped sudoers entry?)" >&2
+	echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 helper node-owned-root path reverted, or dropped sudoers entry?)" >&2
 	exit 1
 fi
 # 3. node can now edit the formerly root-owned tracked file.

@@ -95,9 +95,10 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 			# hand the workspace to the same helper, which re-owns ONLY those uid-0 entries.
 			# Prune the separately mounted, already-node-owned node_modules/.worktrees volumes
 			# exactly as the helper does (mountinfo-derived -path … -prune, with -xdev as a
-			# backstop for a genuinely different filesystem) so the scan never walks them, and
-			# short-circuit with -print -quit so a clean workspace stops at the first match
-			# (usually none) — negligible cost.
+			# backstop for a genuinely different filesystem) so the scan never walks them — those
+			# are the bulky dirs, so pruning them is what keeps this cheap. -print -quit stops at
+			# the FIRST uid-0 entry (the dirty case is detected instantly); a clean workspace has
+			# no match and so does one bounded walk of the pruned source tree + .git at startup.
 			_prune=()
 			while IFS= read -r _mp; do
 				case "$_mp" in

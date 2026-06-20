@@ -56,7 +56,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - the dir-mount ownership stage requires the image."
   }
   Note-Skip "image '$Image' not found"
-  Write-Host "Dir-mount stage skipped: image '$Image' not found (build it to exercise the entrypoint chown path)."
+  Write-Host "Dir-mount stage skipped: image '$Image' not found (build it to exercise the fix-workspace-perms.sh chown path)."
   return
 }
 
@@ -133,16 +133,24 @@ $assertScript = @(
   '  echo "FAIL: node still cannot write the tree after the fix (cannot open: Permission denied)" >&2'
   '  exit 1'
   'fi'
+  '# node must also be able to MODIFY a pre-existing working-tree file, not just create new ones:'
+  '# a regression that chowns only the workspace root + .git would leave existing files root-owned.'
+  'if ! printf "smoke edit\n" >>"${WS}/README.md" 2>/dev/null; then'
+  '  echo "FAIL: node cannot modify the pre-existing root-owned README.md after the fix (working-tree contents still not writable)" >&2'
+  '  exit 1'
+  'fi'
   'if ! git -C "$WS" -c user.email=smoke@powbox.local -c user.name="powbox smoke" commit --allow-empty -m "powbox dirmount smoke" >/dev/null 2>&1; then'
   '  echo "FAIL: node git commit failed after the fix (.git still not writable by node?)" >&2'
   '  exit 1'
   'fi'
-  'owner="$(stat -c %u "${WS}/smoke-write" 2>/dev/null || echo "?")"'
-  'if [ "$owner" != "1000" ]; then'
-  '  echo "FAIL: smoke-write owned by uid ${owner} after the fix, expected node (1000)" >&2'
-  '  exit 1'
-  'fi'
-  'echo "  ok: node can touch + git-commit after the fix, and the tree is node-owned (uid 1000)"'
+  'for f in smoke-write README.md; do'
+  '  owner="$(stat -c %u "${WS}/${f}" 2>/dev/null || echo "?")"'
+  '  if [ "$owner" != "1000" ]; then'
+  '    echo "FAIL: ${f} owned by uid ${owner} after the fix, expected node (1000)" >&2'
+  '    exit 1'
+  '  fi'
+  'done'
+  'echo "  ok: node can touch + modify existing files + git-commit after the fix, and the tree is node-owned (uid 1000)"'
   'exit 0'
 ) -join "`n"
 
@@ -172,7 +180,7 @@ try {
     $passed++
   }
   elseif ($rc -eq 42) { $masked = $true }
-  else { Fail "node could not write the dir-mounted tree after the entrypoint fix (see the FAIL line above)" }
+  else { Fail "node could not write the dir-mounted tree after the fix-workspace-perms.sh fix (see the FAIL line above)" }
 
   # -- Task 007 extension seam ----------------------------------------------
   # Task 007 adds a SECOND case here - "mixed-ownership": a node-owned repo ROOT

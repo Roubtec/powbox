@@ -24,10 +24,17 @@ param(
 # helper) would silently re-break every native-Linux host whose repo is not
 # uid-1000-owned; this stage is the automated guard.
 #
-# Like scripts/smoke-test-selfhosted.ps1's Stage B, this validates the baked helper
-# + its sudoers wiring in isolation (it invokes /usr/local/bin/fix-workspace-perms.sh
-# by the exact path and sudo mechanism entrypoint-core.sh uses), not the full
-# entrypoint chain.
+# The all-root case drives the GENUINE extracted entrypoint decision unit
+# /usr/local/bin/heal-workspace-perms.sh - the byte-for-byte code entrypoint-core.sh runs:
+# its node write-probe + nested-uid-0 scan decide whether and with what path/sudo to call
+# fix-workspace-perms.sh. So it guards the probe-and-call DECISION path, not only the helper,
+# and a regression confined to that decision logic (probe stops detecting the unwritable
+# mount, workspace never handed to the helper) is caught here. Because the unit ultimately
+# invokes /usr/local/bin/fix-workspace-perms.sh by the exact path + sudo mechanism the
+# entrypoint uses, the in-isolation helper + sudoers-wiring coverage is preserved (subsumed),
+# not lost. It still does NOT boot the full entrypoint chain (the firewall/gh/shadow setup
+# needs the launcher's compose wiring and is out of scope here). The mixed-ownership case
+# still calls fix-workspace-perms.sh directly; task 007a converts it to the same unit.
 #
 # Self-skips (no failure) when it cannot meaningfully run: the agent image is
 # absent (unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then it fails); the host is not
@@ -132,8 +139,15 @@ $assertScript = @(
   '  exit 42'
   'fi'
   'echo "  ok: node cannot write the root-owned mount before the fix (genuinely root-owned, EACCES as expected)"'
-  'if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then'
-  '  echo "FAIL: sudo fix-workspace-perms.sh failed (dropped sudoers entry or renamed/missing helper?)" >&2'
+  '# 2. Drive the REAL entrypoint decision unit heal-workspace-perms.sh - the exact code'
+  '#    entrypoint-core.sh runs (its node write-probe + nested-uid-0 scan decide whether and'
+  '#    with what path/sudo to call fix-workspace-perms.sh). Run as node, NOT via sudo (the'
+  '#    unit runs sudo for the inner chown itself). This replaces the former direct sudo'
+  '#    fix-workspace-perms.sh call but PRESERVES its coverage: the unit still invokes that'
+  '#    helper by the same allowlisted path/sudo mechanism. A probe/decision regression'
+  '#    leaves the tree root-owned and surfaces at steps 3-5 below as EACCES.'
+  'if ! /usr/local/bin/heal-workspace-perms.sh; then'
+  '  echo "FAIL: the real entrypoint heal unit (heal-workspace-perms.sh) errored (missing, non-executable, or a probe/scan fault); a fix-workspace-perms.sh helper/sudoers regression instead surfaces at the write/commit steps below" >&2'
   '  exit 1'
   'fi'
   'if ! touch "${WS}/smoke-write" 2>/dev/null; then'

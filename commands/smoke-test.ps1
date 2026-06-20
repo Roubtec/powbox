@@ -193,14 +193,16 @@ else {
 # helper (PR #55) chown it to node so git/edits work. This stage runs two cases: the
 # all-root-owned mount (PR #55) and a mixed-ownership mount (task 007) - a node-owned
 # root that hides nested root-owned files from a host `sudo git pull` that the helper's
-# uid-0 re-own heals. The all-root case (task 005a) drives the GENUINE extracted entrypoint
+# uid-0 re-own heals. BOTH cases (tasks 005a + 007a) drive the GENUINE extracted entrypoint
 # decision unit heal-workspace-perms.sh - the byte-for-byte probe-and-call code
-# entrypoint-core.sh runs - so it guards the probe/decision path (does the probe still
+# entrypoint-core.sh runs - so they guard the probe/decision path (does the probe still
 # detect the unwritable mount and hand it to the helper?), not only the helper; that unit
 # still ultimately invokes fix-workspace-perms.sh by the same allowlisted path/sudo
-# mechanism, so the in-isolation helper + sudoers coverage is preserved. The mixed case
-# still invokes fix-workspace-perms.sh DIRECTLY in isolation; converting it to the same
-# decision unit is tracked in tasks/007a. Neither case boots the full entrypoint chain
+# mechanism, so the in-isolation helper + sudoers coverage is preserved. The all-root case
+# exercises the root-level write probe; the mixed case (node-owned root + nested uid-0
+# entries) exercises the nested-uid-0 DETECTION scan task 007 added that the root-level
+# probe misses, so reverting ONLY that scan now fails the smoke (task 007a). Neither case
+# boots the full entrypoint chain
 # (firewall/gh/shadow need the launcher's compose wiring, out of scope here). It asserts
 # node can
 # write + git-commit each after the fix. It self-skips when the image is absent (honouring -RequireImage /

@@ -24,17 +24,20 @@ param(
 # helper) would silently re-break every native-Linux host whose repo is not
 # uid-1000-owned; this stage is the automated guard.
 #
-# The all-root case drives the GENUINE extracted entrypoint decision unit
+# BOTH cases drive the GENUINE extracted entrypoint decision unit
 # /usr/local/bin/heal-workspace-perms.sh - the byte-for-byte code entrypoint-core.sh runs:
 # its node write-probe + nested-uid-0 scan decide whether and with what path/sudo to call
-# fix-workspace-perms.sh. So it guards the probe-and-call DECISION path, not only the helper,
+# fix-workspace-perms.sh. So they guard the probe-and-call DECISION path, not only the helper,
 # and a regression confined to that decision logic (probe stops detecting the unwritable
 # mount, workspace never handed to the helper) is caught here. Because the unit ultimately
 # invokes /usr/local/bin/fix-workspace-perms.sh by the exact path + sudo mechanism the
 # entrypoint uses, the in-isolation helper + sudoers-wiring coverage is preserved (subsumed),
 # not lost. It still does NOT boot the full entrypoint chain (the firewall/gh/shadow setup
-# needs the launcher's compose wiring and is out of scope here). The mixed-ownership case
-# still calls fix-workspace-perms.sh directly; task 007a converts it to the same unit.
+# needs the launcher's compose wiring and is out of scope here). The all-root case exercises
+# the unit's root-level write probe; the mixed-ownership case (node-owned root + nested uid-0
+# entries) exercises the unit's nested-uid-0 DETECTION scan - the production trigger task 007
+# added that the root-level probe misses - so reverting ONLY that scan now fails the smoke
+# (task 007a).
 #
 # Self-skips (no failure) when it cannot meaningfully run: the agent image is
 # absent (unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then it fails); the host is not
@@ -178,20 +181,40 @@ $assertScript = @(
 # The mixed-ownership in-container assertion (task 007), behaviourally identical to the
 # .sh ASSERT_SCRIPT_MIXED. The fixture ROOT is node-owned but hides nested root-owned
 # entries (a tracked working-tree file + a .git/objects/<xx> shard), as a host `sudo git
-# pull` leaves. The node-owned root means the root-level write probe would PASS, so this
-# probes the nested root-owned tracked file instead. Same exit contract: 0 passed, 42
-# masked (node could already write -> self-skip), other = genuine failure.
+# pull` leaves. Like $assertScript it now drives the GENUINE extracted entrypoint decision
+# unit heal-workspace-perms.sh (task 007a) rather than calling fix-workspace-perms.sh
+# directly; because this fixture root is node-owned the root-level write probe in the unit
+# PASSES, so ONLY 007's nested-uid-0 DETECTION scan can hand the workspace to the helper.
+# This case therefore guards that detection scan, not only the helper chown: revert the scan
+# and the nested entries stay root-owned, so the post-fix edit/commit fail. The node-owned
+# root means the root-level write probe would PASS, so this probes the nested root-owned
+# tracked file instead. Same exit contract: 0 passed, 42 masked (node could already write ->
+# self-skip), other = genuine failure.
 $assertScriptMixed = @(
   'set -u'
   'WS="$1"'
   'NESTED="${WS}/nested.txt"'
+  '# Only meaningful as the node agent (uid 1000) - the uid heal-workspace-perms.sh gates its'
+  '# nested-uid-0 scan on (it scans only a root whose owner == id -u); hard-FAIL if not, so a'
+  '# dropped --user node or an image USER regression cannot make the scan silently no-op.'
+  'if [ "$(id -u)" != "1000" ]; then'
+  '  echo "FAIL: dir-mount mixed assertion not running as node (uid 1000) - got uid $(id -u)" >&2'
+  '  exit 1'
+  'fi'
   'if echo masked 2>/dev/null >>"$NESTED"; then'
   '  echo "  skip: node can already write the nested root-owned file (this host masks the native-Linux uid bug)"'
   '  exit 42'
   'fi'
   'echo "  ok: node cannot write the nested root-owned tracked file before the fix (EACCES as expected)"'
-  'if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then'
-  '  echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 helper node-owned-root path reverted, or dropped sudoers entry?)" >&2'
+  '# 2. Drive the REAL entrypoint decision unit heal-workspace-perms.sh - the exact code'
+  '#    entrypoint-core.sh runs. Run as node, NOT via sudo (the unit runs sudo for the inner'
+  '#    chown itself). Replaces the former direct sudo fix-workspace-perms.sh call. For THIS'
+  '#    mixed case it guards 007 nested-uid-0 DETECTION scan, not only the helper chown: the'
+  '#    node-owned root means the root-level write probe PASSES, so ONLY the nested-uid-0 scan'
+  '#    adds the workspace to _unwritable and invokes the helper. Revert that scan and the'
+  '#    nested uid-0 entries stay root-owned, so the edit/commit below fail with EACCES.'
+  'if ! /usr/local/bin/heal-workspace-perms.sh; then'
+  '  echo "FAIL: the real entrypoint heal unit (heal-workspace-perms.sh) errored (missing, non-executable, or a probe/scan fault); a 007 nested-uid-0 detection-scan or fix-workspace-perms.sh helper/sudoers regression instead surfaces at the write/commit steps below" >&2'
   '  exit 1'
   'fi'
   'if ! echo healed >>"$NESTED" 2>/dev/null; then'
@@ -243,10 +266,12 @@ try {
   # The case 005 left as a seam: a node-owned repo ROOT that hides nested root-owned
   # files (a tracked working-tree file + a .git/objects/<xx> shard chowned to root),
   # exactly what a host `sudo git pull` against a live bind mount leaves behind. 005's
-  # root-level write probe sees a node-owned root and passes, so this case is RED until
-  # 007's entrypoint nested-uid-0 detection + the helper's node-owned-root path land.
-  # Mirrors case_mixed_ownership in the .sh: root stays node-owned; only nested entries
-  # go to root; its own probe + assertion ($assertScriptMixed).
+  # root-level write probe sees a node-owned root and passes, so only 007's entrypoint
+  # nested-uid-0 detection + the helper's node-owned-root path heal it. $assertScriptMixed
+  # now drives the genuine extracted unit heal-workspace-perms.sh (task 007a), so this case
+  # guards that nested-uid-0 detection scan, not only the helper chown. Mirrors
+  # case_mixed_ownership in the .sh: root stays node-owned; only nested entries go to root;
+  # its own probe + assertion ($assertScriptMixed).
   $mfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
   $fixtures.Add($mfixture)
   & git -C $mfixture init -q
@@ -274,7 +299,10 @@ try {
   Invoke-AsRoot @('chown', '0:0', (Join-Path $mfixture 'nested.txt'))
   Invoke-AsRoot @('chown', '-R', '0:0', $shard)
   Write-Host "Case: mixed-ownership mount (node-owned root + nested root-owned tracked file & .git/objects/<xx> shard, as from a host 'sudo git pull')"
-  docker run --rm -v "${mfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptMixed powbox-dirmount $mount
+  # --user node (matching the all-root run and the .sh): heal-workspace-perms.sh gates its
+  # nested-uid-0 scan on a root whose owner == id -u, so the container MUST run as node (uid
+  # 1000) or the scan no-ops and the case would fail for the wrong reason.
+  docker run --rm --user node -v "${mfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptMixed powbox-dirmount $mount
   $rc = $LASTEXITCODE
   if ($rc -eq 0) {
     # Host-side: stat as root - the chowned fixture (mktemp -d is mode 700) may not be

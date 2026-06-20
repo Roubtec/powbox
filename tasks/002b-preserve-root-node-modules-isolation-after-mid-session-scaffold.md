@@ -1,6 +1,6 @@
 # Task 002b — Preserve root node_modules isolation when a JS project is scaffolded mid-session
 
-Generic follow-up from the PR #59 review (per-agent volume isolation). Parked in `tasks/deferred/` because the branch is defendable as-is — the gate fixes host litter for the **common** case (launching an already-JS folder mounts the volume; a never-JS folder stays clean) and the residual regression is confined to an uncommon, recoverable path — while a proper fix expands scope (either regresses the litter gate or adds a new wrapper-level diagnostic with its own validation).
+Generic follow-up from the PR #59 review (per-agent volume isolation). Was deferred because PR #59 is defendable as-is — the gate fixes host litter for the **common** case (launching an already-JS folder mounts the volume; a never-JS folder stays clean) and the residual regression is confined to an uncommon, recoverable path. **Now promoted to `tasks/` — approach decided below.**
 
 Review thread: https://github.com/Roubtec/powbox/pull/59#discussion_r3439823386 (codex, P2).
 
@@ -24,7 +24,13 @@ This is narrow and recoverable (relaunching the agent once the folder has a `pac
 
 Keep a mid-session-scaffolded project's root `node_modules` off the host bind mount, **without** recreating empty mountpoints on folders that never become JS projects (the regression the gate deliberately removed).
 
-## Suggested approach (pick one)
+## Decision (maintainer, 2026-06-20)
+
+**Chosen: approach A, the "warn loudly and proceed" variant.** The wrapper detects the should-have-been-mounted root install and prints one loud stderr line, then runs the install anyway — closing the *silent* host-bind pollution hole without blocking a quick mid-session scaffold. The message tells the user to relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
+
+**Considered & declined:** the *refuse* variant of A (hard-stops the install mid-scaffold — too disruptive for a recoverable, narrow case); option **B** (always mount — reintroduces the empty-mountpoint litter the gate exists to remove); option **C** (entrypoint-only hint — weaker signal than the wrapper, which sits exactly on the install path).
+
+## Suggested approach (chosen: A / warn-and-proceed)
 
 **A. Wrapper-level diagnostic / refusal (preferred — preserves the gate).** Have the `pnpm`/`pn` wrapper (`docker/shared/pnpm-shadow-wrapper.sh`) detect, in dir-mounted mode, that it is about to run a **root** install while `<workspace>/node_modules` is **not** a mountpoint (i.e. the volume was never mounted because the folder was non-dev at launch), and either:
 - warn loudly and proceed — one line telling the user the install is landing on the host bind and to **relaunch the agent** (the folder now has a `package.json`, so the next launch mounts an isolated volume); or
@@ -38,7 +44,7 @@ Whichever is chosen, mirror behavior across **both** `launch-agent.sh`/`launch-a
 
 ## Acceptance
 
-- Scaffolding a JS project mid-session in a folder launched as non-dev no longer **silently** pollutes the host bind mount: the user is warned (or refused) and told to relaunch, or the root volume is in fact used.
+- Scaffolding a JS project mid-session in a folder launched as non-dev no longer **silently** pollutes the host bind mount: the user is **warned** (one loud stderr line) and told to relaunch — the install still proceeds (no refusal).
 - A folder that never becomes a JS project still gets **no** `node_modules`/`.worktrees` mountpoints (the gate's primary benefit is preserved — no new empty-dir litter).
 - A normal already-JS dir-mounted launch and a self-hosted launch are unaffected (no spurious warning/refusal).
 - Behavior consistent across bash and PowerShell launchers and the pnpm wrapper.

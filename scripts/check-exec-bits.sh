@@ -9,24 +9,23 @@
 # shows up on a real Linux host. This guard is the Tier-0 check that catches it
 # in CI (and can be run by hand: `./scripts/check-exec-bits.sh`).
 #
-# Allowlist: a handful of scripts are intentionally NOT executable in git because
-# they are never run directly from a host clone. They are COPY'd into the image
-# with `--chmod=755` (docker/base/Dockerfile) and only ever invoked via that
-# baked /usr/local/bin path or `docker run --entrypoint`. Such a file does not
-# need a committed host exec bit, so it is exempt here. Keep this list tiny and
-# justified — every entry is a hole in the guard.
+# Allowlist: scripts that are intentionally NOT executable in git because they
+# are never run directly from a host clone — COPY'd into the image with
+# `--chmod=755` (docker/base/Dockerfile) and only ever invoked via that baked
+# /usr/local/bin path or `docker run --entrypoint`, so they need no committed
+# host exec bit. The list is currently EMPTY: every shared baked-only script is
+# committed 100755 to match its siblings. Keep any future entry tiny and
+# justified — each one is a hole in the guard.
 set -euo pipefail
 
 # Exact tracked paths (repo-root-relative) exempt from the exec-bit requirement.
-ALLOWLIST=(
-	# COPY --chmod=755 into the base image; only ever run via the baked
-	# /usr/local/bin/seed-workspace.sh path or `docker run --entrypoint`, never
-	# `./docker/shared/seed-workspace.sh` from a host clone.
-	"docker/shared/seed-workspace.sh"
-)
+# Empty by default — add a path here only for a script genuinely never run from
+# a host clone (see the note above).
+ALLOWLIST=()
 
 is_allowed() {
 	local path="$1" entry
+	[ "${#ALLOWLIST[@]}" -eq 0 ] && return 1
 	for entry in "${ALLOWLIST[@]}"; do
 		[ "$path" = "$entry" ] && return 0
 	done
@@ -61,4 +60,8 @@ if [ "${#violations[@]}" -gt 0 ]; then
 	exit 1
 fi
 
-echo "check-exec-bits: OK — every tracked *.sh has its executable bit (allowlisted: ${ALLOWLIST[*]})."
+if [ "${#ALLOWLIST[@]}" -gt 0 ]; then
+	echo "check-exec-bits: OK — every tracked *.sh has its executable bit (allowlisted: ${ALLOWLIST[*]})."
+else
+	echo "check-exec-bits: OK — every tracked *.sh has its executable bit."
+fi

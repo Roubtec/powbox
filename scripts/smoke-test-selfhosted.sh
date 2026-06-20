@@ -372,7 +372,13 @@ if [ -n "$REF_BRANCH" ]; then
 	if printf '%s' "$branch_out" | grep -q "POWBOX --ref WARNING"; then
 		fail "a valid non-default branch --ref printed the fallback warning instead of checking out"
 	fi
-	[ "$(docker run --rm -v "${WSVOL}-branch:/ws" --entrypoint git "$IMAGE" -C /ws rev-parse --abbrev-ref HEAD 2>/dev/null)" = "${REF_BRANCH}" ] ||
+	# --user root: the clone above ran as root (run_seed; seed-workspace.sh does not chown —
+	# that happens in the main entrypoint this test bypasses), so the tree is root-owned. The
+	# default image user is `node`, and git refuses a repo owned by another uid ("dubious
+	# ownership", CVE-2022-24765), printing to stderr and leaving stdout EMPTY — which we'd
+	# read as a HEAD mismatch and wrongly fail. Inspect as the owning user instead. (The other
+	# Stage-B checks are /bin/sh `[ -e ]` file tests, which are ownership-agnostic.)
+	[ "$(docker run --rm --user root -v "${WSVOL}-branch:/ws" --entrypoint git "$IMAGE" -C /ws rev-parse --abbrev-ref HEAD 2>/dev/null)" = "${REF_BRANCH}" ] ||
 		fail "a valid non-default branch --ref did not leave HEAD on that branch"
 	docker volume rm -f "${WSVOL}-branch" >/dev/null 2>&1 || true
 	ok "a valid non-default branch --ref checks out (remote-tracking ref is resolved, not rejected)"

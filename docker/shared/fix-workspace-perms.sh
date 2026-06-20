@@ -14,16 +14,22 @@
 # on Windows/WSL — and on Linux hosts whose mount uid already matches node — it is
 # never invoked and there is no needless recursive chown.
 #
-# Each argument must be a /workspace/<slug> bind mount. We chown ONLY a workspace whose
-# root is owned by ROOT (uid 0) — the reported and overwhelmingly common case (a repo
-# under /root, or a host that runs powbox as root). Chowning a root-owned tree to node
-# is safe: root keeps full host-side access (it bypasses DAC). We deliberately do NOT
-# chown a tree owned by some OTHER non-node uid, because that would strip a real,
-# non-root host user of ownership of their own repo; that case is warned about instead,
-# with remedies, leaving host state untouched. The same protection holds WITHIN a claimed
-# tree: the recursive chown matches only root-owned entries (find -uid 0), so a nested
-# file/dir owned by some other host uid (e.g. a service user's cache or artifact) keeps
-# its owner rather than being silently re-owned to node. The tree is chowned to node:node
+# Each argument must be a /workspace/<slug> bind mount. We act when the workspace root is
+# owned by ROOT (uid 0) — the reported and overwhelmingly common case (a repo under /root,
+# or a host that runs powbox as root) — OR by NODE (uid 1000) itself: a node-owned root can
+# still hide nested root-owned files when a host operation ran as root against the bind
+# mount WHILE the container existed (most often a `sudo git pull` on native Linux, which
+# re-owns to uid 0 exactly the paths it writes — new/updated .git/objects/*, refs, and the
+# changed working-tree files — leaving the top dir node-owned). Chowning root-owned entries
+# to node is safe: root keeps full host-side access (it bypasses DAC). Both cases reduce to
+# a single re-own of `find -uid 0` entries — for a root-owned root that is the whole tree;
+# for a node-owned root it is just the nested uid-0 entries (the root, already node, is
+# untouched). We deliberately do NOT chown a tree whose root is owned by some OTHER, non-node
+# uid, because that would strip a real, non-root host user of ownership of their own repo;
+# that case is warned about instead, with remedies, leaving host state untouched. The same
+# protection holds WITHIN a claimed tree: the recursive chown matches only root-owned entries
+# (find -uid 0), so a nested file/dir owned by some other host uid (e.g. a service user's
+# cache or artifact) keeps its owner rather than being silently re-owned to node. The tree is chowned to node:node
 # bounded so it stays on the bind mount and does NOT descend into the separately mounted,
 # already-node-owned node_modules / .worktrees volumes: each real mountpoint nested under
 # the workspace is pruned explicitly (from /proc/self/mountinfo), with `find -xdev` as a
@@ -38,6 +44,10 @@
 set -euo pipefail
 
 NODE_OWNER="node:node"
+# node's uid, used to tell apart a node-owned root (which we may still self-heal of nested
+# root-owned files) from a genuine foreign host uid (which we refuse). Falls back to the
+# well-known 1000 if the lookup ever fails.
+NODE_UID="$(id -u node 2>/dev/null || echo 1000)"
 
 # Canonical /workspace root, mirroring shadow-mounts.sh, so a `..`-laden or
 # symlinked argument is normalised before the containment check in the loop.
@@ -72,16 +82,22 @@ for ws in "$@"; do
 		continue
 	fi
 	owner_uid="$(stat -c '%u' "$ws" 2>/dev/null || echo "")"
-	if [ "$owner_uid" != "0" ]; then
-		# Owned by a non-root, non-node host uid (a node-owned tree never reaches here —
-		# the entrypoint only passes workspaces node cannot write). Chowning to node
-		# would lock that host user out of their own repo, so refuse and explain.
-		echo "fix-workspace-perms: $ws is owned by host uid ${owner_uid:-?} (not root) and the agent (uid 1000) cannot write it." >&2
-		echo "fix-workspace-perms: NOT changing its ownership (that would lock out that host user). Remedies: chown the repo to uid 1000 (node) on the host, or relaunch in --isolated (self-hosted) mode, which clones into a private node-owned volume instead of bind-mounting this tree." >&2
+	if [ "$owner_uid" != "0" ] && [ "$owner_uid" != "$NODE_UID" ]; then
+		# Owned by a non-root, non-node host uid. Chowning to node would lock that host
+		# user out of their own repo, so refuse and explain. (A root-owned root is the
+		# common native-Linux case; a node-owned root is the mixed-ownership case — a
+		# host `sudo git pull` left the top dir node-owned but some nested entries uid 0
+		# — and is handled below by the same uid-0-only re-own.)
+		echo "fix-workspace-perms: $ws is owned by host uid ${owner_uid:-?} (neither root nor node) and the agent (uid ${NODE_UID}) cannot safely claim it." >&2
+		echo "fix-workspace-perms: NOT changing its ownership (that would lock out that host user). Remedies: chown the repo to uid ${NODE_UID} (node) on the host, or relaunch in --isolated (self-hosted) mode, which clones into a private node-owned volume instead of bind-mounting this tree." >&2
 		status=1
 		continue
 	fi
-	echo "fix-workspace-perms: claiming root-owned $ws for $NODE_OWNER so the agent can write it (git, edits) ..." >&2
+	if [ "$owner_uid" = "0" ]; then
+		echo "fix-workspace-perms: claiming root-owned $ws for $NODE_OWNER so the agent can write it (git, edits) ..." >&2
+	else
+		echo "fix-workspace-perms: $ws root is node-owned but contains nested root-owned entries (e.g. from a host 'sudo git pull'); claiming those uid-0 entries for $NODE_OWNER ..." >&2
+	fi
 	# Keep the chown ON the bind mount and OFF the separately mounted, already-node-owned
 	# node_modules / .worktrees / tmpfs volumes nested under it. `find -xdev` is NOT
 	# enough on its own (it only refuses to cross onto a DIFFERENT filesystem, and a

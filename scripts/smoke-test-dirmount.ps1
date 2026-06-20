@@ -2,13 +2,20 @@ param(
   [string]$Image = "powbox-agent:latest"
 )
 
-# Smoke-test the native-Linux dir-mount ownership fix (PR #55).
+# Smoke-test the native-Linux dir-mount ownership fix (PR #55) and its mixed-ownership
+# extension (task 007). Two cases run: an all-root-owned mount (PR #55) and a node-owned
+# root that hides nested root-owned files left by a host `sudo git pull` (task 007).
 #
 # On a NATIVE-LINUX host a bind-mounted repo keeps its host uid/gid. When that is
 # root (a repo under /root, or a host running powbox as root) the mount is
 # root:root inside the container and the `node` agent (uid 1000) cannot write the
 # working tree or .git - every touch/git pull/git commit fails with EACCES
-# (`cannot open '.git/FETCH_HEAD': Permission denied`). entrypoint-core.sh probes
+# (`cannot open '.git/FETCH_HEAD': Permission denied`). A subtler variant: a host
+# operation that runs as root against a live bind mount (most often `sudo git pull`)
+# re-owns to uid 0 only the paths it writes (new .git/objects/*, refs, changed
+# working-tree files), leaving the node-owned top dir but nested root-owned files that
+# block `git commit` with `insufficient permission for adding an object to repository
+# database`. entrypoint-core.sh probes
 # write access as node and, for any workspace it cannot write, runs the
 # sudo-allowlisted root helper /usr/local/bin/fix-workspace-perms.sh, which chowns
 # a root-owned tree to node. Windows/WSL/macOS bind mounts honour node's writes
@@ -154,6 +161,42 @@ $assertScript = @(
   'exit 0'
 ) -join "`n"
 
+# The mixed-ownership in-container assertion (task 007), behaviourally identical to the
+# .sh ASSERT_SCRIPT_MIXED. The fixture ROOT is node-owned but hides nested root-owned
+# entries (a tracked working-tree file + a .git/objects/<xx> shard), as a host `sudo git
+# pull` leaves. The node-owned root means the root-level write probe would PASS, so this
+# probes the nested root-owned tracked file instead. Same exit contract: 0 passed, 42
+# masked (node could already write -> self-skip), other = genuine failure.
+$assertScriptMixed = @(
+  'set -u'
+  'WS="$1"'
+  'NESTED="${WS}/nested.txt"'
+  'if echo masked 2>/dev/null >>"$NESTED"; then'
+  '  echo "  skip: node can already write the nested root-owned file (this host masks the native-Linux uid bug)"'
+  '  exit 42'
+  'fi'
+  'echo "  ok: node cannot write the nested root-owned tracked file before the fix (EACCES as expected)"'
+  'if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then'
+  '  echo "FAIL: sudo fix-workspace-perms.sh did not self-heal the node-owned root with nested root-owned files (007 helper node-owned-root path reverted, or dropped sudoers entry?)" >&2'
+  '  exit 1'
+  'fi'
+  'if ! echo healed >>"$NESTED" 2>/dev/null; then'
+  '  echo "FAIL: node still cannot write the nested file after the fix (nested root-owned entry not re-owned)" >&2'
+  '  exit 1'
+  'fi'
+  'if ! git -C "$WS" -c user.email=smoke@powbox.local -c user.name="powbox smoke" commit -aqm "powbox dirmount mixed smoke" >/dev/null 2>&1; then'
+  '  echo "FAIL: node git commit failed after the fix (.git/objects shard still root-owned?)" >&2'
+  '  exit 1'
+  'fi'
+  'remaining="$(find "$WS" -uid 0 -print -quit 2>/dev/null || true)"'
+  'if [ -n "$remaining" ]; then'
+  '  echo "FAIL: a root-owned entry survived the fix: $remaining" >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: nested root-owned file + .git/objects shard re-owned to node; edit + git-commit succeed"'
+  'exit 0'
+) -join "`n"
+
 $fixtures = New-Object System.Collections.Generic.List[string]
 $masked = $false
 $passed = 0
@@ -182,16 +225,53 @@ try {
   elseif ($rc -eq 42) { $masked = $true }
   else { Fail "node could not write the dir-mounted tree after the fix-workspace-perms.sh fix (see the FAIL line above)" }
 
-  # -- Task 007 extension seam ----------------------------------------------
-  # Task 007 adds a SECOND case here - "mixed-ownership": a node-owned repo ROOT
-  # with nested root-owned files (a tracked file plus a .git/objects/<xx> dir
-  # chowned to root, simulating a host `sudo git pull`). It reuses mktemp / git /
-  # Invoke-AsRoot / $assertScript above but mutates ownership differently (leave
-  # the root node-owned; chown only the nested entries) and needs its own
-  # self-heal step + assertion. It is RED until 007's self-heal logic lands -
-  # 005's root-level write probe sees a node-owned root, writes succeed, and the
-  # nested root-owned files are missed - so it is deliberately NOT wired here.
-  # Task 007 owns delivering and gating that case. DO NOT enable it as part of 005.
+  # === Case: mixed-ownership mount (task 007) =================================
+  # The case 005 left as a seam: a node-owned repo ROOT that hides nested root-owned
+  # files (a tracked working-tree file + a .git/objects/<xx> shard chowned to root),
+  # exactly what a host `sudo git pull` against a live bind mount leaves behind. 005's
+  # root-level write probe sees a node-owned root and passes, so this case is RED until
+  # 007's entrypoint nested-uid-0 detection + the helper's node-owned-root path land.
+  # Mirrors case_mixed_ownership in the .sh: root stays node-owned; only nested entries
+  # go to root; its own probe + assertion ($assertScriptMixed).
+  $mfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
+  $fixtures.Add($mfixture)
+  & git -C $mfixture init -q
+  Set-Content -LiteralPath (Join-Path $mfixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
+  # Build real history so .git/objects holds shard dirs, plus a tracked file to root-own.
+  $gitId = @('-c', 'user.email=smoke@powbox.local', '-c', 'user.name=powbox smoke')
+  & git -C $mfixture @gitId add -A
+  & git -C $mfixture @gitId commit -q -m 'initial'
+  Set-Content -LiteralPath (Join-Path $mfixture 'nested.txt') -Value 'tracked nested file'
+  & git -C $mfixture @gitId add nested.txt
+  & git -C $mfixture @gitId commit -q -m 'add nested file'
+  # Locate the .git/objects/<xx> shard to root-own BEFORE chowning the tree to node:
+  # mktemp -d gives a mode-700 root owned by the invoking user, so once `chown -R
+  # 1000:1000` runs, a passwordless-sudo runner whose uid is not 1000 could no longer
+  # traverse it (the unprivileged find would see nothing). The captured path stays
+  # valid across the chown.
+  $shard = & find (Join-Path $mfixture '.git/objects') -mindepth 1 -maxdepth 1 -type d -name '??' |
+  Select-Object -First 1
+  if (-not $shard) { Fail 'mixed-ownership fixture has no .git/objects/<xx> shard dir to root-own' }
+  # Force the mixed shape regardless of who runs the stage: node-owned ROOT, then
+  # root-owned ONLY the paths a host `sudo git pull` rewrites (a tracked file + one
+  # .git/objects/<xx> shard). chown the whole tree to node first, then plant the
+  # nested root-owned entries.
+  Invoke-AsRoot @('chown', '-R', '1000:1000', $mfixture)
+  Invoke-AsRoot @('chown', '0:0', (Join-Path $mfixture 'nested.txt'))
+  Invoke-AsRoot @('chown', '-R', '0:0', $shard)
+  Write-Host "Case: mixed-ownership mount (node-owned root + nested root-owned tracked file & .git/objects/<xx> shard, as from a host 'sudo git pull')"
+  docker run --rm -v "${mfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptMixed powbox-dirmount $mount
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) {
+    # Host-side: stat as root - the chowned fixture (mktemp -d is mode 700) may not be
+    # traversable by a non-owner sudo caller.
+    $hostOwner = (Invoke-AsRoot @('stat', '-c', '%u', (Join-Path $mfixture 'nested.txt'))).Trim()
+    if ($hostOwner -ne '1000') { Fail "host-side nested.txt owned by uid $hostOwner, expected node (1000)" }
+    Write-Host "  ok: host-side nested.txt is node-owned (uid 1000) after the run"
+    $passed++
+  }
+  elseif ($rc -eq 42) { $masked = $true }
+  else { Fail "node could not write the mixed-ownership tree after the entrypoint fix (see the FAIL line above)" }
 }
 finally {
   foreach ($f in $fixtures) {

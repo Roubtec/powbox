@@ -166,18 +166,25 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       at runtime (Docker's seccomp profile blocks the mount syscall
 #                       without it); granted in compose.shared.yml.
 #
-#   fix-workspace-perms.sh — chowns a dir-mounted /workspace/<slug> to node when the
-#                       agent (uid 1000) cannot write it, i.e. when a native-Linux
-#                       host bind-mounts a root-owned repo (uid 0; commonly a repo
-#                       under /root). Without it git pull/commit and file edits fail
-#                       with EACCES. It chowns ONLY a root-owned workspace — a tree
-#                       owned by some other foreign host uid is refused and warned
-#                       about, never chowned, so a real host user is not locked out.
-#                       The script is root-owned and immutable; it canonicalizes its
-#                       argument and refuses to act on anything but a direct child of
-#                       /workspace/, and is invoked only for a workspace the entrypoint
-#                       has already confirmed node cannot write, so it no-ops on
-#                       Windows/WSL and on uid-matched Linux hosts.
+#   fix-workspace-perms.sh — re-owns root-owned entries of a dir-mounted /workspace/<slug>
+#                       to node when the agent (uid 1000) otherwise cannot write them.
+#                       Covers two native-Linux cases: a fully root-owned repo (uid 0;
+#                       commonly under /root), and a MIXED-ownership repo whose root is
+#                       node-owned but which hides nested root-owned files (e.g. a host
+#                       `sudo git pull` re-owning .git/objects/*, refs and changed
+#                       working-tree files while leaving the top dir node-owned). Without
+#                       it git pull/commit and file edits fail with EACCES (or
+#                       `insufficient permission for adding an object to repository
+#                       database`). It acts only when the workspace root is owned by root
+#                       OR node, re-owning ONLY find -uid 0 entries — a tree (or nested
+#                       file) owned by some other foreign host uid is left alone (and a
+#                       foreign-owned root is refused with remedies), so a real host user
+#                       is not locked out. The script is root-owned and immutable; it
+#                       canonicalizes its argument and refuses to act on anything but a
+#                       direct child of /workspace/. The entrypoint invokes it for a
+#                       workspace node cannot write OR that a short-circuiting uid-0 scan
+#                       shows contains nested root-owned entries, so it no-ops on
+#                       Windows/WSL and on uid-matched Linux hosts with no uid-0 entries.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs

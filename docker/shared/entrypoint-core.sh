@@ -45,17 +45,34 @@ fi
 # repo state: git pull/commit/checkout and file edits fail with EACCES (e.g.
 # `cannot open '.git/FETCH_HEAD': Permission denied`). We hand such a workspace to node
 # via the fix-workspace-perms.sh sudo helper — but only when its root is owned by root
-# (uid 0); the helper refuses and warns for any other foreign host uid rather than
-# locking a real user out of their own repo. Runs BEFORE the git/safe.directory steps
-# below so they operate on a node-owned tree. Gated on a real write probe (done here, as
-# node), so it is a no-op on Windows/WSL — whose FUSE bind mounts already honour node's
-# writes — and on Linux hosts whose mount uid already matches node; neither pays for a
-# recursive chown. Self-hosted ("--isolated") mode is exempt: its workspace is a
-# container-local volume the launcher already pre-seeds node-owned. The detached image-
-# store writer (POWBOX_IMAGE_STORE_ROLE=writer) is also exempt: it mounts the workspace
-# but NOT the per-container node_modules/.worktrees volumes, so a recursive chown there
-# would descend into the host's copies of those dirs — and it never writes the workspace
-# anyway. Best-effort: a warning is logged if the claim cannot be completed.
+# (uid 0) or node (uid 1000); the helper refuses and warns for any other foreign host uid
+# rather than locking a real user out of their own repo.
+#
+# Two triggers feed the same helper:
+#   (a) the root-level WRITE PROBE below catches an all-root-owned mount (node cannot even
+#       write the top dir); and
+#   (b) a nested-uid-0 SCAN catches the mixed-ownership case the probe misses — a node-owned
+#       root that nonetheless hides root-owned files. That arises when a host operation runs
+#       as root against the bind mount WHILE the container exists (most often `sudo git
+#       pull`): it re-owns to uid 0 exactly the paths it writes (new/updated .git/objects/*,
+#       refs, the changed working-tree files) but leaves the top dir node-owned, so the probe
+#       passes yet `git commit`/`add` still fails with `insufficient permission for adding an
+#       object to repository database`. The scan short-circuits (find -uid 0 -print -quit) and
+#       prunes the nested node-owned volume mounts exactly as the helper does, so a clean
+#       (node-owned, no uid-0) workspace pays only for one find that stops at the first hit.
+# The helper re-owns ONLY uid-0 entries in both cases, so a genuine non-root host uid is
+# never touched.
+#
+# Runs BEFORE the git/safe.directory steps below so they operate on a node-owned tree. Gated
+# on a real write probe / the uid-0 scan (done here, as node), so it is a no-op on Windows/WSL
+# — whose FUSE bind mounts already honour node's writes — and on Linux hosts whose mount uid
+# already matches node with no nested uid-0 entries; neither pays for a recursive chown.
+# Self-hosted ("--isolated") mode is exempt: its workspace is a container-local volume the
+# launcher already pre-seeds node-owned. The detached image-store writer
+# (POWBOX_IMAGE_STORE_ROLE=writer) is also exempt: it mounts the workspace but NOT the
+# per-container node_modules/.worktrees volumes, so a recursive chown there would descend into
+# the host's copies of those dirs — and it never writes the workspace anyway. Best-effort: a
+# warning is logged if the claim cannot be completed.
 if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] && command -v sudo >/dev/null 2>&1; then
 	_unwritable=()
 	for _dir in /workspace/*/; do
@@ -72,6 +89,24 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 		# and succeeds only on a genuinely writable directory.
 		if _probe="$(mktemp "${_dir}/.powbox-write-probe.XXXXXX" 2>/dev/null)"; then
 			rm -f "$_probe" || echo "Warning: could not remove write-probe file $_probe; continuing." >&2
+			# The root is node-writable, but the mixed-ownership case (see the block comment:
+			# a host `sudo git pull` re-owning nested paths to uid 0 while the top dir stays
+			# node-owned) slips past the probe above. Scan for any uid-0 entry and, if found,
+			# hand the workspace to the same helper, which re-owns ONLY those uid-0 entries.
+			# Prune the separately mounted, already-node-owned node_modules/.worktrees volumes
+			# exactly as the helper does (mountinfo-derived -path … -prune, with -xdev as a
+			# backstop for a genuinely different filesystem) so the scan never walks them, and
+			# short-circuit with -print -quit so a clean workspace stops at the first match
+			# (usually none) — negligible cost.
+			_prune=()
+			while IFS= read -r _mp; do
+				case "$_mp" in
+				"$_dir"/?*) _prune+=(-path "$_mp" -prune -o) ;;
+				esac
+			done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
+			if [ -n "$(find "$_dir" -xdev "${_prune[@]}" -uid 0 -print -quit 2>/dev/null)" ]; then
+				_unwritable+=("$_dir")
+			fi
 		else
 			_unwritable+=("$_dir")
 		fi
@@ -81,7 +116,7 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 			echo "Warning: could not make all dir-mounted workspaces writable by node; git and file writes may still fail (see the lines above)." >&2
 		fi
 	fi
-	unset _dir _unwritable _probe
+	unset _dir _unwritable _probe _prune _mp
 fi
 
 # Mark workspace bind-mounts as git safe directories. Host-owned project

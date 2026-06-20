@@ -23,11 +23,17 @@ set -euo pipefail
 # helper) would silently re-break every native-Linux host whose repo is not
 # uid-1000-owned; this stage is the automated guard.
 #
-# Like scripts/smoke-test-selfhosted.sh's Stage B, this validates the baked helper
-# + its sudoers wiring in isolation (it invokes /usr/local/bin/fix-workspace-perms.sh
-# by the exact path and sudo mechanism entrypoint-core.sh uses), not the full
-# entrypoint chain — the firewall/gh/shadow setup needs the launcher's compose
-# wiring and is out of scope here.
+# The all-root case (case_all_root) drives the GENUINE extracted entrypoint decision unit
+# /usr/local/bin/heal-workspace-perms.sh — the byte-for-byte code entrypoint-core.sh runs:
+# its node write-probe + nested-uid-0 scan decide whether and with what path/sudo to call
+# fix-workspace-perms.sh. So it guards the probe-and-call DECISION path, not only the helper,
+# and a regression confined to that decision logic (probe stops detecting the unwritable
+# mount, workspace never handed to the helper) is caught here. Because the unit ultimately
+# invokes /usr/local/bin/fix-workspace-perms.sh by the exact path + sudo mechanism the
+# entrypoint uses, the in-isolation helper + sudoers-wiring coverage is preserved (subsumed),
+# not lost. It still does NOT boot the full entrypoint chain — the firewall/gh/shadow setup
+# needs the launcher's compose wiring and is out of scope here. The mixed-ownership case below
+# still calls fix-workspace-perms.sh directly; task 007a converts it to the same unit.
 #
 # Self-skips (exit 0, no failure) when it cannot meaningfully run:
 #   * the agent image is absent — unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then
@@ -142,11 +148,21 @@ if probe="$(mktemp "${WS}/.powbox-dirmount-probe.XXXXXX" 2>/dev/null)"; then
 	exit 42
 fi
 echo "  ok: node cannot write the root-owned mount before the fix (genuinely root-owned, EACCES as expected)"
-# 2. The entrypoint-equivalent fix: the sudo-allowlisted root helper, invoked by
-#    the exact path entrypoint-core.sh uses. A dropped sudoers entry or a renamed
-#    helper fails here.
-if ! sudo /usr/local/bin/fix-workspace-perms.sh "$WS"; then
-	echo "FAIL: sudo fix-workspace-perms.sh failed (dropped sudoers entry or renamed/missing helper?)" >&2
+# 2. Drive the REAL entrypoint decision unit — heal-workspace-perms.sh, the EXACT code
+#    entrypoint-core.sh runs. Its node write-probe + nested-uid-0 scan DECIDE whether and with
+#    what path/sudo to call fix-workspace-perms.sh; run it as node (NOT via sudo — the unit
+#    runs sudo for the inner chown by itself). This deliberately REPLACES (does not drop) the
+#    former direct sudo fix-workspace-perms.sh call: the unit ultimately invokes that helper
+#    by the same allowlisted path/sudo mechanism, so the sudoers wiring + helper path are still
+#    exercised — the in-isolation helper coverage is PRESERVED, subsumed by this path. Driving
+#    the unit ADDITIONALLY guards the probe/decision logic: a regression there (the probe stops
+#    seeing the unwritable mount, the workspace is never added to _unwritable, the helper is
+#    never invoked or invoked with a wrong path) leaves the tree root-owned and surfaces at
+#    steps 3-5 below as EACCES — distinguishing a probe/decision regression from a bare
+#    helper/sudoers regression. The unit is best-effort (warns and exits 0 on an inner chown
+#    failure), so a non-zero exit HERE means the unit itself is missing/non-executable/erroring.
+if ! /usr/local/bin/heal-workspace-perms.sh; then
+	echo "FAIL: the real entrypoint heal unit (heal-workspace-perms.sh) errored — missing, non-executable, or a probe/scan fault; a fix-workspace-perms.sh helper/sudoers regression instead surfaces at the write/commit steps below" >&2
 	exit 1
 fi
 # 3. node can now create a file in the working tree.
@@ -186,6 +202,9 @@ exit 0
 # The mixed-ownership in-container assertion (task 007), run AS node against a fixture
 # whose ROOT is node-owned but which hides nested root-owned entries (a tracked
 # working-tree file + a .git/objects/<xx> shard), simulating a host `sudo git pull`.
+# NOTE: this case still calls fix-workspace-perms.sh DIRECTLY; converting it to drive the
+# shared heal-workspace-perms.sh decision unit (as the all-root case above now does) is the
+# job of follow-up task 007a, which stacks on this branch.
 # Same exit-code contract as ASSERT_SCRIPT (0 passed / 42 masked / other failure). The
 # node-owned root means the root-level write probe ASSERT_SCRIPT uses would PASS here, so
 # this instead probes the nested root-owned tracked file — the exact thing the mixed case

@@ -185,6 +185,11 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       workspace node cannot write OR that a short-circuiting uid-0 scan
 #                       shows contains nested root-owned entries, so it no-ops on
 #                       Windows/WSL and on uid-matched Linux hosts with no uid-0 entries.
+#                       That probe/scan/heal DECISION (whether and with what path to call
+#                       this helper) lives in heal-workspace-perms.sh, baked beside this one;
+#                       it runs as node (NOT sudo-allowlisted — its only privileged action is
+#                       sudo'ing THIS helper) so the entrypoint and the dir-mount smoke share
+#                       one decision unit.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs
@@ -274,6 +279,7 @@ COPY --chmod=755 \
     docker/shared/seed-image-store.sh \
     docker/shared/seed-workspace.sh \
     docker/shared/fix-workspace-perms.sh \
+    docker/shared/heal-workspace-perms.sh \
     /usr/local/bin/
 
 # Route pnpm (and its `pn` short alias) through the shadow wrapper so a package

@@ -203,7 +203,23 @@ if ($SkipDirMount) {
   $skipped.Add("Stage 5: dir-mount ownership (-SkipDirMount)")
 }
 else {
-  & (Join-Path $rootDir "scripts/smoke-test-dirmount.ps1") -Image $Image
+  # The child still returns success when it self-skips at runtime (non-Linux host,
+  # no root/passwordless sudo, or a host that masks the uid bug), so completion
+  # alone cannot distinguish a real pass from a skip. Hand it a marker file: it
+  # records the skip reason there and we surface it in the banner below, so a
+  # partial run is not reported as "all stages ran". An empty marker means the
+  # stage actually ran.
+  $dirmountMarker = New-TemporaryFile
+  try {
+    $env:POWBOX_SMOKE_SKIP_MARKER = $dirmountMarker.FullName
+    & (Join-Path $rootDir "scripts/smoke-test-dirmount.ps1") -Image $Image
+  }
+  finally {
+    Remove-Item Env:\POWBOX_SMOKE_SKIP_MARKER -ErrorAction SilentlyContinue
+  }
+  $dirmountSkip = Get-Content -LiteralPath $dirmountMarker.FullName -Raw -ErrorAction SilentlyContinue
+  if ($dirmountSkip) { $skipped.Add("Stage 5: dir-mount ownership ($($dirmountSkip.Trim()))") }
+  Remove-Item -LiteralPath $dirmountMarker.FullName -ErrorAction SilentlyContinue
 }
 
 if ($skipped.Count -gt 0) {

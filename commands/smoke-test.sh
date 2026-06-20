@@ -169,7 +169,18 @@ if [ -n "${POWBOX_SMOKE_SKIP_DIRMOUNT:-}" ]; then
 	echo "Skipping dir-mount ownership smoke test (POWBOX_SMOKE_SKIP_DIRMOUNT is set)."
 	skipped+=("Stage 5: dir-mount ownership (POWBOX_SMOKE_SKIP_DIRMOUNT)")
 else
-	"${ROOT_DIR}/scripts/smoke-test-dirmount.sh" "$IMAGE"
+	# The child still exits 0 when it self-skips at runtime (non-Linux host, no
+	# root/passwordless sudo, or a host that masks the uid bug), so its exit code
+	# alone cannot distinguish a real pass from a skip. Hand it a marker file: it
+	# records the skip reason there and we surface it in the banner below, so a
+	# partial run is not reported as "all stages ran". An empty marker means the
+	# stage actually ran.
+	dirmount_marker="$(mktemp "${TMPDIR:-/tmp}/powbox-smoke-dirmount-skip.XXXXXX")"
+	POWBOX_SMOKE_SKIP_MARKER="$dirmount_marker" "${ROOT_DIR}/scripts/smoke-test-dirmount.sh" "$IMAGE"
+	if [ -s "$dirmount_marker" ]; then
+		skipped+=("Stage 5: dir-mount ownership ($(cat "$dirmount_marker"))")
+	fi
+	rm -f "$dirmount_marker"
 fi
 
 if [ "${#skipped[@]}" -gt 0 ]; then

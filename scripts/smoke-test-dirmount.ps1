@@ -36,6 +36,17 @@ $mount = "/workspace/powbox-dirmount-smoke"
 
 function Fail([string]$m) { Write-Error "FAIL: $m"; exit 1 }
 
+# Record a runtime self-skip reason for the umbrella banner. The stage still
+# returns success on a self-skip, so commands/smoke-test.ps1 cannot tell a real
+# pass from a skip on its own; it passes POWBOX_SMOKE_SKIP_MARKER and we write the
+# reason there. A no-op when unset, so direct callers keep the plain success
+# contract.
+function Note-Skip([string]$Reason) {
+  if ($env:POWBOX_SMOKE_SKIP_MARKER) {
+    Set-Content -LiteralPath $env:POWBOX_SMOKE_SKIP_MARKER -Value $Reason -NoNewline
+  }
+}
+
 Write-Host "Dir-mount ownership smoke test (image: $Image)"
 
 # --- image gate (mirrors smoke-test-selfhosted.ps1) ---------------------------
@@ -44,6 +55,7 @@ if ($LASTEXITCODE -ne 0) {
   if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
     throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - the dir-mount ownership stage requires the image."
   }
+  Note-Skip "image '$Image' not found"
   Write-Host "Dir-mount stage skipped: image '$Image' not found (build it to exercise the entrypoint chown path)."
   return
 }
@@ -54,6 +66,7 @@ if ($LASTEXITCODE -ne 0) {
 # below (id/sudo/chown/stat/mktemp) is Linux-only anyway. $IsLinux is $null on
 # Windows PowerShell 5.1, so this also short-circuits there.
 if (-not $IsLinux) {
+  Note-Skip "host is not native Linux"
   Write-Host "Dir-mount stage skipped: the native-Linux bind-mount uid bug does not manifest on this OS (Windows/macOS bind mounts honour node's writes)."
   return
 }
@@ -73,6 +86,7 @@ elseif (Get-Command sudo -ErrorAction SilentlyContinue) {
   if ($LASTEXITCODE -eq 0) { $script:rootPrefix = @('sudo'); $canRoot = $true }
 }
 if (-not $canRoot) {
+  Note-Skip "no root / passwordless sudo to build a root-owned fixture"
   Write-Host "Dir-mount stage skipped: cannot create a root-owned fixture here (need root or passwordless sudo, e.g. a CI runner)."
   Write-Host "  Locally this is expected - the native-Linux root-owned-mount bug only reproduces where a root-owned path can be made. In CI (task 003) this stage runs for real."
   return
@@ -83,7 +97,9 @@ function Invoke-AsRoot {
   param([Parameter(Mandatory)][string[]]$Argument)
   $all = @($script:rootPrefix) + $Argument
   $exe = $all[0]
-  $rest = @($all[1..($all.Count - 1)])
+  # Guard the slice: with a single element, $all[1..0] indexes in reverse and
+  # re-includes $exe; an empty $rest is the correct "no extra args" case.
+  $rest = if ($all.Count -gt 1) { @($all[1..($all.Count - 1)]) } else { @() }
   & $exe @rest
 }
 
@@ -176,6 +192,7 @@ finally {
 }
 
 if ($masked) {
+  Note-Skip "host masks the native-Linux uid bug (node could already write the root-owned mount)"
   Write-Host "Dir-mount stage skipped: this host masks the native-Linux bind-mount uid bug (node could already write the root-owned mount). Nothing to assert."
   return
 }

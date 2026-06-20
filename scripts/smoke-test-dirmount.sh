@@ -25,11 +25,17 @@ set -euo pipefail
 # Self-skips (exit 0, no failure) when it cannot meaningfully run:
 #   * the agent image is absent — unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then
 #     it fails (mirrors smoke-test-selfhosted.sh's guard);
+#   * the host is not native Linux (Windows/WSL/macOS) — the bind-mount uid bug
+#     does not manifest there, and the GNU tooling below is Linux-only anyway;
 #   * it cannot create a genuinely root-owned fixture (no root / no passwordless
 #     sudo) — the local-dev case; in CI (task 003) it runs as root for real;
 #   * the host masks the native-Linux uid bug (node can already write a root-owned
 #     mount — Windows/WSL/macOS FUSE, or a uid-matched host): there is nothing to
 #     assert.
+#
+# When commands/smoke-test.sh runs this as Stage 5 it passes POWBOX_SMOKE_SKIP_MARKER
+# so each runtime self-skip is recorded in the umbrella banner rather than counting
+# silently toward "all stages ran"; see note_skip below.
 
 IMAGE="${1:-powbox-agent:latest}"
 
@@ -40,6 +46,17 @@ MOUNT="/workspace/powbox-dirmount-smoke"
 fail() {
 	echo "FAIL: $*" >&2
 	exit 1
+}
+
+# Record a runtime self-skip reason for the umbrella banner. The stage still
+# exits 0 on a self-skip, so commands/smoke-test.sh cannot tell a real pass from a
+# skip by exit code alone; it passes POWBOX_SMOKE_SKIP_MARKER and we write the
+# reason there. A no-op when unset, so direct callers and CI keep the plain
+# exit-0-on-skip contract.
+note_skip() {
+	if [ -n "${POWBOX_SMOKE_SKIP_MARKER:-}" ]; then
+		printf '%s' "$1" >"$POWBOX_SMOKE_SKIP_MARKER" || true
+	fi
 }
 
 # --- root-capability detection ------------------------------------------------
@@ -216,12 +233,26 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		echo "FAIL: image '$IMAGE' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set — the dir-mount ownership stage requires the image." >&2
 		exit 1
 	fi
+	note_skip "image '$IMAGE' not found"
 	echo "Dir-mount stage skipped: image '$IMAGE' not found (build it to exercise the entrypoint chown path)."
+	exit 0
+fi
+
+# --- native-Linux gate --------------------------------------------------------
+# The bug only manifests on a native-Linux bind mount; Windows/WSL/macOS mounts
+# honour node's writes regardless of the displayed owner, and the GNU tooling used
+# below (stat -c, chown, mktemp) is Linux-only anyway. Mirrors the .ps1's $IsLinux
+# gate so a non-Linux host with root/passwordless sudo (e.g. a macOS CI runner)
+# self-skips here instead of hard-failing where the bug cannot reproduce.
+if [ "$(uname -s)" != "Linux" ]; then
+	note_skip "host is not native Linux ($(uname -s))"
+	echo "Dir-mount stage skipped: the native-Linux bind-mount uid bug does not manifest on this OS ($(uname -s) bind mounts honour node's writes)."
 	exit 0
 fi
 
 # --- root-capability gate -----------------------------------------------------
 if [ "$CAN_ROOT" -ne 1 ]; then
+	note_skip "no root / passwordless sudo to build a root-owned fixture"
 	echo "Dir-mount stage skipped: cannot create a root-owned fixture here (need root or passwordless sudo, e.g. a CI runner)."
 	echo "  Locally this is expected — the native-Linux root-owned-mount bug only reproduces where a root-owned path can be made. In CI (task 003) this stage runs for real."
 	exit 0
@@ -230,6 +261,7 @@ fi
 case_all_root
 
 if [ "$MASKED" -eq 1 ]; then
+	note_skip "host masks the native-Linux uid bug (node could already write the root-owned mount)"
 	echo "Dir-mount stage skipped: this host masks the native-Linux bind-mount uid bug (node could already write the root-owned mount). Nothing to assert."
 	exit 0
 fi

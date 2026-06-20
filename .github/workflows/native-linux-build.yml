@@ -69,12 +69,14 @@ jobs:
         with:
           path: /tmp/powbox-base-image.tar
           # Conservatively keyed on every input baked into the base image: any
-          # change under docker/shared/**, or to PSScriptAnalyzerSettings.psd1
-          # (also COPY'd into the base), busts the key even for files used only by
-          # the agent layer (a harmless extra base rebuild). No restore-keys on
+          # change under docker/shared/**, to PSScriptAnalyzerSettings.psd1 (also
+          # COPY'd into the base), or to .dockerignore (which filters the build
+          # context feeding every base COPY, so a change there can alter or break
+          # a base-only COPY input) busts the key even for files used only by the
+          # agent layer (a harmless extra base rebuild). No restore-keys on
           # purpose — a prefix fallback could load a STALE base that build.sh
           # would reuse without rebuilding.
-          key: powbox-base-${{ runner.os }}-${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1') }}
+          key: powbox-base-${{ runner.os }}-${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
 
       - name: Build image (base + agent)
         run: |

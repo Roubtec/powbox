@@ -18,6 +18,13 @@
 # justified — each one is a hole in the guard.
 set -euo pipefail
 
+# Scan from the repo root so a manual invocation from a subdirectory still
+# checks the whole tree: `git ls-files` is otherwise scoped to the current
+# directory AND prints paths relative to it, which would both miss violations
+# elsewhere and break the repo-root-relative ALLOWLIST below. A no-op when
+# already at the root (as in CI).
+cd "$(git rev-parse --show-toplevel)"
+
 # Exact tracked paths (repo-root-relative) exempt from the exec-bit requirement.
 # Empty by default — add a path here only for a script genuinely never run from
 # a host clone (see the note above).

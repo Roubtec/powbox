@@ -848,12 +848,12 @@ That means a fresh or reset Codex config starts with a richer native status line
 
 ## Continuous Integration
 
-GitHub Actions validate powbox on `ubuntu-latest` — itself a real native-Linux
-host with full, unvirtualized Docker — so the build / mount / identity / exec-bit
-defect class that Windows/WSL masks (git there ignores filemode, the bind mount
-reports `0755`, uid semantics differ) is caught automatically on PRs instead of
-during a manual VPS stand-up. Two layered workflows keep cost proportional to the
-change:
+GitHub Actions validate powbox on `ubuntu-latest` — a hosted native-Linux VM
+running a first-class Docker daemon (not Docker Desktop on Windows/WSL) — so the
+build / mount / identity / exec-bit defect class that Windows/WSL masks (git there
+ignores filemode, the bind mount reports `0755`, uid semantics differ) is caught
+automatically on PRs instead of during a manual VPS stand-up. Two layered
+workflows keep cost proportional to the change:
 
 - **Tier 0 — every PR** (`.github/workflows/native-linux-ci.yml`, seconds, no
   Docker): static guards — an exec-bit check (`scripts/check-exec-bits.sh`, the
@@ -871,10 +871,10 @@ change:
 
 ### What CI covers vs. what stays VPS-only
 
-The hosted runner is a real Linux host, so it covers the build, exec-bit, file
-ownership, and container-identity wiring end to end. It does **not** reproduce a
-few host-specific behaviors, which stay manually VPS-validated (the VPS remains
-the backstop either way):
+The hosted runner is a native-Linux environment, so it covers the build,
+exec-bit, file ownership, and container-identity wiring end to end. It does
+**not** reproduce a few host-specific behaviors, which stay manually
+VPS-validated (the VPS remains the backstop either way):
 
 - **Egress firewall against real CGNAT ranges** and the netcup cloud-firewall
   interplay (PR #52's class) — hosted-runner networking differs.

@@ -1,10 +1,11 @@
 name: Native Linux CI - Tier 1 (image build + smoke)
 
 # Tier 1: the heavy native-Linux check — build the real agent image with real
-# Docker on a hosted ubuntu-latest host (itself a real Linux host with full,
-# unvirtualized Docker), then run the full smoke test. This reproduces the
-# build / mount / identity / exec-bit defect class that only surfaces on a real
-# Linux host (PRs #51/#52/#54/#55) and previously cost a human a VPS stand-up.
+# Docker on a hosted ubuntu-latest runner (a native-Linux VM running a
+# first-class Docker daemon, not Docker Desktop on Windows/WSL), then run the
+# full smoke test. This reproduces the build / mount / identity / exec-bit defect
+# class that only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and
+# previously cost a human a VPS stand-up.
 #
 # Path-gated: across recent history most PRs are skill/docs/launcher edits, so
 # this runs ONLY when an image-affecting file changes. Tier 0

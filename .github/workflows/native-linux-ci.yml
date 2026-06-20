@@ -45,17 +45,37 @@ jobs:
       # blocking genuine shell bugs in any future PR.
       - name: shellcheck (error severity, whole tree)
         run: |
+          # Tracked *.sh files, PLUS extensionless/other tracked files whose
+          # shebang names a shellcheck-supported shell (sh/bash/dash/ksh). Many
+          # baked helpers ship without a .sh suffix (docker/shared/wt-enter,
+          # wt-bootstrap, pg-dev-up, powbox-provenance, …), so a quoting/syntax
+          # regression in one would otherwise slip past Tier 0 — the smoke test
+          # only checks they are on PATH, not that they parse. zsh/pwsh shebangs
+          # are intentionally excluded (shellcheck does not support them).
           mapfile -t files < <(git ls-files -- '*.sh')
-          echo "Running shellcheck --severity=error on ${#files[@]} tracked *.sh file(s)."
+          while IFS= read -r f; do
+            case "$f" in *.sh) continue ;; esac
+            [ -f "$f" ] || continue
+            if head -n1 -- "$f" | grep -qE '^#!.*\b(ba|da|k)?sh\b'; then
+              files+=("$f")
+            fi
+          done < <(git ls-files)
+          echo "Running shellcheck --severity=error on ${#files[@]} tracked shell file(s)."
           shellcheck --severity=error "${files[@]}"
 
       - name: Install shfmt
         env:
           SHFMT_VERSION: v3.10.0
+          # SHA256 of shfmt_v3.10.0_linux_amd64 from the upstream release's
+          # sha256sums.txt. Verified before chmod/exec so a tampered download is
+          # never run with the runner's permissions (supply-chain hardening).
+          # Bump alongside SHFMT_VERSION.
+          SHFMT_SHA256: 1f57a384d59542f8fac5f503da1f3ea44242f46dff969569e80b524d64b71dbc
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           curl -fsSL -o "$RUNNER_TEMP/bin/shfmt" \
             "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  $RUNNER_TEMP/bin/shfmt" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/bin/shfmt"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           "$RUNNER_TEMP/bin/shfmt" --version
@@ -89,20 +109,31 @@ jobs:
       # findings are still surfaced as GitHub annotations.
       - name: PSScriptAnalyzer (error severity, whole tree)
         shell: pwsh
+        env:
+          # Pinned for reproducibility: an unpinned PSGallery install lets a future
+          # PSScriptAnalyzer release add error-severity rules that turn a
+          # previously-green PR red. 1.25.0 reports 0 error/ParseError findings on
+          # this tree; bump deliberately after re-checking.
+          PSSA_VERSION: '1.25.0'
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
-            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -Repository PSGallery
+          $version = $env:PSSA_VERSION
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer | Where-Object { $_.Version -eq [version]$version })) {
+            Install-Module PSScriptAnalyzer -RequiredVersion $version -Force -Scope CurrentUser -Repository PSGallery
           }
-          Import-Module PSScriptAnalyzer
+          Import-Module PSScriptAnalyzer -RequiredVersion $version
           $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          # A syntactically broken .ps1 surfaces as severity 'ParseError', not
+          # 'Error', so it must be in the failure set too — otherwise a broken
+          # script is only annotated as a warning and Tier 0 still passes.
+          $failSeverities = @('Error', 'ParseError')
           foreach ($f in $findings) {
-            $level = if ($f.Severity -eq 'Error') { 'error' } else { 'warning' }
+            $level = if ($failSeverities -contains [string]$f.Severity) { 'error' } else { 'warning' }
             Write-Host ("::{0} file={1},line={2},col={3}::[{4}] {5}" -f $level, $f.ScriptPath, $f.Line, $f.Column, $f.RuleName, $f.Message)
           }
-          $errors = @($findings | Where-Object { $_.Severity -eq 'Error' })
-          Write-Host ("PSScriptAnalyzer: {0} finding(s) total, {1} error-severity." -f $findings.Count, $errors.Count)
+          $errors = @($findings | Where-Object { $failSeverities -contains [string]$_.Severity })
+          Write-Host ("PSScriptAnalyzer: {0} finding(s) total, {1} error/parse-severity." -f $findings.Count, $errors.Count)
           if ($errors.Count -gt 0) {
-            throw "PSScriptAnalyzer found $($errors.Count) error-severity finding(s) (see ::error annotations above)."
+            throw "PSScriptAnalyzer found $($errors.Count) error/parse-severity finding(s) (see ::error annotations above)."
           }

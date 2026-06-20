@@ -192,8 +192,11 @@ else {
 # entrypoint-core.sh's write probe + the sudo-allowlisted fix-workspace-perms.sh
 # helper (PR #55) chown it to node so git/edits work. This stage runs two cases: the
 # all-root-owned mount (PR #55) and a mixed-ownership mount (task 007) - a node-owned
-# root that hides nested root-owned files from a host `sudo git pull`, which the
-# entrypoint's nested-uid-0 scan + the helper's uid-0 re-own heal. It asserts node can
+# root that hides nested root-owned files from a host `sudo git pull` that the helper's
+# uid-0 re-own heals. Both cases invoke fix-workspace-perms.sh DIRECTLY in isolation
+# (not the full entrypoint chain); in production the entrypoint's nested-uid-0 scan is
+# the trigger that hands the mixed case to the helper - exercising that scan end-to-end
+# from the smoke is tracked in tasks/007a, not done here. It asserts node can
 # write + git-commit each after the fix. It self-skips when the image is absent (honouring -RequireImage /
 # POWBOX_SMOKE_REQUIRE_IMAGE), when the host is not native Linux, when it cannot
 # create a root-owned fixture (no root / passwordless sudo - the local-dev case; it

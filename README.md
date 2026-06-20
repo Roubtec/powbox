@@ -846,6 +846,49 @@ The seeded status line uses Codex-native items for model, current directory, rem
 The seeded title surfaces current directory, git branch, model, and thread title when the terminal supports title updates.
 That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
 
+## Continuous Integration
+
+GitHub Actions validate powbox on `ubuntu-latest` — itself a real native-Linux
+host with full, unvirtualized Docker — so the build / mount / identity / exec-bit
+defect class that Windows/WSL masks (git there ignores filemode, the bind mount
+reports `0755`, uid semantics differ) is caught automatically on PRs instead of
+during a manual VPS stand-up. Two layered workflows keep cost proportional to the
+change:
+
+- **Tier 0 — every PR** (`.github/workflows/native-linux-ci.yml`, seconds, no
+  Docker): static guards — an exec-bit check (`scripts/check-exec-bits.sh`, the
+  PR #51 class), `shellcheck` (error severity) over all `*.sh`, an advisory
+  `shfmt` on the scripts a PR changes, and `Invoke-ScriptAnalyzer`
+  (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1`.
+- **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
+  builds the agent image and runs `./commands/smoke-test.sh` under
+  `POWBOX_SMOKE_REQUIRE_IMAGE=1` so no stage self-skips into a false green. It
+  triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
+  `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
+  `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints; skill/docs PRs run
+  Tier 0 only. The expensive base image is cached (a `docker save` tarball keyed
+  on its inputs) so the common Tier-1 run rebuilds only the agent layers.
+
+### What CI covers vs. what stays VPS-only
+
+The hosted runner is a real Linux host, so it covers the build, exec-bit, file
+ownership, and container-identity wiring end to end. It does **not** reproduce a
+few host-specific behaviors, which stay manually VPS-validated (the VPS remains
+the backstop either way):
+
+- **Egress firewall against real CGNAT ranges** and the netcup cloud-firewall
+  interplay (PR #52's class) — hosted-runner networking differs.
+- **FUSE / overlay storage performance** characteristics.
+- **Nested rootless Podman that needs `/dev/net/tun` + `/dev/fuse`** — unreliable
+  on hosted runners, so the smoke test's Podman stage self-skips its nested-run
+  checks there and validates only the static engine wiring.
+- **Long-lived-host behavior** (a persistent VPS over time).
+
+Fuller coverage of the first and third items is possible later by pointing the
+same Tier-1 workflow at a **self-hosted runner** (which can expose
+`/dev/net/tun` + `/dev/fuse` and, with `NET_ADMIN`, exercise the firewall) — more
+setup and a maintained runner, but the workflow itself runs there unchanged.
+
 ## License
 
 This project is licensed under the MIT License.

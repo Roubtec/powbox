@@ -1,0 +1,108 @@
+name: Native Linux CI - Tier 0 (static guards)
+
+# Tier 0: fast, Docker-free static guards that run on EVERY pull request. These
+# reproduce the class of native-Linux defects that Windows/WSL masks (git there
+# ignores filemode), in seconds, with no image build. Tier 0 alone would have
+# caught PR #51 (a shell script committed without its exec bit). The heavier
+# image build + smoke test lives in the path-gated Tier 1 workflow
+# (.github/workflows/native-linux-build.yml).
+#
+# What stays out of CI (VPS-only) is documented in README.md under
+# "Continuous Integration".
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-linux-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-guards:
+    name: Static guards (exec bits, shellcheck, shfmt, PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Full history so the advisory shfmt step can diff against the PR base.
+          fetch-depth: 0
+
+      # The acceptance-critical guard: any tracked *.sh committed without its
+      # executable bit (the PR #51 regression) fails the job. Reads git index
+      # modes, so it is correct even where core.filemode is false.
+      - name: Exec-bit guard
+        run: ./scripts/check-exec-bits.sh
+
+      # shellcheck ships on ubuntu-latest. Run repo-wide but gate only on
+      # error-severity findings: the existing tree carries intentional
+      # info/warning patterns (SC1091 sourced-file, SC2016 single-quote, SC2154
+      # dynamically-set vars), so error-only keeps Tier 0 green today while still
+      # blocking genuine shell bugs in any future PR.
+      - name: shellcheck (error severity, whole tree)
+        run: |
+          mapfile -t files < <(git ls-files -- '*.sh')
+          echo "Running shellcheck --severity=error on ${#files[@]} tracked *.sh file(s)."
+          shellcheck --severity=error "${files[@]}"
+
+      - name: Install shfmt
+        env:
+          SHFMT_VERSION: v3.10.0
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/shfmt" \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          chmod +x "$RUNNER_TEMP/bin/shfmt"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/shfmt" --version
+
+      # The repo is not yet fully shfmt-normalized (several legacy scripts differ
+      # from shfmt's default tab style), so a blanket blocking shfmt would be red
+      # on a clean branch. Instead, surface formatting drift on the scripts THIS
+      # PR adds or changes as a non-blocking advisory — a nudge toward consistent
+      # formatting on new code without retroactively reformatting 30 files.
+      - name: shfmt (advisory) on changed shell scripts
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "$base" "$head" -- '*.sh')
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "No added/changed *.sh in this PR — nothing for shfmt to check."
+            exit 0
+          fi
+          echo "Changed shell scripts:"
+          printf '  %s\n' "${changed[@]}"
+          if shfmt -d "${changed[@]}"; then
+            echo "shfmt: changed scripts match shfmt formatting."
+          else
+            echo "::warning::shfmt found formatting differences in changed shell scripts (advisory, not blocking). Run 'shfmt -w <file>' to apply. The repo is not yet fully shfmt-normalized."
+          fi
+
+      # pwsh ships on ubuntu-latest; PSScriptAnalyzer does not, so install it.
+      # Uses the repo's PSScriptAnalyzerSettings.psd1 (its ExcludeRules mirror the
+      # intentional CLI-script patterns). Gate only on error-severity findings so
+      # the existing tree's warning/info results do not turn Tier 0 red; all
+      # findings are still surfaced as GitHub annotations.
+      - name: PSScriptAnalyzer (error severity, whole tree)
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -Repository PSGallery
+          }
+          Import-Module PSScriptAnalyzer
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          foreach ($f in $findings) {
+            $level = if ($f.Severity -eq 'Error') { 'error' } else { 'warning' }
+            Write-Host ("::{0} file={1},line={2},col={3}::[{4}] {5}" -f $level, $f.ScriptPath, $f.Line, $f.Column, $f.RuleName, $f.Message)
+          }
+          $errors = @($findings | Where-Object { $_.Severity -eq 'Error' })
+          Write-Host ("PSScriptAnalyzer: {0} finding(s) total, {1} error-severity." -f $findings.Count, $errors.Count)
+          if ($errors.Count -gt 0) {
+            throw "PSScriptAnalyzer found $($errors.Count) error-severity finding(s) (see ::error annotations above)."
+          }

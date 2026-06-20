@@ -1,0 +1,102 @@
+name: Native Linux CI - Tier 1 (image build + smoke)
+
+# Tier 1: the heavy native-Linux check — build the real agent image with real
+# Docker on a hosted ubuntu-latest host (itself a real Linux host with full,
+# unvirtualized Docker), then run the full smoke test. This reproduces the
+# build / mount / identity / exec-bit defect class that only surfaces on a real
+# Linux host (PRs #51/#52/#54/#55) and previously cost a human a VPS stand-up.
+#
+# Path-gated: across recent history most PRs are skill/docs/launcher edits, so
+# this runs ONLY when an image-affecting file changes. Tier 0
+# (.github/workflows/native-linux-ci.yml) still covers every PR. The
+# scripts/smoke-test* glob below also future-proofs task 005's
+# scripts/smoke-test-dirmount.* — its dir-mount stage will trigger Tier 1 and
+# join the smoke run automatically once it merges (the smoke entrypoint runs
+# whatever stages exist at run time).
+#
+# NOTE (branch protection): because Tier 1 is path-gated it does not run on
+# every PR. If it is ever marked a *required* status check, use a check that
+# tolerates skipped runs (or keep it non-required) so docs/skill PRs are not
+# blocked waiting on a job that intentionally never starts.
+
+on:
+  pull_request:
+    paths:
+      - 'docker/**'
+      - '**/Dockerfile'
+      - 'compose*.yml'
+      - '.dockerignore'
+      - 'docker-bake.hcl'
+      - 'build.*'
+      - 'scripts/launch-agent.*'
+      - 'scripts/build-image.*'
+      - 'scripts/smoke-test*'
+      - 'commands/smoke-test.*'
+      - '.github/workflows/native-linux-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-linux-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    name: Build image + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Cache-awareness, footprint-respecting edition. The cheap, robust win is
+      # to cache the EXPENSIVE base image (node:24-trixie-slim + ~12 apt groups,
+      # ~13 min cold) as a docker-save tarball keyed on its inputs. On a hit we
+      # load it and rebuild only the agent layers; on a miss we build base+agent
+      # fresh and save the base for next time. This works with the DEFAULT docker
+      # buildx driver (shared image store) that the two-stage local-FROM bake
+      # (agent FROM powbox-agent-base:latest) needs. buildx `type=gha` cache was
+      # NOT used: it requires the docker-container driver, which cannot resolve a
+      # locally-built FROM image across the base->agent stages, and wiring it
+      # cleanly would mean restructuring docker-bake.hcl / build.sh — out of this
+      # task's footprint. The fallback path (full build) is always correct, so a
+      # cold/empty cache only costs time, never correctness.
+      - name: Restore base image cache
+        id: basecache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/powbox-base-image.tar
+          # Conservatively keyed: any change under docker/shared/** busts the key
+          # even for scripts baked only into the agent layer (a harmless extra
+          # base rebuild). No restore-keys on purpose — a prefix fallback could
+          # load a STALE base that build.sh would reuse without rebuilding.
+          key: powbox-base-${{ runner.os }}-${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh') }}
+
+      - name: Build image (base + agent)
+        run: |
+          if [ "${{ steps.basecache.outputs.cache-hit }}" = "true" ]; then
+            echo "Base cache HIT — loading powbox-agent-base:latest from tarball, rebuilding agent layers only."
+            docker load -i /tmp/powbox-base-image.tar
+            # ensure_base_image in build.sh sees the loaded base and skips the
+            # base rebuild, so only the agent layers build here.
+            ./build.sh agent
+          else
+            echo "Base cache MISS — building base + agent from scratch."
+            ./build.sh all
+            echo "Saving base image tarball for the next run."
+            docker save -o /tmp/powbox-base-image.tar powbox-agent-base:latest
+          fi
+          docker image inspect powbox-agent:latest >/dev/null
+
+      # POWBOX_SMOKE_REQUIRE_IMAGE=1 turns a missing image into a hard error and
+      # makes the image-gated stages fail instead of self-skipping into a false
+      # "all green" — so CI never reports a partial smoke pass as success. The
+      # Podman stage's nested-run checks self-skip when /dev/net/tun is absent
+      # (the hosted runner has none); that validates the static engine wiring and
+      # is acceptable, not a failure. The pg-dev-up and self-hosted stages run
+      # in full. Task 005's dir-mount stage, once merged, runs here too.
+      - name: Smoke test (image required, no stage self-skip)
+        env:
+          POWBOX_SMOKE_REQUIRE_IMAGE: '1'
+        run: ./commands/smoke-test.sh

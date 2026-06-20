@@ -309,6 +309,13 @@ case_mixed_ownership() {
 	printf 'tracked nested file\n' >"$fixture/nested.txt"
 	git -C "$fixture" -c user.email=smoke@powbox.local -c user.name="powbox smoke" add nested.txt
 	git -C "$fixture" -c user.email=smoke@powbox.local -c user.name="powbox smoke" commit -q -m "add nested file"
+	# Locate the .git/objects/<xx> shard to root-own BEFORE chowning the tree to node:
+	# mktemp -d gives a mode-700 root owned by the invoking user, so once `chown -R
+	# 1000:1000` runs, a passwordless-sudo runner whose uid is not 1000 could no longer
+	# traverse it — the unprivileged find below would see nothing and the case would
+	# fail before exercising the helper. The captured path stays valid across the chown.
+	shard="$(find "$fixture/.git/objects" -mindepth 1 -maxdepth 1 -type d -name '??' | head -n1)"
+	[ -n "$shard" ] || fail "mixed-ownership fixture has no .git/objects/<xx> shard dir to root-own"
 	# Force the exact mixed-ownership shape regardless of who runs the stage (root in
 	# CI, else a passwordless-sudo runner): node-owned ROOT, with root-owned ONLY the
 	# paths a host `sudo git pull` rewrites. chown the whole tree to node (uid 1000)
@@ -316,8 +323,6 @@ case_mixed_ownership() {
 	# root-owned ones — a tracked file and one .git/objects/<xx> shard (+ its objects).
 	as_root chown -R 1000:1000 "$fixture"
 	as_root chown 0:0 "$fixture/nested.txt"
-	shard="$(find "$fixture/.git/objects" -mindepth 1 -maxdepth 1 -type d -name '??' | head -n1)"
-	[ -n "$shard" ] || fail "mixed-ownership fixture has no .git/objects/<xx> shard dir to root-own"
 	as_root chown -R 0:0 "$shard"
 	echo "Case: mixed-ownership mount (node-owned root + nested root-owned tracked file & .git/objects/<xx> shard, as from a host 'sudo git pull')"
 	run_dirmount_case "$fixture" "$ASSERT_SCRIPT_MIXED" "nested.txt"

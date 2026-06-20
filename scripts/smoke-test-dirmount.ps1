@@ -244,15 +244,20 @@ try {
   Set-Content -LiteralPath (Join-Path $mfixture 'nested.txt') -Value 'tracked nested file'
   & git -C $mfixture @gitId add nested.txt
   & git -C $mfixture @gitId commit -q -m 'add nested file'
+  # Locate the .git/objects/<xx> shard to root-own BEFORE chowning the tree to node:
+  # mktemp -d gives a mode-700 root owned by the invoking user, so once `chown -R
+  # 1000:1000` runs, a passwordless-sudo runner whose uid is not 1000 could no longer
+  # traverse it (the unprivileged find would see nothing). The captured path stays
+  # valid across the chown.
+  $shard = & find (Join-Path $mfixture '.git/objects') -mindepth 1 -maxdepth 1 -type d -name '??' |
+  Select-Object -First 1
+  if (-not $shard) { Fail 'mixed-ownership fixture has no .git/objects/<xx> shard dir to root-own' }
   # Force the mixed shape regardless of who runs the stage: node-owned ROOT, then
   # root-owned ONLY the paths a host `sudo git pull` rewrites (a tracked file + one
   # .git/objects/<xx> shard). chown the whole tree to node first, then plant the
   # nested root-owned entries.
   Invoke-AsRoot @('chown', '-R', '1000:1000', $mfixture)
   Invoke-AsRoot @('chown', '0:0', (Join-Path $mfixture 'nested.txt'))
-  $shard = & find (Join-Path $mfixture '.git/objects') -mindepth 1 -maxdepth 1 -type d -name '??' |
-  Select-Object -First 1
-  if (-not $shard) { Fail 'mixed-ownership fixture has no .git/objects/<xx> shard dir to root-own' }
   Invoke-AsRoot @('chown', '-R', '0:0', $shard)
   Write-Host "Case: mixed-ownership mount (node-owned root + nested root-owned tracked file & .git/objects/<xx> shard, as from a host 'sudo git pull')"
   docker run --rm -v "${mfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptMixed powbox-dirmount $mount

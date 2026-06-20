@@ -15,13 +15,37 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # join the smoke run automatically once it merges (the smoke entrypoint runs
 # whatever stages exist at run time).
 #
-# NOTE (branch protection): because Tier 1 is path-gated it does not run on
-# every PR. If it is ever marked a *required* status check, use a check that
-# tolerates skipped runs (or keep it non-required) so docs/skill PRs are not
-# blocked waiting on a job that intentionally never starts.
+# NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
+# is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
+# and label-skippable (the `non-code` job `if:` below). main is currently
+# UNPROTECTED, so none of these skips can block a merge today. If Tier 1 (or
+# Tier 0) is ever marked a *required* status check, use a check that tolerates
+# skipped runs (or keep it non-required) so docs/`non-code`/non-main-targeting
+# PRs are not blocked waiting on a job that intentionally never starts.
 
 on:
   pull_request:
+    # Base-branch gate: on.pull_request.branches filters on the PR's TARGET
+    # (base) branch, so the heavy Tier 1 build+smoke runs ONLY for PRs merging
+    # into main. Stacked children whose base is a parent feature branch skip
+    # Tier 1 and iterate fast; each branch still gets exactly one Tier 1 run at
+    # the moment it is retargeted to main and rebased — right before it can
+    # compromise main, never on intermediate iterations.
+    #
+    # Auto-retarget caveat (not a bug): when a parent PR merges, GitHub
+    # auto-retargets its children to main. That base change fires a pull_request
+    # `edited` action, which is deliberately NOT in `types` below, so the
+    # retarget alone does NOT start Tier 1. In the rebase-stack flow the child is
+    # then rebased onto main and force-pushed, which fires `synchronize` and DOES
+    # trigger Tier 1 — so the run still happens before merge. `edited` is left
+    # out on purpose: it also fires on every title/body edit and would re-run
+    # Tier 1 needlessly.
+    #
+    # types: the defaults (opened, synchronize, reopened) are spelled out so that
+    # adding labeled/unlabeled (for the `non-code` label gate on the job below)
+    # does not silently drop them.
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'docker/**'
       - '**/Dockerfile'
@@ -46,6 +70,12 @@ jobs:
   build-and-smoke:
     name: Build image + smoke test
     runs-on: ubuntu-latest
+    # Skip when the PR carries the repo's `non-code` label (docs/tasks-only
+    # changes that need no rebuild + full CI). On Tier 1 this is
+    # belt-and-suspenders — the path + base-branch gates above already skip docs
+    # PRs — but it keeps the gate expression identical to Tier 0's. Toggling the
+    # label re-evaluates on the next labeled/unlabeled event.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'non-code') }}
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -63,6 +93,12 @@ jobs:
       # cleanly would mean restructuring docker-bake.hcl / build.sh — out of this
       # task's footprint. The fallback path (full build) is always correct, so a
       # cold/empty cache only costs time, never correctness.
+      # Same-PR-by-design: this cache is seeded on pull_request runs, so the
+      # first push of an image PR warms THIS PR's base cache (the one-time cold
+      # base build hides behind human review latency) and later pushes hit it
+      # warm. It is NOT shared across PRs — a cross-PR/default-branch warmup was
+      # considered and declined (it would add recurring main-branch CI for a
+      # saving not felt). So a cold cache on a fresh PR is expected, not a bug.
       - name: Restore base image cache
         id: basecache
         uses: actions/cache@v4

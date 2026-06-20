@@ -12,7 +12,7 @@
 #             to an implementer's worktree — a missing branch is then an error,
 #             not a silent fresh checkout that reviews an empty diff)
 #
-# Exactly one of three rerun-safe outcomes (matching the *-worktrees skills):
+# Exactly one of three rerun-safe outcomes (matching the worktree-running skills):
 #   * worktree exists and is on <branch>  -> reuse it (prior commits intact)
 #   * branch exists without its worktree  -> attach it (no -b)
 #   * neither exists                      -> create branch off <base> (-b)

@@ -48,7 +48,7 @@ Bonus: because the pnpm store, the worktrees, and the root `node_modules` now sh
 
 ### 4. Keep git worktrees inside the bubble
 
-Worktree-based parallelism (subagents fanning tasks into `.worktrees/<task>` via `wf-address-tasks` / the `*-worktrees` skills) is a first-class use case and stays.
+Worktree-based parallelism (subagents fanning tasks into `.worktrees/<task>` via `wf-address-tasks` / the worktree-running skills) is a first-class use case and stays.
 It costs nothing extra here and actually hardlinks better (decision 3). The `.worktrees` convention, the `wt-bootstrap`/`wt-enter`/`wt-remove` helpers, and `PNPM_STORE_DIR` all keep working, just rooted in the one workspace volume.
 
 ### 5. Shared auth/skills, isolated workspace (via the cwd slug)

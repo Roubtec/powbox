@@ -5,12 +5,12 @@ description: >-
   each item in real artifacts, showing a concrete trigger example, presenting distinct resolution
   outcomes with a recommendation, capturing the maintainer's choice, and applying it. Use for
   generic decision lists and especially for deferred/open items left by address-review or
-  address-reviews-worktrees runs: agent-proposed deferrals, hands-off blockers, discovered findings,
+  address-reviews runs: agent-proposed deferrals, hands-off blockers, discovered findings,
   and cross-branch issues. Trigger when the user wants to work through decision points, decide
   fix-now-vs-defer on follow-ups, or unblock PR/implementation progress. With no arguments, use the
   just-completed run's in-context items; with a pointer (PRs, task file, issue list, doc), re-derive
   the list. Do not trigger to address fresh review threads (use address-review or
-  address-reviews-worktrees) or to rebase a stack (use rebase-stack).
+  address-reviews) or to rebase a stack (use rebase-stack).
 ---
 
 # resolve-open-questions
@@ -28,7 +28,7 @@ recommends.
 Explicit Codex invocation uses `$resolve-open-questions`; natural-language equivalents are fine.
 
 This is the **interactive counterpart** to the hands-off skills. Where `address-review`,
-`address-reviews-worktrees`, and batch executors *document and stop* on anything they should not
+`address-reviews`, and batch executors *document and stop* on anything they should not
 guess, this skill is where those parked questions get answered.
 
 > **Generic core, review-aware layer.** Sections 1–5 below are domain-neutral and apply to any list
@@ -48,13 +48,16 @@ guess, this skill is where those parked questions get answered.
   work-list from that source (for the review case, see the review layer), then proceed identically.
 
 Optional trailing flags, honored only by the review layer's apply phase for items chosen to fix now,
-mirror the review skills: `push` and `ping-codex` / `ping-claude` / `ping-copilot` (re-request bot
-review after the follow-up push). This is a **fully interactive** skill, so it does **not** assume
+mirror the review skills: `push` and `ping-codex` / `ping-claude` / `ping-copilot` / `ping-contributing`
+(re-request bot review after the follow-up push). This is a **fully interactive** skill, so it does **not** assume
 publication: even for a fix-now item it **asks the maintainer to confirm before pushing and before
 editing any review threads** (the flags merely pre-answer that prompt). `ping-codex` / `ping-claude`
 post an `@codex` / `@claude` review comment; **`ping-copilot` requests review via
 `gh pr edit <PR#> --add-reviewer @copilot`** — never an `@copilot review` comment, which drives
-Copilot's coding agent rather than its reviewer.
+Copilot's coding agent rather than its reviewer. **`ping-contributing`** carries the same meaning as in
+`address-review`: re-ping a bot only if it brought a genuinely new finding this round, so a reviewer
+that has gone quiet drops out of the loop — combined with explicit `ping-*` it filters that named set,
+supplied alone it falls back to the bots that reviewed.
 
 ## The core loop
 
@@ -158,7 +161,7 @@ refined.
 ## When the items come from a review-addressing pass
 
 This is the canonical application and the reason the skill exists. `address-review` (one PR) and
-`address-reviews-worktrees` (a batch) run **hands-off**: every thread a fixer couldn't resolve with
+`address-reviews` (a batch) run **hands-off**: every thread a fixer couldn't resolve with
 authority is parked, the run surfaces blockers and out-of-scope findings, and **none of those are
 calls an unattended agent should make**. This layer is where they get made — interactively — and
 where the agreed fixes land. It is the interactive inverse of the review-addressing contract.
@@ -192,7 +195,7 @@ and scan recent run reports / commit messages for discovered findings.
 ### Review-specific apply (step 5)
 
 **Fix-now items → worktree → review → publish** (borrow the machinery from
-`address-reviews-worktrees`):
+`address-reviews`):
 
 - One **git worktree per owning branch** (Session Bootstrap, `wt-enter`, isolation model — see that
   skill). A coupled fix + sibling-analog may span two branches: each lands on **the branch that owns
@@ -221,7 +224,7 @@ and scan recent run reports / commit messages for discovered findings.
   resolved, since a re-review (codex especially) re-raises anything still unaddressed and rewriting
   historical resolutions is needless and messy), a Summary comment, and re-ping bots if requested
   (`@codex`/`@claude` via comment; Copilot via `gh pr edit <PR#> --add-reviewer @copilot`, never an
-  `@copilot review` comment).
+  `@copilot review` comment; under `ping-contributing`, only the bots that brought a new finding this round).
 
 **Deferred items → task hygiene** (no code, but leave nothing dangling):
 
@@ -243,7 +246,7 @@ and scan recent run reports / commit messages for discovered findings.
 - **New review threads that arrived mid-run.** A bot re-review triggered by the *original* push may
   have posted fresh threads while this session ran; publishers will report them. Surface them
   prominently — they are a *new* round, **not this skill's scope** (point at `address-review` /
-  `address-reviews-worktrees`).
+  `address-reviews`).
 - **Stack state.** Fix-now follow-ups make a stacked chain leafier; inherited-code fixes and
   consolidated tasks **collapse at restack**. Point at `rebase-stack` for the integration pass.
 

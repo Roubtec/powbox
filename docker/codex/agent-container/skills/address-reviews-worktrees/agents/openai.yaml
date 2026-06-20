@@ -1,4 +1,0 @@
-interface:
-  display_name: "Address Reviews Worktrees"
-  short_description: "Address multiple PR reviews in parallel"
-  default_prompt: "Use $address-reviews-worktrees to address review feedback on PRs #12, #13, and #14 in parallel with worktrees."

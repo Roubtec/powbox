@@ -1,20 +1,20 @@
 ---
-name: address-reviews-worktrees
-description: Address maintainer-vetted review feedback on several pull requests in parallel, one git worktree per entry — supply the batch as PR numbers and/or local branch names; each worktree checks out the chosen branch (your local ref when you name a branch, the PR head when you give a number) and runs the address-review skill in hands-off mode, with push/ping flags passed through, so many PRs are fixed concurrently without cross-talk. Trigger when the user asks to address reviews on multiple PRs or branches at once, fix review comments across many PRs in parallel, or fan out review-addressing with worktrees. Do not trigger for a single PR (use address-review), for implementing new task files (use address-tasks-worktrees), or for rebasing a stack (use rebase-stack).
+name: address-reviews
+description: Address maintainer-vetted review feedback on several pull requests in parallel, one git worktree per entry — supply the batch as PR numbers and/or local branch names; each worktree checks out the chosen branch (your local ref when you name a branch, the PR head when you give a number) and runs the address-review skill in hands-off mode, with push/ping flags passed through, so many PRs are fixed concurrently without cross-talk. Trigger when the user asks to address reviews on multiple PRs or branches at once, fix review comments across many PRs in parallel, or fan out review-addressing with worktrees. Do not trigger for a single PR (use address-review), for implementing new task files (use address-tasks), or for rebasing a stack (use rebase-stack).
 ---
 
 Address the review feedback on **several pull requests at once**, fanning each PR out into its own git worktree so they progress concurrently without polluting each other.
 
-**Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude] [ping-copilot]`
+**Arguments:** `<PRs and/or branches> [push] [ping-codex] [ping-claude] [ping-copilot] [ping-contributing]`
 
-Explicit Codex invocation uses `$address-reviews-worktrees`; natural-language equivalents are fine.
+Explicit Codex invocation uses `$address-reviews`; natural-language equivalents are fine.
 
 This skill is the parallel batch front-end for `address-review`.
 It does **not** re-implement review-addressing — it sets up one isolated worktree per entry and uses `address-review`'s delegated fix and publish procedures, with a fresh orchestrator-owned reviewer between them.
 Each batch entry is either a **PR number** (work the PR head from `origin`) or a **local branch name** (work *your* local ref exactly as it stands) — see "Resolving and checking out each entry" for the local-first rule that keeps a locally-rebased branch from being silently replaced by a stale `origin` copy.
-It borrows its worktree machinery (isolation model, Session Bootstrap, adaptive throttling, cleanup) wholesale from `address-tasks-worktrees` — **read that skill for the rationale behind those pieces**; only the deltas are spelled out here.
+It borrows its worktree machinery (isolation model, Session Bootstrap, adaptive throttling, cleanup) wholesale from `address-tasks` — **read that skill for the rationale behind those pieces**; only the deltas are spelled out here.
 
-## How this differs from address-tasks-worktrees
+## How this differs from address-tasks
 
 Everything here follows from one fact: **the PRs already exist**, so we modify existing branches rather than create new ones.
 
@@ -38,6 +38,7 @@ Parsing is **lenient** — accept commas, `&`, `#` prefixes, and free word order
 | `ping-codex` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@codex review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
 | `ping-claude` | Passed through: after `address-review` pushes new commits or rewritten history, post a dedicated `@claude review` comment on that PR. Implies `push`; `address-review` skips the ping when publication is an "Everything up-to-date" no-op. |
 | `ping-copilot` | Passed through: after `address-review` pushes new commits or rewritten history, request a Copilot review on that PR via `gh pr edit <PR#> --add-reviewer @copilot` (canonical CLI request, not an `@copilot review` comment — that drives Copilot's coding agent, not its reviewer). Implies `push`; `address-review` skips the request when publication is an "Everything up-to-date" no-op. |
+| `ping-contributing` | Passed through: each PR's publisher re-pings a bot only if it brought a genuinely new finding **on that PR** this round (a re-raise of an already-deferred concern or a re-argued push-back does not count unless it adds a new angle). Combined with explicit `ping-*` it filters that named set per PR; supplied alone it falls back to the known bots (codex/claude/copilot) that reviewed each PR. Implies `push`. Because the decision is made inside each `address-review`, the ping set is pruned **per PR** — a bot may keep being pinged on a PR where it is still finding issues while it has gone quiet on another. |
 
 **Classifying each entry:** a bare integer or `#`-prefixed integer is a **PR number**; anything else (contains a `/`, letters, etc.) is a **branch name**. A branch literally named like an integer is the one ambiguous case — name it with an explicit `refs/heads/` prefix or just pass its PR number instead.
 
@@ -50,14 +51,14 @@ The top-level orchestrator (you) may still consult the user for **batch-level** 
 **Not user-facing (orchestrator may supply at its own discretion):** the per-PR `#N` (you always pass each subagent its assigned PR) and `rebase on top of <branch>`.
 The user has no reason to pass a rebase here — the leafy stack is resolved later — but if you detect a stacked PR that genuinely must be addressed against its near-final base, you may pass a rebase target to that one PR's `address-review`. Off by default.
 
-Flag pass-through is **batch-uniform**: the same `push`/`ping-*` set applies to every PR in the run.
+Flag pass-through is **batch-uniform**: the same `push`/`ping-*` set applies to every PR in the run. With `ping-contributing`, the *flag* is uniform but its *effect* is evaluated independently inside each PR's `address-review`, so each PR re-pings only the bots still contributing to it.
 
 ## Worktree isolation (inherited)
 
 Each PR runs in its **own git worktree** — a separate working directory with its own `HEAD` and index, sharing the one append-only object store and lock-protected refs.
 Two subagents in two worktrees never corrupt each other, so they run **concurrently**.
 The only serialization rule that survives: agents sharing *one* worktree must run one-at-a-time. Across distinct PR head branches, same-phase agents may run concurrently.
-See `address-tasks-worktrees` → "Why worktrees change the rules" and "Durability & host isolation" for the full model.
+See `address-tasks` → "Why worktrees change the rules" and "Durability & host isolation" for the full model.
 The durability rule here is **commit early, but do not push before `address-review`'s reviewed publication step**: committed objects and branch refs survive in the shared `.git`, while premature pushes would publish unreviewed fixes and break no-push runs.
 
 ## Codex subagent execution
@@ -76,7 +77,7 @@ If the session exposes no subagent capability, stop and tell the user this workf
 
 ## Session Bootstrap (run once, in the main working tree, before any worktree)
 
-Identical to `address-tasks-worktrees` → "Session Bootstrap" — run the shared image-baked helper. In brief, all idempotent:
+Identical to `address-tasks` → "Session Bootstrap" — run the shared image-baked helper. In brief, all idempotent:
 
 1. **Run `wt-bootstrap`.** It verifies the worktree roots are container-local, prunes only **this** container's orphaned worktree dirs under `.worktrees/$CONTAINER_NAME/` (a peer container's live work is never scanned), adds the container-local `url."https://github.com/".insteadOf "git@github.com:"` rewrite when `origin` is SSH, and probes `git ls-remote`. On `ok: false`, stop and fix per the `blocker` (run `enable-worktrees`, or rebuild/relaunch); see the sibling skill's Bootstrap for the full rationale. **Stricter than the task batch:** here `remote: false` is also a stop — PR-number resolution and lease-safe publication cannot be trusted from stale refs. Its `wtBase` is the `$WT_BASE` used below.
 2. **Confirm GitHub API access.** `gh auth status` must succeed for every run because each subagent must read review threads (`wt-bootstrap` only probes git remote access, not the API).
@@ -147,7 +148,7 @@ Every prompt starts with:
 - **The assignment:** "You are on branch `<branch>`, paired with PR #N. Confirm the branch with `git branch --show-current`. PR #N is the **authoritative pairing** — treat the supplied number as correct and do not re-derive it. This branch may be a local, possibly-rebased copy of the PR head, so its SHAs can differ from `origin`'s; that is expected, not a wrong-PR signal." (For a branch entry, add: "This is *your local ref*; work it exactly as it stands — do not reset or pull from `origin`.")
 - **Skill path:** pass the absolute path to the seeded `address-review/SKILL.md`; do not make the subagent search across sibling worktrees or guess a config directory.
 - **Repo context:** "Read the repository's agent-context files (`AGENTS.md`, `CLAUDE.md`, or `.github/CLAUDE.md`) first for conventions."
-- **Validation in a worktree:** "If verifying fixes needs a build, install dependencies in this worktree first — cheap on the hardlinked pnpm store. Point Playwright at `/usr/bin/chromium` if used. App-server / `next build` e2e may not run from a nested worktree path; defer it per `address-tasks-worktrees`'s app-server caveat and note that in your report rather than forcing it."
+- **Validation in a worktree:** "If verifying fixes needs a build, install dependencies in this worktree first — cheap on the hardlinked pnpm store. Point Playwright at `/usr/bin/chromium` if used. App-server / `next build` e2e may not run from a nested worktree path; defer it per `address-tasks`'s app-server caveat and note that in your report rather than forcing it."
 - **No shared plan tracker:** "Do not write to any shared task or plan tracker; child entries leak into the orchestrator's view."
 
 ### Phase A — initial fix
@@ -173,14 +174,14 @@ Allow at most 3 reviewer rounds total; an entry still failing after round 3 is b
 ### Publication
 
 For each passing entry on a `push`/`ping-*` run, spawn a fresh `worker` publisher with its final packet and Pass verdict.
-Tell it to invoke `$address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?> <ping-copilot?>`.
+Tell it to invoke `$address-review #N hands-off publish-reviewed <push?> <ping-codex?> <ping-claude?> <ping-copilot?> <ping-contributing?>`.
 It edits no code and returns the full final report, including per-thread dispositions, push/ping outcome, and blockers.
 
 Do **not** give any subagent another PR's context — strict per-PR isolation.
 
 ## Adaptive throttling (finish over fan-out)
 
-Inherit `address-tasks-worktrees` → "Adaptive throttling" in full (storage headroom before each fan-out, `ENOSPC` back-off, serialize shared-exclusive-resource phases, fan out less on `429`/`529`).
+Inherit `address-tasks` → "Adaptive throttling" in full (storage headroom before each fan-out, `ENOSPC` back-off, serialize shared-exclusive-resource phases, fan out less on `429`/`529`).
 
 Effective subagent concurrency now equals the number of PRs in the current phase, not a nested multiple.
 Still start with a modest number of PRs in flight (for example 2–3), widen only when storage and provider limits are comfortable, and serialize shared build/database resources.
@@ -213,7 +214,7 @@ Aggregate the per-PR `address-review` reports into one batch summary:
 ## Checklist
 
 - [ ] Session Bootstrap ran: worktree roots verified container-local, this container's orphans pruned, GitHub/remote access confirmed, `git fetch origin` done.
-- [ ] Batch parsed into entries (each classified PR-number vs branch-name); pass-through flag set (`push`/`ping-*`) captured; `hands-off` force-injected into every `address-review` invocation and equivalent unattended guidance given to reviewers/fix-ups; aliases for one PR de-duplicated and same-head PRs serialized.
+- [ ] Batch parsed into entries (each classified PR-number vs branch-name); pass-through flag set (`push`/`ping-*`, incl. `ping-contributing`) captured; `hands-off` force-injected into every `address-review` invocation and equivalent unattended guidance given to reviewers/fix-ups; aliases for one PR de-duplicated and same-head PRs serialized.
 - [ ] Each entry resolved to a `(branch, PR#)` pair and checked out on the right ref — **branch entries use the local ref, never `origin`**; PR-number entries prefer a same-named local branch, else `origin` head; worktrees under `.worktrees/$CONTAINER_NAME/`; un-setup-able / PR-less entries skipped-and-recorded.
 - [ ] Per-PR phases ran in order: `$address-review ... delegated-fix`, fresh `explorer` review, fresh `worker` fix-up/re-review as needed (3 reviewer rounds max), then `$address-review ... publish-reviewed` only for passing push runs; distinct heads fanned out concurrently but throttled; same-head entries serialized.
 - [ ] No new PR head lineage created, no `gh pr create`, no restack performed.

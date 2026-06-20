@@ -69,7 +69,7 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
 # Each agent's hook is baked here so editing a hook rebuilds only this layer.
 # The wt-* worktree helpers (and the gitcat cross-branch reader) are baked here
 # too — not in the base image — because they evolve in lockstep with the
-# agent-layer assets that reference them (the *-worktrees skills and the Claude
+# agent-layer assets that reference them (the worktree-running skills and the Claude
 # workflows). Keeping them in this layer means the documented `agent-update` /
 # `build.sh agent` path (which reuses an existing base image unless --pull)
 # refreshes the helpers along with the skills/workflows, instead of leaving

@@ -9,8 +9,15 @@
  * new commits/rewritten history; a no-op push (nothing new to review) skips them
  * so an automated review -> address -> review loop can terminate.
  *
+ * The `ping-contributing` modifier prunes that re-review set further: a bot is
+ * re-pinged only when it brought a NEW finding this round (not a re-raise of a
+ * deferred item or a re-argued push-back), so a multi-bot loop winds down
+ * bot-by-bot as each reviewer goes quiet. Combined with explicit `ping-*` it
+ * filters that named set; supplied alone it falls back to every known bot that
+ * reviewed this round.
+ *
  * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [push]
- * [ping-codex] [ping-claude] [ping-copilot]`.
+ * [ping-codex] [ping-claude] [ping-copilot] [ping-contributing]`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------
@@ -94,12 +101,12 @@ const PACKET_SCHEMA = {
           commentId: { type: "string", description: "Top comment databaseId — REQUIRED for type `review-thread` (used to thread the reply). Absent/empty for `standalone`." },
           path: { type: "string" },
           line: { type: "integer" },
-          author: { type: "string", description: "Comment author login." },
+          author: { type: "string", description: "Comment author login. REQUIRED — `ping-contributing` attributes a round's new findings to specific bots by substring-matching this login (codex/copilot/claude), so an empty/absent author silently drops a contributing bot from the re-ping set. Derive it from the same GraphQL `author{ login __typename }` that yields `authorIsBot`; if the author is unavailable (e.g. deleted account) use an empty string — a deleted account is never a live reviewer bot to re-ping, so no attribution is the correct outcome." },
           authorIsBot: { type: "boolean", description: "True if the comment author is a bot / GitHub App. Derive from GraphQL author `__typename` (`Bot`) — NOT from guessing the login; if the author is unavailable (e.g. deleted account), use false, the safe value that keeps the thread open. Drives whether a push-back or deferred thread may be auto-resolved." },
           body: { type: "string", description: "Comment text, verbatim." },
           url: { type: "string", description: "Permalink to the comment (the stable reference for a standalone item, which has no threadId)." },
         },
-        required: ["type", "body", "authorIsBot", "url"],
+        required: ["type", "body", "author", "authorIsBot", "url"],
       },
     },
   },
@@ -122,8 +129,10 @@ const DISPOSITION_SCHEMA = {
           ref: { type: "string", description: "file:line + author, a human-readable reference." },
           kind: { type: "string", description: "actionable-fixed | already-addressed | push-back | deferred-to-task | ambiguous-skipped" },
           detail: { type: "string", description: "For fixed: the one-line summary + commit sha. For already-addressed: where it's handled. For push-back: the rationale. For deferred: the committed task file path + one-line scope, and whether the deferral was maintainer-directed or agent-proposed. For ambiguous: what decision is needed." },
+          author: { type: "string", description: "Comment author login, echoed from the gathered item (include for `standalone` items too). Lets `ping-contributing` attribute a new finding to a specific reviewer bot." },
+          newFinding: { type: "boolean", description: "True ONLY if this thread surfaces a real concern not previously raised on this PR — typically `actionable-fixed`, or a genuinely new `deferred-to-task`/`already-addressed`. FALSE for a `push-back` (the comment was wrong), a re-raise of a concern already deferred to a committed task, or a bot re-arguing a push-back it already lost — UNLESS the thread carries a genuinely new angle this round. Drives `ping-contributing`: a bot is re-pinged only when it authored at least one newFinding this round. Set it honestly even if no ping was requested." },
         },
-        required: ["type", "kind", "detail", "authorIsBot"],
+        required: ["type", "kind", "detail", "authorIsBot", "author", "newFinding"],
       },
     },
     proactiveFixes: { type: "string", description: "Same-pattern fixes made beyond the literal comments, or empty." },
@@ -188,11 +197,25 @@ function shq(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
+// Map a bot comment author login to the known reviewer bot it represents, or
+// null for a human / unrecognized bot. `ping-contributing` uses this to
+// attribute a round's new findings to specific bots so it can re-ping only the
+// ones still adding value. Substring match keeps it robust to the exact app
+// login (e.g. `chatgpt-codex-connector` -> codex, `Copilot` -> copilot).
+function botKindOf(login, authorIsBot) {
+  if (!authorIsBot) return null;
+  const s = String(login || "").toLowerCase();
+  if (s.includes("codex")) return "codex";
+  if (s.includes("copilot")) return "copilot";
+  if (s.includes("claude")) return "claude";
+  return null;
+}
+
 function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 Request (lenient parsing — commas, &, free word order): ${JSON.stringify(input)}
-Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
+Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`, \`ping-contributing\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
 
 Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 1. Working tree clean (\`git status --porcelain\` empty). Do not auto-stash.
@@ -240,7 +263,7 @@ Triage each item into exactly one kind and act:
 - Do NOT push, reply, resolve, or comment on the PR — publication is a separate, later step.
 - Do NOT use the \`TaskCreate\`/\`TaskUpdate\`/\`TaskList\` tools.
 
-For each disposition, echo the item's \`type\` and \`authorIsBot\` (both MANDATORY — publication uses \`authorIsBot\` to decide whether a push-back/deferred thread may be auto-resolved, so never omit it; if the gathered item lacked it, use false, the safe human default), and carry its identifiers: for \`review-thread\` items \`threadId\` and \`commentId\` are MANDATORY (publication cannot reply/resolve without them); for \`standalone\` items include \`url\`. Return the structured dispositions.`;
+For each disposition, echo the item's \`type\` and \`authorIsBot\` (both MANDATORY — publication uses \`authorIsBot\` to decide whether a push-back/deferred thread may be auto-resolved, so never omit it; if the gathered item lacked it, use false, the safe human default), and carry its identifiers: for \`review-thread\` items \`threadId\` and \`commentId\` are MANDATORY (publication cannot reply/resolve without them); for \`standalone\` items include \`url\`. Also set \`author\` (the comment author's login, echoed from the gathered item — include it for \`standalone\` items too) and \`newFinding\` per disposition: \`newFinding: true\` ONLY when the item surfaces a real concern not previously raised on this PR (typically an \`actionable-fixed\`, or a genuinely new \`deferred-to-task\`/\`already-addressed\`); \`false\` for a \`push-back\` (the comment was wrong), a re-raise of a concern already deferred to a committed task file, or a bot re-arguing a push-back it already lost — UNLESS the thread carries a genuinely new angle this round. (This drives the \`ping-contributing\` flag, which re-pings a bot only when it brought a new finding this round; set it honestly even if no ping was requested.) Return the structured dispositions.`;
 }
 
 function reviewPrompt(packet, dispositions) {
@@ -324,12 +347,18 @@ const pushNegated =
 const pingCodex = /\bping-?codex\b/.test(lower);
 const pingClaude = /\bping-?claude\b/.test(lower);
 const pingCopilot = /\bping-?copilot\b/.test(lower);
-const wantPush = pingCodex || pingClaude || pingCopilot || (/\bpush\b/.test(pushWords) && !pushNegated);
+// `ping-contributing` is a modifier: re-ping only bots that brought a new
+// finding this round. Like the other pings it implies push (a re-review is
+// meaningless without one).
+const pingContributing = /\bping-?contributing\b/.test(lower);
+const wantPush =
+  pingCodex || pingClaude || pingCopilot || pingContributing || (/\bpush\b/.test(pushWords) && !pushNegated);
 const flags = {
   push: wantPush,
   pingCodex,
   pingClaude,
   pingCopilot,
+  pingContributing,
 };
 
 phase("Gather");
@@ -453,11 +482,38 @@ const knownNoNewCommits =
   !packet.pr.rebased &&
   !!dispositions.finalSha &&
   dispositions.finalSha === packet.pr.headOid;
+
+// `ping-contributing`: re-ping a bot only when it authored at least one NEW
+// finding this round, attributed by the disposition author's login. A bot that
+// only re-raised a deferred item or re-argued a lost push-back contributed no
+// new finding (newFinding=false) and drops out of the ping set — which is how a
+// multi-bot review->address loop winds down reviewer-by-reviewer.
+const reviewingBots = new Set();
+const contributingBots = new Set();
+for (const d of dispositions.dispositions) {
+  const bot = botKindOf(d && d.author, d && d.authorIsBot);
+  if (!bot) continue;
+  reviewingBots.add(bot);
+  if (d.newFinding) contributingBots.add(bot);
+}
+// Candidate set. Without the modifier it is exactly the bots the user named.
+// With the modifier AND at least one name, it is that named set (then filtered
+// to contributors below); with the modifier supplied ALONE, it falls back to the
+// known bots that reviewed this round.
+const anyExplicitPing = flags.pingCodex || flags.pingClaude || flags.pingCopilot;
+const candidate = {
+  codex: flags.pingContributing ? (anyExplicitPing ? flags.pingCodex : reviewingBots.has("codex")) : flags.pingCodex,
+  claude: flags.pingContributing ? (anyExplicitPing ? flags.pingClaude : reviewingBots.has("claude")) : flags.pingClaude,
+  copilot: flags.pingContributing ? (anyExplicitPing ? flags.pingCopilot : reviewingBots.has("copilot")) : flags.pingCopilot,
+};
+// When the modifier is off, `contributes` is always true, so the per-bot ping
+// reduces exactly to the prior `named && !knownNoNewCommits` behavior.
+const contributes = (bot) => !flags.pingContributing || contributingBots.has(bot);
 const publishFlags = {
   ...flags,
-  pingCodex: flags.pingCodex && !knownNoNewCommits,
-  pingClaude: flags.pingClaude && !knownNoNewCommits,
-  pingCopilot: flags.pingCopilot && !knownNoNewCommits,
+  pingCodex: candidate.codex && contributes("codex") && !knownNoNewCommits,
+  pingClaude: candidate.claude && contributes("claude") && !knownNoNewCommits,
+  pingCopilot: candidate.copilot && contributes("copilot") && !knownNoNewCommits,
 };
 
 phase("Publish");
@@ -468,19 +524,34 @@ const publishReport = await agent(publishPrompt(packet, dispositions.disposition
 
 phase("Summary");
 const published = !!(publishReport && publishReport.published);
-const pingsRequested = flags.pingCodex || flags.pingClaude || flags.pingCopilot;
+const pingsRequested = flags.pingCodex || flags.pingClaude || flags.pingCopilot || flags.pingContributing;
 const nothingNewPushed = knownNoNewCommits || (publishReport && publishReport.pushedNewCommits === false);
+// Bots in the candidate set that were skipped purely for bringing no new
+// finding this round (only meaningful once something new was actually pushed —
+// otherwise every ping is suppressed anyway).
+const droppedForNoContribution =
+  flags.pingContributing && !nothingNewPushed
+    ? ["codex", "claude", "copilot"].filter((b) => candidate[b] && !contributingBots.has(b))
+    : [];
+const notes = [
+  pingsRequested && nothingNewPushed
+    ? "Nothing new was pushed this run, so the re-review ping(s) were skipped to keep an automated review->address->review loop from spinning forever."
+    : null,
+  droppedForNoContribution.length
+    ? `ping-contributing: did not re-ping ${droppedForNoContribution.join(", ")} — no new finding from ${droppedForNoContribution.length > 1 ? "them" : "it"} this round.`
+    : null,
+].filter(Boolean);
 return {
   status: published ? "fixed-published" : "fixed-publish-failed",
   pr: packet.pr,
   rounds,
   flags: publishFlags,
+  reviewingBots: [...reviewingBots],
+  contributingBots: [...contributingBots],
   dispositions: dispositions.dispositions,
   proactiveFixes: dispositions.proactiveFixes,
   publishReport: publishReport || { published: false, aborted: "publisher returned nothing" },
   note: published
-    ? (pingsRequested && nothingNewPushed
-        ? "Published, but nothing new was pushed this run, so the re-review ping(s) were skipped to keep an automated review->address->review loop from spinning forever."
-        : undefined)
+    ? (notes.length ? notes.join(" ") : undefined)
     : "Fixes passed review but publication did not fully complete — see publishReport.aborted; nothing may have been pushed.",
 };

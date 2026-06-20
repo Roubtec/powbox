@@ -93,20 +93,32 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 			# a host `sudo git pull` re-owning nested paths to uid 0 while the top dir stays
 			# node-owned) slips past the probe above. Scan for any uid-0 entry and, if found,
 			# hand the workspace to the same helper, which re-owns ONLY those uid-0 entries.
+			#
+			# Gate the scan to a NODE-OWNED root. A writable root that is NOT node-owned is
+			# either a root-owned-but-writable FUSE bind mount (Docker Desktop / WSL / macOS,
+			# where the owner reports uid 0 yet node may write — the no-op case the block
+			# comment promises) or a foreign-owned root we deliberately refuse to chown. The
+			# mixed-ownership heal applies to neither, and an UNGATED `find -uid 0` would match
+			# the uid-0 root itself and wrongly hand such a mount to the helper (recursively
+			# chowning host metadata / emitting warnings on platforms the probe used to skip).
+			# Restricting to a node-owned root preserves the documented no-op there while still
+			# catching nested uid-0 entries under a genuinely node-owned root.
 			# Prune the separately mounted, already-node-owned node_modules/.worktrees volumes
 			# exactly as the helper does (mountinfo-derived -path … -prune, with -xdev as a
 			# backstop for a genuinely different filesystem) so the scan never walks them — those
 			# are the bulky dirs, so pruning them is what keeps this cheap. -print -quit stops at
 			# the FIRST uid-0 entry (the dirty case is detected instantly); a clean workspace has
 			# no match and so does one bounded walk of the pruned source tree + .git at startup.
-			_prune=()
-			while IFS= read -r _mp; do
-				case "$_mp" in
-				"$_dir"/?*) _prune+=(-path "$_mp" -prune -o) ;;
-				esac
-			done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
-			if [ -n "$(find "$_dir" -xdev "${_prune[@]}" -uid 0 -print -quit 2>/dev/null)" ]; then
-				_unwritable+=("$_dir")
+			if [ "$(stat -c %u "$_dir" 2>/dev/null)" = "$(id -u)" ]; then
+				_prune=()
+				while IFS= read -r _mp; do
+					case "$_mp" in
+					"$_dir"/?*) _prune+=(-path "$_mp" -prune -o) ;;
+					esac
+				done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
+				if [ -n "$(find "$_dir" -xdev "${_prune[@]}" -uid 0 -print -quit 2>/dev/null)" ]; then
+					_unwritable+=("$_dir")
+				fi
 			fi
 		else
 			_unwritable+=("$_dir")

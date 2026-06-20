@@ -87,15 +87,22 @@ function Invoke-AsRoot {
   & $exe @rest
 }
 
-# The in-container assertion, run AS node against the bind-mounted fixture. Built
-# with explicit LF joins (single-quoted lines so PowerShell leaves the shell $vars
-# alone); a here-string would inherit this file's CRLF endings (*.ps1 is pinned to
-# eol=crlf) and the stray ^M would break /bin/bash -c on a Windows checkout. It
-# takes the mount path as $1 and signals back via exit code: 0 passed, 42 masked
-# (node could already write -> self-skip), other = genuine failure.
+# The in-container assertion, run AS node - pinned with `--user node` on the docker
+# run below (not merely the image default), so a USER regression in the image
+# cannot quietly run this as root and mask the bug. Built with explicit LF joins
+# (single-quoted lines so PowerShell leaves the shell $vars alone); a here-string
+# would inherit this file's CRLF endings (*.ps1 is pinned to eol=crlf) and the
+# stray ^M would break /bin/bash -c on a Windows checkout. It takes the mount path
+# as $1 and signals back via exit code: 0 passed, 42 masked (node could already
+# write -> self-skip), other = genuine failure.
 $assertScript = @(
   'set -u'
   'WS="$1"'
+  '# Only meaningful as the node agent (uid 1000); hard-FAIL (not a masked skip) if not.'
+  'if [ "$(id -u)" != "1000" ]; then'
+  '  echo "FAIL: dir-mount assertion not running as node (uid 1000) - got uid $(id -u)" >&2'
+  '  exit 1'
+  'fi'
   'if probe="$(mktemp "${WS}/.powbox-dirmount-probe.XXXXXX" 2>/dev/null)"; then'
   '  rm -f "$probe" 2>/dev/null || true'
   '  echo "  skip: node can already write the root-owned mount (this host masks the native-Linux uid bug)"'
@@ -137,7 +144,7 @@ try {
   Set-Content -LiteralPath (Join-Path $fixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
   Invoke-AsRoot @('chown', '-R', 'root:root', $fixture)
   Write-Host "Case: all-root-owned mount (a repo under /root; root:root inside the container)"
-  docker run --rm -v "${fixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScript powbox-dirmount $mount
+  docker run --rm --user node -v "${fixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScript powbox-dirmount $mount
   $rc = $LASTEXITCODE
   if ($rc -eq 0) {
     # Host-side: the helper claimed the tree for node end to end. stat as root -

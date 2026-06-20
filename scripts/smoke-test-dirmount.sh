@@ -88,9 +88,11 @@ make_git_fixture() {
 	printf '%s' "$d"
 }
 
-# The in-container assertion, run AS node (the image's default user) against the
-# bind-mounted fixture. Single-quoted so the host leaves the inner shell alone; it
-# takes the mount path as $1 and signals back via exit code:
+# The in-container assertion, run AS node — pinned with `--user node` on the
+# docker run below (run_dirmount_case), not merely the image's default user, so a
+# USER regression in the image cannot quietly run this as root and mask the bug.
+# Single-quoted so the host leaves the inner shell alone; it takes the mount path
+# as $1 and signals back via exit code:
 #   0  — passed (node can write + git-commit after the fix; tree is node-owned)
 #   42 — masked (node could already write the root-owned mount → self-skip)
 #   1  — genuine failure (the fix did not make the tree writable by node)
@@ -98,6 +100,14 @@ make_git_fixture() {
 ASSERT_SCRIPT='
 set -u
 WS="$1"
+# 0. This stage is only meaningful AS the node agent (uid 1000) — the user that
+#    hits EACCES on a root-owned mount. `--user node` pins it on the docker run,
+#    but assert it here too so a dropped flag or an image USER regression hard-FAILS
+#    instead of letting the pre-fix probe below succeed and mis-report a masked skip.
+if [ "$(id -u)" != "1000" ]; then
+	echo "FAIL: dir-mount assertion not running as node (uid 1000) — got uid $(id -u)" >&2
+	exit 1
+fi
 # 1. Ground-truth write probe as node BEFORE the fix (mirrors entrypoint-core.sh:
 #    a real create, not [ -w ], because mode bits can disagree with the FS). On
 #    native Linux a root-owned bind mount is genuinely unwritable; a platform that
@@ -146,6 +156,7 @@ run_dirmount_case() {
 	local fixture="$1"
 	set +e
 	docker run --rm \
+		--user node \
 		-v "${fixture}:${MOUNT}" \
 		--entrypoint /bin/bash "$IMAGE" -c "$ASSERT_SCRIPT" powbox-dirmount "$MOUNT"
 	local rc=$?

@@ -36,11 +36,71 @@ set -uo pipefail
 # gracefully rather than failing every call if that layout ever shifts.
 PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
 
+# pnpm subcommand classification, factored so the refresh trigger (the loop at the
+# bottom of this file) and the root-node_modules warning inside refresh_shadows share
+# ONE token list and can never drift apart.
+#
+# install-class = any subcommand worth a pre-emptive shadow refresh, because it either
+# writes the project's node_modules or warms the pnpm store for a package that may
+# have just been scaffolded. pnpm accepts global flags before the subcommand
+# (`pnpm -w add`, `pnpm -C dir install`), so every caller scans all args.
+is_install_class_subcommand() {
+	case "$1" in
+		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# store-only = the install-class subset that warms the pnpm store from the lockfile
+# but never writes the project's node_modules, so it must NOT raise the root-
+# node_modules warning below. `pnpm fetch` ignores the package manifest and only
+# populates the virtual store, so a non-dev-folder `pnpm fetch` does not litter the
+# host bind mount the way an install would — warning about it would be misleading.
+is_store_only_subcommand() {
+	case "$1" in
+		fetch) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Resolve pnpm's actual SUBCOMMAND — the first positional token — so a classifier
+# decision can key off what pnpm will really run rather than any install-class word
+# that merely appears somewhere in the args. pnpm accepts global flags before the
+# subcommand; the value-taking ones we step over are `-C/--dir <dir>` and
+# `--filter/-F <pkg>` (their `=`-joined forms are self-contained, so they fall through
+# the generic `-*` skip). Every other `-`-prefixed token is treated as a boolean global
+# flag and skipped. This is what distinguishes `pnpm install` (subcommand `install`)
+# from `pnpm run install` / `pnpm exec install` (subcommand `run`/`exec`, where the
+# `install` token is a script/command NAME, not a root install) — the false positive
+# that made the warning below noisy. Prints the subcommand, or nothing for a bare `pnpm`.
+pnpm_subcommand() {
+	local prev="" a
+	for a in "$@"; do
+		# A preceding value-taking global flag consumed this token as its value — it is
+		# the flag's argument, never the subcommand, so skip it.
+		case "$prev" in
+			-C | --dir | --filter | -F)
+				prev="$a"
+				continue
+				;;
+		esac
+		case "$a" in
+			-*)
+				prev="$a"
+				continue
+				;;
+		esac
+		printf '%s' "$a"
+		return 0
+	done
+}
+
 refresh_shadows() {
 	# Self-hosted (--isolated) mode has no host filesystem underneath to shadow,
-	# and shadow-mounts.sh is skipped there entirely; mirror that here.
+	# and shadow-mounts.sh is skipped there entirely; mirror that here. It also
+	# always mounts an isolated workspace volume (and sets PNPM_STORE_DIR), so the
+	# unmounted-root warning below never applies to it either.
 	[ "${POWBOX_SELF_HOSTED:-}" = "1" ] && return 0
-	command -v shadow-refresh.sh >/dev/null 2>&1 || return 0
 
 	# Resolve pnpm's EFFECTIVE directory, honoring `-C, --dir <dir>` ("Change to
 	# directory <dir>", per `pnpm install --help`). A `pnpm -C /workspace/<repo>
@@ -78,23 +138,71 @@ refresh_shadows() {
 		[ "$ws" = "/" ] && return 0
 	done
 
-	# Best-effort: a shadow failure must never block the real pnpm command.
+	# This refresh runs for the whole install-class (see the trigger loop), which
+	# includes store-only commands like `pnpm fetch` that only warm the pnpm store from
+	# the lockfile and never write the project's node_modules. The warning below is
+	# about node_modules landing on the host bind mount, so it must fire only for a
+	# subcommand that actually writes node_modules. Key it off the RESOLVED pnpm
+	# subcommand (not any token in the args) so `pnpm run install` / `pnpm exec install`
+	# — where `install` is a script/command name, not the subcommand — are never misread
+	# as a root install. writes_root_node_modules is true iff that subcommand is
+	# install-class and NOT store-only, using the same shared classifiers as the trigger
+	# so the gate can never drift from it.
+	local subcmd writes_root_node_modules=0
+	subcmd="$(pnpm_subcommand "$@")"
+	if [ -n "$subcmd" ] &&
+		is_install_class_subcommand "$subcmd" &&
+		! is_store_only_subcommand "$subcmd"; then
+		writes_root_node_modules=1
+	fi
+
+	# Regression guard (PR #59 follow-up, task 002b). In dir-mounted mode the launcher
+	# mounts the isolated root node_modules volume — and sets PNPM_STORE_DIR — ONLY when
+	# the folder already declared a JS/powbox project at launch. A folder launched as
+	# non-dev gets neither, so if the user scaffolds a project mid-session (pnpm init,
+	# then install) the ROOT install lands node_modules straight on the host bind mount —
+	# the exact host litter / Linux-native-binary pollution the launch-time gate exists to
+	# prevent. The wrapper can re-shadow a new SUBPACKAGE but cannot retrofit the missing
+	# root mount, so warn loudly (once) and proceed: relaunching now that the folder has a
+	# package.json mounts an isolated volume on the next start. Fire only for a node_modules-
+	# writing ROOT install (writes_root_node_modules above, and effdir is the workspace root,
+	# matching how this wrapper scopes the install target) so a store-only command like
+	# `pnpm fetch` or a subpackage install never trips it. Detect "should have been mounted
+	# but wasn't" via the launcher's own contract — PNPM_STORE_DIR is set iff it mounted the
+	# volume — plus `mountpoint`, so a self-hosted run (returned above), an already-mounted
+	# dir-mounted dev project (PNPM_STORE_DIR set), and a genuinely self-hosted layout never
+	# warn. Guard on `command -v mountpoint` so a missing tool degrades to silence rather
+	# than a false alarm.
+	if [ "$writes_root_node_modules" = 1 ] &&
+		[ "$effdir" = "$ws" ] &&
+		[ -z "${PNPM_STORE_DIR:-}" ] &&
+		command -v mountpoint >/dev/null 2>&1 &&
+		! mountpoint -q "$ws/node_modules" 2>/dev/null; then
+		echo "pnpm-shadow-wrapper: WARNING: '$ws' was launched as a non-dev folder, so its root node_modules is NOT an isolated volume — this install writes node_modules onto the host bind mount (host litter / Linux-native binaries). Relaunch the agent now that this folder has a package.json to get an isolated per-container node_modules volume." >&2
+	fi
+
+	# Best-effort re-shadow of any freshly added subpackage. A shadow failure — or no
+	# shadow-refresh.sh at all (e.g. an older base image) — must never block the real pnpm
+	# command, and never gates the warning above (which is independent of it).
+	command -v shadow-refresh.sh >/dev/null 2>&1 || return 0
 	shadow-refresh.sh "$ws" >/dev/null 2>&1 || true
 }
 
-# Only refresh for subcommands that can create or populate node_modules.  pnpm
-# accepts global flags before the subcommand (`pnpm -w add`, `pnpm --filter x i`,
-# `pnpm -C dir install`), so scan every argument for an install-class token
-# rather than only the first.  A false positive triggers a harmless idempotent
-# refresh; a false negative would defeat the purpose, so the list errs toward
-# catching everything that writes node_modules.
+# Only refresh for install-class subcommands — anything that can create or populate
+# node_modules, plus store-only commands like `fetch` that warm the pnpm store for a
+# possibly-just-scaffolded package.  pnpm accepts global flags before the subcommand
+# (`pnpm -w add`, `pnpm --filter x i`, `pnpm -C dir install`), so scan every argument
+# rather than only the first.  A false positive triggers a harmless idempotent refresh;
+# a false negative would defeat the purpose, so the list errs toward catching everything
+# that writes node_modules.  The root-node_modules warning inside refresh_shadows is
+# gated more narrowly — to the RESOLVED subcommand (not any arg) and to the node_modules-
+# writing subset (see pnpm_subcommand and is_store_only_subcommand) — so an install-class
+# word that is merely an argument (`pnpm run install`) refreshes but never warns.
 for arg in "$@"; do
-	case "$arg" in
-		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln)
-			refresh_shadows "$@"
-			break
-			;;
-	esac
+	if is_install_class_subcommand "$arg"; then
+		refresh_shadows "$@"
+		break
+	fi
 done
 
 # Delegate to the real pnpm. Keep the proven happy path (exec the executable .mjs)

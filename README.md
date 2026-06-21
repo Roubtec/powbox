@@ -421,6 +421,8 @@ To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked in
 Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure (e.g. self-hosted mode, where there is no host filesystem to shadow) never blocks the command.
 You can still run `shadow-refresh.sh` by hand at any time.
 
+One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, or `.powbox.yml` at launch, so the launcher mounted no isolated root `node_modules` volume for it). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
+
 ### Custom Shadow Paths (`.powbox.yml`)
 
 For paths that auto-detection does not cover, add a `.powbox.yml` to the project root:

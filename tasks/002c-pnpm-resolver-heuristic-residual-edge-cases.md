@@ -134,6 +134,9 @@ What was implemented:
   negative (was already noted; its stale `tasks/deferred/002c` pointer and "needs a redesign"
   framing are corrected to reference this file and the accept-&-close decision), #2 the
   script-shorthand benign false positive, and #3 the pre-existing bare-script false negative.
+  (Those `#1/#2/#3` labels follow the wrapper comment's own source order — config-key first, since
+  it predates this task — and intentionally do **not** line up with this file's `Case 1/2/3`
+  numbering above: wrapper `#1` = Case 2, wrapper `#2` = Case 1, wrapper `#3` = Case 3.)
 - Three regression tests added to `scripts/test-pnpm-shadow-wrapper.sh` pinning the accepted
   behavior: `pnpm build install` → warns (accepted benign false positive), `pnpm --registry run
   install` → silent (accepted exotic false negative; flips/fails if a future change enumerates

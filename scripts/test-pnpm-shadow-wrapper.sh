@@ -400,8 +400,10 @@ echo "Test: 'pnpm build install' (script shorthand) -> warns (ACCEPTED benign fa
 # freshly-scaffolded non-dev folder auto-installs missing deps first, writing host node_modules
 # exactly as the warning describes. 002c (approach C) keeps the safe-direction bias rather than
 # redesign the resolver to suppress it; this test pins the accepted behavior. The trailing `--help`
-# follows the warn-case hermeticity convention (the eventual real `pnpm build install --help` exits
-# 0 without installing).
+# mirrors the warn-case convention, though a script-shorthand run installs nothing here regardless:
+# the terminal `exec pnpm build install --help` runs the `build` SCRIPT (which just errors — there is
+# no `build` script in the bare fixture) and writes no node_modules, and the assertion inspects only
+# the warning emitted before that exec, so the stage stays hermetic regardless of the real run's exit.
 err="$(wrapper_stderr "$WS" 1 "" "" build install --help)"
 assert_warns "$err" "'pnpm build install' warns (accepted benign false positive; script shorthand latches 'install')"
 

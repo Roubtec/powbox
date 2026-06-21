@@ -17,11 +17,13 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 #
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
-# and label-skippable (the `non-code` job `if:` below). main is currently
-# UNPROTECTED, so none of these skips can block a merge today. If Tier 1 (or
-# Tier 0) is ever marked a *required* status check, use a check that tolerates
-# skipped runs (or keep it non-required) so docs/`non-code`/non-main-targeting
-# PRs are not blocked waiting on a job that intentionally never starts.
+# and label-skippable (the `non-code` job `if:` below). main IS protected by
+# the `main-guard` ruleset (PR required, no force-push, no deletion) but has NO
+# required status checks, so none of these skips can block a merge today. If
+# Tier 1 (or Tier 0) is ever marked a *required* status check, use a check that
+# tolerates skipped runs (or keep it non-required) so docs/`non-code`/
+# non-main-targeting PRs are not blocked waiting on a job that intentionally
+# never starts.
 
 on:
   pull_request:

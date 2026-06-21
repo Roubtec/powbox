@@ -1,17 +1,23 @@
 name: Native Linux CI - Tier 0 (static guards)
 
-# Tier 0: fast, Docker-free static guards that run on EVERY pull request. These
-# reproduce the class of native-Linux defects that Windows/WSL masks (git there
-# ignores filemode), in seconds, with no image build. Tier 0 alone would have
-# caught PR #51 (a shell script committed without its exec bit). The heavier
-# image build + smoke test lives in the path-gated Tier 1 workflow
-# (.github/workflows/native-linux-build.yml).
+# Tier 0: fast, Docker-free static guards that run on every pull request EXCEPT
+# those carrying the repo's `non-code` label (docs/tasks-only changes — see the
+# job `if:` below). These reproduce the class of native-Linux defects that
+# Windows/WSL masks (git there ignores filemode), in seconds, with no image
+# build. Tier 0 alone would have caught PR #51 (a shell script committed without
+# its exec bit). The heavier image build + smoke test lives in the path-gated
+# Tier 1 workflow (.github/workflows/native-linux-build.yml).
 #
 # What stays out of CI (VPS-only) is documented in README.md under
 # "Continuous Integration".
 
 on:
   pull_request:
+    # No paths filter on purpose — Tier 0 runs on every PR. types: the defaults
+    # (opened, synchronize, reopened) are spelled out so adding labeled/unlabeled
+    # — needed so the `non-code` label gate on the job below re-evaluates when
+    # the label is toggled — does not silently drop them.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -24,6 +30,12 @@ jobs:
   static-guards:
     name: Static guards (exec bits, shellcheck, shfmt, PSScriptAnalyzer)
     runs-on: ubuntu-latest
+    # Skip the static guards when the PR carries the repo's `non-code` label
+    # (docs/tasks-only changes that need no rebuild + full CI). This is the real
+    # win of the label, since Tier 0 otherwise runs on every PR. Toggling the
+    # label re-evaluates on the next labeled/unlabeled event. Keep this gate
+    # expression and label name identical to Tier 1's.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'non-code') }}
     timeout-minutes: 10
     steps:
       - name: Checkout

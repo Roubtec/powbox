@@ -28,28 +28,45 @@ if ($env:POWBOX_PRUNE_REMOVED_CONTAINERS) {
     }
 }
 
+# Collect expected (protected) volumes by deriving them from each existing
+# claude-*/codex-* container's ACTUAL mounts, not by constructing
+# agent-{nm,wt,ws,podman}-<name> from the container name. Name-construction
+# over-expected volumes a container does not really mount: a dir-mounted container
+# relaunched without a package.json mounts no nm/wt (MOUNT_WORKSPACE_VOLUMES=off),
+# and a self-hosted (--isolated) container keeps its data in agent-ws-<name> with
+# no nm/wt — yet any leftover agent-nm-<name>/agent-wt-<name> from a prior launch
+# was marked expected and so never reported as an orphan. Conversely, a pre-rename
+# container still mounting its legacy agent-nm-<project>/agent-wt-<project> was NOT
+# protected by the new-name construction, so prune mislisted genuinely-mounted
+# volumes. Reading real mounts fixes both: a container protects exactly what it
+# mounts (legacy or new), and a volume no existing container mounts becomes an
+# orphan candidate (the confirm prompt + Docker's in-use refusal are the backstop).
 foreach ($containerName in $containerNames) {
     if ([string]::IsNullOrWhiteSpace($containerName)) {
         continue
     }
 
     # Skip containers agent-prune is removing this run so their volumes are
-    # correctly reported as orphans.
+    # correctly reported as orphans. On a real run they are already gone from
+    # `docker ps -a`; on a -WhatIf preview they still exist, but we must NOT
+    # inspect them here, or their mounts would be re-protected and hide removals a
+    # real run would perform.
     if ($removedContainers.Contains($containerName)) {
         continue
     }
 
     if ($containerName -like 'claude-*' -or $containerName -like 'codex-*') {
-        # Every agent volume is now keyed by the FULL container name (agent +
-        # project), so a container named claude-<slug> expects
-        # agent-{nm,wt,ws,podman}-claude-<slug> — i.e. agent-<kind>-$containerName.
-        # A shared writable node_modules / pnpm store would corrupt two live agents,
-        # so nm/wt are per-container like ws/podman. agent-ws-* is over-expected for
-        # dir-mounted containers (which never create one), which is harmless.
-        [void]$expectedVolumes.Add("agent-nm-$containerName")
-        [void]$expectedVolumes.Add("agent-wt-$containerName")
-        [void]$expectedVolumes.Add("agent-ws-$containerName")
-        [void]$expectedVolumes.Add("agent-podman-$containerName")
+        # `docker inspect` emits one mount Name per line (bind mounts render an
+        # empty Name, skipped below; anonymous volumes carry a hex name that never
+        # matches the agent-* prefixes). stderr is dropped so a container that
+        # vanished between `docker ps -a` and here (a rare race) is a harmless
+        # no-op, not a hard error.
+        $mountedVolumes = @(docker inspect --format '{{range .Mounts}}{{println .Name}}{{end}}' $containerName 2>$null)
+        foreach ($mountedVolume in $mountedVolumes) {
+            if ($mountedVolume -like 'agent-nm-*' -or $mountedVolume -like 'agent-wt-*' -or $mountedVolume -like 'agent-ws-*' -or $mountedVolume -like 'agent-podman-*') {
+                [void]$expectedVolumes.Add($mountedVolume)
+            }
+        }
     }
 }
 

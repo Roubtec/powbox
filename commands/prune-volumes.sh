@@ -56,17 +56,28 @@ if [ -n "${POWBOX_PRUNE_REMOVED_CONTAINERS:-}" ]; then
 	EOF
 fi
 
-# Collect expected volumes from all existing claude-*/codex-* containers. Every
-# agent volume is now keyed by the FULL container name (agent + project), so a
-# container named claude-<slug> expects agent-{nm,wt,ws,podman}-claude-<slug> —
-# i.e. agent-<kind>-${name}. agent-ws-* is over-expected for dir-mounted
-# containers (which never create one), which is harmless — nothing by that name
-# exists.
+# Collect expected (protected) volumes from all existing claude-*/codex-*
+# containers by deriving them from each container's ACTUAL mounts, not by
+# constructing agent-{nm,wt,ws,podman}-<name> from the container name. The
+# name-construction approach over-expected volumes a container does not really
+# mount: a dir-mounted container relaunched without a package.json mounts no
+# nm/wt (MOUNT_WORKSPACE_VOLUMES=false), and a self-hosted (--isolated) container
+# keeps its data in agent-ws-<name> with no nm/wt — yet any leftover
+# agent-nm-<name>/agent-wt-<name> from a prior launch was marked expected and so
+# never reported as an orphan. Conversely, a pre-rename container still mounting
+# its legacy agent-nm-<project>/agent-wt-<project> was NOT protected by the
+# new-name construction, so prune mislisted genuinely-mounted volumes. Reading
+# real mounts fixes both: a container protects exactly what it mounts (legacy or
+# new), and a volume no existing container mounts becomes an orphan candidate
+# (the confirm prompt + Docker's in-use refusal are the backstop).
 expected=()
 while IFS= read -r name; do
 	[ -z "$name" ] && continue
 	# Skip containers agent-prune is removing this run so their volumes are
-	# correctly reported as orphans (exact, case-sensitive match, as in the shell).
+	# correctly reported as orphans (exact, case-sensitive match). On a real run
+	# they are already gone from `docker ps -a`; on a --dry-run they still exist,
+	# but we must NOT inspect them here, or their mounts would be re-protected and
+	# hide removals a real --yes would perform.
 	for removed in "${removed_containers[@]}"; do
 		[ "$name" = "$removed" ] && continue 2
 	done
@@ -74,7 +85,17 @@ while IFS= read -r name; do
 	claude-* | codex-*) ;;
 	*) continue ;;
 	esac
-	expected+=("agent-nm-${name}" "agent-wt-${name}" "agent-ws-${name}" "agent-podman-${name}")
+	# `docker inspect` emits one mount Name per line (bind mounts render an empty
+	# Name, skipped below; anonymous volumes carry a hex name that never matches
+	# the agent-* prefixes). stderr is dropped so a container that vanished between
+	# `docker ps -a` and here (a rare race) is a harmless no-op, not a hard error.
+	while IFS= read -r vol; do
+		case "$vol" in
+		agent-nm-* | agent-wt-* | agent-ws-* | agent-podman-*)
+			expected+=("$vol")
+			;;
+		esac
+	done < <(docker inspect --format '{{range .Mounts}}{{println .Name}}{{end}}' "$name" 2>/dev/null)
 done < <(docker ps -a --filter "name=claude-" --filter "name=codex-" --format "{{.Names}}")
 
 # The global shared image store is infra shared by every container (like the

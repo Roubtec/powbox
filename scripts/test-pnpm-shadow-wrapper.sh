@@ -179,6 +179,216 @@ err="$(wrapper_stderr "$WS" 1 "" "" run install)"
 assert_no_warn "$err" "'pnpm run install' (install is a run-script name) does not warn"
 err="$(wrapper_stderr "$WS" 1 "" "" exec install)"
 assert_no_warn "$err" "'pnpm exec install' (install is an exec'd command name) does not warn"
+# Regression for the codex P3 review on PR #70: `run-script` is run's documented alias, so
+# `pnpm run-script install` runs the `install` SCRIPT — the resolver must recognize it as a
+# name-arg subcommand or it skips `run-script` and latches the trailing `install`, falsely
+# warning.
+err="$(wrapper_stderr "$WS" 1 "" "" run-script install)"
+assert_no_warn "$err" "'pnpm run-script install' does not warn (run-script is run's alias; install is the script name)"
+
+echo "Test: a value-taking global flag BEFORE the subcommand -> still warns (task-002b gap)"
+# Regression for the codex review on PR #70: the subcommand resolver must step past a
+# value-taking global flag and its VALUE, or it misreads the value as the subcommand and
+# suppresses the warning. `pnpm --reporter silent install` is a real ROOT install
+# (--reporter takes `silent`; install is the subcommand), so in the regression-shaped
+# condition it MUST warn. The old resolver only skipped -C/--dir/--filter/-F, so it
+# resolved the subcommand as `silent` and stayed silent. --loglevel is a second,
+# independent value-taking global proving the fix is not a one-flag special-case.
+err="$(wrapper_stderr "$WS" 1 "" "" --reporter silent install --help)"
+assert_warns "$err" "'pnpm --reporter silent install' warns (value-taking flag before the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --loglevel debug install --help)"
+assert_warns "$err" "'pnpm --loglevel debug install' warns (a second value-taking global)"
+# --loglevel is enum-valued, but one level — `info` — is ALSO the npm-compat `info` (view
+# alias) subcommand. Without stepping over --loglevel's value, `pnpm --loglevel info install`
+# would resolve to `info` and silently skip the warning on a real root install.
+err="$(wrapper_stderr "$WS" 1 "" "" --loglevel info install --help)"
+assert_warns "$err" "'pnpm --loglevel info install' warns (level 'info' is not the 'info' subcommand)"
+
+echo "Test: a value-taking flag before a NON-install subcommand -> silent"
+# The flip side of the fix must not over-warn: `--reporter silent run install` still
+# resolves to `run` (the first real subcommand), so the trailing `install` stays a
+# script name and the command does not warn.
+err="$(wrapper_stderr "$WS" 1 "" "" --reporter silent run install)"
+assert_no_warn "$err" "'pnpm --reporter silent run install' does not warn (run is the subcommand)"
+
+echo "Test: an arbitrary-string flag whose VALUE equals a subcommand name -> resolves the real subcommand"
+# `-C <dir>` / `--filter <pkg>` take user-controlled strings that can collide with a
+# subcommand name. A directory literally named `run` must not be misread as the `run`
+# subcommand: `pnpm -C run install` (from the workspace root fixture) is still a root
+# install and must warn; `--filter run install` likewise.
+err="$(wrapper_stderr "$WS" 1 "" "" -C "$WS" install --help)"
+assert_warns "$err" "'pnpm -C <ws> install' warns (explicit dir, root install)"
+err="$(wrapper_stderr "$WS" 1 "" "" --filter run install --help)"
+assert_warns "$err" "'pnpm --filter run install' warns (filter value 'run' is not the subcommand)"
+# Regression for the copilot review on PR #70: the value consumed by a value-taking global
+# must NOT itself be re-read as a value-taking flag on the next token. A store dir literally
+# named `--filter` (`pnpm --store-dir --filter install`) must not chain into swallowing the
+# real `install` subcommand — that is still a root install and must warn.
+err="$(wrapper_stderr "$WS" 1 "" "" --store-dir --filter install --help)"
+assert_warns "$err" "'pnpm --store-dir --filter install' warns (a consumed value equal to a flag name does not swallow the real subcommand)"
+
+echo "Test: a management/query subcommand with an install-class-looking positional -> silent"
+# The subcommand resolver must recognize NON-install subcommands too, or it skips them and
+# latches the trailing install-class word. `pnpm why install` / `pnpm list add` / `pnpm
+# remove update` / `pnpm config get install` / `pnpm outdated add` all have a real
+# subcommand (why/list/remove/config/outdated) that writes no root node_modules, so even
+# in the regression-shaped condition they must stay silent. (A package literally named
+# `install`/`add`/`update` exists on the registry, so these are realistic queries.)
+err="$(wrapper_stderr "$WS" 1 "" "" why install)"
+assert_no_warn "$err" "'pnpm why install' does not warn (why is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" list add)"
+assert_no_warn "$err" "'pnpm list add' does not warn (list is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" remove update)"
+assert_no_warn "$err" "'pnpm remove update' does not warn (remove is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" config get install)"
+assert_no_warn "$err" "'pnpm config get install' does not warn (config is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" outdated add)"
+assert_no_warn "$err" "'pnpm outdated add' does not warn (outdated is the subcommand)"
+# `cache`/`stage` take a sub-action + package pattern; they must be recognized too so the
+# resolver does not skip them onto a trailing install-class word.
+err="$(wrapper_stderr "$WS" 1 "" "" cache delete add)"
+assert_no_warn "$err" "'pnpm cache delete add' does not warn (cache is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" stage view install)"
+assert_no_warn "$err" "'pnpm stage view install' does not warn (stage is the subcommand)"
+
+echo "Test: 'pnpm help <topic>' -> silent (help is the subcommand, not a root install)"
+# Regression for the copilot review on PR #70: `help` must be recognized as a subcommand,
+# or the resolver skips it and latches the trailing install-class topic. `pnpm help install`
+# / `pnpm help add` print documentation — they write no node_modules — so even in the
+# regression-shaped condition they must stay silent.
+err="$(wrapper_stderr "$WS" 1 "" "" help install)"
+assert_no_warn "$err" "'pnpm help install' does not warn (help is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" help add)"
+assert_no_warn "$err" "'pnpm help add' does not warn (help is the subcommand)"
+
+echo "Test: an npm-compat registry/query command with an install-class positional -> silent"
+# Regression for the codex P3 review on PR #70: the npm-compatible registry/query commands
+# (`view`/`info`/`search`/`star`/`dist-tag`) take a package or keyword positional that can be
+# an install-class word. `pnpm view install` queries the registry for the package literally
+# named `install`; it writes no root node_modules, so it must stay silent. If the resolver
+# did not recognize `view`/… it would skip it and latch the trailing `install`, falsely
+# warning. (`install`/`add`/`update` all exist on the registry, so these are realistic.)
+err="$(wrapper_stderr "$WS" 1 "" "" view install)"
+assert_no_warn "$err" "'pnpm view install' does not warn (view is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" info add)"
+assert_no_warn "$err" "'pnpm info add' does not warn (info is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" search update)"
+assert_no_warn "$err" "'pnpm search update' does not warn (search is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" star update)"
+assert_no_warn "$err" "'pnpm star update' does not warn (star is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" dist-tag ls install)"
+assert_no_warn "$err" "'pnpm dist-tag ls install' does not warn (dist-tag is the subcommand)"
+
+echo "Test: more npm-compat commands whose natural positional is an install-class word -> silent"
+# Same class as the registry block, swept proactively (PR #70 fresh-review follow-up). These
+# are realistic with NO contrived package name: `owner add` is a documented sub-action of the
+# `owner` command, and `bugs`/`repo`/`docs` take a package whose name can be `install`/`add`.
+# The resolver must recognize the real command so it does not latch the trailing word.
+err="$(wrapper_stderr "$WS" 1 "" "" owner add lodash)"
+assert_no_warn "$err" "'pnpm owner add lodash' does not warn (owner is the subcommand, add is its sub-action)"
+err="$(wrapper_stderr "$WS" 1 "" "" bugs install)"
+assert_no_warn "$err" "'pnpm bugs install' does not warn (bugs is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" repo add)"
+assert_no_warn "$err" "'pnpm repo add' does not warn (repo is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" docs install)"
+assert_no_warn "$err" "'pnpm docs install' does not warn (docs is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" deprecate install msg)"
+assert_no_warn "$err" "'pnpm deprecate install' does not warn (deprecate is the subcommand)"
+# Aliases of the registry commands must resolve too: `show`->view, `find`->search.
+err="$(wrapper_stderr "$WS" 1 "" "" show install)"
+assert_no_warn "$err" "'pnpm show install' does not warn (show is a view alias)"
+err="$(wrapper_stderr "$WS" 1 "" "" find update)"
+assert_no_warn "$err" "'pnpm find update' does not warn (find is a search alias)"
+
+echo "Test: the 'la' list alias -> silent (codex P3, PR #70)"
+# Regression for the codex P3 review on PR #70: `la` is a documented alias of `ls`/`list`
+# (`pnpm la --help` -> "Aliases: list, ls, la, ll"). `pnpm la install` lists packages matching
+# `install` and writes no node_modules, so the resolver must recognize `la` alongside list/ls/ll
+# or it skips it and latches the trailing `install`, falsely warning.
+err="$(wrapper_stderr "$WS" 1 "" "" la install)"
+assert_no_warn "$err" "'pnpm la install' does not warn (la is a list alias)"
+
+echo "Test: npm-compat account/admin stub commands -> silent (recognized though 'not yet implemented')"
+# Regression for the codex P3 review on PR #70: pnpm INTERCEPTS the npm-compat account/admin
+# commands `team`/`token`/`access`/`profile` — it errors "<cmd> is not yet implemented" and does
+# NOT install — yet they take sub-actions/positionals that can be install-class words
+# (`pnpm team add <scope:team> <user>`). The resolver must recognize the command so it stops
+# there instead of skipping it and latching the trailing `add`/`install`, which would falsely
+# warn. (token/access/profile use `install` as a stand-in install-class positional to prove the
+# trailing word is not latched as the subcommand.)
+err="$(wrapper_stderr "$WS" 1 "" "" team add scope:team user)"
+assert_no_warn "$err" "'pnpm team add' does not warn (team is the subcommand, add is its sub-action)"
+err="$(wrapper_stderr "$WS" 1 "" "" token install)"
+assert_no_warn "$err" "'pnpm token install' does not warn (token is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" access add)"
+assert_no_warn "$err" "'pnpm access add' does not warn (access is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" profile install)"
+assert_no_warn "$err" "'pnpm profile install' does not warn (profile is the subcommand)"
+
+echo "Test: 'ci' (frozen-lockfile install) and its aliases -> warn (PR #70 fresh-review follow-up)"
+# Proactive same-pattern fix (PR #70): `pnpm ci` is npm-compat clean install (aliases
+# clean-install/ic/install-clean) and writes the project's node_modules from the lockfile exactly
+# like `install`, so in the regression-shaped condition it MUST warn. It was previously in neither
+# the install-class nor the recognized set, so a mid-session `pnpm ci` in a non-dev folder wrote
+# host node_modules with NO warning — a false negative (the dangerous direction). `ci --help` exits
+# 0 and writes nothing, so this stays hermetic.
+err="$(wrapper_stderr "$WS" 1 "" "" ci --help)"
+assert_warns "$err" "'pnpm ci' warns (frozen-lockfile install writes root node_modules)"
+err="$(wrapper_stderr "$WS" 1 "" "" clean-install --help)"
+assert_warns "$err" "'pnpm clean-install' warns (a ci alias)"
+err="$(wrapper_stderr "$WS" 1 "" "" install-clean --help)"
+assert_warns "$err" "'pnpm install-clean' warns (a ci alias)"
+
+echo "Test: a glob-PATTERN value-taking global before the subcommand -> still warns (task-002b gap)"
+# Regression for the codex P2 review on PR #70: the resolver must step past a value-taking
+# pattern global AND its value, or it misreads the (bare-token) pattern as the subcommand.
+# `pnpm --hoist-pattern run install` is a real ROOT install (--hoist-pattern takes `run` as
+# its glob value; install is the subcommand), so it MUST warn. The old skip list lacked the
+# `--*-pattern` globals, so it read `run` as the subcommand and stayed silent.
+# --changed-files-ignore-pattern is a second, independent pattern global proving the fix is
+# not a one-flag special-case.
+err="$(wrapper_stderr "$WS" 1 "" "" --hoist-pattern run install --help)"
+assert_warns "$err" "'pnpm --hoist-pattern run install' warns (pattern value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --changed-files-ignore-pattern run install --help)"
+assert_warns "$err" "'pnpm --changed-files-ignore-pattern run install' warns (a second pattern global)"
+# `--trust-policy-exclude <package-spec>` is a third arbitrary-string class (a package spec,
+# not an enum), so its value can be a bare subcommand name too.
+err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy-exclude run install --help)"
+assert_warns "$err" "'pnpm --trust-policy-exclude run install' warns (spec value 'run' is not the subcommand)"
+# `--global-dir <dir>` is a value-taking dir global (a dir named `run` is plausible), and
+# `--cpu`/`--libc`/`--os`/`--reporter` are loose strings pnpm consumes without enum
+# validation. None may be read as the subcommand: each of these is a real root install.
+err="$(wrapper_stderr "$WS" 1 "" "" --global-dir run install --help)"
+assert_warns "$err" "'pnpm --global-dir run install' warns (dir value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --cpu run install --help)"
+assert_warns "$err" "'pnpm --cpu run install' warns (loose-string value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --reporter run install --help)"
+assert_warns "$err" "'pnpm --reporter run install' warns (--reporter is a free string, not a validated enum)"
+
+echo "Test: a NUMERIC value-taking global before the subcommand -> still warns (PR #70 codex P3)"
+# Regression for the codex P3 review on PR #70: pnpm consumes the token after a numeric
+# value-taking global WITHOUT validating it is a number, so `pnpm --network-concurrency run
+# install` is a real ROOT install (verified pnpm 11.8.0: it creates node_modules + lockfile;
+# `run` is consumed as the flag value, `install` is the subcommand). The resolver must step
+# past these exactly like the string globals, or it reads `run` as the subcommand and stays
+# silent. All three numeric globals `pnpm install --help` documents are covered.
+err="$(wrapper_stderr "$WS" 1 "" "" --network-concurrency run install --help)"
+assert_warns "$err" "'pnpm --network-concurrency run install' warns (numeric value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --child-concurrency run install --help)"
+assert_warns "$err" "'pnpm --child-concurrency run install' warns (a second numeric global)"
+err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy-ignore-after run install --help)"
+assert_warns "$err" "'pnpm --trust-policy-ignore-after run install' warns (a minutes-valued global)"
+
+echo "Test: an ENUM value-taking global before the subcommand -> still warns (PR #70 review round 2)"
+# `--package-import-method` (auto|clone|copy|hardlink) and `--trust-policy` (no-downgrade|off) are
+# value-taking enums `pnpm install --help` documents (with their values spelled out, not <bracketed>).
+# pnpm 11.8.0 consumes the token WITHOUT enum validation, so `pnpm --package-import-method run install`
+# is a real ROOT install (verified: creates node_modules + lockfile). The resolver must step past them
+# like the other value-taking globals, completing coverage of every value-taking option in install --help.
+err="$(wrapper_stderr "$WS" 1 "" "" --package-import-method run install --help)"
+assert_warns "$err" "'pnpm --package-import-method run install' warns (enum value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy run install --help)"
+assert_warns "$err" "'pnpm --trust-policy run install' warns (a second value-taking enum global)"
 
 echo ""
 echo "Results: $pass passed, $fail failed."

@@ -172,15 +172,40 @@ is_known_subcommand() {
 # to a NON-install subcommand (`run`, `why`) would make a real root install resolve to that word
 # and stay silent, which is why the skip list matters.
 #
-# Known residual (exotic, accepted): pnpm also accepts value-taking GLOBAL/config-key options
-# that do NOT appear in `pnpm install --help` — `--node-linker`, `--registry`/`--ca`/`--https-proxy`,
-# the `--fetch-*` numerics, and in principle any `--<npmrc-key> <value>`
-# (all verified to consume their token and install on pnpm 11.8.0).
-# These are an open-ended set we deliberately do NOT enumerate here (the ever-growing-list trap
-# task-002b set out to avoid), so an `--<unlisted-value-taking-global> <subcommand-name> install`
-# still resolves to that subcommand-name value and stays silent. Closing this completely needs the
-# resolver redesign tracked in tasks/deferred/002c. Prints the subcommand, or nothing for a bare
-# `pnpm`.
+# Known residual #1 (config-key false NEGATIVE — exotic, accepted): pnpm also accepts value-taking
+# GLOBAL/config-key options that do NOT appear in `pnpm install --help` — `--node-linker`,
+# `--registry`/`--ca`/`--https-proxy`, the `--fetch-*` numerics, and in principle any
+# `--<npmrc-key> <value>` (all verified to consume their token and install on pnpm 11.8.0). These
+# are an open-ended set we deliberately do NOT enumerate here (the ever-growing-list trap task-002b
+# set out to avoid), so an `--<unlisted-value-taking-global> <subcommand-name> install` still
+# resolves to that subcommand-name value and stays silent.
+#
+# Known residual #2 (script-shorthand false POSITIVE — safe direction, accepted per 002c): pnpm
+# runs `pnpm <token>` as the `<token>` script when `<token>` is not a builtin, so `pnpm build
+# install` runs the `build` script with `install` as its argument. `build` is not a known
+# subcommand, so the resolver skips it and latches the trailing `install`, emitting the
+# root-node_modules warning. Accepted because it errs to the SAFE direction (one advisory stderr
+# line, no block, no data loss) and is frequently a TRUE positive anyway: pnpm 11.8.0 defaults
+# `verify-deps-before-run` on, so before running a script in a freshly-scaffolded non-dev folder
+# pnpm auto-installs missing deps first — writing node_modules onto the host bind mount exactly as
+# the warning describes.
+#
+# Known residual #3 (bare-script false NEGATIVE — pre-existing, out of original scope, accepted
+# per 002c): by that same `verify-deps-before-run`, a bare `pnpm <script>` with NO install-class
+# word (`pnpm build` in a scaffolded non-dev folder) can auto-install deps onto the host bind
+# mount, yet the resolver resolves no install-class subcommand, so the wrapper neither warns nor
+# shadow-refreshes. This predates PR #70 — the wrapper has always keyed off the resolved
+# subcommand, never script-triggered auto-installs — and detecting it would need the
+# package.json-aware redesign.
+#
+# Not pending — accepted: task 002c (tasks/002c-pnpm-resolver-heuristic-residual-edge-cases.md)
+# evaluated the resolver redesign that would close residuals #1–#3 and deliberately chose approach
+# C (accept & close) over redesigning, because no resolver can fully reason about arbitrary scripts
+# (any script can shell out to `pnpm i` internally) and a package.json-aware one would also have to
+# model nested workspace packages — disproportionate to these rare exceptions to a rare occurrence
+# (mid-session scaffolding), whose failure cost is merely relaunching the container. So the resolver
+# keeps its safe-direction bias and the residuals are documented here and pinned by regression tests
+# rather than redesigned away. Prints the subcommand, or nothing for a bare `pnpm`.
 pnpm_subcommand() {
 	local prev="" a
 	for a in "$@"; do

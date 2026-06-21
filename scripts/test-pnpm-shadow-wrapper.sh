@@ -390,6 +390,46 @@ assert_warns "$err" "'pnpm --package-import-method run install' warns (enum valu
 err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy run install --help)"
 assert_warns "$err" "'pnpm --trust-policy run install' warns (a second value-taking enum global)"
 
+echo "Test: 'pnpm build install' (script shorthand) -> warns (ACCEPTED benign false positive, 002c)"
+# ACCEPTED residual per task 002c (approach C — accept & close). `pnpm build install` is pnpm's
+# script-shorthand run: `build` is not a known subcommand, so pnpm runs the `build` SCRIPT with
+# `install` as its argument. The resolver skips the unknown `build` and latches the trailing
+# `install`, so in the regression-shaped condition it emits the warning. This is a benign false
+# positive — advisory only (one stderr line, no block, no data loss) — and is frequently a TRUE
+# positive anyway: pnpm 11.8.0 defaults verify-deps-before-run on, so running a script in a
+# freshly-scaffolded non-dev folder auto-installs missing deps first, writing host node_modules
+# exactly as the warning describes. 002c (approach C) keeps the safe-direction bias rather than
+# redesign the resolver to suppress it; this test pins the accepted behavior. The trailing `--help`
+# follows the warn-case hermeticity convention (the eventual real `pnpm build install --help` exits
+# 0 without installing).
+err="$(wrapper_stderr "$WS" 1 "" "" build install --help)"
+assert_warns "$err" "'pnpm build install' warns (accepted benign false positive; script shorthand latches 'install')"
+
+echo "Test: 'pnpm --registry run install' (unlisted config-key global) -> silent (ACCEPTED, 002c)"
+# ACCEPTED residual per task 002c (approach C — accept & close). `--registry <url>` is a value-taking
+# CONFIG-KEY global that lives OUTSIDE `pnpm install --help`, so it is deliberately NOT enumerated in
+# the resolver's skip list — enumerating the open-ended npmrc config-key surface is exactly the
+# maintenance trap task-002b removed. So the resolver does not step over `--registry`'s value and
+# reads that value `run` as the subcommand, staying SILENT on what is really a root install (`run`
+# is consumed as the registry value, `install` is the subcommand). This pins the accepted
+# limitation: if a future change "fixes" it by enumerating config-key globals this assertion flips
+# to a warning and the test fails, forcing a conscious re-decision rather than a silent reopening of
+# the ever-growing-list trap. The trailing `--help` keeps the real `pnpm --registry run install
+# --help` hermetic (exits 0, writes no node_modules).
+err="$(wrapper_stderr "$WS" 1 "" "" --registry run install --help)"
+assert_no_warn "$err" "'pnpm --registry run install' does not warn (accepted: unlisted config-key global's value 'run' read as the subcommand)"
+
+echo "Test: 'pnpm build' (bare script, no install word) -> silent (ACCEPTED pre-existing gap, 002c)"
+# ACCEPTED residual per task 002c (approach C — accept & close). A bare `pnpm build` resolves to NO
+# install-class subcommand (`build` is an unknown token → a script run), so the wrapper never warns
+# or runs a shadow refresh — even though pnpm 11.8.0's verify-deps-before-run may auto-install
+# missing deps before the script and write host node_modules. This false negative PRE-DATES PR #70
+# (the wrapper has always keyed off the resolved subcommand, never script-triggered auto-installs);
+# detecting it would need the package.json-aware redesign 002c declined as disproportionate. The
+# gate is evaluated before the terminal exec, so this stays hermetic regardless of the script run.
+err="$(wrapper_stderr "$WS" 1 "" "" build)"
+assert_no_warn "$err" "'pnpm build' (bare script) does not warn (accepted pre-existing gap: no install-class subcommand resolved)"
+
 echo ""
 echo "Results: $pass passed, $fail failed."
 if [ "$fail" -gt 0 ]; then

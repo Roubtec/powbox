@@ -67,10 +67,14 @@ is_store_only_subcommand() {
 # itself be an install-class word: `pnpm run install`, `pnpm exec add`, `pnpm dlx
 # create-foo`, `pnpm create vite`. The subcommand resolver below must STOP at one of
 # these so the trailing word is read as its argument, never as the subcommand — the
-# false positive that made the root-node_modules warning noisy.
+# false positive that made the root-node_modules warning noisy. `run-script` is run's
+# documented alias (`pnpm run-script --help` → "Alias: run-script"), so `pnpm run-script
+# install` runs the `install` SCRIPT and must be recognized too, or the resolver skips
+# `run-script` and latches the trailing `install`. (run is the only name-arg subcommand
+# with an alias — exec/dlx/create have none in pnpm 11.)
 is_name_arg_subcommand() {
 	case "$1" in
-		run | exec | dlx | create) return 0 ;;
+		run | run-script | exec | dlx | create) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -124,34 +128,46 @@ is_known_subcommand() {
 # is also what keeps `pnpm run install` resolving to `run` (with `install` as its script
 # name) and `pnpm why install` to `why`, never to `install`.
 #
-# Residual ambiguity: a value-taking global flag whose VALUE happens to equal a subcommand
-# name (a directory named `run`: `pnpm -C run install`; a package named `add`: `pnpm --filter
-# add install`). Those values are user-controlled and CAN collide, so we explicitly step over
-# the value of every global whose value is a FREE token rather than a fixed enum — pnpm 11's
-# dir/selector/pattern/spec/loose-string globals per `pnpm install --help`:
+# Residual ambiguity: a value-taking flag whose VALUE happens to equal a subcommand name (a
+# directory named `run`: `pnpm -C run install`; a package named `add`: `pnpm --filter add
+# install`). pnpm consumes the token after EVERY value-taking option as that option's value
+# during command resolution — verified on pnpm 11.8.0: `pnpm --network-concurrency run install`
+# and even `pnpm --package-import-method run install` both run a real ROOT install (the bogus
+# value `run` is consumed; `install` is the subcommand) — so a value CAN collide with a
+# subcommand name regardless of the option's documented type. We step over the value of every
+# value-taking option `pnpm install --help` documents, so the resolver is complete with respect
+# to that authoritative list:
 #   - dirs:            `-C/--dir`, `--store-dir`, `--virtual-store-dir`, `--modules-dir`,
 #                      `--lockfile-dir`, `--global-dir`
 #   - selectors/specs: `--filter/-F/--filter-prod`, `--trust-policy-exclude`
 #   - glob patterns:   `--hoist-pattern`, `--public-hoist-pattern`,
 #                      `--changed-files-ignore-pattern`, `--test-pattern`
 #   - loose strings:   `--cpu`, `--libc`, `--os`, `--reporter`, `--loglevel`
+#   - numerics:        `--network-concurrency`, `--child-concurrency`, `--trust-policy-ignore-after`
+#   - enums:           `--package-import-method`, `--trust-policy` (pnpm spells their values out in
+#                      `install --help` — `--package-import-method auto|clone|copy|hardlink`,
+#                      `--trust-policy no-downgrade|off` — but does NOT validate before consuming)
 # (their `=`-joined forms are self-contained, so they fall through the generic `-*` skip.) A
 # pattern/dir like `--hoist-pattern run` or `--global-dir run` is an especially easy collision
 # (the value is a bare token), so missing it would let `pnpm --hoist-pattern run install`
-# resolve to `run` and stay silent on a real root install. The "loose strings" group needs
-# the same treatment: `--cpu`/`--libc`/`--os`/`--reporter` are NOT validated enums — pnpm
-# types them as free strings, consumes any value (`pnpm --reporter run install` proceeds),
-# and `--loglevel`'s level `info` is itself the npm-compat `info` (view alias) subcommand —
-# so all five are stepped over. An omitted value-taking global matters only
-# if its value is EXACTLY a subcommand name (a directory or selector literally named
-# `run`/`install`/…), which is exotic; then resolution mis-fires in whichever direction
-# the collision points — a value equal to an install-class word warns identically
-# (benign), but a value equal to a non-install subcommand (`run`, `why`) would make a
-# real root install resolve to that word and stay silent. The remaining value-taking globals
-# ARE genuinely constrained and cannot name a subcommand — the enums `--package-import-method`
-# (auto/hardlink/clone/copy) and `--trust-policy` (off/no-downgrade), and the numeric
-# `--*-concurrency`/`--trust-policy-ignore-after` — so they need no entry and are skipped for
-# free by the recognizer. Prints the subcommand, or nothing for a bare `pnpm`.
+# resolve to `run` and stay silent on a real root install. The "loose strings", "numerics", and
+# "enums" groups need the same treatment: pnpm does NOT validate them before consuming the token
+# (`--cpu`/`--reporter` are free strings; `--network-concurrency run` and `--package-import-method
+# run` are both accepted even though `run` is neither a number nor a valid enum value), and
+# `--loglevel`'s level `info` is itself the npm-compat `info` (view alias) subcommand — so all are
+# stepped over. A value equal to an install-class word warns identically (benign); a value equal
+# to a NON-install subcommand (`run`, `why`) would make a real root install resolve to that word
+# and stay silent, which is why the skip list matters.
+#
+# Known residual (exotic, accepted): pnpm also accepts value-taking GLOBAL/config-key options
+# that do NOT appear in `pnpm install --help` — `--node-linker`, `--registry`/`--ca`/`--https-proxy`,
+# the `--fetch-*` numerics, and in principle any `--<npmrc-key> <value>`
+# (all verified to consume their token and install on pnpm 11.8.0).
+# These are an open-ended set we deliberately do NOT enumerate here (the ever-growing-list trap
+# task-002b set out to avoid), so an `--<unlisted-value-taking-global> <subcommand-name> install`
+# still resolves to that subcommand-name value and stays silent. Closing this completely needs the
+# resolver redesign tracked in tasks/deferred/002c. Prints the subcommand, or nothing for a bare
+# `pnpm`.
 pnpm_subcommand() {
 	local prev="" a
 	for a in "$@"; do
@@ -164,8 +180,16 @@ pnpm_subcommand() {
 				--filter | -F | --filter-prod | --trust-policy-exclude | \
 				--hoist-pattern | --public-hoist-pattern | \
 				--changed-files-ignore-pattern | --test-pattern | \
-				--cpu | --libc | --os | --reporter | --loglevel)
-				prev="$a"
+				--cpu | --libc | --os | --reporter | --loglevel | \
+				--package-import-method | --trust-policy | \
+				--network-concurrency | --child-concurrency | --trust-policy-ignore-after)
+				# This token is the flag's value. Reset prev to a non-flag sentinel so the
+				# value itself cannot be re-read as a value-taking flag on the next
+				# iteration: a dir/selector/pattern literally named like one of these flags
+				# (`pnpm --store-dir --filter install`) must not chain into swallowing the
+				# real `install` subcommand and silently skipping the warning (PR #70 copilot
+				# review). The value is never the subcommand, so dropping it here is safe.
+				prev=""
 				continue
 				;;
 		esac
@@ -196,7 +220,14 @@ refresh_shadows() {
 	local effdir="$PWD" prev="" a
 	for a in "$@"; do
 		case "$prev" in
-			-C | --dir) effdir="$a" ;;
+			-C | --dir)
+				# This token is `-C/--dir`'s value. Consume it and reset prev to a non-flag
+				# sentinel so the value itself cannot be re-read as `-C/--dir` on the next
+				# iteration (the same consumed-value-re-read class fixed in pnpm_subcommand).
+				effdir="$a"
+				prev=""
+				continue
+				;;
 		esac
 		case "$a" in
 			-C=* | --dir=*) effdir="${a#*=}" ;;

@@ -179,6 +179,12 @@ err="$(wrapper_stderr "$WS" 1 "" "" run install)"
 assert_no_warn "$err" "'pnpm run install' (install is a run-script name) does not warn"
 err="$(wrapper_stderr "$WS" 1 "" "" exec install)"
 assert_no_warn "$err" "'pnpm exec install' (install is an exec'd command name) does not warn"
+# Regression for the codex P3 review on PR #70: `run-script` is run's documented alias, so
+# `pnpm run-script install` runs the `install` SCRIPT — the resolver must recognize it as a
+# name-arg subcommand or it skips `run-script` and latches the trailing `install`, falsely
+# warning.
+err="$(wrapper_stderr "$WS" 1 "" "" run-script install)"
+assert_no_warn "$err" "'pnpm run-script install' does not warn (run-script is run's alias; install is the script name)"
 
 echo "Test: a value-taking global flag BEFORE the subcommand -> still warns (task-002b gap)"
 # Regression for the codex review on PR #70: the subcommand resolver must step past a
@@ -214,6 +220,12 @@ err="$(wrapper_stderr "$WS" 1 "" "" -C "$WS" install --help)"
 assert_warns "$err" "'pnpm -C <ws> install' warns (explicit dir, root install)"
 err="$(wrapper_stderr "$WS" 1 "" "" --filter run install --help)"
 assert_warns "$err" "'pnpm --filter run install' warns (filter value 'run' is not the subcommand)"
+# Regression for the copilot review on PR #70: the value consumed by a value-taking global
+# must NOT itself be re-read as a value-taking flag on the next token. A store dir literally
+# named `--filter` (`pnpm --store-dir --filter install`) must not chain into swallowing the
+# real `install` subcommand — that is still a root install and must warn.
+err="$(wrapper_stderr "$WS" 1 "" "" --store-dir --filter install --help)"
+assert_warns "$err" "'pnpm --store-dir --filter install' warns (a consumed value equal to a flag name does not swallow the real subcommand)"
 
 echo "Test: a management/query subcommand with an install-class-looking positional -> silent"
 # The subcommand resolver must recognize NON-install subcommands too, or it skips them and
@@ -313,6 +325,31 @@ err="$(wrapper_stderr "$WS" 1 "" "" --cpu run install --help)"
 assert_warns "$err" "'pnpm --cpu run install' warns (loose-string value 'run' is not the subcommand)"
 err="$(wrapper_stderr "$WS" 1 "" "" --reporter run install --help)"
 assert_warns "$err" "'pnpm --reporter run install' warns (--reporter is a free string, not a validated enum)"
+
+echo "Test: a NUMERIC value-taking global before the subcommand -> still warns (PR #70 codex P3)"
+# Regression for the codex P3 review on PR #70: pnpm consumes the token after a numeric
+# value-taking global WITHOUT validating it is a number, so `pnpm --network-concurrency run
+# install` is a real ROOT install (verified pnpm 11.8.0: it creates node_modules + lockfile;
+# `run` is consumed as the flag value, `install` is the subcommand). The resolver must step
+# past these exactly like the string globals, or it reads `run` as the subcommand and stays
+# silent. All three numeric globals `pnpm install --help` documents are covered.
+err="$(wrapper_stderr "$WS" 1 "" "" --network-concurrency run install --help)"
+assert_warns "$err" "'pnpm --network-concurrency run install' warns (numeric value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --child-concurrency run install --help)"
+assert_warns "$err" "'pnpm --child-concurrency run install' warns (a second numeric global)"
+err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy-ignore-after run install --help)"
+assert_warns "$err" "'pnpm --trust-policy-ignore-after run install' warns (a minutes-valued global)"
+
+echo "Test: an ENUM value-taking global before the subcommand -> still warns (PR #70 review round 2)"
+# `--package-import-method` (auto|clone|copy|hardlink) and `--trust-policy` (no-downgrade|off) are
+# value-taking enums `pnpm install --help` documents (with their values spelled out, not <bracketed>).
+# pnpm 11.8.0 consumes the token WITHOUT enum validation, so `pnpm --package-import-method run install`
+# is a real ROOT install (verified: creates node_modules + lockfile). The resolver must step past them
+# like the other value-taking globals, completing coverage of every value-taking option in install --help.
+err="$(wrapper_stderr "$WS" 1 "" "" --package-import-method run install --help)"
+assert_warns "$err" "'pnpm --package-import-method run install' warns (enum value 'run' is not the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --trust-policy run install --help)"
+assert_warns "$err" "'pnpm --trust-policy run install' warns (a second value-taking enum global)"
 
 echo ""
 echo "Results: $pass passed, $fail failed."

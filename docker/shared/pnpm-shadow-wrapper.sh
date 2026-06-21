@@ -63,35 +63,91 @@ is_store_only_subcommand() {
 	esac
 }
 
-# Resolve pnpm's actual SUBCOMMAND — the first positional token — so a classifier
-# decision can key off what pnpm will really run rather than any install-class word
-# that merely appears somewhere in the args. pnpm accepts global flags before the
-# subcommand; the value-taking ones we step over are `-C/--dir <dir>` and
-# `--filter/-F <pkg>` (their `=`-joined forms are self-contained, so they fall through
-# the generic `-*` skip). Every other `-`-prefixed token is treated as a boolean global
-# flag and skipped. This is what distinguishes `pnpm install` (subcommand `install`)
-# from `pnpm run install` / `pnpm exec install` (subcommand `run`/`exec`, where the
-# `install` token is a script/command NAME, not a root install) — the false positive
-# that made the warning below noisy. Prints the subcommand, or nothing for a bare `pnpm`.
+# name-arg subcommands take a following NAME (a script, a binary, a package) that can
+# itself be an install-class word: `pnpm run install`, `pnpm exec add`, `pnpm dlx
+# create-foo`, `pnpm create vite`. The subcommand resolver below must STOP at one of
+# these so the trailing word is read as its argument, never as the subcommand — the
+# false positive that made the root-node_modules warning noisy.
+is_name_arg_subcommand() {
+	case "$1" in
+		run | exec | dlx | create) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Every pnpm subcommand the resolver below must be able to RECOGNIZE so it stops at the
+# real subcommand rather than skipping past it. It is the union of three sets: install-
+# class and name-arg (defined above — reused here so this can never drift from them) plus
+# the management/query/misc subcommands that are neither. The last group does not write
+# node_modules, but it MUST be listed: many of these take a following positional that can
+# be an install-class word (`pnpm why install`, `pnpm list add`, `pnpm remove update`,
+# `pnpm config get install`), and if the resolver did not recognize `why`/`list`/… it
+# would skip them and latch the trailing install-class word, falsely warning. Keep this
+# in sync with `pnpm help` (pnpm 11); an unlisted brand-new subcommand only degrades to
+# the same latching, never to a crash.
+is_known_subcommand() {
+	is_install_class_subcommand "$1" && return 0
+	is_name_arg_subcommand "$1" && return 0
+	case "$1" in
+		remove | rm | uninstall | un | unlink | prune | \
+			audit | licenses | list | ls | ll | outdated | why | \
+			patch | patch-commit | patch-remove | \
+			store | cache | config | c | doctor | env | deploy | server | \
+			root | bin | setup | pack | publish | init | stage | \
+			start | test | t | restart | clean | runtime | rt | self-update | \
+			approve-builds | ignored-builds | cat-file | cat-index | find-hash) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Resolve pnpm's actual SUBCOMMAND so a classifier decision can key off what pnpm will
+# really run rather than any install-class word that merely appears somewhere in the
+# args. pnpm accepts global flags (some value-taking) before the subcommand, so we
+# CANNOT just take the first non-`-` token: that token might be a flag's value. Rather
+# than chase an ever-growing list of value-taking globals (the gap that let `pnpm
+# --reporter silent install` resolve its subcommand as `silent` and silently skip the
+# task-002b warning — `--reporter`/`--loglevel`/… were not in the old skip list), the
+# subcommand is resolved as the FIRST token that NAMES a real subcommand
+# (is_known_subcommand). A flag's value (`silent`, `debug`, …) is not a subcommand name,
+# so it is skipped for free — making resolution robust to value-taking globals we do not
+# special-case. Stopping at the first REAL subcommand (not the first install-class word)
+# is also what keeps `pnpm run install` resolving to `run` (with `install` as its script
+# name) and `pnpm why install` to `why`, never to `install`.
+#
+# Residual ambiguity: an arbitrary-string global flag whose VALUE happens to equal a
+# subcommand name (a directory named `run`: `pnpm -C run install`; a package named `add`:
+# `pnpm --filter add install`). Those values are user-controlled and CAN collide, so we
+# explicitly step over the value of the arbitrary-string / selector globals — `-C/--dir`,
+# `--filter/-F/--filter-prod`, `--store-dir/--virtual-store-dir`, `--modules-dir/
+# --lockfile-dir` (their `=`-joined forms are self-contained) — pnpm 11's dir/selector-
+# valued globals per `pnpm install --help`. An omitted value-taking global matters only
+# if its value is EXACTLY a subcommand name (a directory or selector literally named
+# `run`/`install`/…), which is exotic; then resolution mis-fires in whichever direction
+# the collision points — a value equal to an install-class word warns identically
+# (benign), but a value equal to a non-install subcommand (`run`, `why`) would make a
+# real root install resolve to that word and stay silent. Enum-valued globals
+# (`--reporter`, `--loglevel`) can never collide and are skipped for free by the
+# recognizer. Prints the subcommand, or nothing for a bare `pnpm`.
 pnpm_subcommand() {
 	local prev="" a
 	for a in "$@"; do
-		# A preceding value-taking global flag consumed this token as its value — it is
-		# the flag's argument, never the subcommand, so skip it.
+		# A preceding arbitrary-string global flag consumed this token as its value — it
+		# is the flag's argument (a path/package selector that could collide with a
+		# subcommand name), never the subcommand, so skip it.
 		case "$prev" in
-			-C | --dir | --filter | -F)
+			-C | --dir | --filter | -F | --filter-prod | \
+				--store-dir | --virtual-store-dir | --modules-dir | --lockfile-dir)
 				prev="$a"
 				continue
 				;;
 		esac
-		case "$a" in
-			-*)
-				prev="$a"
-				continue
-				;;
-		esac
-		printf '%s' "$a"
-		return 0
+		prev="$a"
+		# The subcommand is the first token that names a real subcommand. Everything
+		# else — flags and their (enum or otherwise non-colliding) values — is skipped.
+		if is_known_subcommand "$a"; then
+			printf '%s' "$a"
+			return 0
+		fi
 	done
 }
 

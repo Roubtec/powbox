@@ -180,6 +180,60 @@ assert_no_warn "$err" "'pnpm run install' (install is a run-script name) does no
 err="$(wrapper_stderr "$WS" 1 "" "" exec install)"
 assert_no_warn "$err" "'pnpm exec install' (install is an exec'd command name) does not warn"
 
+echo "Test: a value-taking global flag BEFORE the subcommand -> still warns (task-002b gap)"
+# Regression for the codex review on PR #70: the subcommand resolver must step past a
+# value-taking global flag and its VALUE, or it misreads the value as the subcommand and
+# suppresses the warning. `pnpm --reporter silent install` is a real ROOT install
+# (--reporter takes `silent`; install is the subcommand), so in the regression-shaped
+# condition it MUST warn. The old resolver only skipped -C/--dir/--filter/-F, so it
+# resolved the subcommand as `silent` and stayed silent. --loglevel is a second,
+# independent value-taking global proving the fix is not a one-flag special-case.
+err="$(wrapper_stderr "$WS" 1 "" "" --reporter silent install --help)"
+assert_warns "$err" "'pnpm --reporter silent install' warns (value-taking flag before the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --loglevel debug install --help)"
+assert_warns "$err" "'pnpm --loglevel debug install' warns (a second value-taking global)"
+
+echo "Test: a value-taking flag before a NON-install subcommand -> silent"
+# The flip side of the fix must not over-warn: `--reporter silent run install` still
+# resolves to `run` (the first real subcommand), so the trailing `install` stays a
+# script name and the command does not warn.
+err="$(wrapper_stderr "$WS" 1 "" "" --reporter silent run install)"
+assert_no_warn "$err" "'pnpm --reporter silent run install' does not warn (run is the subcommand)"
+
+echo "Test: an arbitrary-string flag whose VALUE equals a subcommand name -> resolves the real subcommand"
+# `-C <dir>` / `--filter <pkg>` take user-controlled strings that can collide with a
+# subcommand name. A directory literally named `run` must not be misread as the `run`
+# subcommand: `pnpm -C run install` (from the workspace root fixture) is still a root
+# install and must warn; `--filter run install` likewise.
+err="$(wrapper_stderr "$WS" 1 "" "" -C "$WS" install --help)"
+assert_warns "$err" "'pnpm -C <ws> install' warns (explicit dir, root install)"
+err="$(wrapper_stderr "$WS" 1 "" "" --filter run install --help)"
+assert_warns "$err" "'pnpm --filter run install' warns (filter value 'run' is not the subcommand)"
+
+echo "Test: a management/query subcommand with an install-class-looking positional -> silent"
+# The subcommand resolver must recognize NON-install subcommands too, or it skips them and
+# latches the trailing install-class word. `pnpm why install` / `pnpm list add` / `pnpm
+# remove update` / `pnpm config get install` / `pnpm outdated add` all have a real
+# subcommand (why/list/remove/config/outdated) that writes no root node_modules, so even
+# in the regression-shaped condition they must stay silent. (A package literally named
+# `install`/`add`/`update` exists on the registry, so these are realistic queries.)
+err="$(wrapper_stderr "$WS" 1 "" "" why install)"
+assert_no_warn "$err" "'pnpm why install' does not warn (why is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" list add)"
+assert_no_warn "$err" "'pnpm list add' does not warn (list is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" remove update)"
+assert_no_warn "$err" "'pnpm remove update' does not warn (remove is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" config get install)"
+assert_no_warn "$err" "'pnpm config get install' does not warn (config is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" outdated add)"
+assert_no_warn "$err" "'pnpm outdated add' does not warn (outdated is the subcommand)"
+# `cache`/`stage` take a sub-action + package pattern; they must be recognized too so the
+# resolver does not skip them onto a trailing install-class word.
+err="$(wrapper_stderr "$WS" 1 "" "" cache delete add)"
+assert_no_warn "$err" "'pnpm cache delete add' does not warn (cache is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" stage view install)"
+assert_no_warn "$err" "'pnpm stage view install' does not warn (stage is the subcommand)"
+
 echo ""
 echo "Results: $pass passed, $fail failed."
 if [ "$fail" -gt 0 ]; then

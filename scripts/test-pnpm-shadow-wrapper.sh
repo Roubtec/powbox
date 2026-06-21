@@ -21,7 +21,7 @@
 # not run inside a powbox-style container).
 #
 # Usage: scripts/test-pnpm-shadow-wrapper.sh
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WRAPPER="$SCRIPT_DIR/../docker/shared/pnpm-shadow-wrapper.sh"
@@ -84,7 +84,10 @@ wrapper_stderr() {
 	local -a args=("$@")
 	[ "${#args[@]}" -gt 0 ] || args=(install --help)
 	# Discard the wrapper's stdout (its terminal `exec pnpm …`) and capture only its
-	# stderr: `>/dev/null` on the inner command, `2>&1` on the subshell.
+	# stderr: `>/dev/null` on the inner command, `2>&1` on the subshell. The trailing
+	# `|| true` keeps this non-fatal under `set -e`: the test asserts only on stderr
+	# content, never on the wrapper's exit code (dominated by its terminal `exec pnpm`),
+	# so the stage stays hermetic and pnpm-independent as documented in the header.
 	(
 		cd "$cwd" || exit 1
 		PATH="$STUB_DIR:$PATH" \
@@ -92,7 +95,7 @@ wrapper_stderr() {
 			PNPM_STORE_DIR="$store" \
 			POWBOX_SELF_HOSTED="$self" \
 			bash "$WRAPPER" "${args[@]}" >/dev/null
-	) 2>&1
+	) 2>&1 || true
 }
 
 # assert_warns / assert_no_warn <stderr> <msg>
@@ -114,7 +117,10 @@ assert_no_warn() {
 # Exactly one warning line — never a duplicate.
 assert_warns_once() {
 	local n
-	n="$(printf '%s\n' "$1" | grep -cF "$WARN_NEEDLE")"
+	# `grep -cF` exits 1 (printing `0`) when there are no matches; `|| true` keeps the
+	# count substitution non-fatal under `set -e` so a zero-match case is asserted as a
+	# normal `ko`, not an abort.
+	n="$(printf '%s\n' "$1" | grep -cF "$WARN_NEEDLE" || true)"
 	if [ "$n" -eq 1 ]; then
 		ok "$2"
 	else

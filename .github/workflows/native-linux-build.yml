@@ -43,11 +43,20 @@ on:
     # out on purpose: it also fires on every title/body edit and would re-run
     # Tier 1 needlessly.
     #
-    # types: the defaults (opened, synchronize, reopened) are spelled out so that
-    # adding labeled/unlabeled (for the `non-code` label gate on the job below)
-    # does not silently drop them.
+    # types: only the pull_request defaults (opened, synchronize, reopened).
+    # Unlike Tier 0, Tier 1 deliberately does NOT add labeled/unlabeled. The
+    # path + base gates already subsume the `non-code` job gate below — a
+    # docs/`non-code` PR never matches the image `paths:`, so no label toggle
+    # should ever start (or skip) a Tier 1 run and the job-level label gate is
+    # pure belt-and-suspenders here. Omitting the label-only triggers also keeps
+    # Tier 1 strictly path/base-gated: GitHub is reported not to apply `paths:`
+    # to labeled/unlabeled activity types, so including them could let a bare
+    # label change start this heavy build+smoke regardless of which files
+    # changed — exactly the path-gating this workflow exists to enforce. Tier 0
+    # has no `paths:` filter and runs on every PR, so it DOES keep
+    # labeled/unlabeled — there the label gate must re-run/skip on toggle.
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened]
     paths:
       - 'docker/**'
       - '**/Dockerfile'
@@ -73,10 +82,14 @@ jobs:
     name: Build image + smoke test
     runs-on: ubuntu-latest
     # Skip when the PR carries the repo's `non-code` label (docs/tasks-only
-    # changes that need no rebuild + full CI). On Tier 1 this is
-    # belt-and-suspenders — the path + base-branch gates above already skip docs
-    # PRs — but it keeps the gate expression identical to Tier 0's. Toggling the
-    # label re-evaluates on the next labeled/unlabeled event.
+    # changes that need no rebuild + full CI). On Tier 1 this is pure
+    # belt-and-suspenders — the path + base-branch gates above already skip every
+    # docs/`non-code` PR (none match the image `paths:`) — but it keeps the gate
+    # expression identical to Tier 0's. Unlike Tier 0, Tier 1 does NOT trigger on
+    # labeled/unlabeled (see `on:` above), so this gate is evaluated on
+    # opened/synchronize/reopened, not on a bare label toggle — which is fine,
+    # because here the path + base gates, not the label, decide whether Tier 1
+    # runs at all.
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'non-code') }}
     timeout-minutes: 60
     steps:

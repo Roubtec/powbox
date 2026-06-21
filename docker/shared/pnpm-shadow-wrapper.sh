@@ -80,17 +80,27 @@ is_name_arg_subcommand() {
 # class and name-arg (defined above — reused here so this can never drift from them) plus
 # the management/query/misc subcommands that are neither. The last group does not write
 # node_modules, but it MUST be listed: many of these take a following positional that can
-# be an install-class word (`pnpm why install`, `pnpm list add`, `pnpm remove update`,
-# `pnpm config get install`), and if the resolver did not recognize `why`/`list`/… it
-# would skip them and latch the trailing install-class word, falsely warning. Keep this
-# in sync with `pnpm help` (pnpm 11); an unlisted brand-new subcommand only degrades to
-# the same latching, never to a crash.
+# be an install-class word — `pnpm why install`, `pnpm list add`, `pnpm remove update`,
+# `pnpm config get install`, the npm-compatible registry/query commands (`pnpm view install`
+# / `pnpm info add` / `pnpm search update` / `pnpm owner add lodash` / `pnpm bugs install` /
+# `pnpm deprecate install <msg>`), and `pnpm help install` — and if the resolver did not
+# recognize `why`/`view`/`owner`/`help`/… it would skip them and latch the trailing install-
+# class word, falsely warning. NB the npm-compatibility commands (view/v/info/show, search/
+# find/s/se, star/stars, owner, bugs/repo/docs/home, deprecate/unpublish, version, set/get,
+# whoami/login/adduser/logout/ping, completion, sbom) are hidden: they do NOT appear in
+# `pnpm help -a`. When syncing to a new pnpm, probe `pnpm <cmd> --help` — a genuine command
+# prints its own `Usage:`, an unknown one falls through to `install`. An unlisted brand-new
+# subcommand only degrades to the same latching, never to a crash.
 is_known_subcommand() {
 	is_install_class_subcommand "$1" && return 0
 	is_name_arg_subcommand "$1" && return 0
 	case "$1" in
 		remove | rm | uninstall | un | unlink | prune | \
 			audit | licenses | list | ls | ll | outdated | why | \
+			view | v | info | show | search | find | s | se | \
+			star | stars | dist-tag | owner | bugs | repo | docs | home | \
+			deprecate | unpublish | version | set | get | completion | sbom | \
+			whoami | login | adduser | logout | ping | help | \
 			patch | patch-commit | patch-remove | \
 			store | cache | config | c | doctor | env | deploy | server | \
 			root | bin | setup | pack | publish | init | stage | \
@@ -114,20 +124,34 @@ is_known_subcommand() {
 # is also what keeps `pnpm run install` resolving to `run` (with `install` as its script
 # name) and `pnpm why install` to `why`, never to `install`.
 #
-# Residual ambiguity: an arbitrary-string global flag whose VALUE happens to equal a
-# subcommand name (a directory named `run`: `pnpm -C run install`; a package named `add`:
-# `pnpm --filter add install`). Those values are user-controlled and CAN collide, so we
-# explicitly step over the value of the arbitrary-string / selector globals — `-C/--dir`,
-# `--filter/-F/--filter-prod`, `--store-dir/--virtual-store-dir`, `--modules-dir/
-# --lockfile-dir` (their `=`-joined forms are self-contained) — pnpm 11's dir/selector-
-# valued globals per `pnpm install --help`. An omitted value-taking global matters only
+# Residual ambiguity: a value-taking global flag whose VALUE happens to equal a subcommand
+# name (a directory named `run`: `pnpm -C run install`; a package named `add`: `pnpm --filter
+# add install`). Those values are user-controlled and CAN collide, so we explicitly step over
+# the value of every global whose value is a FREE token rather than a fixed enum — pnpm 11's
+# dir/selector/pattern/spec/loose-string globals per `pnpm install --help`:
+#   - dirs:            `-C/--dir`, `--store-dir`, `--virtual-store-dir`, `--modules-dir`,
+#                      `--lockfile-dir`, `--global-dir`
+#   - selectors/specs: `--filter/-F/--filter-prod`, `--trust-policy-exclude`
+#   - glob patterns:   `--hoist-pattern`, `--public-hoist-pattern`,
+#                      `--changed-files-ignore-pattern`, `--test-pattern`
+#   - loose strings:   `--cpu`, `--libc`, `--os`, `--reporter`, `--loglevel`
+# (their `=`-joined forms are self-contained, so they fall through the generic `-*` skip.) A
+# pattern/dir like `--hoist-pattern run` or `--global-dir run` is an especially easy collision
+# (the value is a bare token), so missing it would let `pnpm --hoist-pattern run install`
+# resolve to `run` and stay silent on a real root install. The "loose strings" group needs
+# the same treatment: `--cpu`/`--libc`/`--os`/`--reporter` are NOT validated enums — pnpm
+# types them as free strings, consumes any value (`pnpm --reporter run install` proceeds),
+# and `--loglevel`'s level `info` is itself the npm-compat `info` (view alias) subcommand —
+# so all five are stepped over. An omitted value-taking global matters only
 # if its value is EXACTLY a subcommand name (a directory or selector literally named
 # `run`/`install`/…), which is exotic; then resolution mis-fires in whichever direction
 # the collision points — a value equal to an install-class word warns identically
 # (benign), but a value equal to a non-install subcommand (`run`, `why`) would make a
-# real root install resolve to that word and stay silent. Enum-valued globals
-# (`--reporter`, `--loglevel`) can never collide and are skipped for free by the
-# recognizer. Prints the subcommand, or nothing for a bare `pnpm`.
+# real root install resolve to that word and stay silent. The remaining value-taking globals
+# ARE genuinely constrained and cannot name a subcommand — the enums `--package-import-method`
+# (auto/hardlink/clone/copy) and `--trust-policy` (off/no-downgrade), and the numeric
+# `--*-concurrency`/`--trust-policy-ignore-after` — so they need no entry and are skipped for
+# free by the recognizer. Prints the subcommand, or nothing for a bare `pnpm`.
 pnpm_subcommand() {
 	local prev="" a
 	for a in "$@"; do
@@ -135,8 +159,12 @@ pnpm_subcommand() {
 		# is the flag's argument (a path/package selector that could collide with a
 		# subcommand name), never the subcommand, so skip it.
 		case "$prev" in
-			-C | --dir | --filter | -F | --filter-prod | \
-				--store-dir | --virtual-store-dir | --modules-dir | --lockfile-dir)
+			-C | --dir | --store-dir | --virtual-store-dir | --modules-dir | \
+				--lockfile-dir | --global-dir | \
+				--filter | -F | --filter-prod | --trust-policy-exclude | \
+				--hoist-pattern | --public-hoist-pattern | \
+				--changed-files-ignore-pattern | --test-pattern | \
+				--cpu | --libc | --os | --reporter | --loglevel)
 				prev="$a"
 				continue
 				;;

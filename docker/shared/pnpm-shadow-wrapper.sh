@@ -44,9 +44,14 @@ PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
 # writes the project's node_modules or warms the pnpm store for a package that may
 # have just been scaffolded. pnpm accepts global flags before the subcommand
 # (`pnpm -w add`, `pnpm -C dir install`), so every caller scans all args.
+# `ci`/`clean-install`/`ic`/`install-clean` are pnpm's npm-compat frozen-lockfile install
+# (`pnpm ci --help` → "Aliases: clean-install, ic, install-clean"): they write the project's
+# node_modules from the lockfile exactly like `install`, so they are install-class too — omitting
+# them let a mid-session `pnpm ci` in a non-dev folder write host node_modules with no warning.
 is_install_class_subcommand() {
 	case "$1" in
-		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln) return 0 ;;
+		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln | \
+			ci | clean-install | ic | install-clean) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -87,24 +92,30 @@ is_name_arg_subcommand() {
 # be an install-class word — `pnpm why install`, `pnpm list add`, `pnpm remove update`,
 # `pnpm config get install`, the npm-compatible registry/query commands (`pnpm view install`
 # / `pnpm info add` / `pnpm search update` / `pnpm owner add lodash` / `pnpm bugs install` /
-# `pnpm deprecate install <msg>`), and `pnpm help install` — and if the resolver did not
-# recognize `why`/`view`/`owner`/`help`/… it would skip them and latch the trailing install-
-# class word, falsely warning. NB the npm-compatibility commands (view/v/info/show, search/
-# find/s/se, star/stars, owner, bugs/repo/docs/home, deprecate/unpublish, version, set/get,
-# whoami/login/adduser/logout/ping, completion, sbom) are hidden: they do NOT appear in
-# `pnpm help -a`. When syncing to a new pnpm, probe `pnpm <cmd> --help` — a genuine command
-# prints its own `Usage:`, an unknown one falls through to `install`. An unlisted brand-new
-# subcommand only degrades to the same latching, never to a crash.
+# `pnpm deprecate install <msg>`), the npm-compat account/admin commands (`pnpm team add
+# <scope:team> <user>` / `pnpm access ...` / `pnpm token ...` / `pnpm profile ...`), and
+# `pnpm help install` — and if the resolver did not recognize `why`/`view`/`owner`/`team`/
+# `help`/… it would skip them and latch the trailing install-class word, falsely warning. NB the
+# npm-compatibility commands (view/v/info/show, search/find/s/se, star/stars, owner, bugs/repo/
+# docs/home, deprecate/unpublish, version, set/get, whoami/login/adduser/logout/ping, completion,
+# sbom, and the account/admin group access/team/token/profile) are hidden: they do NOT appear in
+# `pnpm help -a`. When syncing to a new pnpm, probe `pnpm <cmd> --help`: a genuine implemented
+# command prints its own `Usage:`; a recognized-but-stubbed npm-compat command prints `<cmd> is
+# not yet implemented` (pnpm still INTERCEPTS it — it errors WITHOUT installing — so it must be
+# recognized here exactly like an implemented one, e.g. access/team/token/profile); only a truly
+# unknown token falls through to a script run (`verify-deps-before-run` may install, then "Command
+# not found"). An unlisted brand-new subcommand only degrades to the same latching, never a crash.
 is_known_subcommand() {
 	is_install_class_subcommand "$1" && return 0
 	is_name_arg_subcommand "$1" && return 0
 	case "$1" in
 		remove | rm | uninstall | un | unlink | prune | \
-			audit | licenses | list | ls | ll | outdated | why | \
+			audit | licenses | list | ls | la | ll | outdated | why | \
 			view | v | info | show | search | find | s | se | \
 			star | stars | dist-tag | owner | bugs | repo | docs | home | \
 			deprecate | unpublish | version | set | get | completion | sbom | \
 			whoami | login | adduser | logout | ping | help | \
+			access | team | token | profile | \
 			patch | patch-commit | patch-remove | \
 			store | cache | config | c | doctor | env | deploy | server | \
 			root | bin | setup | pack | publish | init | stage | \
@@ -147,7 +158,9 @@ is_known_subcommand() {
 #   - enums:           `--package-import-method`, `--trust-policy` (pnpm spells their values out in
 #                      `install --help` — `--package-import-method auto|clone|copy|hardlink`,
 #                      `--trust-policy no-downgrade|off` — but does NOT validate before consuming)
-# (their `=`-joined forms are self-contained, so they fall through the generic `-*` skip.) A
+# (their `=`-joined forms are a single self-contained token: the prev-value check matches only a
+# bare `--reporter`, never `--reporter=silent`, and the joined token is not a subcommand name, so
+# the loop just steps past it like any other unrecognized arg — there is no separate `-*` branch.) A
 # pattern/dir like `--hoist-pattern run` or `--global-dir run` is an especially easy collision
 # (the value is a bare token), so missing it would let `pnpm --hoist-pattern run install`
 # resolve to `run` and stay silent on a real root install. The "loose strings", "numerics", and

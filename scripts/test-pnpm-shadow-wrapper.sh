@@ -300,6 +300,45 @@ assert_no_warn "$err" "'pnpm show install' does not warn (show is a view alias)"
 err="$(wrapper_stderr "$WS" 1 "" "" find update)"
 assert_no_warn "$err" "'pnpm find update' does not warn (find is a search alias)"
 
+echo "Test: the 'la' list alias -> silent (codex P3, PR #70)"
+# Regression for the codex P3 review on PR #70: `la` is a documented alias of `ls`/`list`
+# (`pnpm la --help` -> "Aliases: list, ls, la, ll"). `pnpm la install` lists packages matching
+# `install` and writes no node_modules, so the resolver must recognize `la` alongside list/ls/ll
+# or it skips it and latches the trailing `install`, falsely warning.
+err="$(wrapper_stderr "$WS" 1 "" "" la install)"
+assert_no_warn "$err" "'pnpm la install' does not warn (la is a list alias)"
+
+echo "Test: npm-compat account/admin stub commands -> silent (recognized though 'not yet implemented')"
+# Regression for the codex P3 review on PR #70: pnpm INTERCEPTS the npm-compat account/admin
+# commands `team`/`token`/`access`/`profile` — it errors "<cmd> is not yet implemented" and does
+# NOT install — yet they take sub-actions/positionals that can be install-class words
+# (`pnpm team add <scope:team> <user>`). The resolver must recognize the command so it stops
+# there instead of skipping it and latching the trailing `add`/`install`, which would falsely
+# warn. (token/access/profile use `install` as a stand-in install-class positional to prove the
+# trailing word is not latched as the subcommand.)
+err="$(wrapper_stderr "$WS" 1 "" "" team add scope:team user)"
+assert_no_warn "$err" "'pnpm team add' does not warn (team is the subcommand, add is its sub-action)"
+err="$(wrapper_stderr "$WS" 1 "" "" token install)"
+assert_no_warn "$err" "'pnpm token install' does not warn (token is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" access add)"
+assert_no_warn "$err" "'pnpm access add' does not warn (access is the subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" profile install)"
+assert_no_warn "$err" "'pnpm profile install' does not warn (profile is the subcommand)"
+
+echo "Test: 'ci' (frozen-lockfile install) and its aliases -> warn (PR #70 fresh-review follow-up)"
+# Proactive same-pattern fix (PR #70): `pnpm ci` is npm-compat clean install (aliases
+# clean-install/ic/install-clean) and writes the project's node_modules from the lockfile exactly
+# like `install`, so in the regression-shaped condition it MUST warn. It was previously in neither
+# the install-class nor the recognized set, so a mid-session `pnpm ci` in a non-dev folder wrote
+# host node_modules with NO warning — a false negative (the dangerous direction). `ci --help` exits
+# 0 and writes nothing, so this stays hermetic.
+err="$(wrapper_stderr "$WS" 1 "" "" ci --help)"
+assert_warns "$err" "'pnpm ci' warns (frozen-lockfile install writes root node_modules)"
+err="$(wrapper_stderr "$WS" 1 "" "" clean-install --help)"
+assert_warns "$err" "'pnpm clean-install' warns (a ci alias)"
+err="$(wrapper_stderr "$WS" 1 "" "" install-clean --help)"
+assert_warns "$err" "'pnpm install-clean' warns (a ci alias)"
+
 echo "Test: a glob-PATTERN value-taking global before the subcommand -> still warns (task-002b gap)"
 # Regression for the codex P2 review on PR #70: the resolver must step past a value-taking
 # pattern global AND its value, or it misreads the (bare-token) pattern as the subcommand.

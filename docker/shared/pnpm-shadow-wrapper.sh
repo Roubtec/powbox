@@ -63,6 +63,38 @@ is_store_only_subcommand() {
 	esac
 }
 
+# Resolve pnpm's actual SUBCOMMAND — the first positional token — so a classifier
+# decision can key off what pnpm will really run rather than any install-class word
+# that merely appears somewhere in the args. pnpm accepts global flags before the
+# subcommand; the value-taking ones we step over are `-C/--dir <dir>` and
+# `--filter/-F <pkg>` (their `=`-joined forms are self-contained, so they fall through
+# the generic `-*` skip). Every other `-`-prefixed token is treated as a boolean global
+# flag and skipped. This is what distinguishes `pnpm install` (subcommand `install`)
+# from `pnpm run install` / `pnpm exec install` (subcommand `run`/`exec`, where the
+# `install` token is a script/command NAME, not a root install) — the false positive
+# that made the warning below noisy. Prints the subcommand, or nothing for a bare `pnpm`.
+pnpm_subcommand() {
+	local prev="" a
+	for a in "$@"; do
+		# A preceding value-taking global flag consumed this token as its value — it is
+		# the flag's argument, never the subcommand, so skip it.
+		case "$prev" in
+			-C | --dir | --filter | -F)
+				prev="$a"
+				continue
+				;;
+		esac
+		case "$a" in
+			-*)
+				prev="$a"
+				continue
+				;;
+		esac
+		printf '%s' "$a"
+		return 0
+	done
+}
+
 refresh_shadows() {
 	# Self-hosted (--isolated) mode has no host filesystem underneath to shadow,
 	# and shadow-mounts.sh is skipped there entirely; mirror that here. It also
@@ -110,16 +142,19 @@ refresh_shadows() {
 	# includes store-only commands like `pnpm fetch` that only warm the pnpm store from
 	# the lockfile and never write the project's node_modules. The warning below is
 	# about node_modules landing on the host bind mount, so it must fire only for a
-	# subcommand that actually writes node_modules. writes_root_node_modules is true iff
-	# some arg is an install-class token that is NOT store-only — derived from the same
-	# shared classifiers as the trigger, so the gate can never drift from it.
-	local writes_root_node_modules=0 wa
-	for wa in "$@"; do
-		if is_install_class_subcommand "$wa" && ! is_store_only_subcommand "$wa"; then
-			writes_root_node_modules=1
-			break
-		fi
-	done
+	# subcommand that actually writes node_modules. Key it off the RESOLVED pnpm
+	# subcommand (not any token in the args) so `pnpm run install` / `pnpm exec install`
+	# — where `install` is a script/command name, not the subcommand — are never misread
+	# as a root install. writes_root_node_modules is true iff that subcommand is
+	# install-class and NOT store-only, using the same shared classifiers as the trigger
+	# so the gate can never drift from it.
+	local subcmd writes_root_node_modules=0
+	subcmd="$(pnpm_subcommand "$@")"
+	if [ -n "$subcmd" ] &&
+		is_install_class_subcommand "$subcmd" &&
+		! is_store_only_subcommand "$subcmd"; then
+		writes_root_node_modules=1
+	fi
 
 	# Regression guard (PR #59 follow-up, task 002b). In dir-mounted mode the launcher
 	# mounts the isolated root node_modules volume — and sets PNPM_STORE_DIR — ONLY when
@@ -160,7 +195,9 @@ refresh_shadows() {
 # rather than only the first.  A false positive triggers a harmless idempotent refresh;
 # a false negative would defeat the purpose, so the list errs toward catching everything
 # that writes node_modules.  The root-node_modules warning inside refresh_shadows is
-# gated more narrowly to the node_modules-writing subset (see is_store_only_subcommand).
+# gated more narrowly — to the RESOLVED subcommand (not any arg) and to the node_modules-
+# writing subset (see pnpm_subcommand and is_store_only_subcommand) — so an install-class
+# word that is merely an argument (`pnpm run install`) refreshes but never warns.
 for arg in "$@"; do
 	if is_install_class_subcommand "$arg"; then
 		refresh_shadows "$@"

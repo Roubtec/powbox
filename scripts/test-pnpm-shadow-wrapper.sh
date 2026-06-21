@@ -166,6 +166,20 @@ echo "Test: non-install command (no node_modules write) -> silent"
 err="$(wrapper_stderr "$WS" 1 "" "" --version)"
 assert_no_warn "$err" "a command with no install-class token does not warn"
 
+echo "Test: 'install' as an ARGUMENT, not the subcommand -> silent"
+# False-positive guard: the wrapper keys the warning off the RESOLVED pnpm subcommand
+# (first positional token), so an install-class word that is merely an argument must not
+# trip it. `pnpm run install` runs a package script NAMED `install`; `pnpm exec install`
+# execs a command NAMED `install` — in both the real subcommand is `run`/`exec`, which
+# writes no root node_modules. In the exact regression-shaped condition (non-dev, no
+# PNPM_STORE_DIR, not a mountpoint, at the workspace root) that makes a true `pnpm
+# install` warn, both must stay silent. The gate is evaluated before the terminal exec,
+# so this stays hermetic regardless of what (if anything) the script/command does.
+err="$(wrapper_stderr "$WS" 1 "" "" run install)"
+assert_no_warn "$err" "'pnpm run install' (install is a run-script name) does not warn"
+err="$(wrapper_stderr "$WS" 1 "" "" exec install)"
+assert_no_warn "$err" "'pnpm exec install' (install is an exec'd command name) does not warn"
+
 echo ""
 echo "Results: $pass passed, $fail failed."
 if [ "$fail" -gt 0 ]; then

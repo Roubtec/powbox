@@ -106,3 +106,54 @@ is a net regression in the direction that actually matters. Case 3 is a separate
 - If approach A is taken, add a guard that detects drift between the wrapper's value-taking flag
   list and pnpm's documented options (so the list cannot silently fall behind).
 - New regression tests cover the chosen behavior.
+
+## Decision (resolved 2026-06-21): Approach C — accept & close
+
+Chosen approach: **C — accept the residuals, document & close.** No resolver redesign, no new
+value-taking-flag list, no `package.json` reads. The resolver's executable logic is unchanged.
+
+Maintainer rationale:
+
+- No resolver can fully reason about arbitrary scripts: a script named anything can internally shell
+  out to `pnpm i` as shorthand for install, so the leading-token-is-a-script analysis is
+  fundamentally incomplete.
+- A `package.json`-aware resolver (approach B) would additionally have to understand nested workspace
+  packages — too costly a solution for what are rare exceptions to a rare occurrence (mid-session
+  scaffolding of a new package inside the container).
+- The failure cost is low: the host just removes the container, deletes the folder, and runs the
+  container afresh.
+- So invest proportionate effort: keep the resolver's safe-direction bias, document the residuals,
+  lock in regression tests.
+
+What was implemented:
+
+- Resolver logic (`pnpm_subcommand()` / `refresh_shadows()` / the classifier functions) is
+  **byte-for-byte unchanged** — only comments changed.
+- The three residual cases are documented in the big comment block above `pnpm_subcommand()` in
+  `docker/shared/pnpm-shadow-wrapper.sh`, marked accepted per this decision: #1 the config-key false
+  negative (was already noted; its stale `tasks/deferred/002c` pointer and "needs a redesign"
+  framing are corrected to reference this file and the accept-&-close decision), #2 the
+  script-shorthand benign false positive, and #3 the pre-existing bare-script false negative.
+  (Those `#1/#2/#3` labels follow the wrapper comment's own source order — config-key first, since
+  it predates this task — and intentionally do **not** line up with this file's `Case 1/2/3`
+  numbering above: wrapper `#1` = Case 2, wrapper `#2` = Case 1, wrapper `#3` = Case 3.)
+- Three regression tests added to `scripts/test-pnpm-shadow-wrapper.sh` pinning the accepted
+  behavior: `pnpm build install` → warns (accepted benign false positive), `pnpm --registry run
+  install` → silent (accepted exotic false negative; flips/fails if a future change enumerates
+  config-key globals, forcing a conscious re-decision), and bare `pnpm build` → silent (accepted
+  pre-existing gap).
+- All existing task-002b `assert_warns` guarantees are retained (no existing stage modified or
+  removed); the full suite still passes.
+
+The codex P3 thread (PR #70, `#discussion_r3448851646`, "Stop latching script arguments as install
+commands") is **closed by this decision** with no code change to the resolver.
+
+Mapping back to the Acceptance section above:
+
+- Case 1 decision: the benign false positive is **explicitly accepted** (approach C) — `pnpm
+  <local-script> <install-word>` with satisfied deps still warns, by design.
+- The task-002b false-negative guarantees still hold (every existing `assert_warns` case retained).
+- Case 3 is **not taken on** — recorded as a documented, accepted gap rather than fixed (it would
+  need the redesign declined here).
+- Approach A was **not** chosen, so no value-taking-flag drift guard is added.
+- New regression tests cover the chosen (accepted) behavior, as required.

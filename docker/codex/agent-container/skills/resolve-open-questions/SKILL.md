@@ -105,8 +105,21 @@ never the original agent's reasoning:
 
 ### 4. Serve each question — the core move
 
-For each item (or coupled group), present a tight brief, then ask. Every brief has the same four
-parts:
+For each item (or coupled group), present a tight brief, then ask.
+
+**Open each round with a one-line progress header** so the maintainer always knows how deep the
+queue still is — this matters most on long lists (20, 35, or more items), where the absence of any
+"how much is left" signal is exactly what makes wading through them tedious. State it as
+**resolved · pending · total**, counting individual open questions/items (a coupled round closes more
+than one at once), where *pending* **includes the item(s) you are about to serve** and *total* is the
+full count identified up front (call it out if coupling or a fresh discovery later shifts the total).
+For example: `Progress: 12 resolved · 23 pending · 35 total — this round: #13–14 (coupled).` Use
+judgment on cadence rather than a fixed threshold: always show it when the remaining count is large
+or a round closes several items, and you may fold it into the prose for a quick run of trivial single
+confirmations — but never let the maintainer lose the sense of how far along they are. Keep it to one
+compact line so it never buries the brief.
+
+Every brief has the same four parts:
 
 1. **Context (grounded).** What the concern is, in terms of the actual artifact and the documented
    intent. Cite the exact site (`file:line`, the spec, the record).
@@ -134,6 +147,17 @@ Then capture the decision through the best interaction surface Codex exposes:
 
 Wait for the answer before locking the decision. Honor clarifying push-back first — maintainers
 often refine the *mechanism*, not just the yes/no.
+
+**Escape hatch — let the maintainer wrap up early.** Codex cannot render an extra structured control
+beside a decision, so make the exit explicit in words: tell the maintainer up front — and again
+whenever a round serves a long queue — that they may say **"wrap up"** (or "stop after this") at any
+time, instead of having to smuggle the request into a free-text answer. When they do, do **not**
+abandon the work in flight: finish resolving and **persisting/applying the item(s) already on the
+table** (step 5), then stop and produce the ledger plus a closing progress count (`N of TOTAL
+resolved; M still pending, listed`) so a later session resumes cleanly. Treat a wrap-up as a clean
+pause, never a discard. If the session *does* expose a structured user-input tool, you may add a
+small "continue / wrap up after this" question to each round (while more than one item remains) as
+the richer equivalent — but the spoken request is the baseline and always honored.
 
 **Sub-step — audit adjacent code/data when the decision relies on an invariant.** If a resolution
 introduces or leans on a non-obvious invariant (e.g. "a record may stay `ACTIVE` past its
@@ -292,7 +316,9 @@ and scan recent run reports / commit messages for discovered findings.
       `gitcat`); gap re-confirmed; reachability classified.
 - [ ] Coupled items grouped; order set; served **one at a time** (trivial independents may share one
       multiple-choice round) with context + trigger example + options-as-outcomes + recommendation;
-      decision captured through the best available Codex interaction surface.
+      decision captured through the best available Codex interaction surface. Each round opens with a
+      `resolved · pending · total` progress line, and the maintainer is told they can say "wrap up" to
+      end early — on which, finish + persist the current item, then stop with a resume-ready ledger.
 - [ ] Adjacent-invariant audit run whenever a resolution relies on/introduces one; findings reported
       before implementing.
 - [ ] Code-writing decisions verified (tests, build, isolated validation) through a fresh review;

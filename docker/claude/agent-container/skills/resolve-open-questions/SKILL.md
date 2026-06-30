@@ -103,8 +103,21 @@ never the original agent's reasoning:
 
 ### 4. Serve each question — the core move
 
-For each item (or coupled group), present a tight brief, then ask. Every brief has the same four
-parts:
+For each item (or coupled group), present a tight brief, then ask.
+
+**Open each round with a one-line progress header** so the maintainer always knows how deep the
+queue still is — this matters most on long lists (20, 35, or more items), where the absence of any
+"how much is left" signal is exactly what makes wading through them tedious. State it as
+**resolved · pending · total**, counting individual open questions/items (a coupled round closes more
+than one at once), where *pending* **includes the item(s) you are about to serve** and *total* is the
+full count identified up front (call it out if coupling or a fresh discovery later shifts the total).
+For example: `Progress: 12 resolved · 23 pending · 35 total — this round: #13–14 (coupled).` Use
+judgment on cadence rather than a fixed threshold: always show it when the remaining count is large
+or a round closes several items, and you may fold it into the prose for a quick run of trivial single
+confirmations — but never let the maintainer lose the sense of how far along they are. Keep it to one
+compact line so it never buries the brief.
+
+Every brief has the same four parts:
 
 1. **Context (grounded).** What the concern is, in terms of the actual artifact and the documented
    intent. Cite the exact site (`file:line`, the spec, the record).
@@ -124,6 +137,18 @@ parts:
 Then capture the decision with **AskUserQuestion** (options = the resolutions; recommended one first
 and labelled). Honor any clarifying push-back before locking it — maintainers often refine the
 *mechanism*, not just the yes/no.
+
+**Offer an exit each round — the escape hatch.** Whenever more than one item still remains, include
+in the *same* `AskUserQuestion` call a second, separate question — *"After this, continue or wrap
+up?"* with options **Continue (Recommended)** and **Wrap up after this** — so the maintainer can end
+a long session at any point (a meeting, a context switch) without having to smuggle the request into
+a free-text answer. It consumes one of `AskUserQuestion`'s four question slots, so when you batch
+trivial decisions cap them at three to leave room; skip the control entirely on the final remaining
+item, where there is nothing left to continue to. If the maintainer picks **Wrap up** — or says so
+in any wording at any time — do **not** abandon the work in flight: finish resolving and
+**persisting/applying the item(s) already on the table** (step 5), then stop and produce the ledger
+plus a closing progress count (`N of TOTAL resolved; M still pending, listed`) so a later session
+resumes cleanly. Treat a wrap-up as a clean pause, never a discard.
 
 **Sub-step — audit adjacent code/data when the decision relies on an invariant.** If a resolution
 introduces or leans on a non-obvious invariant (e.g. "a record may stay `ACTIVE` past its
@@ -281,7 +306,9 @@ and scan recent run reports / commit messages for discovered findings.
       `gitcat`); gap re-confirmed; reachability classified.
 - [ ] Coupled items grouped; order set; served **one at a time** (trivial independents may share one
       multiple-choice round) with context + trigger example + options-as-outcomes + recommendation;
-      decision captured via AskUserQuestion.
+      decision captured via AskUserQuestion. Each round opens with a `resolved · pending · total`
+      progress line, and (while >1 item remains) offers a **continue / wrap-up** escape hatch; on
+      wrap-up, finish + persist the current item, then stop with a resume-ready ledger.
 - [ ] Adjacent-invariant audit run whenever a resolution relies on/introduces one; findings reported
       before implementing.
 - [ ] Code-writing decisions verified (tests, build, isolated validation) through a fresh review;

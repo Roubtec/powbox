@@ -974,9 +974,19 @@ fi
 # an authoritative hint (and the only reliable signal on Docker Desktop / WSL), not the
 # sole guard. Self-hosted mode has no bind mount, so it is irrelevant there.
 if [ "$ISOLATED" != true ]; then
+	# Resolve $HOME to its PHYSICAL path (pwd -P) the same way PROJECT_PATH was above.
+	# The entrypoint compares this home against the mountinfo-derived source, which is
+	# always physical; if /home is itself a symlink (e.g. /home -> /mnt/home) the raw
+	# $HOME=/home/alice would never equal the source's /mnt/home/alice, and the heal
+	# could chown the whole home tree. Fall back to the raw value when it cannot be
+	# resolved (unset, missing dir, no access) — no worse than forwarding it un-resolved.
+	HOST_HOME="${HOME:-}"
+	if [ -n "$HOST_HOME" ]; then
+		HOST_HOME="$(cd "$HOST_HOME" 2>/dev/null && pwd -P)" || HOST_HOME="${HOME:-}"
+	fi
 	EXTRA_ENV+=(
 		-e "POWBOX_WORKSPACE_HOST_PATH=$PROJECT_PATH"
-		-e "POWBOX_WORKSPACE_HOST_HOME=${HOME:-}"
+		-e "POWBOX_WORKSPACE_HOST_HOME=$HOST_HOME"
 	)
 fi
 

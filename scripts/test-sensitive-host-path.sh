@@ -91,6 +91,8 @@ cat >"$mi" <<'EOF'
 889 879 0:81 /root /workspace/root-abc rw,noatime - 9p host rw
 896 889 8:48 /data/docker/volumes/agent-nm/_data /workspace/root-abc/node_modules rw - ext4 /dev/sdd rw
 900 889 8:48 /home/alice/app /workspace/app-def rw - ext4 /dev/sdd rw
+901 889 8:48 /home/has\040space /workspace/space-ghi rw - ext4 /dev/sdd rw
+902 889 8:48 /opt/we\134ird /workspace/bs-jkl rw - ext4 /dev/sdd rw
 EOF
 
 assert_eq() {
@@ -111,10 +113,21 @@ assert_eq "host_src(no such mountpoint)" \
 	"$(powbox_mountinfo_host_src /workspace/missing "$mi")" ""
 assert_eq "host_src(empty arg)" \
 	"$(powbox_mountinfo_host_src "" "$mi")" ""
+# The kernel octal-escapes space/tab/newline/backslash in mountinfo's source field; the
+# lookup must DECODE them back to the real host path, else a sensitive home/system dir
+# whose name carries one of those bytes slips past the predicate (and the warnings print
+# gibberish). \040 → space; \134 → backslash, consumed as one escape (not re-expanded
+# together with the trailing "ird").
+assert_eq "host_src(escaped space decodes)" \
+	"$(powbox_mountinfo_host_src /workspace/space-ghi "$mi")" "/home/has space"
+assert_eq "host_src(escaped backslash decodes)" \
+	"$(powbox_mountinfo_host_src /workspace/bs-jkl "$mi")" '/opt/we\ird'
 
 # End-to-end: the source resolved from mountinfo feeds the sensitivity predicate.
-expect_sensitive 0 "$(powbox_mountinfo_host_src /workspace/root-abc "$mi")" # /root → sensitive
-expect_sensitive 1 "$(powbox_mountinfo_host_src /workspace/app-def "$mi")"  # /home/alice/app → nested project, ok
+expect_sensitive 0 "$(powbox_mountinfo_host_src /workspace/root-abc "$mi")"  # /root → sensitive
+expect_sensitive 1 "$(powbox_mountinfo_host_src /workspace/app-def "$mi")"   # /home/alice/app → nested project, ok
+expect_sensitive 0 "$(powbox_mountinfo_host_src /workspace/space-ghi "$mi")" # /home/has space → home dir (decoded), sensitive
+expect_sensitive 1 "$(powbox_mountinfo_host_src /workspace/bs-jkl "$mi")"    # /opt/we\ird → nested under /opt, ok
 
 if [ "$fails" -ne 0 ]; then
 	echo "sensitive-host-path unit test: $fails/$checks checks FAILED." >&2

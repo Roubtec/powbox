@@ -920,9 +920,25 @@ if ($Isolated -or $mountWorkspaceVolumes) {
 # fires - those FUSE mounts honour node's writes - so this is belt-and-suspenders there;
 # it matters on a native-Linux host.) Self-hosted mode has no bind mount, so it is skipped.
 if (-not $Isolated) {
+  # Resolve $HOME the same way $resolvedProject was (Resolve-Path + ResolveLinkTarget),
+  # so a home reached through a symlink/junction is compared against the entrypoint's
+  # physical mountinfo source on equal footing rather than as a mismatched logical path.
+  # Fall back to the raw value if it cannot be resolved (unset/missing/no access).
+  $resolvedHome = $HOME
+  if ($resolvedHome) {
+    try {
+      $resolvedHome = (Resolve-Path $resolvedHome -ErrorAction Stop).Path
+      $homeLink = [System.IO.DirectoryInfo]::new($resolvedHome).ResolveLinkTarget($true)
+      if ($homeLink) { $resolvedHome = $homeLink.FullName }
+    }
+    catch {
+      # Resolve-Path failed or ResolveLinkTarget needs .NET 6+ / pwsh 7.1+; keep what we have.
+      $resolvedHome = $HOME
+    }
+  }
   $envArgs += @(
     "-e", "POWBOX_WORKSPACE_HOST_PATH=$resolvedProject",
-    "-e", "POWBOX_WORKSPACE_HOST_HOME=$HOME"
+    "-e", "POWBOX_WORKSPACE_HOST_HOME=$resolvedHome"
   )
 }
 

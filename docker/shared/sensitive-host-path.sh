@@ -44,10 +44,36 @@ powbox_mountinfo_host_src() {
 	[ -n "$target" ] || return 0
 	# Fields 1-6 of every mountinfo line are positional (the optional fields and
 	# the fs type come after the " - " separator), so $4=root and $5=mountpoint are
-	# always safe to read this way. -print first match only. The `|| true` keeps the
-	# function exit status 0 even if awk cannot read $mi, so a caller's `x="$(...)"`
-	# assignment never trips `set -e` (an unreadable source just yields empty output).
-	awk -v t="$target" '$5 == t { print $4; exit }' "$mi" 2>/dev/null || true
+	# always safe to read this way. The kernel OCTAL-ESCAPES space (\040), tab (\011),
+	# newline (\012) and backslash (\134) inside both fields, so a source like
+	# "/home/has space" appears as "/home/has\040space" — decode field 4 back to the
+	# real host path before returning. Otherwise a sensitive home or system dir whose
+	# name contains one of those bytes slips past powbox_is_sensitive_host_path's exact
+	# comparisons (and the privileged fix-workspace-perms.sh backstop, which trusts
+	# ONLY this value), and the user-facing skip/refuse warnings print the escaped
+	# gibberish. The match side ($5 == t) needs no decode: the /workspace/<slug>
+	# mountpoints we look up are sanitized and never contain those characters. The
+	# decoder walks left-to-right and consumes each "\NNN" as ONE escape, so an escaped
+	# backslash (\134) is not re-interpreted together with the digits that follow it.
+	# First match only (exit). The `|| true` keeps the function exit status 0 even if
+	# awk cannot read $mi, so a caller's `x="$(...)"` assignment never trips `set -e`
+	# (an unreadable source just yields empty output).
+	awk -v t="$target" '
+		$5 == t {
+			s = $4; out = ""; n = length(s)
+			for (i = 1; i <= n; i++) {
+				c = substr(s, i, 1)
+				if (c == "\\" && i + 3 <= n && substr(s, i + 1, 3) ~ /^[0-7][0-7][0-7]$/) {
+					o = substr(s, i + 1, 3)
+					out = out sprintf("%c", (substr(o, 1, 1) + 0) * 64 + (substr(o, 2, 1) + 0) * 8 + (substr(o, 3, 1) + 0))
+					i += 3
+				} else {
+					out = out c
+				}
+			}
+			print out
+			exit
+		}' "$mi" 2>/dev/null || true
 }
 
 # Classify a host path as sensitive (exit 0) or a genuine project mount (exit 1).

@@ -63,10 +63,35 @@ set -euo pipefail
 # surrounding guard already required sudo, so this is a redundant safety check there.
 command -v sudo >/dev/null 2>&1 || exit 0
 
+# Shared sensitive-host-path predicate (also sourced by fix-workspace-perms.sh). Baked
+# beside this script in the image; the repo copy is the fallback for a direct dev run.
+_shp="$(dirname "$0")/sensitive-host-path.sh"
+[ -r "$_shp" ] || _shp=/usr/local/bin/sensitive-host-path.sh
+# shellcheck source=docker/shared/sensitive-host-path.sh
+. "$_shp"
+
 _unwritable=()
 for _dir in /workspace/*/; do
 	[ -d "$_dir" ] || continue
 	_dir="${_dir%/}"
+	# SAFETY GUARD (the VPS-lockout incident): never (probe and) claim a workspace whose
+	# HOST bind-mount source is a system or home directory. A `cc`/`cx` accidentally
+	# launched from ~ (e.g. /root, /home/<you>) bind-mounts that whole tree as the
+	# "project"; the heal below would recursively chown it to node (uid 1000), and re-owning
+	# a home dir breaks sshd's StrictModes ownership chain on ~/.ssh — locking the user out
+	# of the host. Resolve the host source from the launcher-provided env (authoritative,
+	# and the only reliable source on Docker Desktop / WSL) AND from /proc/self/mountinfo
+	# (env-independent, and the true path on native Linux where this heal actually fires);
+	# skip — leaving host ownership untouched — if EITHER says sensitive. A wrong skip only
+	# means node may be unable to write a genuine project (a loud, recoverable inconvenience
+	# the steps below already warn about); a wrong chown can brick host login.
+	_host_src="$(powbox_mountinfo_host_src "$_dir")"
+	if powbox_is_sensitive_host_path "$_host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}" ||
+		{ [ -n "${POWBOX_WORKSPACE_HOST_PATH:-}" ] &&
+			powbox_is_sensitive_host_path "$POWBOX_WORKSPACE_HOST_PATH" "${POWBOX_WORKSPACE_HOST_HOME:-}"; }; then
+		echo "Warning: NOT claiming $_dir for node — its host source (${POWBOX_WORKSPACE_HOST_PATH:-${_host_src:-unknown}}) looks like a system or home directory, not a project checkout. Skipping the ownership heal so host/system files are left untouched (re-owning a home directory would break SSH login via ~/.ssh). If this really is your project, move it into a subdirectory (e.g. ~/code/myrepo) and relaunch there, or use --isolated mode." >&2
+		continue
+	fi
 	# Probe write access as node by actually creating a file: `[ -w ]` only reads
 	# the mode bits, which can disagree with what the host FS truly permits (e.g.
 	# Docker Desktop's FUSE), so a real write is the ground truth. Use mktemp rather

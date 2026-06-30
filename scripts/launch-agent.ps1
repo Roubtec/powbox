@@ -912,6 +912,20 @@ if ($Isolated -or $mountWorkspaceVolumes) {
   $envArgs += @("-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 }
 
+# Dir-mounted mode only: tell the entrypoint the workspace's HOST bind-mount source (and
+# the launching user's home) so the workspace-perms heal can REFUSE to chown a mount that
+# is actually a system or home directory. A cc/cx accidentally run from ~ would otherwise
+# bind-mount the whole home tree and re-own it to node, breaking sshd's StrictModes chain
+# on ~/.ssh and locking the user out of the host. (On Windows/WSL/macOS the heal never
+# fires - those FUSE mounts honour node's writes - so this is belt-and-suspenders there;
+# it matters on a native-Linux host.) Self-hosted mode has no bind mount, so it is skipped.
+if (-not $Isolated) {
+  $envArgs += @(
+    "-e", "POWBOX_WORKSPACE_HOST_PATH=$resolvedProject",
+    "-e", "POWBOX_WORKSPACE_HOST_HOME=$HOME"
+  )
+}
+
 # Self-hosted clone inputs + label, plus the volume mounts. The entrypoint (after gh
 # auth) clones POWBOX_CLONE_REPO at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and
 # skips the clone when a .git already exists (reuse). These are frozen at creation;

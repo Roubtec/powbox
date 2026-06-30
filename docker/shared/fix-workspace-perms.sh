@@ -43,6 +43,13 @@
 # sudoers-allowed root helper that refuses to act outside /workspace/.
 set -euo pipefail
 
+# Shared sensitive-host-path predicate (also sourced by heal-workspace-perms.sh). Baked
+# beside this script in the image; the repo copy is the fallback for a direct dev run.
+_shp="$(dirname "$0")/sensitive-host-path.sh"
+[ -r "$_shp" ] || _shp=/usr/local/bin/sensitive-host-path.sh
+# shellcheck source=docker/shared/sensitive-host-path.sh
+. "$_shp"
+
 NODE_OWNER="node:node"
 # node's uid, used to tell apart a node-owned root (which we may still self-heal of nested
 # root-owned files) from a genuine foreign host uid (which we refuse). Falls back to the
@@ -79,6 +86,21 @@ for ws in "$@"; do
 	ws="$resolved"
 	if [ ! -d "$ws" ]; then
 		echo "fix-workspace-perms: '$ws' is not a directory; skipping." >&2
+		continue
+	fi
+	# SAFETY BACKSTOP (the VPS-lockout incident): refuse to chown a workspace whose HOST
+	# bind-mount source is a system or home directory (/, /root, /home/<user>, /etc, ...).
+	# A `cc`/`cx` launched by mistake from ~ bind-mounts the whole home tree as the
+	# "project"; re-owning it to node breaks sshd's StrictModes chain on ~/.ssh and locks
+	# the user out of the host. heal-workspace-perms.sh already skips such a mount before
+	# ever calling this helper, but this is the privileged boundary, so re-check here
+	# INDEPENDENTLY: derive the source from /proc/self/mountinfo (which an unprivileged
+	# node cannot forge — unlike an env var, which sudo's env_reset would strip anyway), so
+	# the refusal holds even if this helper is invoked directly with a sensitive workspace.
+	host_src="$(powbox_mountinfo_host_src "$ws")"
+	if powbox_is_sensitive_host_path "$host_src"; then
+		echo "fix-workspace-perms: refusing to chown $ws — its host bind-mount source (${host_src}) is a system or home directory, not a project checkout. Re-owning it to node could break host login (e.g. SSH via a re-owned ~/.ssh). Mount a project subdirectory instead, or use --isolated (self-hosted) mode." >&2
+		status=1
 		continue
 	fi
 	owner_uid="$(stat -c '%u' "$ws" 2>/dev/null || echo "")"

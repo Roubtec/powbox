@@ -344,18 +344,26 @@ const lower = raw.toLowerCase();
 //   ping-codex|claude|copilot -> push + ping exactly those (overrides contributing)
 //   no-push                   -> local-only; mutate no PR at all (the pre-change default)
 // `no-push` WINS: it is the only way to suppress the now-default push, so honor it
-// even when combined with a (contradictory) ping flag. `push-back`/`pushback` means
-// rebutting a comment, not git push, so strip it before reading the push token
-// ("no push", "do not push", "don't push", "without push", "skip push", "no-push"
-// all negate). Pings still imply push, but `no-push` overrides even a requested ping.
-const pushWords = lower.replace(/\bpush-?back\b/g, " ");
+// even when combined with a (contradictory) ping flag.
+//
+// Reliability: the canonical flags are single tokens (`push`, `no-push`,
+// `ping-codex`, ...), but parsing is lenient over free prose, so guard the real
+// collisions. (1) `push-back` is the rebuttal DISPOSITION, never a git push — strip
+// it in every spacing and inflection (`pushback`, `push-back`, `push back`,
+// `pushed/pushes/pushing back`) BEFORE reading the push token, so a comment like
+// "push back on #2" is never misread as publish intent. (2) Match each flag with
+// `[\s-]*` between its halves so spaced forms count too (`ping codex`, `no push`),
+// not only the hyphenated/joined ones. A spelled-out `push` still means "publish,
+// but ping nobody"; pings imply push; only a negation (`no-push`, `no push`,
+// `do not push`, `don't push`, `without push`, `skip push`, `cannot push`) opts out.
+const pushWords = lower.replace(/\bpush(?:ed|es|ing)?[\s-]*back\b/g, " ");
 const noPush =
-  /\bno-push\b/.test(lower) ||
-  /\b(?:no|not|never|without|skip|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
-const pingCodexTok = /\bping-?codex\b/.test(lower);
-const pingClaudeTok = /\bping-?claude\b/.test(lower);
-const pingCopilotTok = /\bping-?copilot\b/.test(lower);
-const pingContribTok = /\bping-?contributing\b/.test(lower);
+  /\bno[\s-]*push\b/.test(lower) ||
+  /\b(?:not|never|without|skip|cannot|can't|cant|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
+const pingCodexTok = /\bping[\s-]*codex\b/.test(lower);
+const pingClaudeTok = /\bping[\s-]*claude\b/.test(lower);
+const pingCopilotTok = /\bping[\s-]*copilot\b/.test(lower);
+const pingContribTok = /\bping[\s-]*contributing\b/.test(lower);
 const anyNamedPing = pingCodexTok || pingClaudeTok || pingCopilotTok;
 // A positive `push` token — only meaningful when not negated (a negation set noPush
 // above). Spelling out `push` means "publish, but ping nobody".

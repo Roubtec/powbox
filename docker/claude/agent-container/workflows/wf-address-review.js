@@ -3,8 +3,9 @@
  *
  * Work through every UNRESOLVED review thread on one pull request: gather the
  * threads, fix what is right / push back on what is wrong, verify every
- * disposition with a fresh-eyes reviewer (max 3 rounds), then — only when asked
- * — publish (lease-safe push, reply + resolve threads, Summary comment, pings).
+ * disposition with a fresh-eyes reviewer (max 3 rounds), then publish by default
+ * (lease-safe push, reply + resolve threads, Summary comment, pings) — a `no-push`
+ * run stays local-only and mutates nothing.
  * The re-review pings fire ONLY when the push actually advanced the branch with
  * new commits/rewritten history; a no-op push (nothing new to review) skips them
  * so an automated review -> address -> review loop can terminate.
@@ -16,8 +17,8 @@
  * filters that named set; supplied alone it falls back to every known bot that
  * reviewed this round.
  *
- * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [push]
- * [ping-codex] [ping-claude] [ping-copilot] [ping-contributing]`.
+ * Invoke as `/wf-address-review [PR#] [rebase on top of <branch>] [no-push]
+ * [push] [ping-codex] [ping-claude] [ping-copilot] [ping-contributing]`.
  *
  * Why a workflow rather than a skill
  * ----------------------------------
@@ -59,7 +60,7 @@
 // phases are not declared; undeclared phase() titles get their own group.
 export const meta = {
   name: "wf-address-review",
-  description: "Address every unresolved review thread on one PR: fix or push back, verify with a fresh-eyes reviewer (max 3 rounds), then publish only when asked.",
+  description: "Address every unresolved review thread on one PR: fix or push back, verify with a fresh-eyes reviewer (max 3 rounds), then publish by default (use no-push for a local-only dry run).",
   whenToUse: "Work through maintainer-vetted review feedback on a single PR hands-off. Not for new task batches (wf-address-tasks) or stack rebases.",
   phases: [
     { title: "Gather", detail: "resolve the PR, branch state, and unresolved threads" },
@@ -335,29 +336,41 @@ function flattenArgs(a) {
 }
 const raw = flattenArgs(args);
 const lower = raw.toLowerCase();
-// Detect publish intent carefully. `push-back`/`pushback` means rebutting a
-// comment, not git push, so strip it before looking for the push token. Honor
-// explicit negation ("no push", "do not push", "don't push", "without push",
-// "skip push", "no-push") so a local-only request is never silently published —
-// pushing mutates the remote and the PR threads. A ping still implies push (a
-// re-review is meaningless without it), so negation cannot veto a requested ping.
+// Publish-by-default model (changed): a bare run now PUBLISHES and re-pings the
+// contributing bots — i.e. it behaves like `ping-contributing`. The flags adjust it:
+//   (nothing)                 -> push + ping the contributing bots   (the default)
+//   ping-contributing         -> same as the default (redundant, kept for reference)
+//   push                      -> push, ping NOBODY (publish quietly)
+//   ping-codex|claude|copilot -> push + ping exactly those (overrides contributing)
+//   no-push                   -> local-only; mutate no PR at all (the pre-change default)
+// `no-push` WINS: it is the only way to suppress the now-default push, so honor it
+// even when combined with a (contradictory) ping flag. `push-back`/`pushback` means
+// rebutting a comment, not git push, so strip it before reading the push token
+// ("no push", "do not push", "don't push", "without push", "skip push", "no-push"
+// all negate). Pings still imply push, but `no-push` overrides even a requested ping.
 const pushWords = lower.replace(/\bpush-?back\b/g, " ");
-const pushNegated =
-  /\bno-push\b/.test(lower) || /\b(?:no|not|never|without|skip|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
-const pingCodex = /\bping-?codex\b/.test(lower);
-const pingClaude = /\bping-?claude\b/.test(lower);
-const pingCopilot = /\bping-?copilot\b/.test(lower);
-// `ping-contributing` is a modifier: re-ping only bots that brought a new
-// finding this round. Like the other pings it implies push (a re-review is
-// meaningless without one).
-const pingContributing = /\bping-?contributing\b/.test(lower);
-const wantPush =
-  pingCodex || pingClaude || pingCopilot || pingContributing || (/\bpush\b/.test(pushWords) && !pushNegated);
+const noPush =
+  /\bno-push\b/.test(lower) ||
+  /\b(?:no|not|never|without|skip|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
+const pingCodexTok = /\bping-?codex\b/.test(lower);
+const pingClaudeTok = /\bping-?claude\b/.test(lower);
+const pingCopilotTok = /\bping-?copilot\b/.test(lower);
+const pingContribTok = /\bping-?contributing\b/.test(lower);
+const anyNamedPing = pingCodexTok || pingClaudeTok || pingCopilotTok;
+// A positive `push` token — only meaningful when not negated (a negation set noPush
+// above). Spelling out `push` means "publish, but ping nobody".
+const explicitPushToken = /\bpush\b/.test(pushWords);
+const wantPush = !noPush;
+// Effective ping-contributing: the bare default and an explicit `ping-contributing`
+// both ping the contributing set; a spelled-out `push` (with no contributing token)
+// pings nobody; a named ping handles its own bots. Forced false on a no-push run.
+const pingContributing =
+  wantPush && (pingContribTok || (!anyNamedPing && !explicitPushToken));
 const flags = {
   push: wantPush,
-  pingCodex,
-  pingClaude,
-  pingCopilot,
+  pingCodex: wantPush && pingCodexTok,
+  pingClaude: wantPush && pingClaudeTok,
+  pingCopilot: wantPush && pingCopilotTok,
   pingContributing,
 };
 

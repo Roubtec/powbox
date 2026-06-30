@@ -358,7 +358,7 @@ const lower = raw.toLowerCase();
 // `do not push`, `don't push`, `without push`, `skip push`, `cannot push`) opts out.
 const pushWords = lower.replace(/\bpush(?:ed|es|ing)?[\s-]*back\b/g, " ");
 const noPush =
-  /\bno[\s-]*push\b/.test(lower) ||
+  /\bno[\s-]*push\b/.test(pushWords) ||
   /\b(?:not|never|without|skip|cannot|can't|cant|dont|don't|do not)\b[\s-]*push\b/.test(pushWords);
 const pingCodexTok = /\bping[\s-]*codex\b/.test(lower);
 const pingClaudeTok = /\bping[\s-]*claude\b/.test(lower);

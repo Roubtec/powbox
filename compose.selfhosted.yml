@@ -1,7 +1,7 @@
 # Self-hosted ("--isolated") overlay: replace the host workspace BIND mount with a
 # per-instance named volume the container clones the repo into ITSELF. This is the
-# second launch mode (see README "Self-Hosted Mode" and AGENTS.md "Project
-# Identity"); the default dir-mounted mode does not use this file.
+# second launch mode (see README "Self-Hosted Mode" and docs/architecture.md
+# "Project Identity"); the default dir-mounted mode does not use this file.
 #
 # `docker compose run` cannot remove or override a service volume from the command
 # line (a `-v` at the same target errors with "duplicate mount destination"), so the

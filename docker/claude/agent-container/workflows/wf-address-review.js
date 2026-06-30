@@ -216,7 +216,7 @@ function gatherPrompt(input) {
   return `You are preparing a pull request for review-addressing. Read \`AGENTS.md\` / \`CLAUDE.md\` first.
 
 Request (lenient parsing — commas, &, free word order): ${JSON.stringify(input)}
-Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`, \`ping-contributing\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
+Possible tokens: a PR number (e.g. #38), \`rebase on top of <branch>\`, \`no-push\`, \`push\`, \`ping-codex\`, \`ping-claude\`, \`ping-copilot\`, \`ping-contributing\`. You only act on the PR# and the rebase here; the push/ping flags are handled later.
 
 Preflight (set \`ok: false\` with a \`blocker\` and stop on any failure):
 1. Working tree clean (\`git status --porcelain\` empty). Do not auto-stash.
@@ -456,7 +456,7 @@ if (!flags.push) {
     dispositions: dispositions.dispositions,
     proactiveFixes: dispositions.proactiveFixes,
     outstanding: passed ? null : (verdict ? verdict.issues : null),
-    note: "Local-only run: no push, no replies/resolves, no comment. Re-run with `push` to publish.",
+    note: "Local-only run: no push, no replies/resolves, no comment. Re-run without `no-push` to publish with the default contributing-bot pings, or with `push` to publish quietly.",
   };
 }
 

@@ -33,11 +33,34 @@ if ($RequireImage) { $env:POWBOX_SMOKE_REQUIRE_IMAGE = '1' }
 try {
 $skipped = [System.Collections.Generic.List[string]]::new()
 docker image inspect $Image *> $null
-if ($LASTEXITCODE -ne 0) {
+$imagePresent = ($LASTEXITCODE -eq 0)
+if (-not $imagePresent) {
   if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
     throw "image '$Image' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set - refusing to run a partial (image-skipping) smoke test. Build it first (./build.ps1 agent) or drop -RequireImage."
   }
   Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2-5) runs, so you get no partial coverage. Build it (./build.ps1 agent), or pass -RequireImage to fail fast here with a clear message instead of a raw docker error at Stage 1."
+}
+
+# Stage 0 - sensitive-host-path predicate unit test. The Bash smoke (commands/smoke-test.sh)
+# runs this hermetically on the host; on Windows there is no native bash, so run the SAME
+# Bash test INSIDE the agent image - which ships bash and the base-image mawk the mountinfo
+# parser is verified against - with the repo mounted read-only. This mirrors the Bash Stage
+# 0's coverage of the predicate and the /proc/self/mountinfo source lookup that stop the
+# workspace-perms heal from recursively chowning a mount whose host source is a system/home
+# dir (the VPS-lockout incident - an accidental cc/cx from ~ re-owning the home tree and
+# breaking sshd StrictModes on ~/.ssh). Unlike the Bash version it needs the image (no host
+# bash on Windows), so it self-skips - recorded in $skipped - when the image is absent; the
+# live end-to-end guard is Stage 5.
+if (-not $imagePresent) {
+  Write-Warning "Skipping sensitive-host-path predicate unit test (Stage 0) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0: sensitive-host-path predicate unit test (image absent)")
+}
+else {
+  Write-Host "Running sensitive-host-path predicate unit test (in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-sensitive-host-path.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "sensitive-host-path predicate unit test failed. See container output above."
+  }
 }
 
 # Stage 1 - tool presence + key image config: every expected CLI resolves and

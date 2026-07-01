@@ -89,7 +89,7 @@ for _dir in /workspace/*/; do
 	if powbox_is_sensitive_host_path "$_host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}" ||
 		{ [ -n "${POWBOX_WORKSPACE_HOST_PATH:-}" ] &&
 			powbox_is_sensitive_host_path "$POWBOX_WORKSPACE_HOST_PATH" "${POWBOX_WORKSPACE_HOST_HOME:-}"; }; then
-		echo "Warning: NOT claiming $_dir for node — its host source (${POWBOX_WORKSPACE_HOST_PATH:-${_host_src:-unknown}}) looks like a system or home directory, not a project checkout. Skipping the ownership heal so host/system files are left untouched (re-owning a home directory would break SSH login via ~/.ssh). If this really is your project, move it into a subdirectory (e.g. ~/code/myrepo) and relaunch there, or use --isolated mode." >&2
+		echo "Warning: NOT claiming $_dir for node — its host source (launcher env POWBOX_WORKSPACE_HOST_PATH=${POWBOX_WORKSPACE_HOST_PATH:-<unset>}, mountinfo-derived=${_host_src:-<none>}) looks like a system or home directory, not a project checkout. Skipping the ownership heal so host/system files are left untouched (re-owning a home directory would break SSH login via ~/.ssh). If this really is your project, move it into a subdirectory (e.g. ~/code/myrepo) and relaunch there, or use --isolated mode." >&2
 		continue
 	fi
 	# Probe write access as node by actually creating a file: `[ -w ]` only reads

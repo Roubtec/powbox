@@ -92,12 +92,31 @@ for ws in "$@"; do
 	# bind-mount source is a system or home directory (/, /root, /home/<user>, /etc, ...).
 	# A `cc`/`cx` launched by mistake from ~ bind-mounts the whole home tree as the
 	# "project"; re-owning it to node breaks sshd's StrictModes chain on ~/.ssh and locks
-	# the user out of the host. heal-workspace-perms.sh already skips such a mount before
-	# ever calling this helper, but this is the privileged boundary, so re-check here
-	# INDEPENDENTLY: derive the source from /proc/self/mountinfo (which an unprivileged
-	# node cannot forge — unlike an env var, which sudo's env_reset would strip anyway), so
-	# the refusal holds even if this helper is invoked directly with a sensitive workspace.
+	# the user out of the host. The AUTHORITATIVE guard for that incident is the launcher
+	# env at the heal layer: heal-workspace-perms.sh classifies on the launcher's true
+	# absolute POWBOX_WORKSPACE_HOST_PATH (pwd -P resolved) and skips a sensitive mount
+	# before ever calling this helper. This is a best-effort, defense-in-depth re-check for
+	# a DIRECT invocation of this helper, where sudo's env_reset has stripped that env: it
+	# derives the source from /proc/self/mountinfo instead (which an unprivileged node
+	# cannot forge).
+	# LIMITATION: mountinfo field 4 is the mount's root WITHIN its source filesystem, not
+	# the absolute host path — so on a separate-mount layout (e.g. a dedicated /home) a
+	# /home/alice bind reads back as /alice and is NOT caught here. Feeding this check the
+	# launcher's true source (mountinfo as fallback) is tracked in
+	# tasks/009-privileged-perms-backstop-true-host-source.md.
 	host_src="$(powbox_mountinfo_host_src "$ws")"
+	# Fail CLOSED when the source cannot be determined. In production every /workspace/<slug>
+	# is a real bind mount, so its mountinfo source is non-empty; an empty result means
+	# /proc/self/mountinfo was unreadable or had no matching mountpoint — we cannot prove the
+	# source is NOT a system/home dir. A wrong refuse here is a loud, recoverable inconvenience
+	# (node cannot write a genuine project); a wrong chown can brick host login — so refuse
+	# rather than proceed blind. The heal path is unaffected: it only ever hands us real bind
+	# mounts, whose source is non-empty.
+	if [ -z "$host_src" ]; then
+		echo "fix-workspace-perms: refusing to chown $ws — could not determine its host bind-mount source from /proc/self/mountinfo, so cannot confirm it is a project checkout rather than a system or home directory. Refusing as a safety precaution (a wrong chown could break host login, e.g. SSH via a re-owned ~/.ssh)." >&2
+		status=1
+		continue
+	fi
 	if powbox_is_sensitive_host_path "$host_src"; then
 		echo "fix-workspace-perms: refusing to chown $ws — its host bind-mount source (${host_src}) is a system or home directory, not a project checkout. Re-owning it to node could break host login (e.g. SSH via a re-owned ~/.ssh). Mount a project subdirectory instead, or use --isolated (self-hosted) mode." >&2
 		status=1

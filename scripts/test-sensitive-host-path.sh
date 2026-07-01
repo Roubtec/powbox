@@ -71,6 +71,19 @@ expect_sensitive 1 /tmp/powbox-dirmount-XXXXXX # the dir-mount smoke's own fixtu
 expect_sensitive 1 /code/myrepo                # a depth-1 NON-system dir is fine
 expect_sensitive 1 /projects
 
+# --- SSH config directories are sensitive at ANY depth: chowning just ~/.ssh (and its
+#     authorized_keys) to node trips sshd StrictModes and locks the user out even while the
+#     home dir stays root-owned. Matched on every mount layout — /root/.ssh, /home/alice/.ssh,
+#     and the shallow /alice/.ssh a separate-/home bind reads field 4 back as. --------------
+expect_sensitive 0 /root/.ssh
+expect_sensitive 0 /home/alice/.ssh
+expect_sensitive 0 /home/alice/.ssh/ # trailing slash normalises the same
+expect_sensitive 0 /alice/.ssh       # separate-/home layout: field 4 reads back shallow
+expect_sensitive 0 /.ssh
+# ... but a sibling/lookalike that is not itself a .ssh dir stays ok.
+expect_sensitive 1 /home/alice/.sshfoo
+expect_sensitive 1 /home/alice/code/.ssh-notes
+
 # --- empty / unknown path is not classified sensitive (caller treats as unknown)
 expect_sensitive 1 ""
 

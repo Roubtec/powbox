@@ -117,7 +117,13 @@ for ws in "$@"; do
 		status=1
 		continue
 	fi
-	if powbox_is_sensitive_host_path "$host_src"; then
+	# Pass POWBOX_WORKSPACE_HOST_HOME (the launcher's physically-resolved $HOME) as the
+	# predicate's optional home arg so a home at a NON-standard location still classifies
+	# sensitive. Under sudo's env_reset it is empty (the mountinfo source is then the only
+	# signal, exactly as described above); it can only ever ADD a refusal (fail-closed), never
+	# permit a chown, so honouring a caller-provided value here is safe. Mirrors the heal's
+	# call; feeding this helper the launcher's true SOURCE too is tracked in task 009.
+	if powbox_is_sensitive_host_path "$host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}"; then
 		echo "fix-workspace-perms: refusing to chown $ws — its host bind-mount source (${host_src}) is a system or home directory, not a project checkout. Re-owning it to node could break host login (e.g. SSH via a re-owned ~/.ssh). Mount a project subdirectory instead, or use --isolated (self-hosted) mode." >&2
 		status=1
 		continue

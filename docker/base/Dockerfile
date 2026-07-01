@@ -270,6 +270,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # system config ("open .../10-powbox.conf: permission denied").
 COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d/10-powbox.conf
 
+# Install the Go toolchain from the official go.dev tarball — Debian trixie's
+# golang package trails upstream by several releases, and Go repos pin exact
+# toolchains (go.mod `toolchain` lines, .tool-versions), so the apt version is
+# never the one a project wants. Pinned with per-arch sha256s; bump the version
+# and both checksums together (https://go.dev/dl/?mode=json). GOTOOLCHAIN is
+# left at its `auto` default deliberately: a repo pinning a NEWER toolchain than
+# the baked one transparently downloads and runs it on first `go` invocation
+# (public egress is open), while a repo pinning an older one runs the baked
+# binary directly (toolchain pins are minimums) — so projects keep working
+# between image bumps instead of failing fast on a version mismatch. Baking the
+# toolchain also makes `go mod tidy` the authoritative resolver for go.sum
+# merge/rebase conflicts (regenerates and validates checksums) rather than
+# hand-merged unions.
+#
+# golangci-lint is the de-facto Go metalinter and the one lint binary projects
+# actually pin (v2 config schema — a v1 binary cannot parse v2 configs); it
+# bundles staticcheck, errcheck, ineffassign, unused, etc. internally, so none
+# of those are installed standalone. Its official installer (fetched at the same
+# pinned tag) sha256-verifies the release tarball before installing. gopls and
+# dlv are deliberately NOT baked: the agent harnesses speak no LSP and debug via
+# tests/prints, and either is one `go install` away (~/go/bin is on PATH below).
+# go/gofmt are symlinked into /usr/local/bin (the sqlcmd/bcp precedent) because
+# login shells (`sh -lc`, as the image smoke test spawns) reset PATH from
+# /etc/profile and would otherwise lose /usr/local/go/bin; the go binary
+# resolves GOROOT through the symlink. Placed low in the file so a Go bump
+# never busts the expensive gh / mssql / pwsh / npm layers above.
+RUN GO_VERSION=1.26.4 \
+    && GOLANGCI_LINT_VERSION=v2.12.2 \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) go_sha256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f ;; \
+        arm64) go_sha256=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768 ;; \
+        *) echo "no pinned Go checksum for architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
+    && echo "${go_sha256}  /tmp/go.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz \
+    && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && curl -fsSL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
+        | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
+
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
 # helpers are intentionally NOT baked here; the agent image
@@ -307,7 +350,10 @@ RUN ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pnpm \
 USER node
 
 ENV PNPM_HOME="/home/node/.local/share/pnpm"
-ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
+# /usr/local/go/bin is the baked Go toolchain; /home/node/go/bin is Go's default
+# GOBIN ($GOPATH/bin), so anything a session `go install`s (gopls, dlv, …) is
+# immediately runnable without PATH surgery.
+ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # The agent harnesses' Bash tools spawn $SHELL non-interactively, so default it
 # to bash: the models' command prior is bash/POSIX (word-splitting, 0-indexed
 # arrays), and a one-shot tool call gains nothing from zsh's interactive features

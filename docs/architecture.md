@@ -39,3 +39,11 @@ Deep dive (measured rationale, the copy→hardlink decision, validation): [workt
 - The base image installs the PostgreSQL 16 server + client + contrib from the official PGDG apt repo (`docker/base/Dockerfile`), version-matched to the `postgres:16.x` images projects pin so integration suites don't hit behavior drift from Debian's stock 15.
 - No daemon is started at build or runtime. `docker/shared/pg-dev-up` (baked to `/usr/local/bin/pg-dev-up`) stands up a throwaway loopback cluster on demand under `$PGDATA` (default `/tmp/pgdata`), as the unprivileged `node` user with trust auth — so it needs **no** sudoers entry. Credentials/port/db are env-overridable; see the script header.
 - The server binaries live off `PATH` at `/usr/lib/postgresql/<major>/bin`; `pg-dev-up` resolves the newest installed major itself, so a future PG bump needs no path edit.
+
+## Bundled Go toolchain
+
+- The base image installs Go at `/usr/local/go` from the official go.dev tarball (`docker/base/Dockerfile`), pinned with per-arch sha256s — Debian trixie's `golang` package trails upstream by several releases, and Go repos pin exact toolchains (`go.mod` `toolchain` lines, `.tool-versions`), so the apt version is never the one a project wants.
+- `GOTOOLCHAIN` stays at its `auto` default: a repo pinning a newer toolchain than the baked one transparently downloads and runs it on first `go` invocation (toolchain pins are minimums), so projects keep working between image bumps instead of failing fast on a version mismatch.
+- `golangci-lint` (v2, pinned to a release tag) is baked beside it as the one lint binary Go projects pin — a v1 binary cannot parse v2 config schemas, and it bundles staticcheck/errcheck/ineffassign/unused internally, so no standalone Go linters are installed. Bump it together with the Go version when projects move.
+- `gopls` and `dlv` are deliberately not baked: the agent harnesses speak no LSP and debug via tests/prints. `/home/node/go/bin` (Go's default `GOBIN`) is on `PATH`, so a session that wants either — or any project codegen tool (protoc plugins, sqlc, mockery) — is one `go install` away.
+- Having the toolchain baked also makes `go mod tidy` the authoritative resolver for `go.sum` merge/rebase conflicts (it regenerates and validates checksums) rather than hand-merged unions of both sides.

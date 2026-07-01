@@ -15,6 +15,7 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Shell | `zsh`, `jq`, `yq`, `fzf`, `less`, `tree`, `file`, `htop`, `shellcheck`, `shfmt`, `strace`, `lsof` |
 | PowerShell | `pwsh` runs `.ps1` scripts; lint them with `pwsh -Command "Invoke-ScriptAnalyzer -Path ."` (PSScriptAnalyzer is a `pwsh` module/cmdlet, not a shell command — and `shellcheck` does *not* lint PowerShell) |
 | Build | `make`, `patch`, `gcc`, `g++` |
+| Go | `go` (pinned current stable, with `gofmt`/`go vet`/`go test`; prefer `go mod tidy` over hand-merging `go.sum` conflicts) and `golangci-lint` (v2). A repo whose `go.mod` pins a newer toolchain auto-downloads it on first `go` run (`GOTOOLCHAIN=auto`). `~/go/bin` is on `PATH`, so `go install ...@latest` covers anything not baked (e.g. `gopls`, `dlv`). |
 | Archives/transfer | `wget`, `curl`, `zip`, `unzip`, `rsync`, `bzip2`, `xz`, `zstd` |
 | Data | `envsubst`, `bc`, `xxd` |
 | Databases | `sqlite3`, `sqlcmd`/`bcp` (Azure SQL / MSSQL), `psql` + a bundled **PostgreSQL 16** server — run `pg-dev-up` to start a throwaway local cluster (see "Local PostgreSQL" below) |

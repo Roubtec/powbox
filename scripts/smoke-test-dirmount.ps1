@@ -39,14 +39,23 @@ param(
 # added that the root-level probe misses - so reverting ONLY that scan now fails the smoke
 # (task 007a).
 #
-# Two further cases guard the SENSITIVE-SOURCE refusal (the VPS-lockout incident: a cc/cx
+# Four further cases guard the SENSITIVE-SOURCE refusal (the VPS-lockout incident: a cc/cx
 # accidentally run from ~ would bind-mount the whole home tree and the heal would chown it to
 # node, breaking sshd StrictModes on ~/.ssh and locking the user out of the host):
-#   * sensitive-skip - a root-owned fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root, so
-#     the real heal unit must SKIP the chown and warn (tree stays root-owned).
+#   * sensitive-skip - a root-owned fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root and
+#     POWBOX_WORKSPACE_DIR=<mount>, so the real heal unit must SKIP the chown and warn (tree
+#     stays root-owned) via the launcher-env fallback consulted when no marker is recorded.
 #   * fix-mountinfo-backstop - a read-only bind of the host /etc, so fix-workspace-perms.sh (the
 #     privileged boundary, run under sudo with env stripped) must refuse via the
-#     /proc/self/mountinfo source it derives independently of any caller env.
+#     /proc/self/mountinfo FALLBACK source when no marker is recorded.
+#   * fix-true-source (task 009 Gap A) - a root-owned fixture whose mountinfo source is
+#     non-sensitive but whose recorded marker true source is /home/alice, so fix must refuse via
+#     the marker (which survives sudo env_reset) where the mountinfo-only backstop would have
+#     chowned it. Fails if 009 is reverted.
+#   * heal-true-source (task 009 Gap B) - a root-owned fixture whose marker true source is a safe
+#     /projects while a deliberately sensitive env (/root) is also passed, so the heal must HEAL
+#     (marker authoritative) rather than skip on the sensitive env / a degenerate mountinfo `/`.
+#     Fails if 009 is reverted.
 # The pure predicate + mountinfo parser are also unit-tested by scripts/test-sensitive-host-path.sh.
 #
 # Self-skips (no failure) when it cannot meaningfully run: the agent image is
@@ -294,10 +303,11 @@ $assertScriptSensitive = @(
 
 # The privileged-boundary backstop assertion, behaviourally identical to the .sh
 # ASSERT_SCRIPT_FIX_BACKSTOP. Run AS node against a read-only bind of the host /etc: fix runs
-# under sudo (env stripped), derives the bind source from /proc/self/mountinfo, and must refuse
-# the sensitive /etc source with NO POWBOX_WORKSPACE_HOST_PATH set. Exit contract: 0 = fix
-# refused via the mountinfo backstop; 42 = this host reports a non-sensitive /etc source
-# (mount-layout quirk) -> self-skip; other = failure.
+# under sudo (env stripped), and with no marker recorded falls back to the /proc/self/mountinfo
+# bind source, so it must refuse the sensitive /etc source with NO POWBOX_WORKSPACE_HOST_PATH
+# set. Exit contract: 0 = fix refused via the mountinfo fallback; 42 = this host reports a
+# non-sensitive /etc source (mount-layout quirk) -> self-skip; other = failure. (The
+# complementary true-source path is task 009 Gap A, covered by the fix-true-source case below.)
 $assertScriptFixBackstop = @(
   'set -u'
   'WS="$1"'
@@ -319,6 +329,115 @@ $assertScriptFixBackstop = @(
   '  exit 1'
   'fi'
   'echo "  ok: fix-workspace-perms.sh refused to chown the sensitive ($src) mount via the mountinfo backstop"'
+  'exit 0'
+) -join "`n"
+
+# The privileged-boundary TRUE-SOURCE refusal assertion (task 009 Gap A), behaviourally identical
+# to the .sh ASSERT_SCRIPT_FIX_TRUESRC. Run AS node against a root-owned fixture whose mountinfo
+# source is a NON-sensitive /tmp bind, with a marker recording the SENSITIVE true source
+# /home/alice (as on a separate-/home layout). fix (under sudo, env stripped) must refuse via the
+# marker file. Exit contract: 0 = fix refused via the recorded true source; 42 = the fixture
+# mountinfo source is itself sensitive (mount-layout quirk) -> self-skip; other = failure.
+$assertScriptFixTrueSrc = @(
+  'set -u'
+  'WS="$1"'
+  'if [ "$(id -u)" != "1000" ]; then'
+  '  echo "FAIL: fix-true-source assertion not running as node (uid 1000) - got uid $(id -u)" >&2'
+  '  exit 1'
+  'fi'
+  '. /usr/local/bin/sensitive-host-path.sh'
+  '# Precondition: the fixture mountinfo source must be NON-sensitive, so the OLD mountinfo-only'
+  '# backstop would NOT refuse - else this case would pass for the wrong reason.'
+  'mi_src="$(powbox_mountinfo_host_src "$WS")"'
+  'echo "  info: mountinfo source for $WS resolves to: ${mi_src:-<none>}"'
+  'if powbox_is_sensitive_host_path "$mi_src"; then'
+  '  echo "  skip: this host reports a sensitive mountinfo source (${mi_src}) for the fixture; cannot isolate the true-source path"'
+  '  exit 42'
+  'fi'
+  '# Record a SENSITIVE true source, then confirm it landed (empty readback => /run/powbox is not'
+  '# node-writable in this image).'
+  'if ! powbox_record_workspace_source "$WS" "/home/alice"; then'
+  '  echo "FAIL: powbox_record_workspace_source returned non-zero writing the marker map" >&2'
+  '  exit 1'
+  'fi'
+  'if [ "$(powbox_marker_host_src "$WS")" != "/home/alice" ]; then'
+  '  echo "FAIL: marker map did not record the true source (is /run/powbox node-writable in this image?)" >&2'
+  '  exit 1'
+  'fi'
+  'out="$(sudo /usr/local/bin/fix-workspace-perms.sh "$WS" 2>&1)"; rc=$?'
+  'printf "%s\n" "$out"'
+  'if [ "$rc" = 0 ]; then'
+  '  echo "FAIL: fix-workspace-perms.sh exited 0 on a true-source-sensitive (/home/alice) mount - it must refuse (Gap A regression: it classified on the non-sensitive mountinfo source ${mi_src})" >&2'
+  '  exit 1'
+  'fi'
+  'if ! printf "%s" "$out" | grep -q "refusing to chown"; then'
+  '  echo "FAIL: fix exited non-zero but WITHOUT the sensitive-source refusal (an unrelated error). Output above." >&2'
+  '  exit 1'
+  'fi'
+  'if ! printf "%s" "$out" | grep -q "/home/alice"; then'
+  '  echo "FAIL: fix refused but did not classify on the recorded true source (/home/alice). Output above." >&2'
+  '  exit 1'
+  'fi'
+  'owner="$(stat -c %u "$WS" 2>/dev/null || echo "?")"'
+  'if [ "$owner" != "0" ]; then'
+  '  echo "FAIL: workspace root owned by uid ${owner} after the refusal, expected still-root (0) - fix chowned despite refusing?" >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: fix refused via the recorded true source (/home/alice) though mountinfo (${mi_src}) is non-sensitive and sudo stripped the env"'
+  'exit 0'
+) -join "`n"
+
+# The startup-heal TRUE-SOURCE heal assertion (task 009 Gap B), behaviourally identical to the .sh
+# ASSERT_SCRIPT_HEAL_TRUESRC. Run AS node against a root-owned fixture with a marker recording the
+# SAFE true source /projects (as on a whole-filesystem-mount checkout where mountinfo field 4 is a
+# bare `/`), launched with a deliberately SENSITIVE env (/root) to prove the marker is
+# authoritative - the heal must HEAL, not skip. Exit contract: 0 = heal claimed the tree for node;
+# 42 = masked (node could already write) -> self-skip; other = failure (heal wrongly skipped).
+$assertScriptHealTrueSrc = @(
+  'set -u'
+  'WS="$1"'
+  'if [ "$(id -u)" != "1000" ]; then'
+  '  echo "FAIL: heal-true-source assertion not running as node (uid 1000) - got uid $(id -u)" >&2'
+  '  exit 1'
+  'fi'
+  'if probe="$(mktemp "${WS}/.powbox-truesrc-probe.XXXXXX" 2>/dev/null)"; then'
+  '  rm -f "$probe" 2>/dev/null || true'
+  '  echo "  skip: node can already write the root-owned mount (this host masks the native-Linux uid bug)"'
+  '  exit 42'
+  'fi'
+  'echo "  ok: node cannot write the root-owned mount before the heal (as expected)"'
+  '. /usr/local/bin/sensitive-host-path.sh'
+  'if ! powbox_record_workspace_source "$WS" "/projects"; then'
+  '  echo "FAIL: powbox_record_workspace_source returned non-zero writing the marker map" >&2'
+  '  exit 1'
+  'fi'
+  'if [ "$(powbox_marker_host_src "$WS")" != "/projects" ]; then'
+  '  echo "FAIL: marker map did not record the true source (is /run/powbox node-writable in this image?)" >&2'
+  '  exit 1'
+  'fi'
+  '# Drive the REAL heal unit. It must NOT skip: the recorded true source (/projects) is'
+  '# authoritative over the degenerate mountinfo and the sensitive launcher env below.'
+  'errlog="$(mktemp)"'
+  'if ! /usr/local/bin/heal-workspace-perms.sh 2>"$errlog"; then'
+  '  echo "FAIL: heal-workspace-perms.sh errored (it should heal cleanly and exit 0). stderr:" >&2'
+  '  cat "$errlog" >&2'
+  '  exit 1'
+  'fi'
+  'if grep -q "system or home directory" "$errlog"; then'
+  '  echo "FAIL: heal SKIPPED the whole-fs-mount checkout - it classified on the degenerate mountinfo / sensitive env instead of the recorded true source (/projects). This is the Gap B regression. stderr:" >&2'
+  '  cat "$errlog" >&2'
+  '  exit 1'
+  'fi'
+  'if ! touch "${WS}/smoke-write" 2>/dev/null; then'
+  '  echo "FAIL: node still cannot write the tree after the heal - it was wrongly skipped (Gap B regression)" >&2'
+  '  exit 1'
+  'fi'
+  'owner="$(stat -c %u "${WS}/smoke-write" 2>/dev/null || echo "?")"'
+  'if [ "$owner" != "1000" ]; then'
+  '  echo "FAIL: smoke-write owned by uid ${owner} after the heal, expected node (1000)" >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: heal claimed the whole-fs-mount checkout for node via the recorded true source (/projects), despite a sensitive launcher env (/root)"'
   'exit 0'
 ) -join "`n"
 
@@ -406,17 +525,19 @@ try {
   # === Case: sensitive host source - heal must REFUSE to chown (the VPS-lockout incident) ====
   # A cc/cx accidentally launched from ~ bind-mounts the whole home tree as the "project"; the
   # heal would then recursively chown it to node, breaking sshd StrictModes on ~/.ssh and
-  # locking the user out of the host. launch-agent passes POWBOX_WORKSPACE_HOST_PATH and the
-  # heal skips any workspace whose host source is a system/home dir. Reproduce that: a root-owned
-  # fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root, so the heal must skip the chown and
-  # warn, leaving the tree root-owned. Verified in-container and host-side (fixture stays uid 0).
+  # locking the user out of the host. launch-agent passes POWBOX_WORKSPACE_HOST_PATH and
+  # POWBOX_WORKSPACE_DIR, and the heal skips any workspace whose host source is a system/home dir.
+  # Reproduce that: a root-owned fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root and
+  # POWBOX_WORKSPACE_DIR=<mount> (no marker written here, so the heal's env-for-the-named-mount
+  # fallback is what catches it), so the heal must skip the chown and warn, leaving the tree
+  # root-owned. Verified in-container and host-side (fixture stays uid 0).
   $sfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
   $fixtures.Add($sfixture)
   & git -C $sfixture init -q
   Set-Content -LiteralPath (Join-Path $sfixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
   Invoke-AsRoot @('chown', '-R', 'root:root', $sfixture)
   Write-Host "Case: sensitive host source (POWBOX_WORKSPACE_HOST_PATH=/root) - heal must skip the chown"
-  docker run --rm --user node -e POWBOX_WORKSPACE_HOST_PATH=/root -e POWBOX_WORKSPACE_HOST_HOME=/root -v "${sfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptSensitive powbox-dirmount $mount
+  docker run --rm --user node -e POWBOX_WORKSPACE_HOST_PATH=/root -e POWBOX_WORKSPACE_HOST_HOME=/root -e "POWBOX_WORKSPACE_DIR=$mount" -v "${sfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptSensitive powbox-dirmount $mount
   $rc = $LASTEXITCODE
   if ($rc -eq 0) {
     # Host-side: the guard left the tree untouched - still root-owned (uid 0).
@@ -429,16 +550,66 @@ try {
   else { Fail "heal did not skip the chown for a sensitive host source (see the FAIL line above)" }
 
   # === Case: privileged-boundary backstop - fix refuses a sensitive mountinfo source =========
-  # fix-workspace-perms.sh runs under sudo (env_reset strips caller env), so it re-derives the
-  # bind source from /proc/self/mountinfo and refuses a sensitive one independently of heal.
-  # Bind the host /etc READ-ONLY (its real mountinfo source is /etc), so fix must refuse via the
-  # backstop with NO sensitive env set. fix refuses before any walk/chown, so /etc is untouched.
+  # fix-workspace-perms.sh runs under sudo (env_reset strips caller env), so with no marker it
+  # falls back to the /proc/self/mountinfo bind source and refuses a sensitive one independently
+  # of heal. Bind the host /etc READ-ONLY (its real mountinfo source is /etc), so fix must refuse
+  # via the fallback with NO sensitive env set. fix refuses before any walk/chown, so /etc is
+  # untouched.
   Write-Host "Case: privileged backstop - fix-workspace-perms refuses a sensitive (/etc) mountinfo source"
   docker run --rm --user node -v "/etc:${mount}:ro" --entrypoint /bin/bash $Image -c $assertScriptFixBackstop powbox-dirmount $mount
   $rc = $LASTEXITCODE
   if ($rc -eq 0) { $passed++ }
   elseif ($rc -eq 42) { $masked = $true }
   else { Fail "fix-workspace-perms did not refuse a sensitive /etc mountinfo source (see the FAIL line above)" }
+
+  # === Case: privileged backstop TRUE-SOURCE refusal (task 009 Gap A) ========================
+  # A root-owned fixture whose mountinfo source is a non-sensitive /tmp bind, with a marker
+  # recording the SENSITIVE true source /home/alice - as on a separate-/home layout where a
+  # /home/alice bind reads back from mountinfo as the shallow /alice. fix must refuse via the
+  # marker (which survives sudo env_reset). Reverting task 009 makes fix classify on the
+  # non-sensitive mountinfo source and NOT refuse -> this case fails.
+  $tfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
+  $fixtures.Add($tfixture)
+  & git -C $tfixture init -q
+  Set-Content -LiteralPath (Join-Path $tfixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
+  Invoke-AsRoot @('chown', '-R', 'root:root', $tfixture)
+  Write-Host "Case: privileged backstop TRUE-SOURCE refusal (marker /home/alice vs non-sensitive mountinfo) - fix must refuse"
+  docker run --rm --user node -v "${tfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptFixTrueSrc powbox-dirmount $mount
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) {
+    # Host-side: fix refused before any chown, so the fixture is still root-owned (uid 0).
+    $hostOwner = (Invoke-AsRoot @('stat', '-c', '%u', $tfixture)).Trim()
+    if ($hostOwner -ne '0') { Fail "host-side fixture root owned by uid $hostOwner after the run, expected still-root (0) - fix chowned a true-source-sensitive mount" }
+    Write-Host "  ok: host-side fixture is still root-owned (uid 0) - fix refused via the recorded true source"
+    $passed++
+  }
+  elseif ($rc -eq 42) { $masked = $true }
+  else { Fail "fix-workspace-perms did not refuse a true-source-sensitive (marker /home/alice) mount (see the FAIL line above)" }
+
+  # === Case: startup-heal TRUE-SOURCE heal (task 009 Gap B) ==================================
+  # A root-owned fixture with a marker recording the SAFE true source /projects (as on a
+  # whole-filesystem-mount checkout where mountinfo field 4 is a bare `/`), launched with a
+  # deliberately SENSITIVE env (POWBOX_WORKSPACE_HOST_PATH=/root) to prove the marker (true
+  # source) is authoritative - the heal must HEAL, not skip. Reverting task 009 makes the heal
+  # consult that sensitive env (or the degenerate mountinfo) directly and SKIP -> node cannot
+  # write -> this case fails.
+  $hfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
+  $fixtures.Add($hfixture)
+  & git -C $hfixture init -q
+  Set-Content -LiteralPath (Join-Path $hfixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
+  Invoke-AsRoot @('chown', '-R', 'root:root', $hfixture)
+  Write-Host "Case: startup-heal TRUE-SOURCE heal (marker /projects vs sensitive env /root) - heal must claim the tree"
+  docker run --rm --user node -e POWBOX_WORKSPACE_HOST_PATH=/root -e POWBOX_WORKSPACE_HOST_HOME=/root -e "POWBOX_WORKSPACE_DIR=$mount" -v "${hfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptHealTrueSrc powbox-dirmount $mount
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) {
+    # Host-side: the heal claimed the tree for node end to end.
+    $hostOwner = (Invoke-AsRoot @('stat', '-c', '%u', (Join-Path $hfixture 'smoke-write'))).Trim()
+    if ($hostOwner -ne '1000') { Fail "host-side smoke-write owned by uid $hostOwner after the run, expected node (1000) - the heal did not claim the whole-fs-mount checkout" }
+    Write-Host "  ok: host-side smoke-write is node-owned (uid 1000) after the run - the heal claimed it via the true source"
+    $passed++
+  }
+  elseif ($rc -eq 42) { $masked = $true }
+  else { Fail "heal did not claim a whole-fs-mount checkout via its recorded true source (see the FAIL line above)" }
 }
 finally {
   foreach ($f in $fixtures) {

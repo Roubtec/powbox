@@ -970,9 +970,12 @@ fi
 # mount that is actually a system or home directory. A `cc`/`cx` accidentally run from
 # ~ (e.g. /root on a VPS) would otherwise bind-mount the whole home tree and re-own it
 # to node, breaking sshd's StrictModes chain on ~/.ssh and locking the user out of the
-# host. The entrypoint also derives the source from /proc/self/mountinfo, so this env is
-# an authoritative hint (and the only reliable signal on Docker Desktop / WSL), not the
-# sole guard. Self-hosted mode has no bind mount, so it is irrelevant there.
+# host. POWBOX_WORKSPACE_DIR pairs the container mountpoint (/workspace/<slug>) with that
+# source so the entrypoint records the per-mount marker map (/run/powbox/workspace-sources)
+# both heal- and fix-workspace-perms.sh classify on — mountinfo is only their fallback.
+# PROJECT_PATH is `pwd -P`-resolved above, so it is the real absolute path on every mount
+# layout (a separate /home reads it back correctly as /home/<user>, not the shallow /<user>
+# mountinfo would show). Self-hosted mode has no bind mount, so it is irrelevant there.
 if [ "$ISOLATED" != true ]; then
 	# Resolve $HOME to its PHYSICAL path (pwd -P) the same way PROJECT_PATH was above.
 	# The entrypoint compares this home against the mountinfo-derived source, which is
@@ -987,6 +990,7 @@ if [ "$ISOLATED" != true ]; then
 	EXTRA_ENV+=(
 		-e "POWBOX_WORKSPACE_HOST_PATH=$PROJECT_PATH"
 		-e "POWBOX_WORKSPACE_HOST_HOME=$HOST_HOME"
+		-e "POWBOX_WORKSPACE_DIR=$WORKSPACE_MOUNT"
 	)
 fi
 

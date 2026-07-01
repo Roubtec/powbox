@@ -79,17 +79,21 @@ for _dir in /workspace/*/; do
 	# launched from ~ (e.g. /root, /home/<you>) bind-mounts that whole tree as the
 	# "project"; the heal below would recursively chown it to node (uid 1000), and re-owning
 	# a home dir breaks sshd's StrictModes ownership chain on ~/.ssh — locking the user out
-	# of the host. Resolve the host source from the launcher-provided env (authoritative,
-	# and the only reliable source on Docker Desktop / WSL) AND from /proc/self/mountinfo
-	# (env-independent, and the true path on native Linux where this heal actually fires);
-	# skip — leaving host ownership untouched — if EITHER says sensitive. A wrong skip only
-	# means node may be unable to write a genuine project (a loud, recoverable inconvenience
-	# the steps below already warn about); a wrong chown can brick host login.
-	_host_src="$(powbox_mountinfo_host_src "$_dir")"
-	if powbox_is_sensitive_host_path "$_host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}" ||
-		{ [ -n "${POWBOX_WORKSPACE_HOST_PATH:-}" ] &&
-			powbox_is_sensitive_host_path "$POWBOX_WORKSPACE_HOST_PATH" "${POWBOX_WORKSPACE_HOST_HOME:-}"; }; then
-		echo "Warning: NOT claiming $_dir for node — its host source (launcher env POWBOX_WORKSPACE_HOST_PATH=${POWBOX_WORKSPACE_HOST_PATH:-<unset>}, mountinfo-derived=${_host_src:-<none>}) looks like a system or home directory, not a project checkout. Skipping the ownership heal so host/system files are left untouched (re-owning a home directory would break SSH login via ~/.ssh). If this really is your project, move it into a subdirectory (e.g. ~/code/myrepo) and relaunch there, or use --isolated mode." >&2
+	# of the host. Classify on the launcher's TRUE absolute source, which
+	# powbox_resolve_host_src returns most-authoritative-first: (1) the startup marker map
+	# (recorded per mountpoint from POWBOX_WORKSPACE_HOST_PATH, which is `pwd -P`-resolved so
+	# it is the real absolute path on every mount layout); (2) that env directly for the mount
+	# it names (a fallback if the marker could not be written); (3) /proc/self/mountinfo as the
+	# env-independent last resort. Making the true source AUTHORITATIVE (rather than OR-ing a
+	# possibly-degenerate mountinfo value in) is what lets a whole-filesystem-mount checkout —
+	# whose mountinfo field 4 is a bare `/` — still heal (task 009 Gap B), while the accidental
+	# `~` launch is still caught because its true source is /home/<you> or /root. Skip — leaving
+	# host ownership untouched — if the resolved source is sensitive. A wrong skip only means
+	# node may be unable to write a genuine project (a loud, recoverable inconvenience the steps
+	# below already warn about); a wrong chown can brick host login.
+	_host_src="$(powbox_resolve_host_src "$_dir")"
+	if powbox_is_sensitive_host_path "$_host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}"; then
+		echo "Warning: NOT claiming $_dir for node — its resolved host source (${_host_src:-<none>}) looks like a system or home directory, not a project checkout. Skipping the ownership heal so host/system files are left untouched (re-owning a home directory would break SSH login via ~/.ssh). If this really is your project, move it into a subdirectory (e.g. ~/code/myrepo) and relaunch there, or use --isolated mode." >&2
 		continue
 	fi
 	# Probe write access as node by actually creating a file: `[ -w ]` only reads

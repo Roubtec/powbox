@@ -148,7 +148,12 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 # create writable paths before named volumes mount so Docker copies sane
 # ownership/permissions onto the volumes. Agent config dirs (.claude, .codex)
 # are mode 700 because they will hold auth tokens (.credentials.json,
-# config.toml).
+# config.toml). /run/powbox is created node-owned so entrypoint-core.sh (running
+# as node) can write the per-boot workspace-source marker map there — the file
+# that lets heal-/fix-workspace-perms.sh classify sensitivity on the launcher's
+# true absolute host source rather than the layout-dependent mountinfo field 4
+# (see sensitive-host-path.sh and tasks/009); /run is a plain image directory
+# here (no tmpfs is mounted over it), so the build-time dir survives to runtime.
 #
 # Sudoers security rationale — the three allowed commands are intentionally
 # scoped:
@@ -216,10 +221,11 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
         /home/node/.local/bin \
         /home/node/.local/share/pnpm/store \
         /home/node/.zsh_history_dir \
+        /run/powbox \
         /workspace \
         /ctx \
     && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
-    && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /workspace /ctx
+    && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /run/powbox /workspace /ctx
 
 # Rootless container engine (Podman) so an in-sandbox agent can build, run, and
 # orchestrate its own containers — databases, Adminer, whole service stacks —

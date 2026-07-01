@@ -354,8 +354,10 @@ exit 0
 # host /etc. fix-workspace-perms.sh runs under sudo (env stripped by env_reset), so it cannot
 # trust a caller env var; it instead derives the bind source from /proc/self/mountinfo (which
 # node cannot forge) and refuses a sensitive one. Here the REAL source IS sensitive (/etc), so
-# fix must refuse even with no POWBOX_WORKSPACE_HOST_PATH set — proving the guard holds if this
-# helper is ever invoked directly with a sensitive workspace, not only via heal. Exit-code
+# fix must refuse even with no POWBOX_WORKSPACE_HOST_PATH set — exercising the mountinfo backstop on
+# a direct invocation with a sensitive workspace, not only via heal (best-effort: on a separate-mount
+# layout the source can resolve non-sensitive and this case self-skips below — feeding the true
+# source, with mountinfo as fallback, is tracked in tasks/009). Exit-code
 # contract: 0 = fix refused via the mountinfo backstop; 42 = this host reports a non-sensitive
 # bind source for /etc (a mount-layout quirk; cannot exercise the path) → self-skip; other =
 # failure (fix did NOT refuse, or failed for an unrelated reason).

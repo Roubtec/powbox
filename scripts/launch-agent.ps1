@@ -916,9 +916,12 @@ if ($Isolated -or $mountWorkspaceVolumes) {
 # the launching user's home) so the workspace-perms heal can REFUSE to chown a mount that
 # is actually a system or home directory. A cc/cx accidentally run from ~ would otherwise
 # bind-mount the whole home tree and re-own it to node, breaking sshd's StrictModes chain
-# on ~/.ssh and locking the user out of the host. (On Windows/WSL/macOS the heal never
-# fires - those FUSE mounts honour node's writes - so this is belt-and-suspenders there;
-# it matters on a native-Linux host.) Self-hosted mode has no bind mount, so it is skipped.
+# on ~/.ssh and locking the user out of the host. POWBOX_WORKSPACE_DIR pairs the container
+# mountpoint (/workspace/<slug>) with that source so the entrypoint records the per-mount
+# marker map (/run/powbox/workspace-sources) both heal- and fix-workspace-perms.sh classify
+# on (mountinfo is only their fallback). (On Windows/WSL/macOS the heal never fires - those
+# FUSE mounts honour node's writes - so this is belt-and-suspenders there; it matters on a
+# native-Linux host.) Self-hosted mode has no bind mount, so it is skipped.
 if (-not $Isolated) {
   # Resolve $HOME the same way $resolvedProject was (Resolve-Path + ResolveLinkTarget),
   # so a home reached through a symlink/junction is compared against the entrypoint's
@@ -938,7 +941,8 @@ if (-not $Isolated) {
   }
   $envArgs += @(
     "-e", "POWBOX_WORKSPACE_HOST_PATH=$resolvedProject",
-    "-e", "POWBOX_WORKSPACE_HOST_HOME=$resolvedHome"
+    "-e", "POWBOX_WORKSPACE_HOST_HOME=$resolvedHome",
+    "-e", "POWBOX_WORKSPACE_DIR=$workspaceMount"
   )
 }
 

@@ -53,6 +53,32 @@ fi
 # the dir-mount ownership smoke (scripts/smoke-test-dirmount.sh) exercise the IDENTICAL
 # decision code — see that script for the full rationale.
 #
+# Record the project workspace's TRUE absolute host bind-mount source in the per-boot marker
+# map BEFORE the heal below reads it. The heal (heal-workspace-perms.sh) AND the privileged
+# helper (fix-workspace-perms.sh) classify sensitivity on this recorded true source, using
+# /proc/self/mountinfo only as a fallback — which is what lets them refuse a /home/<user> bind
+# on a separate-mount layout (where mountinfo field 4 reads back shallow, e.g. /alice) and
+# heal a whole-filesystem-mount checkout (where field 4 is a degenerate `/`); see
+# sensitive-host-path.sh and tasks/009. The launcher forwards POWBOX_WORKSPACE_DIR (the
+# /workspace/<slug> mountpoint) and POWBOX_WORKSPACE_HOST_PATH (its `pwd -P`-resolved host
+# source) only in dir-mounted, non-isolated mode, so this no-ops in self-hosted mode (no bind
+# to classify) and when the launcher is not involved. Recorded HERE, at trusted startup as
+# node, so the FILE survives the helper's later sudo env_reset (an env var would not). Sourcing
+# the shared library defines only functions; best-effort — a marker it cannot write just falls
+# the consumers back to mountinfo.
+if [ -n "${POWBOX_WORKSPACE_DIR:-}" ] && [ -n "${POWBOX_WORKSPACE_HOST_PATH:-}" ]; then
+	_shp="$(dirname "$0")/sensitive-host-path.sh"
+	[ -r "$_shp" ] || _shp=/usr/local/bin/sensitive-host-path.sh
+	# Guard the source: the marker is best-effort, so a missing/unreadable library (it is
+	# image-baked, so this is not expected) must never abort container startup under set -e.
+	if [ -r "$_shp" ]; then
+		# shellcheck source=docker/shared/sensitive-host-path.sh
+		. "$_shp"
+		powbox_record_workspace_source "$POWBOX_WORKSPACE_DIR" "$POWBOX_WORKSPACE_HOST_PATH"
+	fi
+	unset _shp
+fi
+
 # The self-hosted / image-store-writer / sudo-exists guard stays HERE, around the call, so the
 # entrypoint's observable behavior is byte-for-byte unchanged: self-hosted ("--isolated") mode
 # is exempt (its workspace is a container-local volume the launcher already pre-seeds

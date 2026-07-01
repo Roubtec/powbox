@@ -43,6 +43,13 @@
 # sudoers-allowed root helper that refuses to act outside /workspace/.
 set -euo pipefail
 
+# Shared sensitive-host-path predicate (also sourced by heal-workspace-perms.sh). Baked
+# beside this script in the image; the repo copy is the fallback for a direct dev run.
+_shp="$(dirname "$0")/sensitive-host-path.sh"
+[ -r "$_shp" ] || _shp=/usr/local/bin/sensitive-host-path.sh
+# shellcheck source=docker/shared/sensitive-host-path.sh
+. "$_shp"
+
 NODE_OWNER="node:node"
 # node's uid, used to tell apart a node-owned root (which we may still self-heal of nested
 # root-owned files) from a genuine foreign host uid (which we refuse). Falls back to the
@@ -79,6 +86,46 @@ for ws in "$@"; do
 	ws="$resolved"
 	if [ ! -d "$ws" ]; then
 		echo "fix-workspace-perms: '$ws' is not a directory; skipping." >&2
+		continue
+	fi
+	# SAFETY BACKSTOP (the VPS-lockout incident): refuse to chown a workspace whose HOST
+	# bind-mount source is a system or home directory (/, /root, /home/<user>, /etc, ...).
+	# A `cc`/`cx` launched by mistake from ~ bind-mounts the whole home tree as the
+	# "project"; re-owning it to node breaks sshd's StrictModes chain on ~/.ssh and locks
+	# the user out of the host. The AUTHORITATIVE guard for that incident is the launcher
+	# env at the heal layer: heal-workspace-perms.sh classifies on the launcher's true
+	# absolute POWBOX_WORKSPACE_HOST_PATH (pwd -P resolved) and skips a sensitive mount
+	# before ever calling this helper. This is a best-effort, defense-in-depth re-check for
+	# a DIRECT invocation of this helper, where sudo's env_reset has stripped that env: it
+	# derives the source from /proc/self/mountinfo instead (which an unprivileged node
+	# cannot forge).
+	# LIMITATION: mountinfo field 4 is the mount's root WITHIN its source filesystem, not
+	# the absolute host path — so on a separate-mount layout (e.g. a dedicated /home) a
+	# /home/alice bind reads back as /alice and is NOT caught here. Feeding this check the
+	# launcher's true source (mountinfo as fallback) is tracked in
+	# tasks/009-privileged-perms-backstop-true-host-source.md.
+	host_src="$(powbox_mountinfo_host_src "$ws")"
+	# Fail CLOSED when the source cannot be determined. In production every /workspace/<slug>
+	# is a real bind mount, so its mountinfo source is non-empty; an empty result means
+	# /proc/self/mountinfo was unreadable or had no matching mountpoint — we cannot prove the
+	# source is NOT a system/home dir. A wrong refuse here is a loud, recoverable inconvenience
+	# (node cannot write a genuine project); a wrong chown can brick host login — so refuse
+	# rather than proceed blind. The heal path is unaffected: it only ever hands us real bind
+	# mounts, whose source is non-empty.
+	if [ -z "$host_src" ]; then
+		echo "fix-workspace-perms: refusing to chown $ws — could not determine its host bind-mount source from /proc/self/mountinfo, so cannot confirm it is a project checkout rather than a system or home directory. Refusing as a safety precaution (a wrong chown could break host login, e.g. SSH via a re-owned ~/.ssh)." >&2
+		status=1
+		continue
+	fi
+	# Pass POWBOX_WORKSPACE_HOST_HOME (the launcher's physically-resolved $HOME) as the
+	# predicate's optional home arg so a home at a NON-standard location still classifies
+	# sensitive. Under sudo's env_reset it is empty (the mountinfo source is then the only
+	# signal, exactly as described above); it can only ever ADD a refusal (fail-closed), never
+	# permit a chown, so honouring a caller-provided value here is safe. Mirrors the heal's
+	# call; feeding this helper the launcher's true SOURCE too is tracked in task 009.
+	if powbox_is_sensitive_host_path "$host_src" "${POWBOX_WORKSPACE_HOST_HOME:-}"; then
+		echo "fix-workspace-perms: refusing to chown $ws — its host bind-mount source (${host_src}) is a system or home directory, not a project checkout. Re-owning it to node could break host login (e.g. SSH via a re-owned ~/.ssh). Mount a project subdirectory instead, or use --isolated (self-hosted) mode." >&2
+		status=1
 		continue
 	fi
 	owner_uid="$(stat -c '%u' "$ws" 2>/dev/null || echo "")"

@@ -39,6 +39,16 @@ param(
 # added that the root-level probe misses - so reverting ONLY that scan now fails the smoke
 # (task 007a).
 #
+# Two further cases guard the SENSITIVE-SOURCE refusal (the VPS-lockout incident: a cc/cx
+# accidentally run from ~ would bind-mount the whole home tree and the heal would chown it to
+# node, breaking sshd StrictModes on ~/.ssh and locking the user out of the host):
+#   * sensitive-skip - a root-owned fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root, so
+#     the real heal unit must SKIP the chown and warn (tree stays root-owned).
+#   * fix-mountinfo-backstop - a read-only bind of the host /etc, so fix-workspace-perms.sh (the
+#     privileged boundary, run under sudo with env stripped) must refuse via the
+#     /proc/self/mountinfo source it derives independently of any caller env.
+# The pure predicate + mountinfo parser are also unit-tested by scripts/test-sensitive-host-path.sh.
+#
 # Self-skips (no failure) when it cannot meaningfully run: the agent image is
 # absent (unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then it fails); the host is not
 # native Linux (Windows/macOS bind mounts mask the bug); it cannot create a
@@ -234,6 +244,84 @@ $assertScriptMixed = @(
   'exit 0'
 ) -join "`n"
 
+# The sensitive-source guard assertion (the VPS-lockout incident), behaviourally identical to
+# the .sh ASSERT_SCRIPT_SENSITIVE. Run AS node against a genuinely root-owned fixture, but with
+# POWBOX_WORKSPACE_HOST_PATH set (on the docker run) to a home/system path so the real heal unit
+# must REFUSE to chown it and warn, leaving the tree root-owned. Exit contract: 0 = guard
+# skipped (tree left root-owned, node still cannot write); 42 = masked; other = failure.
+$assertScriptSensitive = @(
+  'set -u'
+  'WS="$1"'
+  'if [ "$(id -u)" != "1000" ]; then'
+  '  echo "FAIL: sensitive-skip assertion not running as node (uid 1000) - got uid $(id -u)" >&2'
+  '  exit 1'
+  'fi'
+  '# Ground-truth: node must NOT be able to write the root-owned mount before the heal.'
+  'if probe="$(mktemp "${WS}/.powbox-sens-probe.XXXXXX" 2>/dev/null)"; then'
+  '  rm -f "$probe" 2>/dev/null || true'
+  '  echo "  skip: node can already write the root-owned mount (this host masks the native-Linux uid bug)"'
+  '  exit 42'
+  'fi'
+  'echo "  ok: node cannot write the root-owned mount before the heal (as expected)"'
+  '# Drive the REAL heal unit. POWBOX_WORKSPACE_HOST_PATH (set on the docker run) marks the host'
+  '# source as a home/system dir, so heal MUST skip the chown and warn (best-effort: exit 0).'
+  'errlog="$(mktemp)"'
+  'if ! /usr/local/bin/heal-workspace-perms.sh 2>"$errlog"; then'
+  '  echo "FAIL: heal-workspace-perms.sh errored (it should skip cleanly and exit 0). stderr:" >&2'
+  '  cat "$errlog" >&2'
+  '  exit 1'
+  'fi'
+  'if ! grep -q "system or home directory" "$errlog"; then'
+  '  echo "FAIL: heal did not emit the sensitive-source skip warning. stderr was:" >&2'
+  '  cat "$errlog" >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: heal emitted the sensitive-source skip warning"'
+  '# The guard must have PREVENTED the chown: node still cannot write, tree still root-owned.'
+  'if probe="$(mktemp "${WS}/.powbox-sens-probe2.XXXXXX" 2>/dev/null)"; then'
+  '  rm -f "$probe" 2>/dev/null || true'
+  '  echo "FAIL: node can write the mount AFTER heal - the chown was NOT skipped (guard failed)" >&2'
+  '  exit 1'
+  'fi'
+  'owner="$(stat -c %u "$WS" 2>/dev/null || echo "?")"'
+  'if [ "$owner" != "0" ]; then'
+  '  echo "FAIL: workspace root owned by uid ${owner} after heal, expected still-root (0) - guard failed" >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: chown was skipped - node still cannot write and the tree is still root-owned (uid 0)"'
+  'exit 0'
+) -join "`n"
+
+# The privileged-boundary backstop assertion, behaviourally identical to the .sh
+# ASSERT_SCRIPT_FIX_BACKSTOP. Run AS node against a read-only bind of the host /etc: fix runs
+# under sudo (env stripped), derives the bind source from /proc/self/mountinfo, and must refuse
+# the sensitive /etc source with NO POWBOX_WORKSPACE_HOST_PATH set. Exit contract: 0 = fix
+# refused via the mountinfo backstop; 42 = this host reports a non-sensitive /etc source
+# (mount-layout quirk) -> self-skip; other = failure.
+$assertScriptFixBackstop = @(
+  'set -u'
+  'WS="$1"'
+  '. /usr/local/bin/sensitive-host-path.sh'
+  'src="$(powbox_mountinfo_host_src "$WS")"'
+  'echo "  info: mountinfo source for $WS resolves to: ${src:-<none>}"'
+  'if ! powbox_is_sensitive_host_path "$src"; then'
+  '  echo "  skip: this host reports a non-sensitive bind source (${src:-<none>}) for the /etc mount; cannot exercise the mountinfo backstop"'
+  '  exit 42'
+  'fi'
+  'out="$(sudo /usr/local/bin/fix-workspace-perms.sh "$WS" 2>&1)"; rc=$?'
+  'printf "%s\n" "$out"'
+  'if [ "$rc" = 0 ]; then'
+  '  echo "FAIL: fix-workspace-perms.sh exited 0 on a sensitive ($src) mount - it must refuse" >&2'
+  '  exit 1'
+  'fi'
+  'if ! printf "%s" "$out" | grep -q "refusing to chown"; then'
+  '  echo "FAIL: fix-workspace-perms.sh exited non-zero but WITHOUT the sensitive-source refusal (an unrelated error, not the guard). Output above." >&2'
+  '  exit 1'
+  'fi'
+  'echo "  ok: fix-workspace-perms.sh refused to chown the sensitive ($src) mount via the mountinfo backstop"'
+  'exit 0'
+) -join "`n"
+
 $fixtures = New-Object System.Collections.Generic.List[string]
 $masked = $false
 $passed = 0
@@ -314,6 +402,43 @@ try {
   }
   elseif ($rc -eq 42) { $masked = $true }
   else { Fail "node could not write the mixed-ownership tree after the entrypoint fix (see the FAIL line above)" }
+
+  # === Case: sensitive host source - heal must REFUSE to chown (the VPS-lockout incident) ====
+  # A cc/cx accidentally launched from ~ bind-mounts the whole home tree as the "project"; the
+  # heal would then recursively chown it to node, breaking sshd StrictModes on ~/.ssh and
+  # locking the user out of the host. launch-agent passes POWBOX_WORKSPACE_HOST_PATH and the
+  # heal skips any workspace whose host source is a system/home dir. Reproduce that: a root-owned
+  # fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root, so the heal must skip the chown and
+  # warn, leaving the tree root-owned. Verified in-container and host-side (fixture stays uid 0).
+  $sfixture = (& mktemp -d "/tmp/powbox-dirmount-XXXXXX").Trim()
+  $fixtures.Add($sfixture)
+  & git -C $sfixture init -q
+  Set-Content -LiteralPath (Join-Path $sfixture 'README.md') -Value 'powbox dir-mount ownership smoke fixture'
+  Invoke-AsRoot @('chown', '-R', 'root:root', $sfixture)
+  Write-Host "Case: sensitive host source (POWBOX_WORKSPACE_HOST_PATH=/root) - heal must skip the chown"
+  docker run --rm --user node -e POWBOX_WORKSPACE_HOST_PATH=/root -e POWBOX_WORKSPACE_HOST_HOME=/root -v "${sfixture}:${mount}" --entrypoint /bin/bash $Image -c $assertScriptSensitive powbox-dirmount $mount
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) {
+    # Host-side: the guard left the tree untouched - still root-owned (uid 0).
+    $hostOwner = (Invoke-AsRoot @('stat', '-c', '%u', $sfixture)).Trim()
+    if ($hostOwner -ne '0') { Fail "host-side fixture root owned by uid $hostOwner after the run, expected still-root (0) - the guard failed to skip the chown" }
+    Write-Host "  ok: host-side fixture is still root-owned (uid 0) - the chown was skipped"
+    $passed++
+  }
+  elseif ($rc -eq 42) { $masked = $true }
+  else { Fail "heal did not skip the chown for a sensitive host source (see the FAIL line above)" }
+
+  # === Case: privileged-boundary backstop - fix refuses a sensitive mountinfo source =========
+  # fix-workspace-perms.sh runs under sudo (env_reset strips caller env), so it re-derives the
+  # bind source from /proc/self/mountinfo and refuses a sensitive one independently of heal.
+  # Bind the host /etc READ-ONLY (its real mountinfo source is /etc), so fix must refuse via the
+  # backstop with NO sensitive env set. fix refuses before any walk/chown, so /etc is untouched.
+  Write-Host "Case: privileged backstop - fix-workspace-perms refuses a sensitive (/etc) mountinfo source"
+  docker run --rm --user node -v "/etc:${mount}:ro" --entrypoint /bin/bash $Image -c $assertScriptFixBackstop powbox-dirmount $mount
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) { $passed++ }
+  elseif ($rc -eq 42) { $masked = $true }
+  else { Fail "fix-workspace-perms did not refuse a sensitive /etc mountinfo source (see the FAIL line above)" }
 }
 finally {
   foreach ($f in $fixtures) {

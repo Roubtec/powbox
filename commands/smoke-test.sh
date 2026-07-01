@@ -28,6 +28,16 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 export POWBOX_SMOKE_REQUIRE_IMAGE
 
+# Stage 0 — sensitive-host-path predicate unit test. Hermetic (no image, root, or
+# native-Linux host needed), so it runs unconditionally up front: it guards the predicate
+# and the /proc/self/mountinfo source lookup that stop the workspace-perms heal from
+# recursively chowning a mount whose host source is a system/home dir (the VPS-lockout
+# incident — an accidental `cc`/`cx` from ~ re-owning the home tree and breaking sshd
+# StrictModes on ~/.ssh). The live end-to-end guard is Stage 5's sensitive-skip /
+# fix-mountinfo-backstop cases.
+echo "Running sensitive-host-path predicate unit test ..."
+"${ROOT_DIR}/scripts/test-sensitive-host-path.sh"
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store.

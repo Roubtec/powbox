@@ -38,6 +38,19 @@ set -euo pipefail
 # added that the root-level probe misses — so reverting ONLY that scan now fails the smoke
 # (task 007a).
 #
+# Two further cases guard the SENSITIVE-SOURCE refusal (the VPS-lockout incident: a `cc`/`cx`
+# accidentally run from ~ would bind-mount the whole home tree and the heal would chown it to
+# node, breaking sshd StrictModes on ~/.ssh and locking the user out of the host):
+#   * sensitive-skip — a root-owned fixture launched with POWBOX_WORKSPACE_HOST_PATH=/root, so
+#     the real heal unit must SKIP the chown and warn (tree stays root-owned). Guards the
+#     launcher-env path heal consults in production.
+#   * fix-mountinfo-backstop — a read-only bind of the host /etc, so fix-workspace-perms.sh
+#     (the privileged boundary, run under sudo with env stripped) must refuse via the
+#     /proc/self/mountinfo source it derives independently of any caller env. Guards the
+#     boundary helper directly, so removing its guard fails the smoke even though heal skips
+#     first in production. The pure predicate + mountinfo parser are also unit-tested by
+#     scripts/test-sensitive-host-path.sh (no Docker/root/native-Linux needed).
+#
 # Self-skips (exit 0, no failure) when it cannot meaningfully run:
 #   * the agent image is absent — unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then
 #     it fails (mirrors smoke-test-selfhosted.sh's guard);
@@ -280,6 +293,99 @@ echo "  ok: nested root-owned file + .git/objects shard re-owned to node; edit +
 exit 0
 '
 
+# The sensitive-source guard assertion (the VPS-lockout incident), run AS node against a
+# genuinely root-owned fixture, but with POWBOX_WORKSPACE_HOST_PATH set (on the docker run)
+# to a HOME/SYSTEM path so the real heal unit must REFUSE to chown it. This exercises the
+# production guard path: launch-agent passes that env, and heal-workspace-perms.sh skips any
+# workspace whose host source is sensitive — so an accidental `cc`/`cx` from ~ never re-owns
+# the home tree to node (which would break sshd StrictModes on ~/.ssh and lock the user out).
+# The fixture bind itself is innocuous (mountinfo field4 = /tmp/...); the env is the signal,
+# exactly as in production. Exit-code contract: 0 = guard correctly skipped (tree left
+# root-owned, node still cannot write); 42 = masked (node could already write → cannot test);
+# other = failure (the chown was NOT skipped, or the warning was missing).
+# shellcheck disable=SC2016  # the inner shell expands these, NOT the host
+ASSERT_SCRIPT_SENSITIVE='
+set -u
+WS="$1"
+if [ "$(id -u)" != "1000" ]; then
+	echo "FAIL: sensitive-skip assertion not running as node (uid 1000) — got uid $(id -u)" >&2
+	exit 1
+fi
+# Ground-truth: node must NOT be able to write the root-owned mount before the heal. A host
+# that masks the native-Linux uid bug lets node write it → nothing to assert, self-skip (42).
+if probe="$(mktemp "${WS}/.powbox-sens-probe.XXXXXX" 2>/dev/null)"; then
+	rm -f "$probe" 2>/dev/null || true
+	echo "  skip: node can already write the root-owned mount (this host masks the native-Linux uid bug)"
+	exit 42
+fi
+echo "  ok: node cannot write the root-owned mount before the heal (as expected)"
+# Drive the REAL heal unit. POWBOX_WORKSPACE_HOST_PATH (set on the docker run) marks the host
+# source as a home/system dir, so heal MUST skip the chown and warn. heal is best-effort
+# (exit 0 even when it skips), so a non-zero exit means it errored.
+errlog="$(mktemp)"
+if ! /usr/local/bin/heal-workspace-perms.sh 2>"$errlog"; then
+	echo "FAIL: heal-workspace-perms.sh errored (it should skip cleanly and exit 0). stderr:" >&2
+	cat "$errlog" >&2
+	exit 1
+fi
+if ! grep -q "system or home directory" "$errlog"; then
+	echo "FAIL: heal did not emit the sensitive-source skip warning. stderr was:" >&2
+	cat "$errlog" >&2
+	exit 1
+fi
+echo "  ok: heal emitted the sensitive-source skip warning"
+# The guard must have PREVENTED the chown: node still cannot write, and the tree is still
+# root-owned. (A regression that ignored the guard would have chowned it to node.)
+if probe="$(mktemp "${WS}/.powbox-sens-probe2.XXXXXX" 2>/dev/null)"; then
+	rm -f "$probe" 2>/dev/null || true
+	echo "FAIL: node can write the mount AFTER heal — the chown was NOT skipped (guard failed)" >&2
+	exit 1
+fi
+owner="$(stat -c %u "$WS" 2>/dev/null || echo "?")"
+if [ "$owner" != "0" ]; then
+	echo "FAIL: workspace root owned by uid ${owner} after heal, expected still-root (0) — guard failed" >&2
+	exit 1
+fi
+echo "  ok: chown was skipped — node still cannot write and the tree is still root-owned (uid 0)"
+exit 0
+'
+
+# The privileged-boundary backstop assertion, run AS node against a read-only bind of the
+# host /etc. fix-workspace-perms.sh runs under sudo (env stripped by env_reset), so it cannot
+# trust a caller env var; it instead derives the bind source from /proc/self/mountinfo (which
+# node cannot forge) and refuses a sensitive one. Here the REAL source IS sensitive (/etc), so
+# fix must refuse even with no POWBOX_WORKSPACE_HOST_PATH set — exercising the mountinfo backstop on
+# a direct invocation with a sensitive workspace, not only via heal (best-effort: on a separate-mount
+# layout the source can resolve non-sensitive and this case self-skips below — feeding the true
+# source, with mountinfo as fallback, is tracked in tasks/009). Exit-code
+# contract: 0 = fix refused via the mountinfo backstop; 42 = this host reports a non-sensitive
+# bind source for /etc (a mount-layout quirk; cannot exercise the path) → self-skip; other =
+# failure (fix did NOT refuse, or failed for an unrelated reason).
+# shellcheck disable=SC2016  # the inner shell expands these, NOT the host
+ASSERT_SCRIPT_FIX_BACKSTOP='
+set -u
+WS="$1"
+. /usr/local/bin/sensitive-host-path.sh
+src="$(powbox_mountinfo_host_src "$WS")"
+echo "  info: mountinfo source for $WS resolves to: ${src:-<none>}"
+if ! powbox_is_sensitive_host_path "$src"; then
+	echo "  skip: this host reports a non-sensitive bind source (${src:-<none>}) for the /etc mount; cannot exercise the mountinfo backstop"
+	exit 42
+fi
+out="$(sudo /usr/local/bin/fix-workspace-perms.sh "$WS" 2>&1)"; rc=$?
+printf "%s\n" "$out"
+if [ "$rc" = 0 ]; then
+	echo "FAIL: fix-workspace-perms.sh exited 0 on a sensitive ($src) mount — it must refuse" >&2
+	exit 1
+fi
+if ! printf "%s" "$out" | grep -q "refusing to chown"; then
+	echo "FAIL: fix-workspace-perms.sh exited non-zero but WITHOUT the sensitive-source refusal (an unrelated error, not the guard). Output above." >&2
+	exit 1
+fi
+echo "  ok: fix-workspace-perms.sh refused to chown the sensitive ($src) mount via the mountinfo backstop"
+exit 0
+'
+
 PASSED_CASES=0
 MASKED=0
 
@@ -375,6 +481,71 @@ case_mixed_ownership() {
 	run_dirmount_case "$fixture" "$ASSERT_SCRIPT_MIXED" "nested.txt"
 }
 
+# === Case: sensitive host source — heal must REFUSE to chown (the VPS-lockout incident) ===
+# A `cc`/`cx` accidentally launched from ~ bind-mounts the whole home tree as the "project";
+# the heal would then recursively chown it to node, breaking sshd StrictModes on ~/.ssh and
+# locking the user out of the host. launch-agent now passes POWBOX_WORKSPACE_HOST_PATH and the
+# heal skips any workspace whose host source is a system/home dir. This case reproduces that:
+# a genuinely root-owned fixture, but launched with POWBOX_WORKSPACE_HOST_PATH=/root, so the
+# real heal unit must skip the chown and warn — leaving the tree root-owned. Verified BOTH
+# in-container (ASSERT_SCRIPT_SENSITIVE) and host-side (the fixture stays uid 0 afterwards).
+case_sensitive_skip() {
+	local fixture
+	fixture="$(make_git_fixture)"
+	FIXTURES+=("$fixture")
+	as_root chown -R root:root "$fixture"
+	echo "Case: sensitive host source (POWBOX_WORKSPACE_HOST_PATH=/root) — heal must skip the chown"
+	set +e
+	docker run --rm \
+		--user node \
+		-e POWBOX_WORKSPACE_HOST_PATH=/root \
+		-e POWBOX_WORKSPACE_HOST_HOME=/root \
+		-v "${fixture}:${MOUNT}" \
+		--entrypoint /bin/bash "$IMAGE" -c "$ASSERT_SCRIPT_SENSITIVE" powbox-dirmount "$MOUNT"
+	local rc=$?
+	set -e
+	case "$rc" in
+	0)
+		# Host-side: the guard left the tree untouched — still root-owned (uid 0). stat as
+		# root since the root-owned mktemp dir (mode 700) may not be traversable otherwise.
+		local host_owner
+		host_owner="$(as_root stat -c %u "$fixture" 2>/dev/null || echo '?')"
+		[ "$host_owner" = "0" ] ||
+			fail "host-side fixture root owned by uid ${host_owner} after the run, expected still-root (0) — the guard failed to skip the chown"
+		echo "  ok: host-side fixture is still root-owned (uid 0) — the chown was skipped"
+		PASSED_CASES=$((PASSED_CASES + 1))
+		;;
+	42)
+		MASKED=1
+		;;
+	*)
+		fail "heal did not skip the chown for a sensitive host source (see the FAIL line above)"
+		;;
+	esac
+}
+
+# === Case: privileged-boundary backstop — fix refuses a sensitive mountinfo source ============
+# fix-workspace-perms.sh runs under sudo (env_reset strips caller env), so it re-derives the
+# bind source from /proc/self/mountinfo and refuses a sensitive one INDEPENDENTLY of heal. To
+# exercise that, bind the host /etc (root-owned, present everywhere) READ-ONLY: its real
+# mountinfo source is /etc, so fix must refuse via the backstop with NO sensitive env set. fix
+# refuses before any walk/chown, so the read-only /etc is never touched.
+case_fix_mountinfo_backstop() {
+	echo "Case: privileged backstop — fix-workspace-perms refuses a sensitive (/etc) mountinfo source"
+	set +e
+	docker run --rm \
+		--user node \
+		-v "/etc:${MOUNT}:ro" \
+		--entrypoint /bin/bash "$IMAGE" -c "$ASSERT_SCRIPT_FIX_BACKSTOP" powbox-dirmount "$MOUNT"
+	local rc=$?
+	set -e
+	case "$rc" in
+	0) PASSED_CASES=$((PASSED_CASES + 1)) ;;
+	42) MASKED=1 ;;
+	*) fail "fix-workspace-perms did not refuse a sensitive /etc mountinfo source (see the FAIL line above)" ;;
+	esac
+}
+
 echo "Dir-mount ownership smoke test (image: $IMAGE)"
 
 # --- image gate (copied from smoke-test-selfhosted.sh) ------------------------
@@ -410,6 +581,8 @@ fi
 
 case_all_root
 case_mixed_ownership
+case_sensitive_skip
+case_fix_mountinfo_backstop
 
 if [ "$MASKED" -eq 1 ]; then
 	note_skip "host masks the native-Linux uid bug (node could already write the root-owned mount)"

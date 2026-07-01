@@ -965,6 +965,31 @@ if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 	EXTRA_ENV+=(-e "PNPM_STORE_DIR=$WT_STORE_DIR")
 fi
 
+# Dir-mounted mode only: tell the entrypoint the workspace's HOST bind-mount source
+# (and the launching user's home) so the workspace-perms heal can REFUSE to chown a
+# mount that is actually a system or home directory. A `cc`/`cx` accidentally run from
+# ~ (e.g. /root on a VPS) would otherwise bind-mount the whole home tree and re-own it
+# to node, breaking sshd's StrictModes chain on ~/.ssh and locking the user out of the
+# host. The entrypoint also derives the source from /proc/self/mountinfo, so this env is
+# an authoritative hint (and the only reliable signal on Docker Desktop / WSL), not the
+# sole guard. Self-hosted mode has no bind mount, so it is irrelevant there.
+if [ "$ISOLATED" != true ]; then
+	# Resolve $HOME to its PHYSICAL path (pwd -P) the same way PROJECT_PATH was above.
+	# The entrypoint compares this home against the mountinfo-derived source, which is
+	# always physical; if /home is itself a symlink (e.g. /home -> /mnt/home) the raw
+	# $HOME=/home/alice would never equal the source's /mnt/home/alice, and the heal
+	# could chown the whole home tree. Fall back to the raw value when it cannot be
+	# resolved (unset, missing dir, no access) — no worse than forwarding it un-resolved.
+	HOST_HOME="${HOME:-}"
+	if [ -n "$HOST_HOME" ]; then
+		HOST_HOME="$(cd "$HOST_HOME" 2>/dev/null && pwd -P)" || HOST_HOME="${HOME:-}"
+	fi
+	EXTRA_ENV+=(
+		-e "POWBOX_WORKSPACE_HOST_PATH=$PROJECT_PATH"
+		-e "POWBOX_WORKSPACE_HOST_HOME=$HOST_HOME"
+	)
+fi
+
 # Self-hosted clone inputs. The entrypoint (after gh auth) clones POWBOX_CLONE_REPO
 # at POWBOX_CLONE_REF into POWBOX_WORKSPACE_DIR, and skips the clone when a .git
 # already exists (reuse — the agent owns its tree). These env vars are frozen at

@@ -189,7 +189,13 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       this helper) lives in heal-workspace-perms.sh, baked beside this one;
 #                       it runs as node (NOT sudo-allowlisted — its only privileged action is
 #                       sudo'ing THIS helper) so the entrypoint and the dir-mount smoke share
-#                       one decision unit.
+#                       one decision unit. BOTH refuse outright to chown a mount whose HOST
+#                       bind-mount source is a system or home directory (/, /root, /home/<user>,
+#                       /etc, ...): a `cc`/`cx` launched by mistake from ~ would otherwise re-own
+#                       the whole home tree to node and break sshd's StrictModes chain on ~/.ssh,
+#                       locking the user out of the host. That shared predicate (and the
+#                       /proc/self/mountinfo source lookup the root helper trusts because node
+#                       cannot forge it) lives in sensitive-host-path.sh, sourced by both.
 #
 #   apt-get           — allows agents to install system packages at runtime for
 #                       anything not pre-installed in the base image. apt-get runs
@@ -280,6 +286,7 @@ COPY --chmod=755 \
     docker/shared/seed-workspace.sh \
     docker/shared/fix-workspace-perms.sh \
     docker/shared/heal-workspace-perms.sh \
+    docker/shared/sensitive-host-path.sh \
     /usr/local/bin/
 
 # Route pnpm (and its `pn` short alias) through the shadow wrapper so a package

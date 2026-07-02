@@ -41,7 +41,20 @@ case "$GIT_COMMON" in
 esac
 WT="$ROOT/.worktrees/${CONTAINER_NAME:?CONTAINER_NAME must be set}/$SLUG"
 
+# Best-effort removal of the worktree's scoped golangci-lint analysis cache
+# (populated by the golangci-lint wrapper at
+# .worktrees/.golangci-cache/<container>/<slug>), so caches do not accumulate
+# after their worktree is gone. Deletes ONLY this exact slug's cache dir and
+# never fails the removal — a cache that cannot be deleted is just a warning.
+remove_lint_cache() {
+	local cache="$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$SLUG"
+	[ -d "$cache" ] || return 0
+	rm -rf "$cache" 2>/dev/null ||
+		echo "wt-remove: warning: could not remove lint cache $cache" >&2
+}
+
 if [ ! -d "$WT" ]; then
+	remove_lint_cache
 	echo "wt-remove: $WT already absent; nothing to do" >&2
 	exit 0
 fi
@@ -56,6 +69,7 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	echo "wt-remove: pruning orphaned worktree dir $WT" >&2
 	rm -rf "$WT"
 	git -C "$ROOT" worktree prune
+	remove_lint_cache
 	exit 0
 fi
 
@@ -72,4 +86,5 @@ if [ -n "$FORCE" ]; then
 else
 	git -C "$ROOT" worktree remove "$WT" >&2
 fi
+remove_lint_cache
 echo "wt-remove: removed $WT (branch kept)" >&2

@@ -293,9 +293,14 @@ COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d
 # `curl | sh` installer: under /bin/sh (no pipefail) a failed installer
 # download would be masked by the pipeline and the layer would "succeed"
 # without the linter, and the pinned digests make the bits immutable where a
-# tag fetch is not. gopls and dlv are deliberately NOT baked: the agent
-# harnesses speak no LSP and debug via tests/prints, and either is one
-# `go install` away (~/go/bin is on PATH below).
+# tag fetch is not. The binary is extracted OFF PATH to /usr/local/libexec:
+# the PATH name /usr/local/bin/golangci-lint is a symlink to the
+# cache-scoping wrapper (golangci-lint-wrapper.sh — the pnpm-wrapper
+# precedent; see the symlink RUN below the shared-script COPY), which derives
+# a per-worktree GOLANGCI_LINT_CACHE and then execs this real binary. gopls
+# and dlv are deliberately NOT baked: the agent harnesses speak no LSP and
+# debug via tests/prints, and either is one `go install` away (~/go/bin is on
+# PATH below).
 # go/gofmt are symlinked into /usr/local/bin (the sqlcmd/bcp precedent) because
 # login shells (`sh -lc`, as the image smoke test spawns) reset PATH from
 # /etc/profile and would otherwise lose /usr/local/go/bin; the go binary
@@ -324,7 +329,8 @@ RUN GO_VERSION=1.26.4 \
     && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
     && curl -fsSL -o /tmp/golangci-lint.tar.gz "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}.tar.gz" \
     && echo "${golangci_sha256}  /tmp/golangci-lint.tar.gz" | sha256sum -c - \
-    && tar -C /usr/local/bin --strip-components=1 --no-same-owner \
+    && mkdir -p /usr/local/libexec \
+    && tar -C /usr/local/libexec --strip-components=1 --no-same-owner \
         -xzf /tmp/golangci-lint.tar.gz "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}/golangci-lint" \
     && rm /tmp/golangci-lint.tar.gz \
     && printf 'export PATH="$HOME/go/bin:$PATH"\n' > /etc/profile.d/golang-gobin.sh
@@ -345,6 +351,7 @@ COPY --chmod=755 \
     docker/shared/shadow-refresh.sh \
     docker/shared/pnpm-shadow-wrapper.sh \
     docker/shared/pnpm-shadow-doctor \
+    docker/shared/golangci-lint-wrapper.sh \
     docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
     docker/shared/seed-image-store.sh \
@@ -360,8 +367,13 @@ COPY --chmod=755 \
 # pnpm; `pnpx`/`pnx` (dlx) are left alone — they don't write workspace
 # node_modules. Must run after `npm install -g pnpm` created these symlinks and
 # after the wrapper was copied above.
+# golangci-lint gets the same treatment: the PATH name resolves to the
+# cache-scoping wrapper, which derives a per-worktree GOLANGCI_LINT_CACHE and
+# execs the real binary extracted to /usr/local/libexec in the Go layer above
+# (parallel worktree runs must not share one analysis cache — see the wrapper).
 RUN ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pnpm \
-    && ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pn
+    && ln -sf /usr/local/bin/pnpm-shadow-wrapper.sh /usr/local/bin/pn \
+    && ln -sf /usr/local/bin/golangci-lint-wrapper.sh /usr/local/bin/golangci-lint
 
 USER node
 

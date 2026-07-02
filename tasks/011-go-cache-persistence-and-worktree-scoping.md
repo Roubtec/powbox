@@ -36,7 +36,7 @@ The open choices above were settled with the maintainer before implementation:
    - `PNPM_STORE_DIR` stays keyed to the existing JS/powbox gate — the pnpm wrapper's regression guard (`pnpm-shadow-wrapper.sh`, "PNPM_STORE_DIR is set iff the launcher mounted the volume") must keep firing when a root `pnpm install` in a go.mod-only repo would write onto the host bind mount. The new Go cache env vars key on the worktrees-volume gate instead.
    - The stale-mount reconciliation in both launchers (expected-vs-actual volume name per destination) becomes three-state (both / wt-only / neither) with messages to match.
    - `POWBOX_PRINT_IDENTITY` output and the smoke tests gain the second gate flag (matrix: package.json-only / go.mod-only / both / neither).
-4. **Root (non-worktree) checkout: also scoped** — the wrapper maps the main checkout to `.worktrees/.golangci-cache/_root` when the volume exists (persistence across recreation, uniform behavior), falling back to the `~/.cache/golangci-lint` default when there is no `.worktrees` mount.
+4. **Root (non-worktree) checkout: also scoped** — the wrapper maps the main checkout to `.worktrees/.golangci-cache/.root` when the volume exists (persistence across recreation, uniform behavior), falling back to the `~/.cache/golangci-lint` default when there is no `.worktrees` mount. (The reserved name is dot-prefixed on purpose: `wt-enter` permits a literal slug `_root` but forbids leading dots, so `.root` can never collide with a real worktree slug.)
 
 ## Acceptance
 

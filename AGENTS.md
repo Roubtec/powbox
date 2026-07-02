@@ -42,6 +42,24 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 - The repo-root `PSScriptAnalyzerSettings.psd1` is auto-applied (PSScriptAnalyzer discovers it in the analyzed directory) and is baked into the image as the house default at `/usr/local/share/powershell/PSScriptAnalyzerSettings.psd1`. It excludes rules that clash with these CLI-style scripts — see the file for the per-rule rationale.
 - To override the config for a single run, pass an explicit `-Settings`: `-Settings @{}` for a full unfiltered pass against all default rules, or e.g. `-Settings @{IncludeRules=@('PSReviewUnusedParameter')}` to run one otherwise-excluded rule across the tree. Note that `-IncludeRule` alone does **not** override `ExcludeRules` — the auto-discovered config wins.
 
+## Validating Changes
+
+When you develop powbox from **inside** a powbox container, the validation surface is split: static checks and pure-shell tests run here, but anything that needs a built image runs on the host or in CI.
+
+Runs in-container (do these before handing off):
+
+- Static lint gates: `shellcheck` (Tier 0 CI blocks at `--severity=error`; run the default severity locally), `shfmt -d`, and PSScriptAnalyzer — see [PowerShell Linting](#powershell-linting).
+- Pure-shell unit tests that need no image or Docker daemon, e.g. `scripts/test-sensitive-host-path.sh`, `scripts/test-detect-shadows.sh`, `scripts/test-pnpm-shadow-wrapper.sh`.
+
+Needs the host or CI (cannot run here):
+
+- Full image builds (`./build.sh base|agent|all`). The in-container `docker` is a Podman shim with no `buildx bake`, so `scripts/build-image.sh` fails fast with host-build guidance rather than emitting a confusing `unknown flag: --file`.
+- `commands/smoke-test.sh` and the per-stage smokes (`scripts/smoke-test-image.sh`, `scripts/smoke-test-dirmount.sh`, `scripts/smoke-test-podman.sh`, `scripts/smoke-test-selfhosted.sh`) — they need a real built image and, in some cases, a relaunchable container that the running agent container cannot provide.
+
+When validating a change requires a rebuilt image or a smoke run, stop and ask the user to build on the host (`./build.sh all`, or `build.ps1`) and restart the container from the rebuilt image — do not attempt an in-container build. Tier 1 CI builds and smoke-tests every PR automatically, so a PR is still covered.
+
+The gates live in `.github/workflows/native-linux-ci.yml` (Tier 0 static guards) and `.github/workflows/native-linux-build.yml` (Tier 1 build + smoke).
+
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.

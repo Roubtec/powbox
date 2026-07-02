@@ -69,13 +69,15 @@ gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>
   `address-review` SKILL.md "GitHub API recipes" section — keep the helper and the skills'
   fallback recipe identical.
 - **Scope assertion:** before emitting anything, every comment `url` must point at the
-  requested PR. Match with a proper boundary — `/pull/<N>` followed by a non-digit
-  (`#`, `/`, or end) — so PR #12 never accepts a `/pull/123` URL. Include the owner/repo in
-  the match so a same-number PR in another repo also trips it. On any mismatch: emit
-  **nothing** on stdout, print a diagnostic naming the offending URL(s) to stderr, and exit
-  with a **distinct exit code** (e.g. `3`) so callers can distinguish "contaminated response —
-  retry" from usage or auth errors. A single internal retry before failing is acceptable;
-  document whichever you choose in the usage text.
+  requested PR. Match exactly as the skills' recipe prescribes — `OWNER/REPO` plus
+  `/pull/<N>` followed by `#`, `/`, `?`, or end (never a plain substring check) — so PR #12
+  never accepts a `/pull/123` URL and a same-number PR in another repo also trips it. On a
+  mismatch, discard the response and retry **once** with a fresh single-shot query; if the
+  mismatch repeats, fail closed: emit **nothing** on stdout, print a diagnostic naming the
+  offending URL(s) to stderr, and exit with a **distinct exit code** (e.g. `3`) so callers
+  can distinguish "contaminated response" from usage or auth errors. These
+  retry-once-then-fail-closed semantics match the skills' recipe; document them in the
+  usage text.
 - **Style:** follow `docker/shared/gitcat` — bash, `set -euo pipefail`, `usage()` to stdout
   for `-h`/`--help` (exit 0) and stderr on misuse (exit non-zero), `die()` for diagnostics,
   tab-indented, `shellcheck`/`shfmt` clean. Dependencies are `gh` and `jq`, both baked.
@@ -116,9 +118,10 @@ gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>
   (a) unresolved-only filtering (and `--all`); (b) a two-page thread list followed via
   `endCursor`, asserting **two separate** `gh` invocations with the right `after` values and
   that `--paginate` never appears in the shim's recorded args; (c) a contaminated fixture —
-  one comment `url` from a different PR — exits with the distinct code and emits no stdout
-  JSON; (d) the URL boundary case (`/pull/12` vs `/pull/123`); (e) nested comment-page
-  fetch-up.
+  one comment `url` from a different PR, served on the first call **and** the internal
+  retry — exits with the distinct code and emits no stdout JSON, while a contaminated
+  first response followed by a clean retry succeeds; (d) the URL boundary case
+  (`/pull/12` vs `/pull/123`); (e) nested comment-page fetch-up.
 - The helper must not depend on the repo it runs in (it is a generic container tool, like
   `gitcat` — keep it repo-agnostic; no powbox-specific assumptions).
 - Keep the skills' fallback recipe and the helper's query **textually in sync** — a drift
@@ -134,8 +137,10 @@ gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>
 
 - `gh-review-threads <PR#>` on a real PR (manual validation) prints the JSON shape above,
   unresolved-only by default, and never invokes `--paginate`.
-- A contaminated response (simulated in the unit test) produces no stdout output, a stderr
-  diagnostic naming the offending URL, and the documented distinct exit code.
+- A persistently contaminated response (contaminated on the internal retry too, simulated in
+  the unit test) produces no stdout output, a stderr diagnostic naming the offending URL,
+  and the documented distinct exit code; a clean retry after one contaminated response
+  succeeds.
 - `/pull/<N>` matching is boundary-safe (`12` never matches `123`) and repo-qualified.
 - Fresh agent image (`build.sh agent` or `agent-update`) has the helper on `PATH` at
   `/usr/local/bin/gh-review-threads` with the exec bit set; `scripts/check-exec-bits.sh`

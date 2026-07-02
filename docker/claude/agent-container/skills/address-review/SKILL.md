@@ -115,7 +115,7 @@ If the rebase changed the branch tip, expect the eventual push to be a force-pus
 
 Fetch the **unresolved** review threads and enough context to judge them (see "GitHub API recipes"):
 
-- **Review threads** (inline comments) via GraphQL `reviewThreads` — paginate past 100 threads, keep only `isResolved == false`, and detect unexpectedly truncated comment lists. For each, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, author login/type, `body`, `diffHunk`, and `url`.
+- **Review threads** (inline comments) via GraphQL `reviewThreads` — one single-shot query per page, following `endCursor` manually past 100 threads; never `gh api graphql --paginate` for this query (see the recipes — under concurrent runs it has returned another PR's threads). Keep only `isResolved == false`, detect unexpectedly truncated comment lists, and **scope-check the result**: every returned comment `url` must point at this PR (`…/pull/<N>#…`); on any mismatch, discard the whole response and re-fetch. For each thread, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, author login/type, `body`, `diffHunk`, and `url`.
 - **Top-level review summaries** (`gh pr view --json reviews`) and **issue comments** (`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`) — read for context, especially **maintainer replies/push-backs** that override or qualify a bot's original comment. They are not automatically actionable because they have no resolved/unresolved state; include a standalone item only when the maintainer explicitly identifies it as outstanding in the request or discussion.
 
 A maintainer reply on an unresolved thread is **authoritative**: if they said "skip this" or "do X instead," follow the maintainer over the original reviewer.
@@ -217,14 +217,14 @@ Purpose: run inside a parallelized agent that has no direct line to the user (e.
 
 `gh api` expands `{owner}`/`{repo}` to the current repo. For GraphQL, pass real values (`gh repo view --json owner,name`).
 
-**List unresolved review threads** (id for resolve, comment `databaseId` for replies). `--paginate` follows `reviewThreads.pageInfo`; if a thread's nested `comments.pageInfo.hasNextPage` is true, fetch that thread's remaining comments before triage:
+**List unresolved review threads** (id for resolve, comment `databaseId` for replies). Single-shot query — do **not** use `--paginate` here: run concurrently with other `gh` GraphQL calls (e.g. an `address-reviews` fan-out), `gh api graphql --paginate` has returned **another PR's** review threads, which unguarded would misfile replies/resolves onto the wrong PR. One page covers most PRs (`totalCount` ≤ 100); when `reviewThreads.pageInfo.hasNextPage` is true, fetch the next page as a fresh single-shot call passing the returned `endCursor` via `-F after=CURSOR`, and likewise fetch a thread's remaining comments when its nested `comments.pageInfo.hasNextPage` is true — always before triage:
 
 ```sh
-gh api graphql --paginate -f query='
-query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){
+gh api graphql -f query='
+query($owner:String!,$repo:String!,$pr:Int!,$after:String){
   repository(owner:$owner,name:$repo){
     pullRequest(number:$pr){
-      reviewThreads(first:100,after:$endCursor){ nodes{
+      reviewThreads(first:100,after:$after){ totalCount nodes{
         id isResolved isOutdated path line
         comments(first:100){
           nodes{ databaseId author{ login __typename } body diffHunk url }
@@ -233,8 +233,10 @@ query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){
       } pageInfo{ hasNextPage endCursor }}
     }
   }
-}' -F owner=OWNER -F repo=REPO -F pr=NUMBER
+}' -F owner=OWNER -F repo=REPO -F pr=NUMBER   # for pages after the first, add: -F after=CURSOR
 ```
+
+**Scope-check before acting:** every returned comment `url` must contain `/pull/NUMBER` for the PR you are addressing. A mismatch means the response was contaminated by a concurrent query (or you queried the wrong PR) — discard the entire result and re-fetch; never reply to or resolve a thread whose `url` points at a different PR.
 
 **Reply to a review comment** (REST, threads the reply under the original):
 
@@ -269,7 +271,7 @@ gh pr edit NUMBER --add-reviewer @copilot
 - [ ] Working tree clean; no rebase in progress; `gh` authenticated.
 - [ ] PR resolved (explicit `PR#` precedence) and sanity-checked against the current branch.
 - [ ] If requested, single-branch rebase done first; non-trivial conflict handled (interactive loop-in / hands-off abort+stop); validated when conflicted.
-- [ ] All **unresolved** threads gathered with pagination; resolved ones ignored; maintainer replies and top-level decision comments treated as authoritative; a zero-actionable run exits without push/comment/ping.
+- [ ] All **unresolved** threads gathered via single-shot queries (manual `endCursor` paging past 100 — never GraphQL `--paginate`) and scope-checked (every comment `url` on this PR); resolved ones ignored; maintainer replies and top-level decision comments treated as authoritative; a zero-actionable run exits without push/comment/ping.
 - [ ] Each thread triaged: actionable / already-addressed / push-back / deferred-to-task / ambiguous.
 - [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); same-pattern sweep done in changed/related code.
 - [ ] Deferred items recorded as standalone task files per `write-tasks` conventions, numbered into the repo's task folder, committed on the current branch separately from code fixes.

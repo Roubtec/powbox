@@ -299,8 +299,13 @@ COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d
 # go/gofmt are symlinked into /usr/local/bin (the sqlcmd/bcp precedent) because
 # login shells (`sh -lc`, as the image smoke test spawns) reset PATH from
 # /etc/profile and would otherwise lose /usr/local/go/bin; the go binary
-# resolves GOROOT through the symlink. Placed low in the file so a Go bump
-# never busts the expensive gh / mssql / pwsh / npm layers above.
+# resolves GOROOT through the symlink. ~/go/bin (GOBIN — where `go install`
+# lands) can't be covered by build-time symlinks, so a profile.d snippet
+# re-prepends it for those PATH-resetting login shells ($HOME, not a hardcoded
+# /home/node, so it also holds for root); the harnesses' non-login shells get
+# it from the ENV PATH below, and zsh logins inherit that ENV PATH untouched
+# (Debian's zprofile never sources /etc/profile). Placed low in the file so a
+# Go bump never busts the expensive gh / mssql / pwsh / npm layers above.
 RUN GO_VERSION=1.26.4 \
     && GOLANGCI_LINT_VERSION=2.12.2 \
     && arch="$(dpkg --print-architecture)" \
@@ -321,7 +326,8 @@ RUN GO_VERSION=1.26.4 \
     && echo "${golangci_sha256}  /tmp/golangci-lint.tar.gz" | sha256sum -c - \
     && tar -C /usr/local/bin --strip-components=1 --no-same-owner \
         -xzf /tmp/golangci-lint.tar.gz "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}/golangci-lint" \
-    && rm /tmp/golangci-lint.tar.gz
+    && rm /tmp/golangci-lint.tar.gz \
+    && printf 'export PATH="$HOME/go/bin:$PATH"\n' > /etc/profile.d/golang-gobin.sh
 
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
@@ -362,7 +368,9 @@ USER node
 ENV PNPM_HOME="/home/node/.local/share/pnpm"
 # /usr/local/go/bin is the baked Go toolchain; /home/node/go/bin is Go's default
 # GOBIN ($GOPATH/bin), so anything a session `go install`s (gopls, dlv, …) is
-# immediately runnable without PATH surgery.
+# immediately runnable without PATH surgery. Login shells never see this ENV
+# (they reset PATH from /etc/profile) — the go/gofmt symlinks and the
+# profile.d GOBIN snippet in the Go layer above keep both entries alive there.
 ENV PATH="/opt/mssql-tools18/bin:/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # The agent harnesses' Bash tools spawn $SHELL non-interactively, so default it
 # to bash: the models' command prior is bash/POSIX (word-splitting, 0-indexed

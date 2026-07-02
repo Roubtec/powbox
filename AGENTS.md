@@ -56,7 +56,7 @@ Needs the host or CI (cannot run here):
 - Full image builds (`./build.sh base|agent|all`). The in-container `docker` is a Podman shim with no `buildx bake`, so `scripts/build-image.sh` fails fast with host-build guidance rather than emitting a confusing `unknown flag: --file`.
 - `commands/smoke-test.sh` and the per-stage smokes (`scripts/smoke-test-image.sh`, `scripts/smoke-test-dirmount.sh`, `scripts/smoke-test-podman.sh`, `scripts/smoke-test-selfhosted.sh`) — they need a real built image and, in some cases, a relaunchable container that the running agent container cannot provide.
 
-When validating a change requires a rebuilt image or a smoke run, stop and ask the user to build on the host (`./build.sh all`, or `build.ps1`) and restart the container from the rebuilt image — do not attempt an in-container build. Tier 1 CI builds and smoke-tests image-affecting PRs targeting main automatically, so such a PR is still covered.
+When validating a change requires a rebuilt image or a smoke run, stop and ask the user to build on the host (`./build.sh all`, or `build.ps1`) and restart the container from the rebuilt image — do not attempt an in-container build. Tier 1 CI also builds and smoke-tests image-affecting PRs targeting main (unless the PR is labeled `non-code`), so such a PR is normally covered.
 
 The gates live in `.github/workflows/native-linux-ci.yml` (Tier 0 static guards) and `.github/workflows/native-linux-build.yml` (Tier 1 build + smoke).
 

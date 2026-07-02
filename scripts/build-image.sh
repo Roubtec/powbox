@@ -57,12 +57,12 @@ esac
 # this guard is moot (real Docker) — the AGENTS.md rule covers it either way.
 if docker --version 2>/dev/null | grep -qi podman; then
 	cat >&2 <<'EOF'
-Full image builds are not supported inside the agent container: `docker` here is
-a Podman shim, and `podman buildx` has no `bake` subcommand.
+This `docker` is backed by Podman, and `podman buildx` has no `bake` subcommand,
+so a full image build here would fail. Full image builds are a host/CI concern.
 
 Ask the user to run `./build.sh all` (or `build.ps1`) on the host, then restart
-the container from the rebuilt image. Tier 1 CI builds and smoke-tests
-image-affecting PRs targeting main automatically.
+the container from the rebuilt image. Tier 1 CI also builds and smoke-tests
+image-affecting PRs to main, unless the PR is labeled `non-code`.
 EOF
 	exit 1
 fi

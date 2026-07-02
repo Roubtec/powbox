@@ -78,7 +78,9 @@ if (-not $imagePresent) {
 }
 else {
   Write-Host "Running gh-review-threads helper unit test (in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-gh-review-threads.sh
+  # Point HELPER at the baked artifact so the in-image run validates the installed
+  # /usr/local/bin/gh-review-threads on PATH, not the mounted /repo source checkout.
+  docker run --rm -v "${rootDir}:/repo:ro" -e GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads --entrypoint /bin/bash $Image /repo/scripts/test-gh-review-threads.sh
   if ($LASTEXITCODE -ne 0) {
     throw "gh-review-threads helper unit test failed. See container output above."
   }

@@ -14,7 +14,7 @@ set -euo pipefail
 # nested comment fetch-up. Runnable on its own and wired into
 # commands/smoke-test.{sh,ps1}.
 #
-# Covers Implementation-notes cases (a)–(e):
+# Covers Implementation-notes cases (a)–(f):
 #   (a) unresolved-only filtering, and --all
 #   (b) a two-page thread list followed via endCursor (two separate gh calls,
 #       right `after` values, no --paginate)
@@ -25,7 +25,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HELPER="${ROOT_DIR}/docker/shared/gh-review-threads"
+# Which helper binary to exercise. Defaults to the in-repo source. Smoke Stage 0b
+# overrides it with GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads so an
+# in-image run actually validates the BAKED artifact on PATH, not the mounted source
+# checkout — otherwise a stale or behaviorally broken installed helper would slip past
+# Stage 1's `command -v` presence probe untested.
+HELPER="${GH_REVIEW_THREADS_HELPER:-${ROOT_DIR}/docker/shared/gh-review-threads}"
 
 [ -x "$HELPER" ] || {
 	echo "test-gh-review-threads: helper not found or not executable: $HELPER" >&2

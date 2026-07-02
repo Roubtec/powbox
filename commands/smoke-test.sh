@@ -56,7 +56,9 @@ if command -v jq >/dev/null 2>&1; then
 	"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
 elif docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running gh-review-threads helper unit test (host jq absent — in $IMAGE) ..."
-	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-gh-review-threads.sh
+	# Point HELPER at the baked artifact so the in-image run validates the installed
+	# /usr/local/bin/gh-review-threads on PATH, not the mounted /repo source checkout.
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" -e GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-gh-review-threads.sh
 else
 	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — host 'jq' not found and image '$IMAGE' absent."
 	skipped+=("Stage 0b: gh-review-threads helper unit test (no host jq, image absent)")

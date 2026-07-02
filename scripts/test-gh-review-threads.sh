@@ -21,6 +21,7 @@ set -euo pipefail
 #   (c) a contaminated response — fail closed on repeat, succeed on a clean retry
 #   (d) the /pull/12 vs /pull/123 boundary (and end/`#` acceptance)
 #   (e) nested comment-page fetch-up
+#   (f) default repo resolution via `gh repo view` when --repo is omitted
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -318,6 +319,28 @@ cline1="$(nth_match 1 "$d/log" '[threadId=')"
 assert_contains "e: nested call targets the thread" "$cline1" "[threadId=T_nested]"
 assert_contains "e: nested call uses the comment endCursor" "$cline1" "[after=CCUR1]"
 assert_not_contains "e: never --paginate" "$RUN_LOG" "[--paginate]"
+
+# ============================================================================
+# (f) default repo resolution via `gh repo view` when --repo is omitted
+# ============================================================================
+# With no --repo, the helper resolves OWNER/REPO from `gh repo view --json
+# owner,name` and scopes against that. The stub serves $GH_STUB_DIR/repo for the
+# `gh repo view` call; a thread url under the resolved repo must pass. Exit 0
+# proves the .owner.login/.name parse (a misparse would build a wrong EXPECTED
+# prefix and the scope check would fail closed with exit 3).
+NODES_F='[
+  {"id":"T_default","isResolved":false,"isOutdated":false,"path":"d.js","line":1,
+   "comments":{"nodes":[{"databaseId":801,"author":{"login":"codex","__typename":"Bot"},"body":"default repo","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r801"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+]'
+d="$(new_case)"
+printf '%s\n' '{"owner":{"login":"acme"},"name":"widgets"}' >"$d/repo"
+threads_one_page "$NODES_F" >"$d/threads-1"
+run "$d" 12
+assert_eq "f: default-repo exit 0" "$RUN_RC" 0
+assert_eq "f: one thread" "$(jqr 'length' "$RUN_OUT")" 1
+assert_eq "f: keeps the in-scope thread" "$(jqr '.[0].id' "$RUN_OUT")" T_default
+assert_contains "f: resolved repo via gh repo view" "$RUN_LOG" "[repo] [view]"
+assert_not_contains "f: never --paginate" "$RUN_LOG" "[--paginate]"
 
 # ============================================================================
 # usage / arg handling

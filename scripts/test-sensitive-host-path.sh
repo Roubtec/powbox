@@ -13,7 +13,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LIB="${ROOT_DIR}/docker/shared/sensitive-host-path.sh"
+# Which library to source. Defaults to the in-repo source. Smoke Stage 0a overrides it
+# with SENSITIVE_HOST_PATH_LIB=/usr/local/bin/sensitive-host-path.sh so an in-image run
+# actually validates the BAKED base-layer copy that entrypoint-core.sh / fix-workspace-perms.sh
+# / heal-workspace-perms.sh source at runtime, not the mounted /repo source checkout —
+# otherwise a stale or behaviorally broken baked copy would never be exercised by the smoke.
+LIB="${SENSITIVE_HOST_PATH_LIB:-${ROOT_DIR}/docker/shared/sensitive-host-path.sh}"
+
+[ -r "$LIB" ] || {
+	echo "test-sensitive-host-path: library not found or not readable: $LIB" >&2
+	exit 1
+}
 
 # shellcheck source=docker/shared/sensitive-host-path.sh
 . "$LIB"

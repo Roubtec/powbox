@@ -13,7 +13,7 @@ would have posted `Fixed in <sha>` replies and `resolveReviewThread` mutations a
 The skills were already updated to describe the reliable approach in prose (commit
 `1b79b5f`, `fix(skills): fetch review threads single-shot with a PR-scope check, not
 --paginate`, on `minor-improvements`): single-shot queries, manual `endCursor` paging, and a
-PR-scope check on every returned comment `url`. But prose asks every agent to re-implement
+repo-qualified, boundary-safe PR-scope check on every returned comment `url`. But prose asks every agent to re-implement
 the same multi-step recipe correctly, every run. A small **image-baked helper** makes the
 safe path the easy path: one command that encapsulates the query, the manual pagination, and
 the scope assertion — used identically by the Claude skill, the Codex skill, and the

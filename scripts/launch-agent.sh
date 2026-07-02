@@ -216,22 +216,22 @@ normalize_ctx_path() {
 	local p
 	p="$1"
 	case "$(uname -s)" in
-		MINGW* | MSYS* | CYGWIN*)
-			# Normalize backslashes to forward slashes (Windows paths only).
-			p="$(printf '%s' "$p" | sed 's|\\|/|g')"
-			# Lowercase first so that the prefix patterns below only need to match [a-z].
-			# This must stay above the sed substitutions — moving it after them would
-			# leave prefixes intact when Docker reports an uppercase drive letter.
-			p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
-			# /run/desktop/mnt/host/c and /run/desktop/mnt/host/c/... → c: and c:/...
-			p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-			# /host_mnt/c and /host_mnt/c/... → c: and c:/...
-			p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-			# /mnt/c and /mnt/c/... → c: and c:/...
-			p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-			# MSYS/Git Bash native form: /c and /c/... → c: and c:/...
-			p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-			;;
+	MINGW* | MSYS* | CYGWIN*)
+		# Normalize backslashes to forward slashes (Windows paths only).
+		p="$(printf '%s' "$p" | sed 's|\\|/|g')"
+		# Lowercase first so that the prefix patterns below only need to match [a-z].
+		# This must stay above the sed substitutions — moving it after them would
+		# leave prefixes intact when Docker reports an uppercase drive letter.
+		p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+		# /run/desktop/mnt/host/c and /run/desktop/mnt/host/c/... → c: and c:/...
+		p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+		# /host_mnt/c and /host_mnt/c/... → c: and c:/...
+		p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+		# /mnt/c and /mnt/c/... → c: and c:/...
+		p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+		# MSYS/Git Bash native form: /c and /c/... → c: and c:/...
+		p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
+		;;
 	esac
 	# Strip trailing slash.
 	printf '%s' "${p%/}"
@@ -700,7 +700,7 @@ fi
 #     (Go caches + worktrees), NO node_modules mount;
 #   * non-dev folder (both gates false)                    -> NO mount at all.
 # This covers three upgrade/mismatch paths:
-	#   * predates the .worktrees volume entirely (no .worktrees mount) — it still
+#   * predates the .worktrees volume entirely (no .worktrees mount) — it still
 #     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
 #     installs never hardlink even after the image is rebuilt;
 #   * predates the per-agent volume RENAME — it mounts the old project-keyed
@@ -855,6 +855,9 @@ elif [ "$AGENT" = "claude" ]; then
 		# Passing --continue when no session exists makes claude print "No
 		# conversation found" and exit instead of falling back to a fresh session.
 		# The check runs inside the container where claude-config is mounted.
+		# The single quotes are deliberate: $PWD, $HOME, and $slug must expand in
+		# the container's shell at runtime, not in this launcher.
+		# shellcheck disable=SC2016
 		CMD=(sh -c 'slug=$(printf %s "$PWD" | sed "s/[^a-zA-Z0-9-]/-/g"); if ls "$HOME/.claude/projects/$slug"/*.jsonl >/dev/null 2>&1; then exec claude --dangerously-skip-permissions --continue; else exec claude --dangerously-skip-permissions; fi')
 	else
 		CMD=(claude --dangerously-skip-permissions)
@@ -921,6 +924,9 @@ if [ "$ISOLATED" = true ]; then
 	# dir; the now-empty volume then gets the placeholder below. The volume itself is
 	# kept. Nothing persists the wipe, so a later restart of a named instance never
 	# re-wipes the agent's work.
+	# The single quotes are deliberate: $(ls -A ...) must run in the prep
+	# container's shell, not in this launcher.
+	# shellcheck disable=SC2016
 	WS_PREP_CMD='mkdir -p /mnt/workspace /mnt/containers /mnt/podman-imagestore && chown node:node /mnt/workspace /mnt/containers /mnt/podman-imagestore && { [ -n "$(ls -A /mnt/workspace 2>/dev/null)" ] || : > /mnt/workspace/.powbox-ws-init; }'
 	if [ "$RECLONE" = true ]; then
 		WS_PREP_CMD='find /mnt/workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; '"$WS_PREP_CMD"

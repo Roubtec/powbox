@@ -101,7 +101,7 @@ Record `owner`, `repo`, PR `number`, `baseRefName`, `headRefName`, `headRefOid`,
 Rebasing brings the branch close to its final merged state, so address the feedback against the geometry the work will actually land in (essential when several stacked PRs are being fixed at once).
 This is a **single-branch** rebase. To restack a whole chain of dependent branches, that is the separate `rebase-stack` skill — mention it if the user seems to want chain-wide restacking.
 
-1. Verify the target branch ref exists locally.
+1. Verify the target exists locally — a branch ref, or an exact commit SHA (a batch orchestrator pins the target to one commit so every entry rebases onto the same base).
 2. Save the branch being rewritten, not the target: `current_branch="$(git branch --show-current)"`, require it to be non-empty, set `ts="$(date -u +%Y%m%d-%H%M%S)"`, then `git update-ref "refs/pre-rebase/$current_branch/$ts" HEAD`.
 3. `git rebase <target>`. Git's patch-id detection drops commits already present on the target.
 4. **Conflicts:**

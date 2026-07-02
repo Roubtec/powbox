@@ -14,7 +14,8 @@ set -euo pipefail
 # nested comment fetch-up. Runnable on its own and wired into
 # commands/smoke-test.{sh,ps1}.
 #
-# Covers Implementation-notes cases (a)–(f):
+# Covers cases (a)–(g) — (a)–(e) from the task Implementation notes, (f)–(g) added
+# in review:
 #   (a) unresolved-only filtering, and --all
 #   (b) a two-page thread list followed via endCursor (two separate gh calls,
 #       right `after` values, no --paginate)
@@ -22,6 +23,7 @@ set -euo pipefail
 #   (d) the /pull/12 vs /pull/123 boundary (and end/`#` acceptance)
 #   (e) nested comment-page fetch-up
 #   (f) default repo resolution via `gh repo view` when --repo is omitted
+#   (g) case-insensitive owner/repo scope match (non-canonical --repo casing)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -346,6 +348,25 @@ assert_eq "f: one thread" "$(jqr 'length' "$RUN_OUT")" 1
 assert_eq "f: keeps the in-scope thread" "$(jqr '.[0].id' "$RUN_OUT")" T_default
 assert_contains "f: resolved repo via gh repo view" "$RUN_LOG" "[repo] [view]"
 assert_not_contains "f: never --paginate" "$RUN_LOG" "[--paginate]"
+
+# ============================================================================
+# (g) case-insensitive owner/repo scope match
+# ============================================================================
+# GitHub owner/repo are case-insensitive, but comment urls carry canonical casing.
+# A --repo passed in non-canonical casing (Acme/Widgets) must still scope-match the
+# canonical urls (acme/widgets) and emit them, rather than read as contamination and
+# fail closed with exit 3 (which is what a case-sensitive prefix check would do).
+NODES_G='[
+  {"id":"T_case","isResolved":false,"isOutdated":false,"path":"g.js","line":1,
+   "comments":{"nodes":[{"databaseId":811,"author":{"login":"codex","__typename":"Bot"},"body":"canonical-cased url","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r811"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+]'
+d="$(new_case)"
+threads_one_page "$NODES_G" >"$d/threads-1"
+run "$d" --repo Acme/Widgets 12
+assert_eq "g: mixed-case --repo accepted (exit 0)" "$RUN_RC" 0
+assert_eq "g: one thread" "$(jqr 'length' "$RUN_OUT")" 1
+assert_eq "g: emits the in-scope thread" "$(jqr '.[0].id' "$RUN_OUT")" T_case
+assert_eq "g: preserves canonical url casing" "$(jqr '.[0].comments[0].url' "$RUN_OUT")" "https://github.com/acme/widgets/pull/12#discussion_r811"
 
 # ============================================================================
 # usage / arg handling

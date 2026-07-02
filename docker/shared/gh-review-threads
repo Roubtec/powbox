@@ -133,6 +133,10 @@ fi
 
 # The boundary-safe, repo-qualified prefix every comment url must extend.
 EXPECTED="https://github.com/${OWNER}/${REPO}/pull/${PR}"
+# Lowercased copy for the scope match: GitHub owner/repo are case-insensitive, but
+# comment urls carry canonical casing, so a --repo whose casing differs (e.g.
+# roubtec/powbox vs the canonical Roubtec/powbox) must not read as contamination.
+EXPECTED_LC="$(printf '%s' "$EXPECTED" | tr '[:upper:]' '[:lower:]')"
 
 # --- GraphQL queries ---------------------------------------------------------
 # Kept textually in sync with the address-review SKILL.md recipe (see header).
@@ -253,16 +257,23 @@ fetch_all() {
 }
 
 # Print any comment url in the merged nodes that is NOT boundary-safe-inside this
-# PR. Empty output ⇒ the whole response is in scope. `$EXPECTED` is matched as a
-# literal (quoted) prefix; `[#/?]*` allows exactly the boundary characters after
-# the PR number, so `/pull/12` never matches `/pull/123`.
+# PR. Empty output ⇒ the whole response is in scope. The match is case-insensitive
+# on the owner/repo path: only OWNER/REPO vary in case (the host, `/pull/`, the PR
+# number, and the boundary chars have none), and GitHub forbids case-only owner/repo
+# collisions, so lowercasing both sides never widens the match to a different repo —
+# it just stops a non-canonically-cased `--repo` (roubtec/powbox vs Roubtec/powbox)
+# from reading every valid comment as contamination. `$EXPECTED_LC` is matched as a
+# literal (quoted) prefix; `[#/?]*` allows exactly the boundary characters after the
+# PR number, so `/pull/12` never matches `/pull/123`. The ORIGINAL (canonical-cased)
+# url is emitted on a mismatch so stderr diagnostics stay faithful.
 scope_offenders() {
-	local combined="$1" url
+	local combined="$1" url lc
 	while IFS= read -r url; do
 		[ -n "$url" ] || continue
-		case "$url" in
-		"$EXPECTED") ;;
-		"$EXPECTED"[#/?]*) ;;
+		lc="$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')"
+		case "$lc" in
+		"$EXPECTED_LC") ;;
+		"$EXPECTED_LC"[#/?]*) ;;
 		*) printf '%s\n' "$url" ;;
 		esac
 	done < <(jq -r '.[].comments.nodes[].url' <<<"$combined")

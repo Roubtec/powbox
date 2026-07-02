@@ -40,7 +40,12 @@ echo "Running sensitive-host-path predicate unit test ..."
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
-# worktree installs can hardlink from a co-located store.
+# worktree installs can hardlink from a co-located store. The GOBIN probe
+# plants a stub tool in ~/go/bin and runs it by bare name: these commands run
+# under a login shell (`sh -lc`), which resets PATH from /etc/profile, so the
+# probe passing proves the baked profile.d snippet restores $HOME/go/bin —
+# the documented "`go install` and it's runnable" contract.
+# shellcheck disable=SC2016  # the GOBIN probe's $HOME expands in the container shell, NOT the host
 "${ROOT_DIR}/scripts/smoke-test-image.sh" "$IMAGE" \
 	"claude --version >/dev/null" \
 	"codex --version >/dev/null" \
@@ -74,6 +79,10 @@ echo "Running sensitive-host-path predicate unit test ..."
 	"strace -V >/dev/null" \
 	"gpg --version >/dev/null" \
 	"gcc --version >/dev/null" \
+	"go version >/dev/null" \
+	"command -v gofmt >/dev/null" \
+	"golangci-lint version >/dev/null" \
+	'mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go/bin/powbox-gobin-probe" && chmod +x "$HOME/go/bin/powbox-gobin-probe" && powbox-gobin-probe | grep -qx gobin-ok' \
 	"file --version >/dev/null" \
 	"printf test | xxd >/dev/null" \
 	"envsubst --version >/dev/null" \

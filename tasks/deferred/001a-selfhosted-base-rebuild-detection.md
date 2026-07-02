@@ -20,7 +20,7 @@ Review thread: https://github.com/Roubtec/powbox/pull/54#discussion_r3408643062 
 
 ## Interim mitigation already shipped on PR #54
 
-README "Self-Hosted Mode → Upgrading an existing install needs a base-image rebuild" tells adopters to run `agent-update-base` or `build.sh all`. This task replaces that manual step with automatic detection.
+README "Self-Hosted Mode → Upgrading an existing install needs a base-image rebuild" tells adopters to run `agent-full-rebuild` or `build.sh all`. This task replaces that manual step with automatic detection.
 
 ## Goal
 
@@ -36,7 +36,7 @@ Make `agent-check-updates` / `agent-update` flag the **base** image as stale whe
 
 **B. Launcher capability guard (cheaper, narrower — could ship alongside A).**
 - Stamp a capability label on the base, e.g. `powbox.base.selfhosted=1` (inherited by the agent image built `FROM` it).
-- In `scripts/launch-agent.{sh,ps1}`, when `--isolated`/`-Isolated` is requested, inspect the resolved image for that label and, if absent, **fail fast** with a clear message ("this image's base predates self-hosted mode — rebuild with `agent-update-base` or `build.sh all`") instead of silently starting in an empty workspace.
+- In `scripts/launch-agent.{sh,ps1}`, when `--isolated`/`-Isolated` is requested, inspect the resolved image for that label and, if absent, **fail fast** with a clear message ("this image's base predates self-hosted mode — rebuild with `agent-full-rebuild` or `build.sh all`") instead of silently starting in an empty workspace.
 - This only guards self-hosted specifically; option A generalises to every base-layer change, which is why A is preferred. B turns the silent failure into a loud, actionable one even when someone bypasses the update flow.
 
 ## Acceptance

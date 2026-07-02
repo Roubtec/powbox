@@ -60,6 +60,7 @@ The deep architecture/runtime detail lives in chapter docs under `docs/` so it d
 | Launch modes & container/volume naming (dir-mounted vs. `--isolated` identity) | [docs/architecture.md](docs/architecture.md) → "Project Identity" · README "Self-Hosted Mode" |
 | Volumes, the pnpm store, worktree `node_modules` hardlinking | [docs/architecture.md](docs/architecture.md) → "Volumes and Stores" · [docs/worktree-node-modules-hardlinks.md](docs/worktree-node-modules-hardlinks.md) |
 | Bundled PostgreSQL build rationale | [docs/architecture.md](docs/architecture.md) → "Bundled PostgreSQL" |
+| Bundled Go toolchain rationale (version pinning, GOTOOLCHAIN, golangci-lint) | [docs/architecture.md](docs/architecture.md) → "Bundled Go toolchain" |
 | Container startup: entrypoint chain, per-agent hooks, ordering, workspace-perms healing, the mid-session pnpm/shadow wrapper, the bash/zsh split | [docs/entrypoint-and-runtime.md](docs/entrypoint-and-runtime.md) |
 | The unified image spec / migration order | [docs/unified-agent-image.md](docs/unified-agent-image.md) |
 | Skill refresh, ownership markers, pruning, provenance internals | [docs/skills-refresh-and-provenance.md](docs/skills-refresh-and-provenance.md) |

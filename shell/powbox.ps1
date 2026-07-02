@@ -429,26 +429,13 @@ function _Powbox-BuildFromTable {
     _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -ExtraArgs $ExtraArgs
 }
 
-function agent-update-claude {
-    $table = _Powbox-AgentPorcelain
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "agent-update-claude: update check failed"
-        return
-    }
-    _Powbox-BuildFromTable -Table @($table) -Force @("claude") @args
-}
-
-function agent-update-codex {
-    $table = _Powbox-AgentPorcelain
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "agent-update-codex: update check failed"
-        return
-    }
-    _Powbox-BuildFromTable -Table @($table) -Force @("codex") @args
-}
-
-function agent-update-base {
-    # A new base means the whole agent image should be rebuilt on top of it.
+# Nuclear option: rebuild the entire stack - base + agent image - from the
+# current repo commit, re-pulling the upstream base and ignoring the layer
+# cache, with both agents at their latest release (build.ps1 all -Pull
+# -NoCache). For when the images are in an unknown state and you want a clean
+# slate. To pick up powbox recipe changes without discarding cache, use the
+# much faster `agent-update -Refresh` instead.
+function agent-full-rebuild {
     $table = _Powbox-AgentPorcelain
     if ($LASTEXITCODE -eq 0) {
         _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex") -Target all -Pull -NoCache @args
@@ -463,8 +450,27 @@ function agent-update-base {
 # is still picked up. A stale base image is upstream of everything, so it triggers
 # a full -Pull -NoCache rebuild of base + the agent image; otherwise only the
 # stale agents are forced to latest and the unified image is rebuilt with minimal
-# layers (the unchanged binary's layer is reused). Extra args go to build.ps1.
+# layers (the unchanged binary's layer is reused).
+#
+# -Refresh removes the nothing-stale early exit and widens the build target to
+# `all`: the full stack is rebuilt from the current repo state (cached, no
+# -Pull), so recipe edits under docker/ are picked up even when every binary is
+# current. No -NoCache is needed - Docker keys each layer's cache on its
+# instruction content, so changed layers rebuild and unchanged ones are reused.
+# Binaries are still pinned (stale ones to latest, current ones to their baked
+# version), so a pure recipe refresh never silently bumps an agent; when updates
+# ARE pending, -Refresh takes them too. Extra args go to build.ps1.
 function agent-update {
+    $refresh = $false
+    $passthru = @()
+    foreach ($arg in $args) {
+        if (([string]$arg).ToLowerInvariant() -in @('-refresh', '--refresh')) {
+            $refresh = $true
+        } else {
+            $passthru += $arg
+        }
+    }
+
     # check-updates.ps1 writes its report via Write-Host (the information
     # stream); 6>&1 captures it so we can both display it and scan it for the
     # "update available" marker without a second network round-trip. Keep this
@@ -474,17 +480,23 @@ function agent-update {
 
     # Provenance: which powbox commit built the current image vs. the working
     # tree. A current binary set can still sit on an image built from an older
-    # repo - this surfaces that so the user can rebuild for repo changes alone.
+    # repo - this surfaces that so the user can rebuild for repo changes alone
+    # (which is exactly what -Refresh does).
     agent-image-info 2>$null
 
+    $verb = 'update'
     if (-not ($report -match 'update available')) {
-        Write-Host "All agent images are up to date."
-        return
+        if (-not $refresh) {
+            Write-Host "All agent images are up to date. (agent-update -Refresh rebuilds the stack from the current repo state anyway.)"
+            return
+        }
+        Write-Host "No binary/base updates - the full stack will be rebuilt from the current repo state (cached, no pull)."
+        $verb = 'rebuild'
     }
 
-    $reply = Read-Host 'Proceed with the update? [y/N]'
+    $reply = Read-Host "Proceed with the ${verb}? [y/N]"
     if ($reply -notmatch '^(y|yes)$') {
-        Write-Host "Update cancelled."
+        Write-Host "Cancelled."
         return
     }
 
@@ -513,18 +525,29 @@ function agent-update {
 
     if ($baseStale) {
         Write-Host "Base image is stale — rebuilding base (with -Pull) and the agent image on top."
-        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @passthru
         if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
         return
     }
 
     if ($stale.Count -eq 0) {
-        Write-Host "Nothing to update — already up to date."
+        if (-not $refresh) {
+            Write-Host "Nothing to update — already up to date."
+            return
+        }
+        Write-Host "Refreshing the full image stack (both binaries pinned to their baked versions)."
+        _Powbox-BuildFromTable -Table $table -Force @() -Target all @passthru
+        if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
         return
     }
 
-    Write-Host "Updating: $($stale -join ', ') (rebuilding only the affected image layers)."
-    _Powbox-BuildFromTable -Table $table -Force $stale @args
+    $target = if ($refresh) { 'all' } else { 'agent' }
+    if ($refresh) {
+        Write-Host "Updating: $($stale -join ', ') — and refreshing the full stack from the current repo state."
+    } else {
+        Write-Host "Updating: $($stale -join ', ') (rebuilding only the affected image layers)."
+    }
+    _Powbox-BuildFromTable -Table $table -Force $stale -Target $target @passthru
     if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
 }
 

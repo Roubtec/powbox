@@ -349,7 +349,7 @@ The clone helper (`seed-workspace.sh`) and the entrypoint logic that runs it liv
 
 Rebuilding only the agent image — the common `cc --build` / `cx --build` path, and `agent-update` when just an agent binary changed — therefore layers a new agent on an **old base** that has no clone step, so `--isolated` would create the workspace volume but the entrypoint never clones into it (you land in an empty checkout).
 
-When adopting this feature on a machine that already has the images, rebuild the base too: `agent-update-base`, or `build.sh all` (see [Build Modes](#build-modes)). A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
+When adopting this feature on a machine that already has the images, rebuild the base too: `agent-update --refresh`, `agent-full-rebuild`, or `build.sh all` (see [Build Modes](#build-modes)). A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
 
 > A follow-up task tracks making `agent-update` / `agent-check-updates` flag a base rebuild automatically when the base layer's powbox source changes (today they only detect a stale **upstream** base), so this becomes a hands-off upgrade.
 
@@ -577,8 +577,8 @@ Functions exposed by both libraries:
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
 - `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-trixie-slim` registry digest
 - `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet. After a successful rebuild it offers (on a TTY) to re-seed skills from the fresh image via `agent-update-skills`.
-- `agent-update-claude`, `agent-update-codex` — rebuild the unified image bumping just that agent to its latest release, pinning the other binary to its baked version so only the affected layers rebuild (no `--no-cache`)
-- `agent-update-base` — re-pull the upstream base image and rebuild the shared substrate layers with the latest package versions, then rebuild the agent image on top (`build.sh all --pull --no-cache`)
+- `agent-update --refresh` (PowerShell: `-Refresh`) — rebuild even when nothing is stale: the full stack (base + agent) is rebuilt from the current repo state, cached and without `--pull`, with every current binary pinned to its baked version — the way to pick up powbox recipe changes (a changed Dockerfile layer busts its own cache by content, so no `--no-cache` is needed; unchanged layers are reused). When updates *are* pending, `--refresh` takes them too and widens the rebuild to the full stack.
+- `agent-full-rebuild` — the nuclear option: re-pull the upstream base image and rebuild everything from scratch with the latest package and agent versions (`build.sh all --pull --no-cache`), for when the images are in an unknown state and you want a clean slate. For plain recipe changes `agent-update --refresh` is much faster. (To rebuild with one agent held at a specific version, call the build script directly: `build.sh agent --claude-version <v> --codex-version <v>`.)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 - `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies. Skills are tracked by a `.powbox-seeded` ownership marker, so it refreshes only powbox's own copies and leaves user-authored skills alone. Flags: `--dry-run`/`-DryRun` (preview the plan), `--prune`/`-Prune` (remove obsolete seeds no longer baked), `--adopt-all`/`-AdoptAll` (take the baked version of unmarked name-collisions); on a TTY it prompts before pruning/adopting. Rebuild the image first so the baked skills are current.
 - `agent-image-info` — print the powbox commit that built each layer of `powbox-agent:latest` (base / codex / claude/top) from the image's `powbox.commit.*` labels, plus your working-tree HEAD, so a stale image is obvious even when the agent binaries are current. In-container, the baked `powbox-provenance` command prints the same from `/home/node/.powbox/*.commit`. See [Image provenance](#image-provenance).
@@ -646,14 +646,11 @@ agent-check-updates
 # Review the update report and confirm before rebuilding stale images
 agent-update
 
-# Bump just Claude to its latest release (rebuilds only the Claude layers)
-agent-update-claude
+# Rebuild the full stack from the current repo state (cached) even with no updates
+agent-update -Refresh
 
-# Bump just Codex to its latest release (rebuilds Codex + the Claude layer above)
-agent-update-codex
-
-# Re-pull the base image and rebuild the shared substrate with latest packages
-agent-update-base
+# Nuclear: re-pull the base and rebuild everything from scratch
+agent-full-rebuild
 
 # Re-seed updated baked skills onto the config volumes (preview, then apply)
 agent-update-skills -DryRun
@@ -723,14 +720,11 @@ agent-check-updates
 # Review the update report and confirm before rebuilding stale images
 agent-update
 
-# Bump just Claude to its latest release (rebuilds only the Claude layers)
-agent-update-claude
+# Rebuild the full stack from the current repo state (cached) even with no updates
+agent-update --refresh
 
-# Bump just Codex to its latest release (rebuilds Codex + the Claude layer above)
-agent-update-codex
-
-# Re-pull the base image and rebuild the shared substrate with latest packages
-agent-update-base
+# Nuclear: re-pull the base and rebuild everything from scratch
+agent-full-rebuild
 
 # Re-seed updated baked skills onto the config volumes (preview, then apply)
 agent-update-skills --dry-run

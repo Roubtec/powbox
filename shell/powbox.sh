@@ -376,26 +376,13 @@ _powbox_build_from_table() {
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
 }
 
-agent-update-claude() {
-    local table
-    if ! table="$(_powbox_agent_porcelain)"; then
-        echo "agent-update-claude: update check failed" >&2
-        return 1
-    fi
-    _powbox_build_from_table "$table" "claude" agent "$@"
-}
-
-agent-update-codex() {
-    local table
-    if ! table="$(_powbox_agent_porcelain)"; then
-        echo "agent-update-codex: update check failed" >&2
-        return 1
-    fi
-    _powbox_build_from_table "$table" "codex" agent "$@"
-}
-
-agent-update-base() {
-    # A new base means the whole agent image should be rebuilt on top of it.
+# Nuclear option: rebuild the entire stack — base + agent image — from the
+# current repo commit, re-pulling the upstream base and ignoring the layer
+# cache, with both agents at their latest release (build.sh all --pull
+# --no-cache). For when the images are in an unknown state and you want a
+# clean slate. To pick up powbox recipe changes without discarding cache, use
+# the much faster `agent-update --refresh` instead.
+agent-full-rebuild() {
     local table
     if table="$(_powbox_agent_porcelain)"; then
         _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
@@ -410,8 +397,26 @@ agent-update-base() {
 # is still picked up. A stale base image is upstream of everything, so it triggers
 # a full --pull --no-cache rebuild of base + the agent image; otherwise only the
 # stale agents are forced to latest and the unified image is rebuilt with minimal
-# layers (the unchanged binary's layer is reused). Extra args go to build.sh.
+# layers (the unchanged binary's layer is reused).
+#
+# --refresh removes the nothing-stale early exit and widens the build target to
+# `all`: the full stack is rebuilt from the current repo state (cached, no
+# --pull), so recipe edits under docker/ are picked up even when every binary is
+# current. No --no-cache is needed — Docker keys each layer's cache on its
+# instruction content, so changed layers rebuild and unchanged ones are reused.
+# Binaries are still pinned (stale ones to latest, current ones to their baked
+# version), so a pure recipe refresh never silently bumps an agent; when updates
+# ARE pending, --refresh takes them too. Extra args go to build.sh.
 agent-update() {
+    local refresh=false arg
+    local passthru=()
+    for arg in "$@"; do
+        case "$arg" in
+            --refresh) refresh=true ;;
+            *) passthru+=("$arg") ;;
+        esac
+    done
+
     local report
     if ! report="$("$POWBOX_ROOT/commands/check-updates.sh")"; then
         [ -n "$report" ] && printf '%s\n' "$report"
@@ -422,23 +427,29 @@ agent-update() {
 
     # Provenance: which powbox commit built the current image vs. the working
     # tree. A current binary set can still sit on an image built from an older
-    # repo — this surfaces that so the user can rebuild for repo changes alone.
+    # repo — this surfaces that so the user can rebuild for repo changes alone
+    # (which is exactly what --refresh does).
     agent-image-info 2>/dev/null || true
 
     # The report prints the literal "update available" marker for each stale
     # component, so grepping it lets us decide whether to prompt without a second
     # network round-trip. Keep this in sync with commands/check-updates.sh.
+    local verb="update"
     if ! printf '%s\n' "$report" | grep -q 'update available'; then
-        echo "All agent images are up to date."
-        return 0
+        if [ "$refresh" != true ]; then
+            echo "All agent images are up to date. (agent-update --refresh rebuilds the stack from the current repo state anyway.)"
+            return 0
+        fi
+        echo "No binary/base updates — the full stack will be rebuilt from the current repo state (cached, no pull)."
+        verb="rebuild"
     fi
 
     local reply
-    printf 'Proceed with the update? [y/N] '
+    printf 'Proceed with the %s? [y/N] ' "$verb"
     read -r reply
     case "$reply" in
         [yY]|[yY][eE][sS]) ;;
-        *) echo "Update cancelled."; return 0 ;;
+        *) echo "Cancelled."; return 0 ;;
     esac
 
     local table
@@ -449,7 +460,7 @@ agent-update() {
 
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
         echo "Base image is stale — rebuilding base (with --pull) and the agent image on top."
-        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
+        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "${passthru[@]}"
         local rc=$?
         [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"
@@ -464,12 +475,25 @@ agent-update() {
     stale="${stale# }"
 
     if [ -z "$stale" ]; then
-        echo "Nothing to update — already up to date."
-        return 0
+        if [ "$refresh" != true ]; then
+            echo "Nothing to update — already up to date."
+            return 0
+        fi
+        echo "Refreshing the full image stack (both binaries pinned to their baked versions)."
+        _powbox_build_from_table "$table" "" all "${passthru[@]}"
+        local rc=$?
+        [ "$rc" -eq 0 ] && _powbox_post_build
+        return "$rc"
     fi
 
-    echo "Updating: ${stale// /, } (rebuilding only the affected image layers)."
-    _powbox_build_from_table "$table" "$stale" agent "$@"
+    local target=agent
+    if [ "$refresh" = true ]; then
+        target=all
+        echo "Updating: ${stale// /, } — and refreshing the full stack from the current repo state."
+    else
+        echo "Updating: ${stale// /, } (rebuilding only the affected image layers)."
+    fi
+    _powbox_build_from_table "$table" "$stale" "$target" "${passthru[@]}"
     local rc=$?
     [ "$rc" -eq 0 ] && _powbox_post_build
     return "$rc"

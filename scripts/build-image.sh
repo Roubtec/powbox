@@ -61,8 +61,8 @@ Full image builds are not supported inside the agent container: `docker` here is
 a Podman shim, and `podman buildx` has no `bake` subcommand.
 
 Ask the user to run `./build.sh all` (or `build.ps1`) on the host, then restart
-the container from the rebuilt image. Tier 1 CI builds and smoke-tests every PR
-automatically.
+the container from the rebuilt image. Tier 1 CI builds and smoke-tests
+image-affecting PRs targeting main automatically.
 EOF
 	exit 1
 fi

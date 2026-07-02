@@ -44,6 +44,29 @@ base | agent | all) ;;
 	;;
 esac
 
+# Fail fast when `docker` is a Podman shim (the agent container ships one). This
+# sits AFTER argument parsing so a bad flag/target still errors normally first,
+# and BEFORE any build, pull, or image-inspection side effect below. `podman
+# buildx` has no `bake` subcommand, so a bake here dies with a confusing
+# `unknown flag: --file`; and even a build that somehow succeeded could not be
+# validated, since the running container cannot be relaunched from the image it
+# just built. Full image builds are a host/CI concern. Detection is a version
+# probe, not a `buildx bake` invocation, precisely to avoid surfacing that
+# confusing failure. No `build-image.ps1` parity by design: the in-container
+# agent path is `./build.sh`; `build.ps1` runs on the host by convention, where
+# this guard is moot (real Docker) — the AGENTS.md rule covers it either way.
+if docker --version 2>/dev/null | grep -qi podman; then
+	cat >&2 <<'EOF'
+This `docker` is backed by Podman, and `podman buildx` has no `bake` subcommand,
+so a full image build here would fail. Full image builds are a host/CI concern.
+
+Ask the user to run `./build.sh all` (or `build.ps1`) on the host, then restart
+the container from the rebuilt image. Tier 1 CI also builds and smoke-tests
+image-affecting PRs to main, unless the PR is labeled `non-code`.
+EOF
+	exit 1
+fi
+
 # Upstream base image, parsed from the base Dockerfile's FROM so it never drifts
 # from what is actually built. BASE_SOURCE_DIGEST is resolved lazily just before
 # the base target is built and stamped onto the image as a label (see

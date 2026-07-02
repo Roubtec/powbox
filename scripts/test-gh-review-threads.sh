@@ -144,6 +144,21 @@ run() {
 
 jqr() { jq -r "$1" <<<"$2"; }
 
+# Bash-3.2-safe log inspection (no mapfile/readarray/arrays). This test runs
+# directly on the host in commands/smoke-test.sh Stage 0b, where macOS ships
+# Bash 3.2, so these must stay portable.
+count_matches() {
+	# count_matches <file> <fixed-string> — number of matching lines (0 if none).
+	# grep -c prints "0" and exits 1 on no match; `|| true` keeps set -e happy.
+	grep -Fc "$2" "$1" || true
+}
+nth_match() {
+	# nth_match <n> <file> <fixed-string> — the n-th matching line (1-indexed),
+	# empty if fewer than n matches. `sed -n Np` (no early `q`) drains all of
+	# grep's output, so grep never takes SIGPIPE under `set -o pipefail`.
+	grep -F "$3" "$2" | sed -n "${1}p" || true
+}
+
 # A single-page reviewThreads response wrapping the given nodes JSON.
 threads_one_page() {
 	printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' "$1"
@@ -198,10 +213,9 @@ run "$d" --repo acme/widgets 12
 assert_eq "b: exit 0" "$RUN_RC" 0
 assert_eq "b: both pages merged" "$(jqr 'length' "$RUN_OUT")" 2
 assert_eq "b: page ids" "$(jqr '[.[].id]|sort|join(",")' "$RUN_OUT")" T_p1,T_p2
-mapfile -t tlines < <(grep -F '[owner=' "$d/log" || true)
-assert_eq "b: exactly two thread-list calls" "${#tlines[@]}" 2
-assert_not_contains "b: first page has no cursor" "${tlines[0]:-}" "[after="
-assert_contains "b: second page uses endCursor" "${tlines[1]:-}" "[after=CURSOR_ONE]"
+assert_eq "b: exactly two thread-list calls" "$(count_matches "$d/log" '[owner=')" 2
+assert_not_contains "b: first page has no cursor" "$(nth_match 1 "$d/log" '[owner=')" "[after="
+assert_contains "b: second page uses endCursor" "$(nth_match 2 "$d/log" '[owner=')" "[after=CURSOR_ONE]"
 assert_not_contains "b: never --paginate" "$RUN_LOG" "[--paginate]"
 
 # ============================================================================
@@ -224,8 +238,7 @@ run "$d" --repo acme/widgets 12
 assert_eq "c1: fails closed with exit 3" "$RUN_RC" 3
 assert_eq "c1: no stdout emitted" "$RUN_OUT" ""
 assert_contains "c1: names the offending url on stderr" "$RUN_ERR" "https://github.com/acme/widgets/pull/999"
-mapfile -t tlines < <(grep -F '[owner=' "$d/log" || true)
-assert_eq "c1: fetched twice (retry once)" "${#tlines[@]}" 2
+assert_eq "c1: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
 
 # c2: contaminated first response, clean retry → success.
 d="$(new_case)"
@@ -300,10 +313,10 @@ assert_eq "e: exit 0" "$RUN_RC" 0
 assert_eq "e: one thread" "$(jqr 'length' "$RUN_OUT")" 1
 assert_eq "e: both comments merged" "$(jqr '.[0].comments | length' "$RUN_OUT")" 2
 assert_eq "e: comment ids in order" "$(jqr '[.[0].comments[].databaseId]|join(",")' "$RUN_OUT")" "311,312"
-mapfile -t clines < <(grep -F '[threadId=' "$d/log" || true)
-assert_eq "e: one nested-comments call" "${#clines[@]}" 1
-assert_contains "e: nested call targets the thread" "${clines[0]:-}" "[threadId=T_nested]"
-assert_contains "e: nested call uses the comment endCursor" "${clines[0]:-}" "[after=CCUR1]"
+assert_eq "e: one nested-comments call" "$(count_matches "$d/log" '[threadId=')" 1
+cline1="$(nth_match 1 "$d/log" '[threadId=')"
+assert_contains "e: nested call targets the thread" "$cline1" "[threadId=T_nested]"
+assert_contains "e: nested call uses the comment endCursor" "$cline1" "[after=CCUR1]"
 assert_not_contains "e: never --paginate" "$RUN_LOG" "[--paginate]"
 
 # ============================================================================

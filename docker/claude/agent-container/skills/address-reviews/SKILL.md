@@ -49,6 +49,7 @@ The top-level orchestrator (you) may still consult the user for **batch-level** 
 
 **Not user-facing (orchestrator may supply at its own discretion):** the per-PR `#N` (you always pass each subagent its assigned PR) and `rebase on top of <branch>`.
 The user has no reason to pass a rebase here — the leafy stack is resolved later — but if you detect a stacked PR that genuinely must be addressed against its near-final base, you may pass a rebase target to that one PR's `address-review`. Off by default.
+When you do pass one, **pin it to an exact commit**: resolve the target once, right after Bootstrap's `git fetch` (e.g. `git rev-parse origin/main`), and pass that SHA rather than the symbolic name. Remote-tracking refs can advance mid-batch (any later fetch moves them), so a name each entry resolves at its own time could rebase entries onto different bases; one recorded SHA keeps the whole batch deterministic.
 
 **The default is to publish.** A bare batch (no push/ping argument) publishes every entry and re-pings its contributing bots, exactly as `ping-contributing` (resolution order and precedence are as in `address-review` → "Flag interactions"); `no-push` is the only way to run the whole batch local-only. Flag pass-through is otherwise **batch-uniform**: the same resolved `push`/`ping-*` set applies to every PR in the run. With `ping-contributing` (including the bare default), the *flag* is uniform but its *effect* is evaluated independently inside each PR's `address-review`, so each PR re-pings only the bots still contributing to it.
 

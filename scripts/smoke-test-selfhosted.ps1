@@ -92,6 +92,36 @@ if ([string]::IsNullOrEmpty($dm["NM_VOLUME"]) -or [string]::IsNullOrEmpty($dm["W
 if (-not [string]::IsNullOrEmpty($dm["WS_VOLUME"])) { Fail "dir-mounted must not have a WS_VOLUME" }
 Ok "dir-mounted hash matches SHA256(path)[:12], has nm/wt and no ws volume"
 
+# --- dir-mounted volume-gate matrix (the SPLIT gate, task 011) -----------------
+# agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
+# .powbox.yml -> MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
+# agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
+# go.mod (MOUNT_WORKTREES_VOLUME, which gates GOMODCACHE/GOCACHE) - so a pure-Go
+# repo gets persistent Go caches + worktrees WITHOUT an empty node_modules/
+# mountpoint littering the host folder. Four fixture shapes pin the matrix.
+$matrixRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-gate-$PID"
+try {
+  foreach ($dir in @("pkg-only", "gomod-only", "both", "neither")) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $matrixRoot $dir) | Out-Null
+  }
+  foreach ($marker in @(@("pkg-only", "package.json"), @("gomod-only", "go.mod"), @("both", "package.json"), @("both", "go.mod"))) {
+    New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot $marker[0]) $marker[1]) | Out-Null
+  }
+  foreach ($case in @(
+      @("pkg-only", "true", "true"),
+      @("gomod-only", "false", "true"),
+      @("both", "true", "true"),
+      @("neither", "false", "false"))) {
+    $gid = Get-Identity @("-Agent", "claude", "-ProjectPath", (Join-Path $matrixRoot $case[0]))
+    if ($gid["MOUNT_WORKSPACE_VOLUMES"] -ne $case[1]) { Fail "gate matrix $($case[0]): MOUNT_WORKSPACE_VOLUMES is '$($gid["MOUNT_WORKSPACE_VOLUMES"])', want '$($case[1])'" }
+    if ($gid["MOUNT_WORKTREES_VOLUME"] -ne $case[2]) { Fail "gate matrix $($case[0]): MOUNT_WORKTREES_VOLUME is '$($gid["MOUNT_WORKTREES_VOLUME"])', want '$($case[2])'" }
+  }
+}
+finally {
+  Remove-Item -Recurse -Force $matrixRoot -ErrorAction SilentlyContinue
+}
+Ok "volume-gate matrix: nm keys on the JS/powbox gate, wt also on go.mod (pkg-only / go.mod-only / both / neither)"
+
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")
 $n2 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")

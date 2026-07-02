@@ -254,6 +254,25 @@ if [ -n "${PNPM_STORE_DIR:-}" ]; then
 	fi
 fi
 
+# Pre-create the Go caches when the launcher pointed them into the persistent
+# worktrees mount (GOMODCACHE/GOCACHE env — the PNPM_STORE_DIR precedent above;
+# set for dir-mounted JS/powbox/Go projects and in self-hosted mode, omitted for
+# non-dev folders so nothing is mkdir-ed onto a host bind mount). Plain env is
+# all `go` needs — no `go env -w` — so this mkdir only surfaces a bad value
+# LOUDLY at startup instead of as a confusing mid-session `go build` failure.
+# Guarded so a bad value never aborts the container start: on failure the var is
+# unset (the exec'd agent inherits the cleared env), so `go` falls back to its
+# image-default, container-ephemeral cache paths and keeps working.
+for _gocache_var in GOMODCACHE GOCACHE; do
+	_gocache_dir="${!_gocache_var:-}"
+	[ -n "$_gocache_dir" ] || continue
+	if ! mkdir -p "$_gocache_dir" 2>/dev/null; then
+		echo "Warning: cannot create Go cache dir $_gocache_dir (${_gocache_var}); unsetting it so go falls back to its default." >&2
+		unset "$_gocache_var"
+	fi
+done
+unset _gocache_var _gocache_dir
+
 # Prepare rootless Podman (only present once the image gained container-engine
 # support). XDG_RUNTIME_DIR must exist, be private, and be exported so Podman
 # uses it for the runtime/runroot instead of falling back to a /run/user/<uid>

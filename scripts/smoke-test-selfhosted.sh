@@ -99,6 +99,36 @@ esac
 [ -z "$(id_field "$DM" WS_VOLUME)" ] || fail "dir-mounted must not have a WS_VOLUME"
 ok "dir-mounted has nm/wt volumes and no ws volume"
 
+# --- dir-mounted volume-gate matrix (the SPLIT gate, task 011) -----------------
+# agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
+# .powbox.yml → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
+# agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
+# go.mod (MOUNT_WORKTREES_VOLUME, which gates GOMODCACHE/GOCACHE) — so a pure-Go
+# repo gets persistent Go caches + worktrees WITHOUT an empty node_modules/
+# mountpoint littering the host folder. Four fixture shapes pin the matrix.
+MATRIX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-gate-XXXXXX")"
+trap 'rm -rf "$MATRIX_ROOT"' EXIT
+gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / MOUNT_WORKTREES_VOLUME
+	local out
+	out="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude "$MATRIX_ROOT/$1" 2>/dev/null)"
+	[ "$(id_field "$out" MOUNT_WORKSPACE_VOLUMES)" = "$2" ] ||
+		fail "gate matrix $1: MOUNT_WORKSPACE_VOLUMES is '$(id_field "$out" MOUNT_WORKSPACE_VOLUMES)', want '$2'"
+	[ "$(id_field "$out" MOUNT_WORKTREES_VOLUME)" = "$3" ] ||
+		fail "gate matrix $1: MOUNT_WORKTREES_VOLUME is '$(id_field "$out" MOUNT_WORKTREES_VOLUME)', want '$3'"
+}
+mkdir -p "$MATRIX_ROOT/pkg-only" "$MATRIX_ROOT/gomod-only" "$MATRIX_ROOT/both" "$MATRIX_ROOT/neither"
+: >"$MATRIX_ROOT/pkg-only/package.json"
+: >"$MATRIX_ROOT/gomod-only/go.mod"
+: >"$MATRIX_ROOT/both/package.json"
+: >"$MATRIX_ROOT/both/go.mod"
+gate_case pkg-only true true
+gate_case gomod-only false true
+gate_case both true true
+gate_case neither false false
+rm -rf "$MATRIX_ROOT"
+trap - EXIT
+ok "volume-gate matrix: nm keys on the JS/powbox gate, wt also on go.mod (pkg-only / go.mod-only / both / neither)"
+
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"
 N2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"

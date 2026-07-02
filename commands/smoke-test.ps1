@@ -69,7 +69,14 @@ else {
 # plants a stub tool in ~/go/bin and runs it by bare name: these commands run
 # under a login shell (`sh -lc`), which resets PATH from /etc/profile, so the
 # probe passing proves the baked profile.d snippet restores $HOME/go/bin -
-# the documented "`go install` and it's runnable" contract.
+# the documented "`go install` and it's runnable" contract. The golangci-lint
+# probes pin the cache-scoping wrapper contract: the PATH name resolves to the
+# wrapper (real binary off PATH in /usr/local/libexec), a fixture worktree under
+# .worktrees/<container>/<slug> gets its cache scoped to
+# .worktrees/.golangci-cache/<container>/<slug>, the main checkout scopes to
+# .root only in self-hosted mode when .worktrees is not a mountpoint (no host
+# litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
+# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
 & (Join-Path $rootDir "scripts/smoke-test-image.ps1") `
   -Image $Image `
   -Commands @(
@@ -108,6 +115,15 @@ else {
     'go version >/dev/null'
     'command -v gofmt >/dev/null'
     'golangci-lint version >/dev/null'
+    'readlink /usr/local/bin/golangci-lint | grep -q golangci-lint-wrapper'
+    '[ -x /usr/local/libexec/golangci-lint ]'
+    'GOMODCACHE=/tmp/powbox-gomod-probe go env GOMODCACHE | grep -qx /tmp/powbox-gomod-probe'
+    'GOCACHE=/tmp/powbox-gocache-probe go env GOCACHE | grep -qx /tmp/powbox-gocache-probe'
+    'GOLANGCI_LINT_CACHE=/tmp/powbox-golangci-custom golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-custom"'
+    'mkdir -p /tmp/powbox-golangci-probe/repo && cd /tmp/powbox-golangci-probe/repo && git init -q && git -c user.email=smoke@powbox.local -c user.name=smoke commit -q --allow-empty -m init && git worktree add -q .worktrees/probe-cont/task-a -b probe-a'
+    'cd /tmp/powbox-golangci-probe/repo/.worktrees/probe-cont/task-a && golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/probe-cont/task-a"'
+    'cd /tmp/powbox-golangci-probe/repo && golangci-lint cache status | grep -q "Dir: $HOME/.cache/golangci-lint"'
+    'cd /tmp/powbox-golangci-probe/repo && POWBOX_SELF_HOSTED=1 golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/.root"'
     'mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go/bin/powbox-gobin-probe" && chmod +x "$HOME/go/bin/powbox-gobin-probe" && powbox-gobin-probe | grep -qx gobin-ok'
     'file --version >/dev/null'
     'printf test | xxd >/dev/null'

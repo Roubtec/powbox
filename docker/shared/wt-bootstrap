@@ -84,7 +84,11 @@ fi
 
 # --- Prune ONLY this container's orphans --------------------------------------
 # A peer container's live worktrees live under its own $CONTAINER_NAME subdir
-# and are never scanned; the shared .pnpm-store sits at the volume root.
+# and are never scanned; the shared .pnpm-store and .gomodcache/.gocache sit at
+# the volume root. Each pruned orphan's scoped golangci-lint analysis cache
+# (.golangci-cache/$CONTAINER_NAME/<slug>, written by the golangci-lint
+# wrapper) is dropped with it — best-effort, exactly the slug being pruned —
+# so caches from crashed sessions do not accumulate.
 mkdir -p "$WT_BASE"
 git -C "$ROOT" worktree prune
 PRUNED=()
@@ -92,6 +96,7 @@ for d in "$WT_BASE"/*/; do
 	[ -e "$d" ] || continue
 	if ! git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 		rm -rf "$d"
+		rm -rf "$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$(basename "$d")" 2>/dev/null || true
 		PRUNED+=("$(basename "$d")")
 		echo "pruned orphaned worktree: $d" >&2
 	fi

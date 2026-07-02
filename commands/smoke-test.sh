@@ -38,15 +38,29 @@ export POWBOX_SMOKE_REQUIRE_IMAGE
 echo "Running sensitive-host-path predicate unit test ..."
 "${ROOT_DIR}/scripts/test-sensitive-host-path.sh"
 
-# Stage 0b — gh-review-threads helper unit test. Also hermetic (stubs `gh` with a
-# PATH shim serving canned fixtures — no live GitHub, image, or root needed), so
-# it runs unconditionally up front. It guards the baked docker/shared/gh-review-threads
-# helper: manual pagination (never `gh api graphql --paginate`, which under
-# concurrent runs has returned another PR's threads) and the boundary-safe,
-# repo-qualified PR-scope assertion that fails closed (exit 3) on a contaminated
-# response — the behavior the address-review skills/workflow depend on.
-echo "Running gh-review-threads helper unit test ..."
-"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
+# Stage 0b — gh-review-threads helper unit test. Hermetic (stubs `gh` with a PATH
+# shim serving canned fixtures — no live GitHub or root needed), so like Stage 0 it
+# runs up front. Unlike Stage 0 it needs `jq` (the helper and its test parse JSON),
+# which a stock host may lack — the README prerequisites only require Docker/buildx,
+# and a default macOS install has no jq. Rather than abort the whole smoke before the
+# image stages when host `jq` is missing, degrade gracefully: run on the host when
+# `jq` is present; otherwise run the SAME test INSIDE the agent image (which ships
+# bash, jq, and the baked helper) with the repo mounted read-only — mirroring the
+# PowerShell path. If neither host `jq` nor the image is available, record a skip.
+# It guards the baked docker/shared/gh-review-threads helper: manual pagination
+# (never `gh api graphql --paginate`, which under concurrent runs has returned
+# another PR's threads) and the boundary-safe, repo-qualified PR-scope assertion
+# that fails closed (exit 3) on a contaminated response.
+if command -v jq >/dev/null 2>&1; then
+	echo "Running gh-review-threads helper unit test ..."
+	"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
+elif docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running gh-review-threads helper unit test (host jq absent — in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-gh-review-threads.sh
+else
+	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — host 'jq' not found and image '$IMAGE' absent."
+	skipped+=("Stage 0b: gh-review-threads helper unit test (no host jq, image absent)")
+fi
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
@@ -81,6 +95,8 @@ echo "Running gh-review-threads helper unit test ..."
 	"command -v wt-bootstrap >/dev/null" \
 	"command -v wt-enter >/dev/null" \
 	"command -v wt-remove >/dev/null" \
+	"command -v gitcat >/dev/null" \
+	"command -v gh-review-threads >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	"ping -V >/dev/null" \
 	"nc -h >/dev/null 2>&1" \

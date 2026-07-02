@@ -118,6 +118,8 @@ else {
     'command -v wt-bootstrap >/dev/null'
     'command -v wt-enter >/dev/null'
     'command -v wt-remove >/dev/null'
+    'command -v gitcat >/dev/null'
+    'command -v gh-review-threads >/dev/null'
     'shellcheck --version >/dev/null'
     'ping -V >/dev/null'
     'nc -h >/dev/null 2>&1'

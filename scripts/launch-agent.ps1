@@ -97,11 +97,19 @@ $resolvedCtx = if ($Ctx -ne "") { (Resolve-Path $Ctx).Path } else { "" }
 $nodeModulesVolume = ""
 $worktreesVolume = ""
 $workspaceVolume = ""
-# Whether to mount the dir-mounted node_modules / worktrees volumes. Only set true
-# for a project that actually looks like one that needs them (see below); a non-dev
-# folder mounted for research or file management gets neither, so Docker never
-# auto-creates empty node_modules/ and .worktrees/ mountpoint dirs in the host folder.
+# Whether to mount the dir-mounted node_modules volume. Only set true for a
+# project that actually looks like one that needs it (see below); a non-dev
+# folder mounted for research or file management gets neither volume, so Docker
+# never auto-creates empty node_modules/ and .worktrees/ mountpoint dirs in the
+# host folder. This flag keeps its historical name and meaning — the JS/powbox
+# gate — because PNPM_STORE_DIR and the pnpm wrapper's regression guard key on it.
 $mountWorkspaceVolumes = $false
+# Whether to mount the dir-mounted worktrees volume (a SUPERSET gate): true
+# whenever $mountWorkspaceVolumes is, PLUS for a go.mod-only repo — Go projects
+# want the persistent worktrees volume (it now also holds the Go caches, see
+# below) but have no use for an isolated node_modules mount, which would only
+# litter an empty node_modules/ dir in the host folder.
+$mountWorktreesVolume = $false
 $repoSpec = ""
 
 if ($Isolated) {
@@ -254,6 +262,15 @@ else {
     (Test-Path (Join-Path $resolvedProject '.powbox.yml') -PathType Leaf)) {
     $mountWorkspaceVolumes = $true
   }
+  # The worktrees volume has a second, WIDER trigger: go.mod. A pure-Go repo gets
+  # agent-wt-* (persistent Go caches + worktrees) but NOT agent-nm-* — no empty
+  # node_modules/ litter on the host (the empty .worktrees/ mountpoint dir is
+  # accepted; it appears for every gated repo). PNPM_STORE_DIR stays keyed to the
+  # JS/powbox gate above so the pnpm wrapper's host-litter warning still fires
+  # for a stray root `pnpm install` in a go.mod-only repo.
+  if ($mountWorkspaceVolumes -or (Test-Path (Join-Path $resolvedProject 'go.mod') -PathType Leaf)) {
+    $mountWorktreesVolume = $true
+  }
 }
 
 $containerName = "$Agent-$projectSlug"
@@ -261,6 +278,16 @@ $containerName = "$Agent-$projectSlug"
 # both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
 $worktreesStoreDir = "/workspace/$projectSlug/.worktrees/.pnpm-store"
+# Go caches beside the pnpm store, under the same persistent mount. Their
+# in-container defaults (~/go/pkg/mod, ~/.cache/go-build) sit OUTSIDE every
+# volume, so container recreation cold-downloads all modules and rebuilds
+# everything; pointing GOMODCACHE/GOCACHE here survives recreation in both modes.
+# Deliberately SHARED across a project's worktrees (unlike the golangci-lint
+# analysis cache): the module cache is content-addressed with its own locking and
+# the build cache is designed for concurrent builds, so sharing is safe and is
+# the whole point (warm caches for every worktree).
+$worktreesGoModCacheDir = "/workspace/$projectSlug/.worktrees/.gomodcache"
+$worktreesGoCacheDir = "/workspace/$projectSlug/.worktrees/.gocache"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
 # container (agent + project), NOT just the project: a project's Claude and Codex
@@ -290,6 +317,7 @@ if ($env:POWBOX_PRINT_IDENTITY -eq "1") {
   # Lowercase to match the bash launcher's "true"/"false" (PowerShell stringifies a
   # bool as "True"/"False"), keeping the two launchers' identity output identical.
   Write-Output "MOUNT_WORKSPACE_VOLUMES=$($mountWorkspaceVolumes.ToString().ToLowerInvariant())"
+  Write-Output "MOUNT_WORKTREES_VOLUME=$($mountWorktreesVolume.ToString().ToLowerInvariant())"
   Write-Output "REPO_SPEC=$repoSpec"
   Write-Output "CLONE_REF=$Ref"
   exit 0
@@ -537,10 +565,12 @@ if (-not $Volatile -and $containerExists) {
 
 # Detect whether the existing container's node_modules + .worktrees mounts still match
 # what THIS launch wants, and recreate a stopped container when they do NOT. The expected
-# mount at each destination depends on the host-litter gate:
-#   * dev project ($mountWorkspaceVolumes=$true)   -> the per-agent volume
+# mount at each destination depends on the (split) host-litter gate:
+#   * JS/powbox project ($mountWorkspaceVolumes=$true)  -> BOTH per-agent volumes
 #     agent-{nm,wt}-<container>;
-#   * non-dev folder ($mountWorkspaceVolumes=$false) -> NO mount at all.
+#   * go.mod-only repo ($mountWorktreesVolume=$true only) -> ONLY agent-wt-<container>
+#     (Go caches + worktrees), NO node_modules mount;
+#   * non-dev folder (both gates false)                    -> NO mount at all.
 # This covers three upgrade/mismatch paths:
   #   * predates the .worktrees volume entirely (no .worktrees mount) — it still
 #     has a tmpfs .worktrees shadow and points pnpm at the old shared store, so worktree
@@ -550,10 +580,11 @@ if (-not $Volatile -and $containerExists) {
 #     keeps the stale source, so a project's Claude and Codex would still share one
 #     writable node_modules / pnpm store and race — exactly what per-agent keying prevents;
 #     and
-#   * predates the host-litter gate, OR the folder is no longer a dev project — it still
-#     mounts node_modules/.worktrees in a non-dev folder, so a bare `docker start` keeps
-#     re-creating empty node_modules/.worktrees dirs in the host folder and the gate never
-#     takes effect for the upgraded container. Recreating without those mounts stops the litter.
+#   * predates the host-litter gate (or the SPLIT gate), OR the folder changed shape — it
+#     still mounts node_modules/.worktrees in a non-dev folder (or node_modules in a
+#     go.mod-only repo), so a bare `docker start` keeps re-creating empty mountpoint dirs
+#     in the host folder and the gate never takes effect for the upgraded container.
+#     Recreating without those mounts stops the litter.
 # Mere presence of a .worktrees mount can't distinguish these, so we compare the actual
 # mounted volume NAME at each destination to the expected name (empty = expect no mount).
 # Warn (don't disrupt) if it is currently running. Self-hosted mode is skipped ($Isolated):
@@ -561,13 +592,13 @@ if (-not $Volatile -and $containerExists) {
 # mounts, so there is nothing to compare — and a steady-state non-dev reuse (no mounts
 # present, none expected) compares equal and is correctly left alone.
 if (-not $Isolated -and -not $Volatile -and $containerExists) {
+  $expectedNmMount = ""
+  $expectedWtMount = ""
   if ($mountWorkspaceVolumes) {
     $expectedNmMount = $nodeModulesVolume
-    $expectedWtMount = $worktreesVolume
   }
-  else {
-    $expectedNmMount = ""
-    $expectedWtMount = ""
+  if ($mountWorktreesVolume) {
+    $expectedWtMount = $worktreesVolume
   }
   $wtMountName = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/.worktrees`"}}{{.Name}}{{end}}{{end}}" $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $wtMountName = "" }
@@ -583,6 +614,15 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
       }
       else {
         Write-Host "Container $containerName uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-$containerName and worktree installs hardlink from the co-located pnpm store."
+        $recreateStaleMounts = $true
+      }
+    }
+    elseif ($mountWorktreesVolume) {
+      if ($containerRunning) {
+        Write-Host "Note: container $containerName does not match this go.mod-only repo's expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); Go caches/worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
+      }
+      else {
+        Write-Host "Container $containerName does not match this go.mod-only repo's expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent Go caches + worktrees) and no node_modules mount."
         $recreateStaleMounts = $true
       }
     }
@@ -803,19 +843,21 @@ if ($Isolated) {
 }
 else {
   # Always pre-create the per-container Podman store + the global image store; add
-  # the node_modules/worktrees volumes only when this project uses them
-  # ($mountWorkspaceVolumes) so a non-dev folder leaves no host litter.
+  # the node_modules/worktrees volumes only when this project uses them (see the
+  # split $mountWorkspaceVolumes / $mountWorktreesVolume gates — a go.mod-only
+  # repo gets just the worktrees volume) so a non-dev folder leaves no host litter.
   $prepVolArgs = @(
     "-v", "${podmanVolume}:/mnt/containers",
     "-v", "agent-podman-imagestore:/mnt/podman-imagestore"
   )
   $prepPaths = "/mnt/containers /mnt/podman-imagestore"
   if ($mountWorkspaceVolumes) {
-    $prepVolArgs += @(
-      "-v", "${nodeModulesVolume}:/mnt/node_modules",
-      "-v", "${worktreesVolume}:/mnt/worktrees"
-    )
-    $prepPaths = "/mnt/node_modules /mnt/worktrees $prepPaths"
+    $prepVolArgs += @("-v", "${nodeModulesVolume}:/mnt/node_modules")
+    $prepPaths = "/mnt/node_modules $prepPaths"
+  }
+  if ($mountWorktreesVolume) {
+    $prepVolArgs += @("-v", "${worktreesVolume}:/mnt/worktrees")
+    $prepPaths = "/mnt/worktrees $prepPaths"
   }
   docker compose @composeArgs run --rm --no-deps --user root --entrypoint /bin/sh `
     @prepVolArgs `
@@ -911,6 +953,20 @@ $envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabe
 if ($Isolated -or $mountWorkspaceVolumes) {
   $envArgs += @("-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 }
+# Point the Go module + build caches into the same persistent mount — keyed on the
+# WIDER worktrees gate (or self-hosted mode, where .worktrees is a subdir of the
+# one workspace volume), NOT the JS gate above: a go.mod-only repo mounts only the
+# worktrees volume. Omitting them for a non-dev dir-mounted folder stops the
+# entrypoint from mkdir-ing cache dirs onto the host bind mount — go just keeps
+# its image-default (container-ephemeral) cache paths there instead. Plain env is
+# all `go` needs (no `go env -w`), matching the PNPM_STORE_DIR precedent; the
+# entrypoint pre-creates the dirs (guarded, warn-don't-abort).
+if ($Isolated -or $mountWorktreesVolume) {
+  $envArgs += @(
+    "-e", "GOMODCACHE=$worktreesGoModCacheDir",
+    "-e", "GOCACHE=$worktreesGoCacheDir"
+  )
+}
 
 # Dir-mounted mode only: tell the entrypoint the workspace's HOST bind-mount source (and
 # the launching user's home) so the workspace-perms heal can REFUSE to chown a mount that
@@ -953,9 +1009,11 @@ if (-not $Isolated) {
 # step empties the volume so the entrypoint clones fresh), so a reused container
 # never re-wipes the agent's work on a later restart. In dir-mounted mode the root
 # node_modules and .worktrees are separate per-container named volumes mounted over the
-# bind mount — but only for a project that uses them ($mountWorkspaceVolumes); a non-dev
-# folder gets neither. In self-hosted mode they are ordinary subdirs of the one workspace
-# volume (mounted via compose.selfhosted.yml), so no extra -v args are added here.
+# bind mount — but only for a project that uses them (the split $mountWorkspaceVolumes /
+# $mountWorktreesVolume gates: a JS/powbox project gets both, a go.mod-only repo gets
+# just .worktrees); a non-dev folder gets neither. In self-hosted mode they are ordinary
+# subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no extra
+# -v args are added here.
 $workspaceVolArgs = @()
 if ($Isolated) {
   $envArgs += @(
@@ -976,13 +1034,15 @@ if ($Isolated) {
     "--label", "powbox.ref=$Ref"
   )
 }
-elseif ($mountWorkspaceVolumes) {
+else {
   # Only for a project that uses them; a non-dev folder gets neither, so Docker never
   # creates empty node_modules/.worktrees mountpoints in the host folder.
-  $workspaceVolArgs = @(
-    "-v", "${nodeModulesVolume}:${workspaceMount}/node_modules",
-    "-v", "${worktreesVolume}:${workspaceMount}/.worktrees"
-  )
+  if ($mountWorkspaceVolumes) {
+    $workspaceVolArgs += @("-v", "${nodeModulesVolume}:${workspaceMount}/node_modules")
+  }
+  if ($mountWorktreesVolume) {
+    $workspaceVolArgs += @("-v", "${worktreesVolume}:${workspaceMount}/.worktrees")
+  }
 }
 
 docker compose @composeArgs run @runArgs `

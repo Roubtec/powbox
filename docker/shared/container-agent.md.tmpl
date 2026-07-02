@@ -43,6 +43,7 @@ Invoke a peer directly when it helps — e.g. ask the other agent for an indepen
 
 - `git` is available for all local operations (status, diff, log, commit, branch, etc.).
 - `gitcat [--raw] <ref> <path> [<start> [<end>]]` prints a file as of another branch or commit with stable line numbers (a range slice keeps full-file numbering; `--raw` emits plain bytes for piping). Use it for cross-branch reads — e.g. inspecting code across a stacked-PR chain from one checkout — instead of `git show <ref>:<path> > /tmp/...` round-trips or switching branches.
+- `gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>` fetches a PR's inline review threads as a JSON array on stdout — each thread with `id`, `isResolved`, `isOutdated`, `path`, `line`, and `comments[]` (`databaseId`, `author { login __typename }`, `body`, `diffHunk`, `url`); unresolved-only by default, `--all` includes resolved. It exists because, run concurrently with other `gh` GraphQL calls (e.g. an `address-reviews` fan-out), `gh api graphql --paginate` has returned **another PR's** threads; the helper pages manually (fresh per-page call, never `--paginate`) and asserts every comment `url` belongs to the requested PR, retrying once then failing closed (exit `3`, nothing on stdout) on a contaminated response. Use it for review-addressing instead of a hand-rolled `reviewThreads` query.
 - The global git config is seeded from the host on first run. Do not modify `/home/node/.gitconfig-host` (read-only mount).
 
 ## Filesystem layout

@@ -129,7 +129,7 @@ If the rebase changed the branch tip, expect the eventual push to be a force-pus
 
 Fetch the **unresolved** review threads and enough context to judge them (see "GitHub API recipes"):
 
-- **Review threads** (inline comments) via GraphQL `reviewThreads` — one single-shot query per page, following `endCursor` manually past 100 threads; never `gh api graphql --paginate` for this query (see the recipes — under concurrent runs it has returned another PR's threads). Keep only `isResolved == false`, detect unexpectedly truncated comment lists, and **scope-check the result**: every returned comment `url` must match this repo and PR exactly (`https://github.com/OWNER/REPO/pull/<N>` followed by `#`, `/`, `?`, or end; never a plain substring check like `/pull/<N>`). On any mismatch, discard the whole response, retry once with a fresh single-shot query, and if it repeats fail closed without replying/resolving. For each thread, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, author login/type, `body`, `diffHunk`, and `url`.
+- **Review threads** (inline comments) via `gh-review-threads` (or the fallback recipe) — prefer the baked `gh-review-threads <PR#>` helper, which fetches the unresolved threads with fresh single-shot per-page queries (never `gh api graphql --paginate` — under concurrent runs it has returned another PR's threads), does the nested comment fetch-up, and applies the scope check below, failing closed on contamination. Only when `command -v gh-review-threads` fails (an older image) fall back to running the GraphQL query by hand as the recipes describe: one single-shot query per page, following `endCursor` manually past 100 threads, never `--paginate`. Either way, keep only `isResolved == false`, detect unexpectedly truncated comment lists, and **scope-check the result** (the helper already does): every returned comment `url` must match this repo and PR exactly (`https://github.com/OWNER/REPO/pull/<N>` followed by `#`, `/`, `?`, or end; never a plain substring check like `/pull/<N>`). On any mismatch, discard the whole response, retry once with a fresh single-shot query, and if it repeats fail closed without replying/resolving. For each thread, capture the thread `id`, `path`, `line`, `isOutdated`, and every comment's `databaseId`, author login/type, `body`, `diffHunk`, and `url`.
 - **Top-level review summaries** (`gh pr view --json reviews`) and **issue comments** (`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`) — read for context, especially **maintainer replies/push-backs** that override or qualify a bot's original comment. They are not automatically actionable because they have no resolved/unresolved state; include a standalone item only when the maintainer explicitly identifies it as outstanding in the request or discussion.
 
 A maintainer reply on an unresolved thread is **authoritative**: if they said "skip this" or "do X instead," follow the maintainer over the original reviewer.
@@ -231,7 +231,16 @@ Purpose: run inside a parallelized agent that has no direct line to the user (e.
 
 `gh api` expands `{owner}`/`{repo}` to the current repo. For GraphQL, pass real values (`gh repo view --json owner,name`).
 
-**List unresolved review threads** (id for resolve, comment `databaseId` for replies). Single-shot query — do **not** use `--paginate` here: run concurrently with other `gh` GraphQL calls (e.g. an `address-reviews` fan-out), `gh api graphql --paginate` has returned **another PR's** review threads, which unguarded would misfile replies/resolves onto the wrong PR. One page covers most PRs (`totalCount` ≤ 100); when `reviewThreads.pageInfo.hasNextPage` is true, fetch the next page as a fresh single-shot call passing the returned `endCursor` via `-F after=CURSOR`, and likewise fetch a thread's remaining comments when its nested `comments.pageInfo.hasNextPage` is true — always before triage:
+**List unresolved review threads** (id for resolve, comment `databaseId` for replies).
+
+**Primary — use the baked `gh-review-threads` helper.** `gh-review-threads <PR#>` prints the unresolved threads as a JSON array on stdout — each thread with `id isResolved isOutdated path line` and `comments[]` (`databaseId`, `author { login __typename }`, `body`, `diffHunk`, `url`); add `--all` to include resolved threads, `--repo <owner>/<repo>` for a repo other than the current one. It already encapsulates everything the fallback below spells out: fresh single-shot per-page pagination (never `--paginate`), nested comment fetch-up, and the repo-qualified boundary-safe scope check — failing closed with exit code `3` and nothing on stdout if a response is contaminated (after one retry). Prefer it:
+
+```sh
+gh-review-threads NUMBER | jq '...'          # unresolved threads, scope-checked
+gh-review-threads --all NUMBER               # include resolved threads too
+```
+
+**Fallback when the helper is absent** (`command -v gh-review-threads` fails — a container built from an older image, the same graceful-degradation pattern used for the gh-version-gated Copilot ping): run the query by hand. Single-shot query — do **not** use `--paginate` here: run concurrently with other `gh` GraphQL calls (e.g. an `address-reviews` fan-out), `gh api graphql --paginate` has returned **another PR's** review threads, which unguarded would misfile replies/resolves onto the wrong PR. One page covers most PRs (`totalCount` ≤ 100); when `reviewThreads.pageInfo.hasNextPage` is true, fetch the next page as a fresh single-shot call passing the returned `endCursor` via `-F after=CURSOR`, and likewise fetch a thread's remaining comments when its nested `comments.pageInfo.hasNextPage` is true — always before triage:
 
 ```sh
 gh api graphql -f query='
@@ -250,7 +259,9 @@ query($owner:String!,$repo:String!,$pr:Int!,$after:String){
 }' -F owner=OWNER -F repo=REPO -F pr=NUMBER   # for pages after the first, add: -F after=CURSOR
 ```
 
-**Scope-check before acting:** every returned comment `url` must match the exact repo-qualified PR path for the PR you are addressing, for example `https://github.com/OWNER/REPO/pull/NUMBER#...`. Implement this as a boundary-safe match on `OWNER/REPO` plus `/pull/NUMBER` followed by `#`, `/`, `?`, or end; do not use a plain substring check, because `/pull/12` also appears inside `/pull/123`. A mismatch means the response was contaminated by a concurrent query (or you queried the wrong PR) — discard the entire result, retry once with a fresh single-shot query, and if it repeats fail closed; never reply to or resolve a thread whose `url` points at a different PR.
+The helper's query is kept textually identical to this block; keep them in sync if you touch either.
+
+**Scope-check before acting** (the helper does this for you; this governs the fallback path): every returned comment `url` must match the exact repo-qualified PR path for the PR you are addressing, for example `https://github.com/OWNER/REPO/pull/NUMBER#...`. Implement this as a boundary-safe match on `OWNER/REPO` plus `/pull/NUMBER` followed by `#`, `/`, `?`, or end; do not use a plain substring check, because `/pull/12` also appears inside `/pull/123`. A mismatch means the response was contaminated by a concurrent query (or you queried the wrong PR) — discard the entire result, retry once with a fresh single-shot query, and if it repeats fail closed; never reply to or resolve a thread whose `url` points at a different PR.
 
 **Reply to a review comment** (REST, threads the reply under the original):
 
@@ -285,7 +296,7 @@ gh pr edit NUMBER --add-reviewer @copilot
 - [ ] Working tree clean; no rebase in progress; `gh` authenticated.
 - [ ] PR resolved (explicit `PR#` precedence) and sanity-checked against the current branch.
 - [ ] If requested, single-branch rebase done first; non-trivial conflict handled (interactive loop-in / hands-off abort+stop); validated when conflicted.
-- [ ] All **unresolved** threads gathered via single-shot queries (manual `endCursor` paging past 100 — never GraphQL `--paginate`) and scope-checked with a repo-qualified, boundary-safe PR URL match; resolved ones ignored; maintainer replies and top-level decision comments treated as authoritative; a zero-actionable run exits without push/comment/ping.
+- [ ] All **unresolved** threads gathered via `gh-review-threads` (or the fallback recipe when `command -v gh-review-threads` fails) — single-shot queries, manual `endCursor` paging past 100, never GraphQL `--paginate` — and scope-checked with a repo-qualified, boundary-safe PR URL match; resolved ones ignored; maintainer replies and top-level decision comments treated as authoritative; a zero-actionable run exits without push/comment/ping.
 - [ ] Each thread triaged: actionable / already-addressed / push-back / deferred-to-task / ambiguous.
 - [ ] Fixes done inline or via a fixer subagent (one checkout-dependent agent at a time); same-pattern sweep done in changed/related code.
 - [ ] Deferred items recorded as standalone task files per `write-tasks` conventions, numbered into the repo's task folder, committed on the current branch separately from code fixes.

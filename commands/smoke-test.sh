@@ -38,6 +38,16 @@ export POWBOX_SMOKE_REQUIRE_IMAGE
 echo "Running sensitive-host-path predicate unit test ..."
 "${ROOT_DIR}/scripts/test-sensitive-host-path.sh"
 
+# Stage 0b — gh-review-threads helper unit test. Also hermetic (stubs `gh` with a
+# PATH shim serving canned fixtures — no live GitHub, image, or root needed), so
+# it runs unconditionally up front. It guards the baked docker/shared/gh-review-threads
+# helper: manual pagination (never `gh api graphql --paginate`, which under
+# concurrent runs has returned another PR's threads) and the boundary-safe,
+# repo-qualified PR-scope assertion that fails closed (exit 3) on a contaminated
+# response — the behavior the address-review skills/workflow depend on.
+echo "Running gh-review-threads helper unit test ..."
+"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe

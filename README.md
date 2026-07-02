@@ -459,7 +459,7 @@ These directories are gitignored and absent on a fresh checkout. `.claude/worktr
 
 **Discipline.** Commit and push often. Only the common `.git` persists to the host, so push committed work to the remote and `git pull` on the host to sync — a worktree's uncommitted changes are not durable.
 
-The mechanical lifecycle is handled by image-baked helpers on `PATH` — `wt-bootstrap`, `wt-enter`, `wt-remove` (plus `gitcat` for cross-branch reads) — which the worktree skills and workflows call rather than re-deriving git plumbing. The measured copy→hardlink rationale, the durability/orphan-pruning model, and tmpfs sizing are detailed in [docs/worktree-node-modules-hardlinks.md](docs/worktree-node-modules-hardlinks.md).
+The mechanical lifecycle is handled by image-baked helpers on `PATH` — `wt-bootstrap`, `wt-enter`, `wt-remove` (plus `gitcat` for cross-branch reads and `gh-review-threads` for a concurrency-safe, PR-scope-checked review-thread fetch) — which the worktree skills and workflows call rather than re-deriving git plumbing. The measured copy→hardlink rationale, the durability/orphan-pruning model, and tmpfs sizing are detailed in [docs/worktree-node-modules-hardlinks.md](docs/worktree-node-modules-hardlinks.md).
 
 ### Mid-Session Refresh
 

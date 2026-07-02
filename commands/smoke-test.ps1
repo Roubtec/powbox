@@ -63,6 +63,27 @@ else {
   }
 }
 
+# Stage 0b - gh-review-threads helper unit test. Like Stage 0, the hermetic Bash test
+# (it stubs `gh` with a PATH shim serving canned fixtures - no live GitHub) has no host
+# bash on Windows, so run the SAME test INSIDE the agent image (which ships bash, jq, and
+# the baked helper) with the repo mounted read-only; the stub and its fixtures are written
+# to a container temp dir, so the read-only repo mount is fine. It guards the baked
+# docker/shared/gh-review-threads helper: manual pagination (never `gh api graphql
+# --paginate`, which under concurrent runs has returned another PR's threads) and the
+# boundary-safe, repo-qualified PR-scope assertion that fails closed (exit 3) on a
+# contaminated response. Self-skips (recorded in $skipped) when the image is absent.
+if (-not $imagePresent) {
+  Write-Warning "Skipping gh-review-threads helper unit test (Stage 0b) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0b: gh-review-threads helper unit test (image absent)")
+}
+else {
+  Write-Host "Running gh-review-threads helper unit test (in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-gh-review-threads.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "gh-review-threads helper unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe

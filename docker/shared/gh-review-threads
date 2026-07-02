@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# gh-review-threads — fetch a pull request's inline review threads safely, as
+# JSON on stdout, with a repo-qualified PR-scope assertion on every comment.
+#
+# Why this exists: under concurrent `gh` GraphQL calls from sibling worktrees
+# (an `address-reviews` fan-out), `gh api graphql --paginate` has returned
+# ANOTHER PR's `reviewThreads` — querying PR #10/#11 surfaced PR #9's threads.
+# Unguarded, a publisher would then post `Fixed in <sha>` replies and
+# `resolveReviewThread` mutations onto the WRONG PR. This helper makes the safe
+# path the easy path: it NEVER uses `--paginate` (it pages manually with a fresh
+# per-page `gh api graphql` call), buffers every page, and asserts that every
+# returned comment `url` points at the requested PR before emitting anything —
+# failing closed with a distinct exit code if a response is contaminated.
+#
+# The GraphQL query below is kept textually in sync with the "GitHub API recipes"
+# → "List unresolved review threads" recipe in the address-review skills
+# (docker/{claude,codex}/agent-container/skills/address-review/SKILL.md); a drift
+# between them is exactly the inconsistency this helper exists to remove. Update
+# both together.
+#
+# Usage: gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>
+#
+#   gh-review-threads 38                 # unresolved threads on PR #38, as JSON
+#   gh-review-threads --all 38           # include resolved threads too
+#   gh-review-threads --repo o/r 38      # a PR in an explicit repo
+#
+# Output: a JSON array on stdout — one object per thread with `id`, `isResolved`,
+# `isOutdated`, `path`, `line`, and `comments[]`, each comment carrying
+# `databaseId`, `author { login __typename }`, `body`, `diffHunk`, and `url`.
+# Unresolved threads only by default; `--all` includes resolved ones.
+#
+# Repo: `--repo` wins; otherwise the current repo (`gh repo view`). Review
+# threads live on the base repo's PR, so the current-repo default is correct in a
+# fork-PR worktree checked out from the base repo; use `--repo` for the rest.
+#
+# Scope assertion: before emitting, every comment `url` must match
+# `https://github.com/OWNER/REPO/pull/<N>` followed by `#`, `/`, `?`, or end (a
+# boundary-safe, repo-qualified match — so PR #12 never accepts a `/pull/123`
+# url, nor a same-number PR in another repo). On a mismatch the whole response is
+# discarded and the fetch retried ONCE from scratch; if the mismatch repeats the
+# helper fails closed — nothing on stdout, the offending url(s) on stderr, and
+# exit 3 (distinct from usage/auth errors) so callers can tell a contaminated
+# response apart from a plain failure.
+#
+# Dependencies: `gh` (authenticated) and `jq`, both baked into the agent image.
+set -euo pipefail
+
+# Usage text goes to stdout for an explicit help request (exit 0, pipeable) and
+# to stderr when it is an error diagnosis (exit non-zero).
+usage() {
+	local code="${1:-1}"
+	{
+		echo "usage: gh-review-threads [--all] [--repo <owner>/<repo>] <PR#>"
+		echo
+		echo "  Prints the PR's inline review threads as a JSON array on stdout"
+		echo "  (unresolved only by default; --all includes resolved threads)."
+		echo "  Pages manually — never 'gh api graphql --paginate' — and asserts"
+		echo "  every comment url belongs to the requested PR, retrying once then"
+		echo "  failing closed (exit 3, nothing on stdout) on a contaminated response."
+	} >&$((code == 0 ? 1 : 2))
+	exit "$code"
+}
+
+die() {
+	echo "gh-review-threads: $*" >&2
+	exit 1
+}
+
+# --- Argument parsing --------------------------------------------------------
+ALL_JQ=false # a JSON boolean fed to jq --argjson below
+REPO_ARG=""
+PR=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h | --help) usage 0 ;;
+	--all)
+		ALL_JQ=true
+		shift
+		;;
+	--repo)
+		[ $# -ge 2 ] || usage 1
+		REPO_ARG="$2"
+		shift 2
+		;;
+	--repo=*)
+		REPO_ARG="${1#--repo=}"
+		shift
+		;;
+	--)
+		shift
+		break
+		;;
+	-*) usage 1 ;;
+	*)
+		[ -z "$PR" ] || usage 1
+		PR="$1"
+		shift
+		;;
+	esac
+done
+# Positional args after a `--` terminator.
+while [ $# -gt 0 ]; do
+	[ -z "$PR" ] || usage 1
+	PR="$1"
+	shift
+done
+
+[ -n "$PR" ] || usage 1
+PR="${PR#\#}" # tolerate a leading '#', e.g. `#38`
+[[ "$PR" =~ ^[1-9][0-9]*$ ]] || die "PR number must be a positive integer: '$PR'"
+
+# --- Repo resolution ---------------------------------------------------------
+if [ -n "$REPO_ARG" ]; then
+	case "$REPO_ARG" in
+	*/*/* | /* | */) die "--repo must be in OWNER/REPO form: '$REPO_ARG'" ;;
+	*/*) ;;
+	*) die "--repo must be in OWNER/REPO form: '$REPO_ARG'" ;;
+	esac
+	OWNER="${REPO_ARG%%/*}"
+	REPO="${REPO_ARG##*/}"
+	if [ -z "$OWNER" ] || [ -z "$REPO" ]; then
+		die "--repo must be in OWNER/REPO form: '$REPO_ARG'"
+	fi
+else
+	repo_json="$(gh repo view --json owner,name)" ||
+		die "could not resolve the current repo (gh repo view failed); pass --repo <owner>/<repo>"
+	OWNER="$(jq -r '.owner.login' <<<"$repo_json")"
+	REPO="$(jq -r '.name' <<<"$repo_json")"
+	if [ -z "$OWNER" ] || [ "$OWNER" = null ] || [ -z "$REPO" ] || [ "$REPO" = null ]; then
+		die "could not resolve the current repo owner/name; pass --repo <owner>/<repo>"
+	fi
+fi
+
+# The boundary-safe, repo-qualified prefix every comment url must extend.
+EXPECTED="https://github.com/${OWNER}/${REPO}/pull/${PR}"
+
+# --- GraphQL queries ---------------------------------------------------------
+# Kept textually in sync with the address-review SKILL.md recipe (see header).
+# shellcheck disable=SC2016  # $owner/$repo/$pr/$after are GraphQL variables, resolved server-side — must NOT expand in the shell
+THREADS_QUERY='
+query($owner:String!,$repo:String!,$pr:Int!,$after:String){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$pr){
+      reviewThreads(first:100,after:$after){ totalCount nodes{
+        id isResolved isOutdated path line
+        comments(first:100){
+          nodes{ databaseId author{ login __typename } body diffHunk url }
+          pageInfo{ hasNextPage endCursor }
+        }
+      } pageInfo{ hasNextPage endCursor }}
+    }
+  }
+}'
+
+# Fetch a single thread's remaining comments (nested comment pagination).
+# shellcheck disable=SC2016  # $threadId/$after are GraphQL variables, resolved server-side — must NOT expand in the shell
+COMMENTS_QUERY='
+query($threadId:ID!,$after:String){
+  node(id:$threadId){
+    ... on PullRequestReviewThread{
+      comments(first:100,after:$after){
+        nodes{ databaseId author{ login __typename } body diffHunk url }
+        pageInfo{ hasNextPage endCursor }
+      }
+    }
+  }
+}'
+
+# One page of review threads. A FRESH `gh api graphql` invocation per page —
+# never `--paginate`. `after` is a nullable String variable: on the first page
+# we omit it entirely (GraphQL defaults it to null); later pages pass the prior
+# `endCursor`. owner/repo/after are raw strings (-f); pr is a typed Int (-F).
+threads_page() {
+	local after="$1"
+	if [ -n "$after" ]; then
+		gh api graphql -f query="$THREADS_QUERY" \
+			-f owner="$OWNER" -f repo="$REPO" -F pr="$PR" -f after="$after"
+	else
+		gh api graphql -f query="$THREADS_QUERY" \
+			-f owner="$OWNER" -f repo="$REPO" -F pr="$PR"
+	fi
+}
+
+# One page of a single thread's comments.
+comments_page() {
+	local thread_id="$1" after="$2"
+	if [ -n "$after" ]; then
+		gh api graphql -f query="$COMMENTS_QUERY" -f threadId="$thread_id" -f after="$after"
+	else
+		gh api graphql -f query="$COMMENTS_QUERY" -f threadId="$thread_id"
+	fi
+}
+
+# Given a page's `nodes` array, complete any thread whose comment list was
+# truncated (comments.pageInfo.hasNextPage) by fetching its remaining comments
+# with fresh per-page calls, then return the nodes with full comment lists.
+complete_comments() {
+	local nodes="$1"
+	# Common case: no thread overflowed 100 comments — one jq call, no loop.
+	if ! jq -e 'any(.[]?; .comments.pageInfo.hasNextPage)' <<<"$nodes" >/dev/null; then
+		printf '%s\n' "$nodes"
+		return 0
+	fi
+	local count i node has_more tid after cresp cnodes merged out
+	count="$(jq 'length' <<<"$nodes")"
+	out='[]'
+	for ((i = 0; i < count; i++)); do
+		node="$(jq -c ".[$i]" <<<"$nodes")"
+		has_more="$(jq -r '.comments.pageInfo.hasNextPage' <<<"$node")"
+		if [ "$has_more" = true ]; then
+			tid="$(jq -r '.id' <<<"$node")"
+			after="$(jq -r '.comments.pageInfo.endCursor' <<<"$node")"
+			merged="$(jq -c '.comments.nodes' <<<"$node")"
+			while [ "$has_more" = true ]; do
+				cresp="$(comments_page "$tid" "$after")" ||
+					die "gh api graphql failed fetching comments for thread $tid"
+				cnodes="$(jq -c '.data.node.comments.nodes' <<<"$cresp")"
+				# Merge via stdin, not `--argjson`: a large accumulated value blown
+				# onto jq's argv trips Linux's per-arg limit (E2BIG). printf is a
+				# shell builtin, so its args are exempt; jq slurps both from a pipe.
+				merged="$(printf '%s\n%s\n' "$merged" "$cnodes" | jq -cs '.[0] + .[1]')"
+				has_more="$(jq -r '.data.node.comments.pageInfo.hasNextPage' <<<"$cresp")"
+				after="$(jq -r '.data.node.comments.pageInfo.endCursor' <<<"$cresp")"
+			done
+			node="$(printf '%s\n%s\n' "$node" "$merged" |
+				jq -cs '.[1] as $m | .[0] | .comments.nodes = $m | .comments.pageInfo.hasNextPage = false')"
+		fi
+		out="$(printf '%s\n%s\n' "$out" "$node" | jq -cs '.[0] + [.[1]]')"
+	done
+	printf '%s\n' "$out"
+}
+
+# Fetch EVERY page of review threads (manual cursor paging) and return the merged
+# `nodes` array with every thread's comments completed. Buffers everything: no
+# partial output escapes, so a later contaminated page can never leak to stdout.
+fetch_all() {
+	local after='' resp all_nodes page_nodes has_next
+	all_nodes='[]'
+	while :; do
+		resp="$(threads_page "$after")" || die "gh api graphql failed fetching review threads"
+		jq -e '.data.repository.pullRequest != null' <<<"$resp" >/dev/null 2>&1 ||
+			die "no pull request #$PR in $OWNER/$REPO (or it is inaccessible)"
+		page_nodes="$(jq -c '.data.repository.pullRequest.reviewThreads.nodes' <<<"$resp")"
+		page_nodes="$(complete_comments "$page_nodes")"
+		# stdin, not `--argjson`: the accumulated array can exceed jq's per-arg
+		# limit on a large PR (E2BIG). See the note in complete_comments.
+		all_nodes="$(printf '%s\n%s\n' "$all_nodes" "$page_nodes" | jq -cs '.[0] + .[1]')"
+		has_next="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$resp")"
+		[ "$has_next" = true ] || break
+		after="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' <<<"$resp")"
+	done
+	printf '%s\n' "$all_nodes"
+}
+
+# Print any comment url in the merged nodes that is NOT boundary-safe-inside this
+# PR. Empty output ⇒ the whole response is in scope. `$EXPECTED` is matched as a
+# literal (quoted) prefix; `[#/?]*` allows exactly the boundary characters after
+# the PR number, so `/pull/12` never matches `/pull/123`.
+scope_offenders() {
+	local combined="$1" url
+	while IFS= read -r url; do
+		[ -n "$url" ] || continue
+		case "$url" in
+		"$EXPECTED") ;;
+		"$EXPECTED"[#/?]*) ;;
+		*) printf '%s\n' "$url" ;;
+		esac
+	done < <(jq -r '.[].comments.nodes[].url' <<<"$combined")
+}
+
+# --- Fetch, scope-check (retry once), then emit ------------------------------
+combined="$(fetch_all)"
+offenders="$(scope_offenders "$combined")"
+if [ -n "$offenders" ]; then
+	# Contaminated — discard and retry the WHOLE fetch once from scratch.
+	combined="$(fetch_all)"
+	offenders="$(scope_offenders "$combined")"
+	if [ -n "$offenders" ]; then
+		{
+			echo "gh-review-threads: contaminated response — comment url(s) do not belong to $OWNER/$REPO PR #$PR:"
+			printf '  %s\n' "$offenders"
+			echo "Refusing to emit; a concurrent 'gh api graphql --paginate' or wrong-PR query likely crossed responses."
+		} >&2
+		exit 3
+	fi
+fi
+
+# Every comment is in scope. Reshape to the documented output: filter to
+# unresolved unless --all, and flatten each thread's comments to an array.
+jq --argjson all "$ALL_JQ" '
+  [ .[]
+    | select($all or (.isResolved == false))
+    | { id, isResolved, isOutdated, path, line,
+        comments: [ .comments.nodes[] | { databaseId, author, body, diffHunk, url } ] }
+  ]
+' <<<"$combined"

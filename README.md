@@ -210,10 +210,10 @@ Shared volume names are kept stable to preserve existing data:
 
 The launcher also creates **per-container** volumes, keyed by the full container name (agent + project) so a project's Claude and Codex containers each get their own copy (not shared):
 
-- `agent-nm-<agent>-<project>` → the root `node_modules`
-- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the per-container pnpm store** (`.worktrees/.pnpm-store`)
+- `agent-nm-<agent>-<project>` → the root `node_modules` (mounted for JS/powbox projects: `package.json`, `pnpm-workspace.yaml`, or `.powbox.yml`)
+- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the per-container pnpm store** (`.worktrees/.pnpm-store`) **and the Go caches** — the shared `GOMODCACHE`/`GOCACHE` (`.worktrees/.gomodcache`, `.worktrees/.gocache`) plus the per-worktree golangci-lint analysis caches (`.worktrees/.golangci-cache/…`) — so Go module downloads and builds survive container recreation. Mounted for JS/powbox projects **and** for repos with a `go.mod`; a go.mod-only repo gets this volume without the `node_modules` one, so no empty `node_modules/` dir appears in the host folder.
 
-In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the store as subdirs); it is keyed per container, like the Podman storage volume below.
+In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the stores/caches as subdirs); it is keyed per container, like the Podman storage volume below.
 
 > The pnpm store moved from a single shared `agent-pnpm-store` volume to a per-container store inside each `agent-wt-<agent>-<project>` volume so that worktree `pnpm install` can **hardlink** package files from it instead of copying them (the store and the worktree `node_modules` must share one mount — see [Git Worktree Parallel Development](#git-worktree-parallel-development)). The old shared `agent-pnpm-store` volume is no longer mounted and can be removed with `prune-volumes`.
 

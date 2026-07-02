@@ -24,9 +24,9 @@ Teach or question the user if that is in the best interest of the final product.
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
-| `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted mode only |
-| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the per-container pnpm store at `.worktrees/.pnpm-store`; dir-mounted mode only |
-| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store as subdirs; replaces the bind mount and the two volumes above |
+| `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted JS/powbox projects only |
+| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the per-container pnpm store at `.worktrees/.pnpm-store` and the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`); dir-mounted JS/powbox **or** `go.mod` projects |
+| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 

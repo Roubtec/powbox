@@ -287,22 +287,29 @@ COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d
 # golangci-lint is the de-facto Go metalinter and the one lint binary projects
 # actually pin (v2 config schema — a v1 binary cannot parse v2 configs); it
 # bundles staticcheck, errcheck, ineffassign, unused, etc. internally, so none
-# of those are installed standalone. Its official installer (fetched at the same
-# pinned tag) sha256-verifies the release tarball before installing. gopls and
-# dlv are deliberately NOT baked: the agent harnesses speak no LSP and debug via
-# tests/prints, and either is one `go install` away (~/go/bin is on PATH below).
+# of those are installed standalone. Its release tarball is fetched straight
+# from GitHub and sha256-pinned per arch exactly like Go (checksums come from
+# the release's golangci-lint-<ver>-checksums.txt) — NOT via the official
+# `curl | sh` installer: under /bin/sh (no pipefail) a failed installer
+# download would be masked by the pipeline and the layer would "succeed"
+# without the linter, and the pinned digests make the bits immutable where a
+# tag fetch is not. gopls and dlv are deliberately NOT baked: the agent
+# harnesses speak no LSP and debug via tests/prints, and either is one
+# `go install` away (~/go/bin is on PATH below).
 # go/gofmt are symlinked into /usr/local/bin (the sqlcmd/bcp precedent) because
 # login shells (`sh -lc`, as the image smoke test spawns) reset PATH from
 # /etc/profile and would otherwise lose /usr/local/go/bin; the go binary
 # resolves GOROOT through the symlink. Placed low in the file so a Go bump
 # never busts the expensive gh / mssql / pwsh / npm layers above.
 RUN GO_VERSION=1.26.4 \
-    && GOLANGCI_LINT_VERSION=v2.12.2 \
+    && GOLANGCI_LINT_VERSION=2.12.2 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
-        amd64) go_sha256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f ;; \
-        arm64) go_sha256=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768 ;; \
-        *) echo "no pinned Go checksum for architecture: $arch" >&2; exit 1 ;; \
+        amd64) go_sha256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f \
+               golangci_sha256=8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553 ;; \
+        arm64) go_sha256=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768 \
+               golangci_sha256=44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a ;; \
+        *) echo "no pinned Go/golangci-lint checksums for architecture: $arch" >&2; exit 1 ;; \
     esac \
     && curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
     && echo "${go_sha256}  /tmp/go.tar.gz" | sha256sum -c - \
@@ -310,8 +317,11 @@ RUN GO_VERSION=1.26.4 \
     && rm /tmp/go.tar.gz \
     && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
     && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
-    && curl -fsSL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
-        | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
+    && curl -fsSL -o /tmp/golangci-lint.tar.gz "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}.tar.gz" \
+    && echo "${golangci_sha256}  /tmp/golangci-lint.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local/bin --strip-components=1 --no-same-owner \
+        -xzf /tmp/golangci-lint.tar.gz "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}/golangci-lint" \
+    && rm /tmp/golangci-lint.tar.gz
 
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree

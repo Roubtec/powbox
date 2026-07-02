@@ -24,12 +24,16 @@ USER node
 ARG CLAUDE_CODE_VERSION=latest
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 ENV DISABLE_AUTOUPDATER=1
-# Intentionally pipes the remote install script directly into bash without
-# pinning a checksum. These images are built locally by each user as a personal
-# harness and the goal is always the latest agent tooling. Pinning a concrete
+# Intentionally runs the remote install script without pinning a checksum.
+# These images are built locally by each user as a personal harness and the
+# goal is always the latest agent tooling. Pinning a concrete
 # CLAUDE_CODE_VERSION (which agent-update does) is what lets Docker rebuild only
-# this layer when Claude — and only Claude — has a new release.
-RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}"
+# this layer when Claude — and only Claude — has a new release. Downloaded to a
+# file first (not `curl | bash`) so a failed download fails the build instead
+# of being masked by the pipeline's exit status.
+RUN curl -fsSL -o /tmp/claude-install.sh https://claude.ai/install.sh \
+    && bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
+    && rm /tmp/claude-install.sh
 RUN rm -rf /home/node/.claude/downloads
 
 # --- Per-agent seed assets ---------------------------------------------------

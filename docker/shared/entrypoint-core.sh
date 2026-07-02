@@ -214,7 +214,11 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 				# un-shadowed (e.g. missing mount capability).
 				_has_nm_shadow=false
 				for _t in "${_targets[@]}"; do
-					case "$_t" in */node_modules) _has_nm_shadow=true; break ;; esac
+					case "$_t" in */node_modules)
+						_has_nm_shadow=true
+						break
+						;;
+					esac
 				done
 				# Final gate: the ROOT node_modules must itself be a mounted volume. The
 				# invalidation is safe ONLY because that root is the PERSISTENT named

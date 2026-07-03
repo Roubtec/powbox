@@ -43,7 +43,7 @@ try {
   # rebuild.
   $script:PowboxBaseRecipeDigest = ""
   try {
-    $script:PowboxBaseRecipeDigest = (& (Join-Path $rootDir "scripts/base-source-digest.ps1")).Trim()
+    $script:PowboxBaseRecipeDigest = (& (Join-Path $rootDir "scripts/base-source-digest.ps1") 2>$null).Trim()
   } catch {
     $script:PowboxBaseRecipeDigest = ""
   }

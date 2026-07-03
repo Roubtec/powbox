@@ -221,7 +221,7 @@ if (Test-ImageExists $BaseImage) {
     # undeterminable digest never forces a rebuild.
     $baseRecipeBaked = Get-ImageLabel $BaseImage 'powbox.base.recipe.digest'
     try {
-        $baseRecipeNow = (& (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts/base-source-digest.ps1')).Trim()
+        $baseRecipeNow = (& (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts/base-source-digest.ps1') 2>$null).Trim()
     } catch {
         $baseRecipeNow = $null
     }

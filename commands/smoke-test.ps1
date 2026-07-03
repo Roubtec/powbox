@@ -44,11 +44,14 @@ if (-not $imagePresent) {
 # Stage 0 - sensitive-host-path predicate unit test. The Bash smoke (commands/smoke-test.sh)
 # runs this hermetically on the host; on Windows there is no native bash, so run the SAME
 # Bash test INSIDE the agent image - which ships bash and the base-image mawk the mountinfo
-# parser is verified against - with the repo mounted read-only. This mirrors the Bash Stage
-# 0's coverage of the predicate and the /proc/self/mountinfo source lookup that stop the
+# parser is verified against - with the repo mounted read-only. Like the Bash Stage 0a, it
+# points the test at the BAKED /usr/local/bin/sensitive-host-path.sh (via SENSITIVE_HOST_PATH_LIB,
+# below) - the library entrypoint-core.sh / fix-workspace-perms.sh / heal-workspace-perms.sh
+# actually source at runtime - so a stale or behaviorally broken baked copy is caught here.
+# This covers the predicate and the /proc/self/mountinfo source lookup that stop the
 # workspace-perms heal from recursively chowning a mount whose host source is a system/home
 # dir (the VPS-lockout incident - an accidental cc/cx from ~ re-owning the home tree and
-# breaking sshd StrictModes on ~/.ssh). Unlike the Bash version it needs the image (no host
+# breaking sshd StrictModes on ~/.ssh). Unlike the Bash version there is no host run (no host
 # bash on Windows), so it self-skips - recorded in $skipped - when the image is absent; the
 # live end-to-end guard is Stage 5.
 if (-not $imagePresent) {
@@ -57,7 +60,9 @@ if (-not $imagePresent) {
 }
 else {
   Write-Host "Running sensitive-host-path predicate unit test (in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-sensitive-host-path.sh
+  # Point LIB at the baked artifact so the in-image run validates the installed
+  # /usr/local/bin/sensitive-host-path.sh that containers source, not the mounted /repo source.
+  docker run --rm -v "${rootDir}:/repo:ro" -e SENSITIVE_HOST_PATH_LIB=/usr/local/bin/sensitive-host-path.sh --entrypoint /bin/bash $Image /repo/scripts/test-sensitive-host-path.sh
   if ($LASTEXITCODE -ne 0) {
     throw "sensitive-host-path predicate unit test failed. See container output above."
   }

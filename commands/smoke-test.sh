@@ -38,6 +38,25 @@ export POWBOX_SMOKE_REQUIRE_IMAGE
 echo "Running sensitive-host-path predicate unit test ..."
 "${ROOT_DIR}/scripts/test-sensitive-host-path.sh"
 
+# Stage 0a — sensitive-host-path predicate unit test against the BAKED library. Stage 0
+# above ran the test on the host against the /repo source checkout; this run points it at
+# the base-layer copy at /usr/local/bin/sensitive-host-path.sh (via SENSITIVE_HOST_PATH_LIB)
+# so it exercises the BAKED library that entrypoint-core.sh, fix-workspace-perms.sh, and
+# heal-workspace-perms.sh actually source at runtime (they fall back to that path). Without
+# it the smoke only ever validated the /repo source, so a stale or behaviorally broken baked
+# copy in the base layer would slip through untested. Needs the agent image; when it is absent
+# the host Stage 0 already covered the source, so this simply records a skip — no second host
+# run, which would be redundant with Stage 0.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running sensitive-host-path predicate unit test (baked library in $IMAGE) ..."
+	# Point LIB at the baked artifact so the in-image run validates the installed
+	# /usr/local/bin/sensitive-host-path.sh containers source, not the mounted /repo source.
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" -e SENSITIVE_HOST_PATH_LIB=/usr/local/bin/sensitive-host-path.sh --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-sensitive-host-path.sh
+else
+	echo "WARNING: skipping in-image sensitive-host-path baked-library test (Stage 0a) — image '$IMAGE' absent; Stage 0 already covered the /repo source on the host."
+	skipped+=("Stage 0a: sensitive-host-path baked-library test (image absent)")
+fi
+
 # Stage 0b — gh-review-threads helper unit test. Hermetic (stubs `gh` with a PATH
 # shim serving canned fixtures — no live GitHub or root needed), so like Stage 0 it
 # runs up front. It guards the baked docker/shared/gh-review-threads helper: manual

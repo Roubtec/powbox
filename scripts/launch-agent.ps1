@@ -735,6 +735,30 @@ if (-not $Volatile -and $containerExists) {
   exit $LASTEXITCODE
 }
 
+# Self-hosted capability guard (Task 001a, Approach B). The clone-into-volume path
+# for -Isolated lives entirely in the BASE image layer (seed-workspace.sh plus
+# entrypoint-core.sh's clone call), so an agent image whose base predates
+# self-hosted mode would create the workspace volume but never clone into it -
+# landing the agent in an EMPTY checkout with no loud failure. The base stamps a
+# static powbox.base.selfhosted=1 label (inherited by the agent image); if the
+# resolved image lacks it, fail fast here with an actionable message instead. Only
+# reached on the create/recreate path (the resume/reuse branches above already
+# exited), i.e. exactly when a clone would run. Skipped when the image is absent -
+# that is a missing-image problem the build/compose flow handles, not a stale base.
+# A pre-label image also lacks it and is correctly rejected: it cannot self-host.
+if ($Isolated) {
+  docker image inspect powbox-agent:latest *> $null
+  if ($LASTEXITCODE -eq 0) {
+    $selfhostedCap = docker image inspect powbox-agent:latest --format '{{ index .Config.Labels "powbox.base.selfhosted" }}' 2>$null
+    if (-not $selfhostedCap -or $selfhostedCap.Trim() -eq '' -or $selfhostedCap.Trim() -eq '<no value>') {
+      Write-Error ("This agent image's base predates self-hosted mode, so -Isolated would create the workspace " +
+        "volume but start you in an EMPTY checkout (the clone step lives in the base layer). Rebuild the base + " +
+        "agent, then relaunch: agent-full-rebuild  (or: build.ps1 all; build.sh all on Linux/macOS).")
+      exit 1
+    }
+  }
+}
+
 if ($Shell) {
   $command = @("zsh")
   if ($Continue) {

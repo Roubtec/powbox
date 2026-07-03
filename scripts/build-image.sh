@@ -91,6 +91,16 @@ powbox_commit() {
 }
 POWBOX_COMMIT="$(powbox_commit)"
 
+# Digest over the base layer's powbox SOURCE inputs (the base Dockerfile plus the
+# files it COPYs; see scripts/base-source-digest.sh). Stamped as
+# powbox.base.recipe.digest on the base image so check-updates.sh can flag a stale
+# base when powbox's own base recipe changes — the powbox-source analogue of the
+# existing upstream node:24-trixie-slim digest trigger. Only consumed by the base
+# target. Empty on the rare failure (no sha256 tool, or the manifest is gone); an
+# empty label just means check-updates cannot detect recipe staleness, never a
+# false rebuild.
+POWBOX_BASE_RECIPE_DIGEST="$("${ROOT_DIR}/scripts/base-source-digest.sh" 2>/dev/null || true)"
+
 image_label() {
 	# Echo a label value off a local image, or empty when the image/label is absent.
 	local v
@@ -201,6 +211,7 @@ run_bake() {
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
+		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		POWBOX_BASE_IMAGE_ID="$(base_image_id)" \
@@ -224,6 +235,7 @@ ensure_base_image() {
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
+		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST" \
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base

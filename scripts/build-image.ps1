@@ -33,6 +33,21 @@ try {
   }
   $script:PowboxCommit = Get-PowboxCommit
 
+  # Digest over the base layer's powbox SOURCE inputs (the base Dockerfile plus
+  # the files it COPYs; see scripts/base-source-digest.ps1). Stamped as
+  # powbox.base.recipe.digest on the base image so check-updates.ps1 can flag a
+  # stale base when powbox's own base recipe changes - the powbox-source analogue
+  # of the existing upstream node:24-trixie-slim digest trigger. Only consumed by
+  # the base target. Empty on the rare failure (no crypto/manifest); an empty
+  # label just means check-updates cannot detect recipe staleness, never a false
+  # rebuild.
+  $script:PowboxBaseRecipeDigest = ""
+  try {
+    $script:PowboxBaseRecipeDigest = (& (Join-Path $rootDir "scripts/base-source-digest.ps1")).Trim()
+  } catch {
+    $script:PowboxBaseRecipeDigest = ""
+  }
+
   function Get-ImageLabel {
     param([string]$Image, [string]$Label)
     $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
@@ -144,6 +159,7 @@ try {
     $env:CODEX_VERSION = $CodexVersion
     $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
     $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
+    $env:POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
     $env:POWBOX_COMMIT = $script:PowboxCommit
     $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
     # Resolved here (not at script top) so the agent target records the base it
@@ -173,6 +189,7 @@ try {
     $env:CODEX_VERSION = $CodexVersion
     $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
     $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
+    $env:POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
     $env:POWBOX_COMMIT = $script:PowboxCommit
     $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
     docker buildx bake --file (Join-Path $rootDir "docker-bake.hcl") base

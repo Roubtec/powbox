@@ -343,6 +343,11 @@ RUN GO_VERSION=1.26.4 \
 # because they evolve in lockstep with the agent-layer assets that consume them
 # (the worktree-running skills and the Claude workflows), so an `agent-update` /
 # `build.sh agent` rebuild refreshes them without a base rebuild.
+#
+# NOTE: every file COPYd into the base image is also listed in
+# scripts/base-source-files.txt, which drives the powbox.base.recipe.digest
+# staleness check. When you add or remove a base COPY here, update that manifest
+# to match (agent-layer files must NOT be listed there).
 COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \
@@ -444,8 +449,34 @@ ARG BASE_SOURCE_DIGEST=""
 # the agent's. Supplied by scripts/build-image.{sh,ps1}. Declared last so a new
 # commit only rebuilds this trivial metadata layer.
 ARG POWBOX_COMMIT="unknown"
+# Digest over this base layer's powbox SOURCE inputs (this Dockerfile plus every
+# file it COPYs — see scripts/base-source-files.txt). Distinct from
+# powbox.base.source.digest above, which is the UPSTREAM node:24-trixie-slim
+# digest: this one changes whenever powbox's own base recipe changes.
+# check-updates.{sh,ps1} recompute it from the working tree and mark the base
+# stale on a mismatch, so adopting any base-layer change (e.g. self-hosted mode)
+# triggers a base rebuild with no manual step. Supplied by
+# scripts/build-image.{sh,ps1} via scripts/base-source-digest.{sh,ps1}.
+#
+# Cache-key note: this ARG/LABEL sits in the base's FINAL, trivial metadata layer
+# (below every expensive apt/go/COPY layer), so a new digest only rebuilds this
+# layer. It is stamped on the BASE image only — nothing in the agent Dockerfile's
+# Codex install layer references it, so it cannot bust that layer's cache (the
+# constraint documented in docs/skills-refresh-and-provenance.md). When the base
+# recipe actually changes the base is rebuilt and re-parents the agent's Codex
+# layer anyway; when it does not, the digest is identical and this layer is a
+# cache hit, so the base image ID (and thus the Codex layer) is unaffected.
+ARG POWBOX_BASE_RECIPE_DIGEST=""
 RUN mkdir -p /home/node/.powbox \
     && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/base.commit
+# powbox.base.selfhosted is a static capability flag (Approach B): the clone path
+# for self-hosted (--isolated) mode lives entirely in THIS base layer
+# (seed-workspace.sh + entrypoint-core.sh's clone call), so its presence proves
+# the image can self-host. It is inherited by the agent image built FROM this one
+# (the agent Dockerfile does not override it), and launch-agent.{sh,ps1} fail fast
+# on --isolated when it is absent instead of starting in an empty checkout.
 LABEL powbox.base.source="${BASE_SOURCE_IMAGE}" \
       powbox.base.source.digest="${BASE_SOURCE_DIGEST}" \
+      powbox.base.recipe.digest="${POWBOX_BASE_RECIPE_DIGEST}" \
+      powbox.base.selfhosted="1" \
       powbox.commit.base="${POWBOX_COMMIT}"

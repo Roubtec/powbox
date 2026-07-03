@@ -349,9 +349,9 @@ The clone helper (`seed-workspace.sh`) and the entrypoint logic that runs it liv
 
 Rebuilding only the agent image — the common `cc --build` / `cx --build` path, and `agent-update` when just an agent binary changed — therefore layers a new agent on an **old base** that has no clone step, so `--isolated` would create the workspace volume but the entrypoint never clones into it (you land in an empty checkout).
 
-When adopting this feature on a machine that already has the images, rebuild the base too: `agent-update --refresh`, `agent-full-rebuild`, or `build.sh all` (see [Build Modes](#build-modes)). A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
+This is detected automatically. The base image records a digest over its own powbox build inputs — the base Dockerfile plus every file it `COPY`s (`powbox.base.recipe.digest`; see `scripts/base-source-files.txt`). `agent-check-updates` recomputes that digest from the working tree and flags the base **stale** whenever a base-layer source file changed (adopting self-hosted mode, or any future base-layer change), exactly like a stale **upstream** base; `agent-update` then offers the full base + agent rebuild with no manual step. Editing only an agent-layer file does not trigger it, so ordinary agent updates are not forced into a needless full rebuild. A first-time build (`agent-update` on a machine with no images) already builds base + agent, so it is unaffected.
 
-> A follow-up task tracks making `agent-update` / `agent-check-updates` flag a base rebuild automatically when the base layer's powbox source changes (today they only detect a stale **upstream** base), so this becomes a hands-off upgrade.
+As a backstop, `--isolated` / `-Isolated` also refuses to launch against an image whose base lacks the self-hosted capability label (`powbox.base.selfhosted`, inherited from the base) — it fails fast with a rebuild instruction (`agent-full-rebuild` / `build.sh all`) instead of starting you in an empty workspace, so even a launch that bypasses `agent-update` fails loudly rather than silently.
 
 ### gh auth must be ready before the clone
 

@@ -115,10 +115,19 @@ component_status() {
 # porcelain output that agent-update consumes. An unknown latest (registry/npm
 # unreachable) is undeterminable and is never flagged.
 compare_base() {
-	local baked="$1" latest="$2"
+	local baked="$1" latest="$2" recipe_stale="${3:-false}"
 	local b l
 	b="$(short_digest "$baked")"
 	l="$(short_digest "$latest")"
+	# A powbox base-source (recipe) change forces an update regardless of the
+	# upstream digest comparison, and MUST print the "update available" marker
+	# agent-update greps for (otherwise a recipe-only change would report "up to
+	# date" and never prompt). Take priority over the upstream branches below.
+	if [ "$recipe_stale" = true ]; then
+		[ -n "$b" ] || b="(unknown)"
+		printf '  %-8s  baked: %-14s  ** update available (base source changed) **\n' "Base" "$b"
+		return
+	fi
 	if [ -z "$baked" ]; then
 		# Image missing or unlabeled: a build is needed when the upstream is known.
 		if [ -n "$latest" ]; then
@@ -168,6 +177,12 @@ compare() {
 claude_baked="" codex_baked=""
 claude_latest="" codex_latest=""
 base_source="" base_baked="" base_latest=""
+# Powbox base-source ("recipe") staleness: the base image records a digest over
+# its own build inputs (powbox.base.recipe.digest); if the working tree's
+# recomputed digest differs, the base layer's powbox source changed and the base
+# is stale independently of the upstream node:24-trixie-slim digest. See
+# scripts/base-source-digest.sh.
+base_recipe_baked="" base_recipe_now="" recipe_stale=false
 
 if has_image "$AGENT_IMAGE"; then
 	versions_raw="$(baked_versions_raw "$AGENT_IMAGE")"
@@ -180,6 +195,21 @@ fi
 if has_image "$BASE_IMAGE"; then
 	base_source="$(image_label "$BASE_IMAGE" 'powbox.base.source')"
 	base_baked="$(image_label "$BASE_IMAGE" 'powbox.base.source.digest')"
+	# Recompute the base recipe digest from the working tree and compare against
+	# what the local base image was built from. A mismatch means a base-layer
+	# source change (this repo's base Dockerfile or a file it COPYs) and marks the
+	# base stale, OR-ed with the upstream-digest trigger below so agent-update's
+	# base==stale rebuild path fires for either reason (no agent-update change
+	# needed). A base image built before this label carries an empty baked digest,
+	# so it compares unequal and is flagged stale too — that is the one-time rebuild
+	# adopting this detection is meant to trigger. Only a NON-EMPTY recomputed
+	# digest is trusted: if it can't be computed (no sha256 tool, manifest gone),
+	# recipe staleness stays off so an undeterminable digest never forces a rebuild.
+	base_recipe_baked="$(image_label "$BASE_IMAGE" 'powbox.base.recipe.digest')"
+	base_recipe_now="$("${ROOT_DIR}/scripts/base-source-digest.sh" 2>/dev/null || true)"
+	if [ -n "$base_recipe_now" ] && [ "$base_recipe_baked" != "$base_recipe_now" ]; then
+		recipe_stale=true
+	fi
 else
 	note "Image $BASE_IMAGE not found — base will be shown as (unknown)."
 fi
@@ -207,8 +237,15 @@ fi
 # -------------------------------------------------------------------
 
 if $PORCELAIN; then
+	# OR the powbox-source (recipe) trigger into the base status: a recipe mismatch
+	# forces "stale" even when the upstream digest is unchanged (or undeterminable),
+	# feeding agent-update's existing base==stale rebuild path. The digest columns
+	# stay the UPSTREAM baked/latest pair (unchanged contract); only the status
+	# column reflects the OR.
+	base_status="$(component_status "$(short_digest "$base_baked")" "$(short_digest "$base_latest")")"
+	[ "$recipe_stale" = true ] && base_status=stale
 	printf '%s\t%s\t%s\t%s\n' base \
-		"$(component_status "$(short_digest "$base_baked")" "$(short_digest "$base_latest")")" \
+		"$base_status" \
 		"${base_baked:--}" "${base_latest:--}"
 	printf '%s\t%s\t%s\t%s\n' claude \
 		"$(component_status "$claude_baked" "$claude_latest")" \
@@ -228,7 +265,7 @@ fi
 
 echo ""
 echo "Agent update check:"
-if [ -n "$base_baked" ] || [ -n "$base_latest" ]; then compare_base "$base_baked" "$base_latest"; fi
+if [ -n "$base_baked" ] || [ -n "$base_latest" ] || [ "$recipe_stale" = true ]; then compare_base "$base_baked" "$base_latest" "$recipe_stale"; fi
 # Codex before Claude: Codex updates less often and the Claude layer is built on
 # top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
 if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi

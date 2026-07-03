@@ -128,9 +128,18 @@ function Format-ShortDigest([string]$Digest) {
 # just like a version mismatch. This keeps the human report consistent with the
 # porcelain output that agent-update consumes. An unknown latest (registry/npm
 # unreachable) is undeterminable and is never flagged.
-function Write-BaseComparison([string]$Baked, [string]$Latest) {
+function Write-BaseComparison([string]$Baked, [string]$Latest, [bool]$RecipeStale = $false) {
     $b = Format-ShortDigest $Baked
     $l = Format-ShortDigest $Latest
+    # A powbox base-source (recipe) change forces an update regardless of the
+    # upstream digest comparison, and MUST print the "update available" marker
+    # agent-update greps for (otherwise a recipe-only change would report "up to
+    # date" and never prompt). Takes priority over the upstream branches below.
+    if ($RecipeStale) {
+        if (-not $b) { $b = '(unknown)' }
+        Write-Host ("  {0,-8}  baked: {1,-14}  ** update available (base source changed) **" -f 'Base', $b)
+        return
+    }
     if (-not $Baked) {
         # Image missing or unlabeled: a build is needed when the upstream is known.
         if ($Latest) {
@@ -181,6 +190,14 @@ $codexBaked  = $null
 $baseSource  = $null
 $baseBaked   = $null
 $baseLatest  = $null
+# Powbox base-source ("recipe") staleness: the base image records a digest over
+# its own build inputs (powbox.base.recipe.digest); if the working tree's
+# recomputed digest differs, the base layer's powbox source changed and the base
+# is stale independently of the upstream node:24-trixie-slim digest. See
+# scripts/base-source-digest.ps1.
+$baseRecipeBaked = $null
+$baseRecipeNow   = $null
+$recipeStale     = $false
 
 if (Test-ImageExists $AgentImage) {
     $bakedVersions = Get-BakedAgentVersions $AgentImage
@@ -193,6 +210,24 @@ if (Test-ImageExists $AgentImage) {
 if (Test-ImageExists $BaseImage) {
     $baseSource = Get-ImageLabel $BaseImage 'powbox.base.source'
     $baseBaked  = Get-ImageLabel $BaseImage 'powbox.base.source.digest'
+    # Recompute the base recipe digest from the working tree and compare against
+    # what the local base image was built from. A mismatch means a base-layer
+    # source change (this repo's base Dockerfile or a file it COPYs) and marks the
+    # base stale, OR-ed with the upstream-digest trigger below so agent-update's
+    # base==stale rebuild path fires for either reason. A base image built before
+    # this label carries an empty baked digest, so it compares unequal and is
+    # flagged stale too (the one-time adoption rebuild). Only a NON-EMPTY recomputed
+    # digest is trusted: if it can't be computed, recipe staleness stays off so an
+    # undeterminable digest never forces a rebuild.
+    $baseRecipeBaked = Get-ImageLabel $BaseImage 'powbox.base.recipe.digest'
+    try {
+        $baseRecipeNow = (& (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts/base-source-digest.ps1') 2>$null).Trim()
+    } catch {
+        $baseRecipeNow = $null
+    }
+    if ($baseRecipeNow -and $baseRecipeBaked -ne $baseRecipeNow) {
+        $recipeStale = $true
+    }
 } else {
     Write-Note "Image $BaseImage not found — base will be shown as (unknown)."
 }
@@ -230,8 +265,12 @@ if ($Porcelain) {
     }
 
     # Base staleness compares short digests (like the .sh) so a registry digest
-    # and a baked digest that share the same 12-char prefix compare equal.
+    # and a baked digest that share the same 12-char prefix compare equal. OR in the
+    # powbox-source (recipe) trigger: a recipe mismatch forces 'stale' even when the
+    # upstream digest is unchanged (or undeterminable), feeding agent-update's
+    # existing base==stale rebuild path. The digest columns stay the UPSTREAM pair.
     $baseStatus = Get-ComponentStatus (Format-ShortDigest $baseBaked) (Format-ShortDigest $baseLatest)
+    if ($recipeStale) { $baseStatus = 'stale' }
     $tab = "`t"
     'base' + $tab + $baseStatus + $tab + (Format-PorcelainValue $baseBaked) + $tab + (Format-PorcelainValue $baseLatest)
     'claude' + $tab + (Get-ComponentStatus $claudeBaked $claudeLatest) + $tab + (Format-PorcelainValue $claudeBaked) + $tab + (Format-PorcelainValue $claudeLatest)
@@ -249,7 +288,7 @@ if ($Porcelain) {
 
 Write-Host ''
 Write-Host 'Agent update check:'
-if ($baseBaked   -or $baseLatest)   { Write-BaseComparison $baseBaked $baseLatest }
+if ($baseBaked   -or $baseLatest -or $recipeStale)   { Write-BaseComparison $baseBaked $baseLatest -RecipeStale $recipeStale }
 # Codex before Claude: Codex updates less often and the Claude layer is built on
 # top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }

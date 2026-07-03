@@ -18,6 +18,16 @@ variable "BASE_SOURCE_DIGEST" {
   default = ""
 }
 
+# Digest over the base layer's powbox SOURCE inputs (the base Dockerfile plus the
+# files it COPYs; see scripts/base-source-files.txt). Stamped as
+# powbox.base.recipe.digest on the base image so check-updates.{sh,ps1} can flag
+# a stale base when powbox's own base recipe changes. Distinct from
+# BASE_SOURCE_DIGEST (the upstream node:24-trixie-slim digest). Supplied by
+# scripts/build-image.{sh,ps1}.
+variable "POWBOX_BASE_RECIPE_DIGEST" {
+  default = ""
+}
+
 # Powbox git commit that built the image's top layers (and the base image when
 # building base); baked into the skill ownership marker and the provenance
 # labels/files. Supplied by scripts/build-image.{sh,ps1}.
@@ -54,6 +64,7 @@ target "base" {
   args = {
     BASE_SOURCE_IMAGE = BASE_SOURCE_IMAGE
     BASE_SOURCE_DIGEST = BASE_SOURCE_DIGEST
+    POWBOX_BASE_RECIPE_DIGEST = POWBOX_BASE_RECIPE_DIGEST
     POWBOX_COMMIT = POWBOX_COMMIT
   }
 }

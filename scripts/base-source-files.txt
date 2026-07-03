@@ -1,0 +1,43 @@
+# Powbox source files baked into the BASE image layer.
+#
+# This is the single source of truth for the base-source ("recipe") digest that
+# detects a stale base from powbox-side changes: scripts/base-source-digest.{sh,ps1}
+# hash exactly these files, build-image.{sh,ps1} stamp the result as the
+# powbox.base.recipe.digest label on the base image, and check-updates.{sh,ps1}
+# recompute it from the working tree and mark the base stale on a mismatch
+# (a powbox-source analogue of the existing upstream-digest trigger).
+#
+# Scope is BASE-layer inputs ONLY — the base Dockerfile plus every file it COPYs.
+# Agent-layer files (including docker/shared/* COPYd by docker/agent/Dockerfile,
+# e.g. entrypoint-agent.sh, seed-skills.sh, the wt-* helpers) MUST NOT appear here,
+# or an agent-only edit would falsely flag the base stale and force needless full
+# rebuilds. When you add or remove a COPY in docker/base/Dockerfile, update this
+# list to match.
+#
+# Paths are repo-root-relative, forward-slash. Blank lines and #-comments ignored;
+# order is irrelevant (the digest scripts sort before hashing).
+
+docker/base/Dockerfile
+
+# Root file COPYd into the base image.
+PSScriptAnalyzerSettings.psd1
+
+# docker/shared/* COPYd into the base image (/usr/local/bin and elsewhere).
+docker/shared/.bashrc
+docker/shared/.zshrc
+docker/shared/cid
+docker/shared/containers.conf
+docker/shared/detect-shadows.sh
+docker/shared/entrypoint-core.sh
+docker/shared/fix-workspace-perms.sh
+docker/shared/golangci-lint-wrapper.sh
+docker/shared/heal-workspace-perms.sh
+docker/shared/init-firewall.sh
+docker/shared/pg-dev-up
+docker/shared/pnpm-shadow-doctor
+docker/shared/pnpm-shadow-wrapper.sh
+docker/shared/seed-image-store.sh
+docker/shared/seed-workspace.sh
+docker/shared/sensitive-host-path.sh
+docker/shared/shadow-mounts.sh
+docker/shared/shadow-refresh.sh

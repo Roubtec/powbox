@@ -1,10 +1,7 @@
 # 015a — Migrate the shareable skills into Roubtec/agent-skills
 
-> **Batch note:** These tasks live in the jabko repo only as a transport vehicle
-> (committed with a `[drop]` marker on branch `add-dev-skill-support`). They are
-> to be executed **in the powbox repo checkout** by an agent with read/write
-> access to both the powbox repo and https://github.com/Roubtec/agent-skills.
-> Execute in numeric order: 015a → 015b → 015c → 015d; 015e is a human checklist.
+> **Batch note:** Execute in numeric order: 015a → 015b → 015c → 015d; 015e is a human checklist.
+> Run from a powbox repo checkout with read/write access to powbox and https://github.com/Roubtec/agent-skills.
 
 ## Why this task exists
 

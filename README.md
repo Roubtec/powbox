@@ -210,8 +210,8 @@ Shared volume names are kept stable to preserve existing data:
 
 The launcher also creates **per-container** volumes, keyed by the full container name (agent + project) so a project's Claude and Codex containers each get their own copy (not shared):
 
-- `agent-nm-<agent>-<project>` → the root `node_modules` (mounted for JS/powbox projects: `package.json`, `pnpm-workspace.yaml`, or `.powbox.yml`)
-- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the per-container pnpm store** (`.worktrees/.pnpm-store`) **and the Go caches** — the shared `GOMODCACHE`/`GOCACHE` (`.worktrees/.gomodcache`, `.worktrees/.gocache`) plus the per-worktree golangci-lint analysis caches (`.worktrees/.golangci-cache/…`) — so Go module downloads and builds survive container recreation. Mounted for JS/powbox projects **and** for repos with a `go.mod`; a go.mod-only repo gets this volume without the `node_modules` one, so no empty `node_modules/` dir appears in the host folder.
+- `agent-nm-<agent>-<project>` → the root `node_modules` (mounted for JS/powbox projects: `package.json`, `pnpm-workspace.yaml`, committed `.powbox.yml`, or `.powbox.local.yml` with a top-level `shadow:` key; a ctx-only local config does not trigger it)
+- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the per-container pnpm store** (`.worktrees/.pnpm-store`) **and the Go caches** — the shared `GOMODCACHE`/`GOCACHE` (`.worktrees/.gomodcache`, `.worktrees/.gocache`) plus the per-worktree golangci-lint analysis caches (`.worktrees/.golangci-cache/…`) — so Go module downloads and builds survive container recreation. Mounted for the same JS/powbox gate **and** for repos with a `go.mod`; a go.mod-only repo gets this volume without the `node_modules` one, so no empty `node_modules/` dir appears in the host folder.
 
 In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the stores/caches as subdirs); it is keyed per container, like the Podman storage volume below.
 
@@ -431,10 +431,10 @@ The entrypoint scans for workspace declarations in this order:
 
 1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs
 2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`)
-3. **`.powbox.yml` / `.powbox.local.yml`** — reads custom `shadow` glob patterns (see below)
+3. **`.powbox.yml` / `.powbox.local.yml` with `shadow:`** — reads custom `shadow` glob patterns (see below)
 
 All matched directories get a tmpfs overlay.
-If none of these files exist, the feature is a no-op.
+If none of these declarations exist, the feature is a no-op.
 
 ### Mid-Session Packages
 
@@ -445,7 +445,7 @@ To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked in
 Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure (e.g. self-hosted mode, where there is no host filesystem to shadow) never blocks the command.
 You can still run `shadow-refresh.sh` by hand at any time.
 
-One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, or `.powbox.yml` at launch, so the launcher mounted no isolated root `node_modules` volume for it). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
+One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, committed `.powbox.yml`, or `.powbox.local.yml` with a top-level `shadow:` key at launch, so the launcher mounted no isolated root `node_modules` volume for it; a local config with only `ctx:` still counts as non-dev). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
 
 ### Custom Shadow Paths (`.powbox.yml` / `.powbox.local.yml`)
 

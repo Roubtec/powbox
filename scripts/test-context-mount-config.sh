@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Unit tests for host-side ctx mount config parsing in launch-agent.{sh,ps1}.
-# These use POWBOX_PRINT_CTX=1, so they do not need Docker or a built image.
+# These use POWBOX_PRINT_CTX=1 or a fake docker shim, so they do not need Docker
+# or a built image.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,6 +42,18 @@ run_ps() {
 	local ws="$1"
 	shift
 	POWBOX_PRINT_CTX=1 pwsh -NoProfile -File "$LAUNCH_PS" codex "$ws" "$@" 2>&1
+}
+
+run_sh_no_print() {
+	local ws="$1"
+	shift
+	bash "$LAUNCH_SH" codex "$ws" "$@" 2>&1
+}
+
+run_ps_no_print() {
+	local ws="$1"
+	shift
+	pwsh -NoProfile -File "$LAUNCH_PS" codex "$ws" "$@" 2>&1
 }
 
 run_ps_ctx_values_from() {
@@ -267,6 +280,20 @@ assert_contains "CLI relative PowerShell caller path" "$out_ps" "CTX_MOUNT_0_PAT
 assert_not_contains "CLI relative bash not workspace path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/project/refs")"
 assert_not_contains "CLI relative PowerShell not workspace path" "$out_ps" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/project/refs")"
 
+echo "Test: CLI literal leading tilde ctx resolves from HOME"
+tilde_ws="$(new_ws cli-tilde)"
+fake_home="$WORK_ROOT/fake-home"
+# shellcheck disable=SC2088 # This regression requires a literal leading tilde.
+literal_tilde_ctx='~/existing-dir'
+mkdir -p "$tilde_ws/project" "$fake_home/existing-dir"
+out_sh="$(HOME="$fake_home" run_sh "$tilde_ws/project" --ctx "$literal_tilde_ctx")"
+out_ps="$(HOME="$fake_home" run_ps "$tilde_ws/project" -Ctx "$literal_tilde_ctx")"
+assert_eq "CLI tilde bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 1
+assert_eq "CLI tilde PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 1
+assert_contains "CLI tilde bash path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$fake_home/existing-dir")"
+assert_contains "CLI tilde PowerShell path" "$out_ps" "CTX_MOUNT_0_PATH=$(realpath "$fake_home/existing-dir")"
+assert_eq "CLI tilde hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+
 echo "Test: CLI equals split only when the prefix is a valid alias"
 eq_ws="$(new_ws cli-equals)"
 mkdir -p "$eq_ws/project" "$eq_ws/fixtures=a" "$eq_ws/a"
@@ -316,6 +343,29 @@ assert_eq "CLI missing value bash status" "$status_sh" 1
 assert_eq "CLI empty value PowerShell status" "$status_ps" 1
 assert_contains "CLI missing value bash error" "$out_sh" "missing path for --ctx"
 assert_contains "CLI empty value PowerShell error" "$out_ps" "-Ctx value has an empty path"
+
+echo "Test: CLI ctx validation runs before Docker setup"
+ws="$(new_ws cli-before-docker)"
+fake_bin="$WORK_ROOT/fake-bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/docker" <<'SH'
+#!/usr/bin/env bash
+echo "FAKE_DOCKER_CALLED $*" >&2
+exit 42
+SH
+chmod +x "$fake_bin/docker"
+set +e
+out_sh="$(PATH="$fake_bin:$PATH" run_sh_no_print "$ws" --ctx "")"
+status_sh=$?
+out_ps="$(PATH="$fake_bin:$PATH" run_ps_no_print "$ws" -Ctx "")"
+status_ps=$?
+set -e
+assert_eq "empty ctx before Docker bash status" "$status_sh" 1
+assert_eq "empty ctx before Docker PowerShell status" "$status_ps" 1
+assert_contains "empty ctx before Docker bash error" "$out_sh" "--ctx value has an empty path"
+assert_contains "empty ctx before Docker PowerShell error" "$out_ps" "-Ctx value has an empty path"
+assert_not_contains "empty ctx before Docker bash skips docker" "$out_sh" "FAKE_DOCKER_CALLED"
+assert_not_contains "empty ctx before Docker PowerShell skips docker" "$out_ps" "FAKE_DOCKER_CALLED"
 
 echo "Test: missing configured paths and duplicate target names warn and skip"
 ws="$(new_ws missing-duplicate)"

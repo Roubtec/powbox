@@ -669,12 +669,13 @@ powbox_resolve_config_ctx_dir() {
 }
 
 powbox_resolve_cli_ctx_dir() {
-	local raw="$1" outvar="$2" resolved_path
-	if [ ! -d "$raw" ]; then
+	local raw="$1" outvar="$2" path resolved_path
+	path="$(powbox_expand_leading_tilde "$raw")"
+	if [ ! -d "$path" ]; then
 		echo "Error: context path does not exist: ${raw}" >&2
 		exit 1
 	fi
-	resolved_path="$(cd "$raw" && pwd -P)" || {
+	resolved_path="$(cd "$path" && pwd -P)" || {
 		echo "Error: failed to resolve context path: ${raw}" >&2
 		exit 1
 	}

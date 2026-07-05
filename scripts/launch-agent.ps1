@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("claude", "codex")]
   [string]$Agent,
@@ -352,11 +352,12 @@ function Resolve-Powbox-ConfigCtxDirectory ([string]$RawPath, [string]$Workspace
 }
 
 function Resolve-Powbox-CliCtxDirectory ([string]$RawPath) {
-  if (-not (Test-Path -LiteralPath $RawPath -PathType Container)) {
+  $path = Expand-Powbox-LeadingTilde $RawPath
+  if (-not (Test-Path -LiteralPath $path -PathType Container)) {
     Write-Error "Error: context path does not exist: $RawPath"
     exit 1
   }
-  try { return (Resolve-Powbox-DirectoryPath $RawPath) }
+  try { return (Resolve-Powbox-DirectoryPath $path) }
   catch {
     Write-Error "Error: failed to resolve context path: $RawPath"
     exit 1
@@ -753,6 +754,7 @@ else {
 }
 
 $containerName = "$Agent-$projectSlug"
+$workspaceMount = "/workspace/$projectSlug"
 # pnpm store path under the workspace mount (same mount as .worktrees/<task> in
 # both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
@@ -881,7 +883,6 @@ else {
   $env:WORKSPACE_PATH = $resolvedProject
 }
 $env:PROJECT_NAME = $projectSlug
-$workspaceMount = "/workspace/$projectSlug"
 
 $ghHostConfigPath = if ($env:GH_HOST_CONFIG_DIR) { $env:GH_HOST_CONFIG_DIR } else { "$env:APPDATA\GitHub CLI" }
 $gitConfigPath = if ($env:GIT_CONFIG_PATH) { $env:GIT_CONFIG_PATH } else { Join-Path $env:USERPROFILE ".gitconfig" }

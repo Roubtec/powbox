@@ -49,9 +49,11 @@ This task brings the argument to feature parity for a single invocation.
 ## Context and references
 
 - Task 014 (`tasks/014-context-mounts-local-config.md`): entry normalization
-  rules (`~`/relative expansion, basename/alias validation), duplicate
-  semantics, the "Recreate detection (config-hash label)" section, and the
-  uniform `/ctx/<name>` layout — all reused verbatim here.
+  rules (`~` expansion, basename/alias validation), duplicate semantics, the
+  "Recreate detection (config-hash label)" section, the `--mount` mount form,
+  and the uniform `/ctx/<name>` layout — reused here, **except relative-path
+  resolution**, which keeps the CLI's caller-cwd semantics (see Implementation
+  notes).
 - Current single-value plumbing: `scripts/launch-agent.sh:25,77-79,124-129`
   and `scripts/launch-agent.ps1:14,89-93` (as of 014's baseline; 014 will
   have reshaped these).
@@ -81,6 +83,17 @@ and triples the flag surface.
   repeated `-Ctx` in PowerShell.
 - The single-value invocation (`--ctx <path>`) must behave exactly as it
   does after 014 — same mount, same hash — so parity is a pure superset.
+- **CLI relative paths keep shell-relative semantics — do *not* adopt 014's
+  config-relative rule.** A config `ctx:` entry resolves a relative path
+  against the workspace root, but an explicit `--ctx <relpath>` must continue
+  to resolve against the **caller's current directory**, exactly as the
+  launcher does today (`scripts/launch-agent.sh:128-129`,
+  `CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"`). Otherwise `cc ../app --ctx refs`
+  from a sibling directory would silently switch from mounting `./refs` to
+  `../app/refs` (or fail if only the former exists). Share 014's validation,
+  alias, hash, and `--mount` construction; branch **only** the relative-path
+  base (workspace root for config entries, caller cwd for CLI values). `~`
+  expansion and everything else stay common.
 - Keep 014's hard-error character for everything CLI: fail before any
   container mutation (validate the full set first, then act).
 - Match each script's existing arg-parsing style; keep sh/ps1 behavioral
@@ -103,6 +116,10 @@ and triples the flag surface.
    (no regression), and the whole wrapper chain (`cc`/`cx` →
    `commands/*` → `launch-agent.*`) forwards multi-values intact.
 6. README documents both platforms' multi-value forms with examples.
+7. A relative `--ctx <relpath>` resolves against the caller's current
+   directory, not the workspace root: `cc ../app --ctx refs` run from a
+   sibling directory mounts the caller's `./refs`, matching pre-014 CLI
+   behavior — never `../app/refs`.
 
 ## Validation
 
@@ -117,8 +134,10 @@ and triples the flag surface.
 ## Review plan
 
 Reviewer should check: (1) the CLI grammar matches the settled
-`[name=]path[:mode]` form and shares 014's normalization code rather than
-duplicating it; (2) sh/ps1
+`[name=]path[:mode]` form and shares 014's normalization/validation/hash code
+rather than duplicating it, **while branching relative-path resolution** to the
+caller's cwd (not the workspace root — config-relative semantics must not leak
+onto CLI values); (2) sh/ps1
 parity, including the `[string[]]` binding vs repeated-flag difference;
 (3) validation happens before any destructive step; (4) single-value
 behavior is a strict superset of post-014 behavior.

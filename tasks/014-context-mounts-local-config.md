@@ -140,12 +140,38 @@ For each `ctx` entry, in listed order:
 2. Expand a leading `~` to the user's home directory; resolve a relative
    path against the workspace root. Environment variables are **not**
    expanded — entries are otherwise literal. Then validate: warn (not abort)
-   if the result does not exist or is not a directory, and skip the entry.
+   and skip the entry if the resolved path does not exist, is not a
+   directory, or contains a comma (`,` is the `--mount` field delimiter and
+   cannot be carried — see "Mount form").
 3. Target name = the `name:` alias if given, else the folder's basename.
-   Validate it is a single, safe path segment (non-empty, no `/` or `\`, not
-   `.`/`..`); warn + skip otherwise. Mount `-v <host>:/ctx/<name>:<mode>`.
+   Validate it is a single, safe path segment (non-empty, no `/`, `\`, or `,`,
+   not `.`/`..`); warn + skip otherwise. A `:` **is** allowed — the mount form
+   below carries it. Build the mount with the exploded `--mount` form, not the
+   colon-packed `-v`:
+   `--mount type=bind,src=<host>,dst=/ctx/<name>[,ro]` (omit the `,ro` token
+   for `rw`).
 4. Duplicate target names after alias resolution: warn + skip the later
    entry, with the warning suggesting a `name:` alias as the fix.
+
+**Mount form — `--mount`, not `-v`.** Build every ctx mount (config entries
+*and* the CLI `--ctx`) with the exploded
+`--mount type=bind,src=<host>,dst=/ctx/<name>[,ro]` form — read-write omits the
+`,ro` token — rather than the colon-packed `-v <host>:/ctx/<name>:<mode>`. This
+is the CLI equivalent of docker-compose's *long* volume syntax (separate
+`source:`/`target:` fields), and it is required for correctness, not style:
+`-v` treats `:` as its field delimiter, so a `:` in **either** the resolved
+host path **or** the derived target name — both valid POSIX path characters —
+makes the engine reject the mount as `incorrect volume format`. `--mount`
+passes source and target as separate fields, so colons flow through untouched
+(verified on podman 5.4.2). This is why step 3 no longer needs to ban colons,
+and why an ambiguous *mode suffix* is disambiguated at the parsing layer (the
+long-form config object with a standalone `path:`/`mode:`), not by mangling the
+path. The one residual limitation is a literal **comma**: it is `--mount`'s
+field delimiter and podman's CSV-quoting escape is unreliable, so a resolved
+host path or derived name containing `,` is rejected up front (config: warn +
+skip; CLI: hard error) with a clear message instead of a cryptic engine error.
+Commas in directory names are far rarer than colons, so this is a strictly
+smaller hole than the retired `-v` form.
 
 The result flattens any odd combination of host folders into one predictable,
 easy-to-reference list of directories under `/ctx`. Mixing rw/ro is entirely
@@ -281,6 +307,15 @@ old `.Mounts`-source comparison could not see them.
   hashing rejected (cosmetic edits would recreate; a missing-then-created
   host path would go undetected); mount-set inspection rejected (fiddly
   N-mount cross-platform normalization, blind to `ro`/`rw`).
+- **Mount form: `--mount`, not `-v`.** Ctx (and CLI `--ctx`) mounts use the
+  exploded `--mount type=bind,src=,dst=[,ro]` form so a `:` in a host path or
+  derived name — valid POSIX, but rejected by colon-packed `-v` — mounts
+  correctly (the CLI analog of docker-compose long syntax). A literal `,` (the
+  `--mount` field delimiter) stays unsupported: warn + skip (config) / hard
+  error (CLI). Rationale and verification in "Mount form" under Mount
+  derivation. `-v` rejected: it cannot express a colon-containing path in
+  either position, and the review found no way to escape that within the short
+  form.
 - **OQ-8 — Gitignore: docs + launcher warning.** README documents the
   requirement; the launcher warns via `git check-ignore -q` when the file
   exists in a git repo and is not ignored. Never edits `.gitignore`
@@ -302,7 +337,10 @@ old `.Mounts`-source comparison could not see them.
 2. `--ctx <path>` on the CLI ignores the configured context entirely and
    mounts read-only at `/ctx/<basename>` (uniform layout). Relaunching over a
    stopped legacy container (flattened `/ctx`, no label) recreates it once
-   via the legacy-fallback comparison.
+   because a missing `powbox.ctx-hash` label counts as a mismatch whenever a
+   desired context set is present (see "Recreate detection" → Legacy
+   containers) — **not** via a source-only comparison, which would see the
+   unchanged path and wrongly reuse the flattened, unlabeled mount.
 3. Editing the local file's `ctx` list (add/remove an entry, change a mode or
    alias) changes the hash: a **stopped** container is recreated with the new
    mount set; a **running** one fails with the existing "stop first" message;
@@ -311,7 +349,10 @@ old `.Mounts`-source comparison could not see them.
    that now exists **does**.
 4. A missing host path warns and is skipped (launch proceeds); a duplicate
    target name warns, skips the later entry, and suggests a `name:` alias —
-   never a silent wrong mount, never an abort.
+   never a silent wrong mount, never an abort. A host path or derived name
+   containing a `:` mounts correctly under `/ctx/<name>` (the `--mount` form
+   carries it); one containing a `,` is warn-skipped (config) / hard-errored
+   (CLI) with a clear message, never a raw engine failure.
 5. No config file + no `--ctx` ⇒ behavior identical to today (including the
    "keep whatever is already mounted" reuse path).
 6. The container image is unchanged; no new host dependencies are required.
@@ -346,4 +387,7 @@ including the legacy no-label fallback and the "don't care" (no config, no
 `--ctx`) path — cannot regress the existing reuse flows; (3) Windows path handling
 (drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath` usage); (4)
 that the mini-parser fails safe (warn + ignore) on YAML it doesn't understand;
-(5) docs accurately reflect resolved OQ decisions.
+(5) docs accurately reflect resolved OQ decisions; (6) the launcher emits the
+`--mount type=bind,src=,dst=[,ro]` form (not colon-packed `-v`) for ctx mounts,
+so a `:` in a host path or derived name mounts rather than failing, and a `,`
+is rejected up front with a clear message.

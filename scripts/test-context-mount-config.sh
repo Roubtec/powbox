@@ -141,6 +141,29 @@ assert_contains "long-form path defaults to ro" "$out_sh" "CTX_MOUNT_2_MODE=ro"
 assert_not_contains "Windows-drive-looking scalar is not an object in bash" "$out_sh" "unsupported ctx object key 'C'"
 assert_not_contains "Windows-drive-looking scalar is not an object in PowerShell" "$out_ps" "unsupported ctx object key 'C'"
 
+echo "Test: key-looking short forms are scalars unless colon is followed by whitespace"
+key_ws="$(new_ws key-looking-scalars)"
+mkdir -p "$key_ws/path:foo" "$key_ws/name:bar" "$key_ws/mode:baz"
+cat >"$key_ws/.powbox.local.yml" <<'YAML'
+ctx:
+  - path:foo
+  - name:bar
+  - mode:baz
+YAML
+out_sh="$(run_sh "$key_ws")"
+out_ps="$(run_ps "$key_ws")"
+assert_eq "key-looking scalar bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 3
+assert_eq "key-looking scalar PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 3
+assert_eq "key-looking scalar hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+assert_contains "path-looking scalar name" "$out_sh" "CTX_MOUNT_0_NAME=path:foo"
+assert_contains "name-looking scalar name" "$out_sh" "CTX_MOUNT_1_NAME=name:bar"
+assert_contains "mode-looking scalar name" "$out_sh" "CTX_MOUNT_2_NAME=mode:baz"
+assert_contains "path-looking scalar default mode" "$out_sh" "CTX_MOUNT_0_MODE=ro"
+assert_contains "name-looking scalar default mode" "$out_sh" "CTX_MOUNT_1_MODE=ro"
+assert_contains "mode-looking scalar default mode" "$out_sh" "CTX_MOUNT_2_MODE=ro"
+assert_not_contains "key-looking scalars do not form missing-path objects in bash" "$out_sh" "missing required path"
+assert_not_contains "key-looking scalars do not form missing-path objects in PowerShell" "$out_ps" "missing required path"
+
 echo "Test: local ctx clobbers committed ctx and ctx: [] is explicit empty"
 ws="$base_ws"
 mkdir -p "$ws/refC"

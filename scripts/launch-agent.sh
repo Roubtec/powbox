@@ -371,7 +371,7 @@ powbox_parse_yaml_scalar() {
 powbox_split_yaml_key_value() {
 	local line parsed_key parsed_value
 	line="$(powbox_trim "$(powbox_strip_yaml_comment "$1")")"
-	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_.-]*):(.*)$ ]]; then
+	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_.-]*):($|[[:space:]].*)$ ]]; then
 		parsed_key="${BASH_REMATCH[1]}"
 		parsed_value="${BASH_REMATCH[2]}"
 		printf -v "$2" '%s' "$parsed_key"

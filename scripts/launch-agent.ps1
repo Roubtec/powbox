@@ -171,7 +171,7 @@ function ConvertFrom-Powbox-YamlScalar ([string]$Value, [string]$Context) {
 
 function Split-Powbox-YamlKeyValue ([string]$Line) {
   $trimmed = (ConvertFrom-Powbox-YamlCommentedLine $Line).Trim(" ", "`t", "`r")
-  if ($trimmed -match '^([A-Za-z_][A-Za-z0-9_.-]*):(.*)$') {
+  if ($trimmed -match '^([A-Za-z_][A-Za-z0-9_.-]*):($|[ \t].*)$') {
     return [pscustomobject]@{ Key = $Matches[1]; Value = $Matches[2] }
   }
   return $null

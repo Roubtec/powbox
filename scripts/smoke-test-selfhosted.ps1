@@ -94,23 +94,32 @@ Ok "dir-mounted hash matches SHA256(path)[:12], has nm/wt and no ws volume"
 
 # --- dir-mounted volume-gate matrix (the SPLIT gate, task 011) -----------------
 # agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
-# .powbox.yml -> MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
+# committed .powbox.yml / local shadow: -> MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
 # go.mod (MOUNT_WORKTREES_VOLUME, which gates GOMODCACHE/GOCACHE) - so a pure-Go
 # repo gets persistent Go caches + worktrees WITHOUT an empty node_modules/
-# mountpoint littering the host folder. Four fixture shapes pin the matrix.
+# mountpoint littering the host folder. The local ctx:-only case must not opt a
+# non-dev folder into project volumes.
 $matrixRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-gate-$PID"
 try {
-  foreach ($dir in @("pkg-only", "gomod-only", "both", "neither")) {
+  foreach ($dir in @("pkg-only", "gomod-only", "both", "powbox-yml", "local-shadow", "local-shadow-empty", "local-ctx-only", "neither")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $matrixRoot $dir) | Out-Null
   }
   foreach ($marker in @(@("pkg-only", "package.json"), @("gomod-only", "go.mod"), @("both", "package.json"), @("both", "go.mod"))) {
     New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot $marker[0]) $marker[1]) | Out-Null
   }
+  New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot "powbox-yml") ".powbox.yml") | Out-Null
+  Set-Content -LiteralPath (Join-Path (Join-Path $matrixRoot "local-shadow") ".powbox.local.yml") -Value @("shadow:", "  - .worktrees")
+  Set-Content -LiteralPath (Join-Path (Join-Path $matrixRoot "local-shadow-empty") ".powbox.local.yml") -Value "shadow: []"
+  Set-Content -LiteralPath (Join-Path (Join-Path $matrixRoot "local-ctx-only") ".powbox.local.yml") -Value "ctx: []"
   foreach ($case in @(
       @("pkg-only", "true", "true"),
       @("gomod-only", "false", "true"),
       @("both", "true", "true"),
+      @("powbox-yml", "true", "true"),
+      @("local-shadow", "true", "true"),
+      @("local-shadow-empty", "true", "true"),
+      @("local-ctx-only", "false", "false"),
       @("neither", "false", "false"))) {
     $gid = Get-Identity @("-Agent", "claude", "-ProjectPath", (Join-Path $matrixRoot $case[0]))
     if ($gid["MOUNT_WORKSPACE_VOLUMES"] -ne $case[1]) { Fail "gate matrix $($case[0]): MOUNT_WORKSPACE_VOLUMES is '$($gid["MOUNT_WORKSPACE_VOLUMES"])', want '$($case[1])'" }
@@ -120,7 +129,7 @@ try {
 finally {
   Remove-Item -Recurse -Force $matrixRoot -ErrorAction SilentlyContinue
 }
-Ok "volume-gate matrix: nm keys on the JS/powbox gate, wt also on go.mod (pkg-only / go.mod-only / both / neither)"
+Ok "volume-gate matrix: nm keys on JS/powbox/local-shadow gate, wt also on go.mod; local ctx-only stays non-dev"
 
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")

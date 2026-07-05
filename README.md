@@ -431,7 +431,7 @@ The entrypoint scans for workspace declarations in this order:
 
 1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs
 2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`)
-3. **`.powbox.yml`** — reads custom `shadow` glob patterns (see below)
+3. **`.powbox.yml` / `.powbox.local.yml`** — reads custom `shadow` glob patterns (see below)
 
 All matched directories get a tmpfs overlay.
 If none of these files exist, the feature is a no-op.
@@ -447,7 +447,7 @@ You can still run `shadow-refresh.sh` by hand at any time.
 
 One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, or `.powbox.yml` at launch, so the launcher mounted no isolated root `node_modules` volume for it). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
 
-### Custom Shadow Paths (`.powbox.yml`)
+### Custom Shadow Paths (`.powbox.yml` / `.powbox.local.yml`)
 
 For paths that auto-detection does not cover, add a `.powbox.yml` to the project root:
 
@@ -457,12 +457,15 @@ shadow:
   - tools/legacy-build/vendor     # non-standard path
 ```
 
+Use `.powbox.local.yml` for machine-local experiments or overrides that should not be committed.
+If `.powbox.local.yml` has a top-level `shadow:` key, its list replaces the committed `.powbox.yml` shadow list wholesale; `shadow: []` locally disables committed custom shadows while leaving workspace auto-detection from `pnpm-workspace.yaml` and `package.json` active.
+
 Patterns are resolved relative to the project root.
 A pattern containing glob metacharacters (`*`, `?`, `[`, `]`) is expanded as a glob, and only directories that exist at container start are shadowed.
 A literal path (no glob metacharacters) is shadowed even if it does not exist yet — it is created and tmpfs-mounted at startup. This lets committed declarations for gitignored, fresh-checkout-absent directories take effect without a manual `mkdir`.
 In both cases a pattern that resolves outside the workspace root is rejected.
 
-Auto-detection and `.powbox.yml` patterns are merged and deduplicated.
+Auto-detection and the effective custom shadow list are merged and deduplicated.
 
 ### Git Worktree Parallel Development
 

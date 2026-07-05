@@ -406,6 +406,11 @@ powbox_effective_ctx_config_present() {
 	powbox_file_has_top_section "${workspace}/.powbox.yml" ctx
 }
 
+powbox_local_shadow_config_present() {
+	local workspace="$1"
+	powbox_file_has_top_section "${workspace}/.powbox.local.yml" shadow
+}
+
 powbox_parse_ctx_finish_object() {
 	if [ "$ctx_obj_open" != true ]; then
 		return 0
@@ -1053,14 +1058,16 @@ else
 	WT_VOLUME="agent-wt-${AGENT}-${PROJECT_NAME}"
 	# Mount those volumes only when the host folder looks like a project that uses
 	# them: a JS/Node project (package.json — covers npm/yarn/pnpm — or
-	# pnpm-workspace.yaml) or one that has opted into powbox via .powbox.yml (e.g. a
-	# non-JS repo that still wants persistent worktrees). A research/file-management
-	# folder matches none of these, so it gets no node_modules/.worktrees mounts and
-	# no host litter. The entrypoint's shadow loop independently finds nothing to
-	# shadow for such a folder, so launcher and entrypoint stay consistent.
+	# pnpm-workspace.yaml), one that has opted into powbox via committed .powbox.yml
+	# (e.g. a non-JS repo that still wants persistent worktrees), or one with a
+	# local-only shadow: key. A research/file-management folder, including one with
+	# only local ctx: mounts, gets no node_modules/.worktrees mounts and no host litter.
+	# The entrypoint's shadow loop independently finds nothing to shadow for such a
+	# folder, so launcher and entrypoint stay consistent.
 	if [ -f "$PROJECT_PATH/package.json" ] ||
 		[ -f "$PROJECT_PATH/pnpm-workspace.yaml" ] ||
-		[ -f "$PROJECT_PATH/.powbox.yml" ]; then
+		[ -f "$PROJECT_PATH/.powbox.yml" ] ||
+		powbox_local_shadow_config_present "$PROJECT_PATH"; then
 		MOUNT_WORKSPACE_VOLUMES=true
 	fi
 	# The worktrees volume has a second, WIDER trigger: go.mod. A pure-Go repo

@@ -101,11 +101,12 @@ ok "dir-mounted has nm/wt volumes and no ws volume"
 
 # --- dir-mounted volume-gate matrix (the SPLIT gate, task 011) -----------------
 # agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
-# .powbox.yml → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
+# committed .powbox.yml / local shadow: → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
 # go.mod (MOUNT_WORKTREES_VOLUME, which gates GOMODCACHE/GOCACHE) — so a pure-Go
 # repo gets persistent Go caches + worktrees WITHOUT an empty node_modules/
-# mountpoint littering the host folder. Four fixture shapes pin the matrix.
+# mountpoint littering the host folder. The local ctx:-only case must not opt a
+# non-dev folder into project volumes.
 MATRIX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-gate-XXXXXX")"
 trap 'rm -rf "$MATRIX_ROOT"' EXIT
 gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / MOUNT_WORKTREES_VOLUME
@@ -116,18 +117,39 @@ gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / 
 	[ "$(id_field "$out" MOUNT_WORKTREES_VOLUME)" = "$3" ] ||
 		fail "gate matrix $1: MOUNT_WORKTREES_VOLUME is '$(id_field "$out" MOUNT_WORKTREES_VOLUME)', want '$3'"
 }
-mkdir -p "$MATRIX_ROOT/pkg-only" "$MATRIX_ROOT/gomod-only" "$MATRIX_ROOT/both" "$MATRIX_ROOT/neither"
+mkdir -p \
+	"$MATRIX_ROOT/pkg-only" \
+	"$MATRIX_ROOT/gomod-only" \
+	"$MATRIX_ROOT/both" \
+	"$MATRIX_ROOT/powbox-yml" \
+	"$MATRIX_ROOT/local-shadow" \
+	"$MATRIX_ROOT/local-shadow-empty" \
+	"$MATRIX_ROOT/local-ctx-only" \
+	"$MATRIX_ROOT/neither"
 : >"$MATRIX_ROOT/pkg-only/package.json"
 : >"$MATRIX_ROOT/gomod-only/go.mod"
 : >"$MATRIX_ROOT/both/package.json"
 : >"$MATRIX_ROOT/both/go.mod"
+: >"$MATRIX_ROOT/powbox-yml/.powbox.yml"
+cat >"$MATRIX_ROOT/local-shadow/.powbox.local.yml" <<'YAML'
+shadow:
+  - .worktrees
+YAML
+printf 'shadow: []\n' >"$MATRIX_ROOT/local-shadow-empty/.powbox.local.yml"
+cat >"$MATRIX_ROOT/local-ctx-only/.powbox.local.yml" <<'YAML'
+ctx: []
+YAML
 gate_case pkg-only true true
 gate_case gomod-only false true
 gate_case both true true
+gate_case powbox-yml true true
+gate_case local-shadow true true
+gate_case local-shadow-empty true true
+gate_case local-ctx-only false false
 gate_case neither false false
 rm -rf "$MATRIX_ROOT"
 trap - EXIT
-ok "volume-gate matrix: nm keys on the JS/powbox gate, wt also on go.mod (pkg-only / go.mod-only / both / neither)"
+ok "volume-gate matrix: nm keys on JS/powbox/local-shadow gate, wt also on go.mod; local ctx-only stays non-dev"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"

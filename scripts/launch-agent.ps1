@@ -203,7 +203,7 @@ function Complete-Powbox-CtxObject ([ref]$Current, [System.Collections.IList]$En
     $Current.Value = $null
     return
   }
-  [void]$Entries.Add([pscustomobject]@{ Path = $obj.Path; Name = $obj.Name; Mode = $obj.Mode; Origin = $obj.Origin })
+  [void]$Entries.Add([pscustomobject]@{ Path = $obj.Path; Name = $obj.Name; Mode = $obj.Mode; ShortForm = $false; Origin = $obj.Origin })
   $Current.Value = $null
 }
 
@@ -244,28 +244,22 @@ function Read-Powbox-CtxFile ([string]$File) {
         continue
       }
       $kv = Split-Powbox-YamlKeyValue $rest
-      if ($kv) {
+      if ($kv -and @("path", "name", "mode").Contains($kv.Key)) {
         $current = @{ Path = ""; Name = ""; Mode = ""; Origin = "${File}:${lineNo}"; PathSet = $false; Bad = $false }
-        if ($kv.Key -in @("path", "name", "mode")) {
-          $parsed = ConvertFrom-Powbox-YamlScalar $kv.Value "${File}:${lineNo}: ctx.$($kv.Key)"
-          if ($parsed.Ok) {
-            switch ($kv.Key) {
-              "path" { $current.Path = $parsed.Value; $current.PathSet = $true }
-              "name" { $current.Name = $parsed.Value }
-              "mode" { $current.Mode = $parsed.Value }
-            }
+        $parsed = ConvertFrom-Powbox-YamlScalar $kv.Value "${File}:${lineNo}: ctx.$($kv.Key)"
+        if ($parsed.Ok) {
+          switch ($kv.Key) {
+            "path" { $current.Path = $parsed.Value; $current.PathSet = $true }
+            "name" { $current.Name = $parsed.Value }
+            "mode" { $current.Mode = $parsed.Value }
           }
-          else { $current.Bad = $true }
         }
-        else {
-          Write-Powbox-Warning "${File}:${lineNo}: unsupported ctx object key '$($kv.Key)'; skipping entry."
-          $current.Bad = $true
-        }
+        else { $current.Bad = $true }
       }
       else {
         $parsed = ConvertFrom-Powbox-YamlScalar $rest "${File}:${lineNo}: ctx entry"
         if ($parsed.Ok) {
-          [void]$entries.Add([pscustomobject]@{ Path = $parsed.Value; Name = ""; Mode = ""; Origin = "${File}:${lineNo}" })
+          [void]$entries.Add([pscustomobject]@{ Path = $parsed.Value; Name = ""; Mode = ""; ShortForm = $true; Origin = "${File}:${lineNo}" })
         }
       }
       continue
@@ -424,8 +418,11 @@ function Resolve-Powbox-CtxMountSet ([string]$Workspace) {
     $rawPath = $entry.Path
     $mode = $entry.Mode
     if ($mode -eq "") {
-      if ($rawPath.EndsWith(":ro")) { $mode = "ro"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
-      elseif ($rawPath.EndsWith(":rw")) { $mode = "rw"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
+      if ($entry.ShortForm) {
+        if ($rawPath.EndsWith(":ro")) { $mode = "ro"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
+        elseif ($rawPath.EndsWith(":rw")) { $mode = "rw"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
+        else { $mode = "ro" }
+      }
       else { $mode = "ro" }
     }
     if ($mode -notin @("ro", "rw")) {

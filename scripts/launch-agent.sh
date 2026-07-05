@@ -422,6 +422,7 @@ powbox_parse_ctx_finish_object() {
 	POWBOX_PARSE_CTX_PATHS+=("$ctx_obj_path")
 	POWBOX_PARSE_CTX_NAMES+=("$ctx_obj_name")
 	POWBOX_PARSE_CTX_MODES+=("$ctx_obj_mode")
+	POWBOX_PARSE_CTX_SHORT_FORMS+=(false)
 	POWBOX_PARSE_CTX_ORIGINS+=("$ctx_obj_origin")
 	ctx_obj_open=false
 }
@@ -435,6 +436,7 @@ powbox_parse_ctx_file() {
 	POWBOX_PARSE_CTX_PATHS=()
 	POWBOX_PARSE_CTX_NAMES=()
 	POWBOX_PARSE_CTX_MODES=()
+	POWBOX_PARSE_CTX_SHORT_FORMS=()
 	POWBOX_PARSE_CTX_ORIGINS=()
 	[ -f "$file" ] || return 0
 	while IFS= read -r line || [ -n "$line" ]; do
@@ -487,6 +489,19 @@ powbox_parse_ctx_file() {
 				continue
 			fi
 			if powbox_split_yaml_key_value "$rest" key value; then
+				case "$key" in
+				path | name | mode) ;;
+				*)
+					if powbox_parse_yaml_scalar "$rest" parsed "${file}:${line_no}: ctx entry"; then
+						POWBOX_PARSE_CTX_PATHS+=("$parsed")
+						POWBOX_PARSE_CTX_NAMES+=("")
+						POWBOX_PARSE_CTX_MODES+=("")
+						POWBOX_PARSE_CTX_SHORT_FORMS+=(true)
+						POWBOX_PARSE_CTX_ORIGINS+=("${file}:${line_no}")
+					fi
+					continue
+					;;
+				esac
 				ctx_obj_open=true
 				ctx_obj_bad=false
 				ctx_obj_path_set=false
@@ -509,16 +524,13 @@ powbox_parse_ctx_file() {
 						ctx_obj_bad=true
 					fi
 					;;
-				*)
-					powbox_warn "${file}:${line_no}: unsupported ctx object key '${key}'; skipping entry."
-					ctx_obj_bad=true
-					;;
 				esac
 			else
 				if powbox_parse_yaml_scalar "$rest" parsed "${file}:${line_no}: ctx entry"; then
 					POWBOX_PARSE_CTX_PATHS+=("$parsed")
 					POWBOX_PARSE_CTX_NAMES+=("")
 					POWBOX_PARSE_CTX_MODES+=("")
+					POWBOX_PARSE_CTX_SHORT_FORMS+=(true)
 					POWBOX_PARSE_CTX_ORIGINS+=("${file}:${line_no}")
 				fi
 			fi
@@ -563,8 +575,8 @@ powbox_parse_ctx_file() {
 powbox_load_effective_ctx_config() {
 	local workspace="$1"
 	local base_present=false local_present=false
-	local -a base_paths=() base_names=() base_modes=() base_origins=()
-	local -a local_paths=() local_names=() local_modes=() local_origins=()
+	local -a base_paths=() base_names=() base_modes=() base_short_forms=() base_origins=()
+	local -a local_paths=() local_names=() local_modes=() local_short_forms=() local_origins=()
 
 	powbox_parse_ctx_file "${workspace}/.powbox.yml"
 	if [ "$POWBOX_PARSE_CTX_PRESENT" = true ]; then
@@ -572,6 +584,7 @@ powbox_load_effective_ctx_config() {
 		base_paths=("${POWBOX_PARSE_CTX_PATHS[@]}")
 		base_names=("${POWBOX_PARSE_CTX_NAMES[@]}")
 		base_modes=("${POWBOX_PARSE_CTX_MODES[@]}")
+		base_short_forms=("${POWBOX_PARSE_CTX_SHORT_FORMS[@]}")
 		base_origins=("${POWBOX_PARSE_CTX_ORIGINS[@]}")
 	fi
 
@@ -581,6 +594,7 @@ powbox_load_effective_ctx_config() {
 		local_paths=("${POWBOX_PARSE_CTX_PATHS[@]}")
 		local_names=("${POWBOX_PARSE_CTX_NAMES[@]}")
 		local_modes=("${POWBOX_PARSE_CTX_MODES[@]}")
+		local_short_forms=("${POWBOX_PARSE_CTX_SHORT_FORMS[@]}")
 		local_origins=("${POWBOX_PARSE_CTX_ORIGINS[@]}")
 	fi
 
@@ -588,18 +602,21 @@ powbox_load_effective_ctx_config() {
 	POWBOX_CTX_CONFIG_PATHS=()
 	POWBOX_CTX_CONFIG_NAMES=()
 	POWBOX_CTX_CONFIG_MODES=()
+	POWBOX_CTX_CONFIG_SHORT_FORMS=()
 	POWBOX_CTX_CONFIG_ORIGINS=()
 	if [ "$local_present" = true ]; then
 		POWBOX_CTX_CONFIG_PRESENT=true
 		POWBOX_CTX_CONFIG_PATHS=("${local_paths[@]}")
 		POWBOX_CTX_CONFIG_NAMES=("${local_names[@]}")
 		POWBOX_CTX_CONFIG_MODES=("${local_modes[@]}")
+		POWBOX_CTX_CONFIG_SHORT_FORMS=("${local_short_forms[@]}")
 		POWBOX_CTX_CONFIG_ORIGINS=("${local_origins[@]}")
 	elif [ "$base_present" = true ]; then
 		POWBOX_CTX_CONFIG_PRESENT=true
 		POWBOX_CTX_CONFIG_PATHS=("${base_paths[@]}")
 		POWBOX_CTX_CONFIG_NAMES=("${base_names[@]}")
 		POWBOX_CTX_CONFIG_MODES=("${base_modes[@]}")
+		POWBOX_CTX_CONFIG_SHORT_FORMS=("${base_short_forms[@]}")
 		POWBOX_CTX_CONFIG_ORIGINS=("${base_origins[@]}")
 	fi
 }
@@ -731,7 +748,7 @@ powbox_ctx_hash() {
 }
 
 powbox_derive_ctx_mounts() {
-	local workspace="$1" resolved raw_path raw_name raw_mode mode name origin i
+	local workspace="$1" resolved raw_path raw_name raw_mode raw_short_form mode name origin i
 	CTX_DESIRED_PRESENT=false
 	CTX_HASH=""
 	CTX_MOUNT_NAMES=()
@@ -760,23 +777,28 @@ powbox_derive_ctx_mounts() {
 		raw_path="${POWBOX_CTX_CONFIG_PATHS[$i]}"
 		raw_name="${POWBOX_CTX_CONFIG_NAMES[$i]}"
 		raw_mode="${POWBOX_CTX_CONFIG_MODES[$i]}"
+		raw_short_form="${POWBOX_CTX_CONFIG_SHORT_FORMS[$i]}"
 		origin="${POWBOX_CTX_CONFIG_ORIGINS[$i]}"
 
 		mode="$raw_mode"
 		if [ -z "$mode" ]; then
-			case "$raw_path" in
-			*:ro)
+			if [ "$raw_short_form" = true ]; then
+				case "$raw_path" in
+				*:ro)
+					mode=ro
+					raw_path="${raw_path%:ro}"
+					;;
+				*:rw)
+					mode=rw
+					raw_path="${raw_path%:rw}"
+					;;
+				*)
+					mode=ro
+					;;
+				esac
+			else
 				mode=ro
-				raw_path="${raw_path%:ro}"
-				;;
-			*:rw)
-				mode=rw
-				raw_path="${raw_path%:rw}"
-				;;
-			*)
-				mode=ro
-				;;
-			esac
+			fi
 		fi
 		case "$mode" in
 		ro | rw) ;;

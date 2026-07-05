@@ -114,8 +114,35 @@ ctx:
 YAML
 hash_after="$(value_of "$(run_sh "$ws")" CTX_HASH)"
 assert_eq "cosmetic reorder keeps hash" "$hash_after" "$hash_before"
+base_ws="$ws"
+
+echo "Test: colon-bearing short forms and long-form suffix literals"
+colon_ws="$(new_ws colon-paths)"
+mkdir -p "$colon_ws/foo:bar" "$colon_ws/baz:qux" "$colon_ws/ref:rw"
+cat >"$colon_ws/.powbox.local.yml" <<'YAML'
+ctx:
+  - foo:bar
+  - baz:qux:rw
+  - C:\Code\OtherRepo:rw
+  - path: ref:rw
+YAML
+out_sh="$(run_sh "$colon_ws")"
+out_ps="$(run_ps "$colon_ws")"
+assert_eq "colon path bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 3
+assert_eq "colon path PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 3
+assert_eq "colon path hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+assert_contains "short scalar colon name" "$out_sh" "CTX_MOUNT_0_NAME=foo:bar"
+assert_contains "short scalar colon default mode" "$out_sh" "CTX_MOUNT_0_MODE=ro"
+assert_contains "short scalar colon rw suffix name" "$out_sh" "CTX_MOUNT_1_NAME=baz:qux"
+assert_contains "short scalar colon rw suffix mode" "$out_sh" "CTX_MOUNT_1_MODE=rw"
+assert_contains "long-form path keeps rw suffix in name" "$out_sh" "CTX_MOUNT_2_NAME=ref:rw"
+assert_contains "long-form path keeps rw suffix in path" "$out_sh" "CTX_MOUNT_2_PATH=$(realpath "$colon_ws/ref:rw")"
+assert_contains "long-form path defaults to ro" "$out_sh" "CTX_MOUNT_2_MODE=ro"
+assert_not_contains "Windows-drive-looking scalar is not an object in bash" "$out_sh" "unsupported ctx object key 'C'"
+assert_not_contains "Windows-drive-looking scalar is not an object in PowerShell" "$out_ps" "unsupported ctx object key 'C'"
 
 echo "Test: local ctx clobbers committed ctx and ctx: [] is explicit empty"
+ws="$base_ws"
 mkdir -p "$ws/refC"
 cat >"$ws/.powbox.local.yml" <<'YAML'
 ctx:

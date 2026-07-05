@@ -8,7 +8,7 @@ param(
   [switch]$Continue,
   [switch]$Volatile,
   [string]$Exec = "",
-  [string]$Ctx = "",
+  [string[]]$Ctx = @(),
   [switch]$Isolated,
   [string]$Repo = "",
   [string]$Name = "",

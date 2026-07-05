@@ -374,17 +374,26 @@ Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with 
 
 ## Context Mounts
 
-Pass `--ctx <path>` to mount one host directory read-only under `/ctx/<basename>` inside the container.
+Pass `--ctx <path>` to mount host directories under `/ctx/<basename>` inside the container.
 This is useful for giving the agent access to reference code, data sources, or other content without allowing modifications.
 
 ```bash
 ./commands/claude-container.sh ~/projects/myapp --ctx ~/datasets/reference
+./commands/claude-container.sh ~/projects/myapp --ctx ~/datasets/reference --ctx specs=~/docs/specs:rw
 ```
 
-That example makes the host folder available at `/ctx/reference`.
-The CLI form accepts one path, always read-only, and it overrides any configured context for that launch.
+```powershell
+.\commands\claude-container.ps1 C:\Code\myapp -Ctx C:\Data\reference,specs=C:\Docs\specs:rw
+```
 
-For multiple folders, add a `ctx:` list to `.powbox.local.yml` in the workspace root.
+The first bash example makes the host folder available read-only at `/ctx/reference`.
+Repeat `--ctx` in bash, or pass a native PowerShell string array with `-Ctx A,B`.
+Each CLI value uses `[name=]path[:ro|:rw]`: the mode defaults to `ro`, and `name=` sets the `/ctx/<name>` target alias.
+The CLI form overrides any configured context for that launch.
+CLI relative paths resolve from the caller's current directory, not from the workspace root.
+If a path contains `=`, prefix it with a separator such as `./fixtures=a`, `/data/run=1/refs`, or `C:\x=y`; a bare single segment like `fixtures=a` is interpreted as alias `fixtures` pointing at path `a`.
+
+For persistent per-workspace context, add a `ctx:` list to `.powbox.local.yml` in the workspace root.
 The file is user-local and should be ignored by git; the launcher warns if it exists in a git repo and `git check-ignore -q .powbox.local.yml` does not ignore it.
 
 ```yaml

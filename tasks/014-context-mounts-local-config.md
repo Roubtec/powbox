@@ -1,13 +1,12 @@
 # 014 — Multi-folder context mounts via `.powbox.local.yml`
 
-> **STATUS: SECOND DRAFT — partially resolved.** OQ-2, OQ-5, OQ-6, and OQ-7
-> are settled (see "Resolved decisions"); the remaining open questions must be
-> resolved with the maintainer before implementation starts. The spec sections
-> are written against the resolutions plus the current recommendations.
+> **STATUS: RESOLVED — ready for implementation.** All open questions are
+> settled with the maintainer (see "Resolved decisions" for the ledger).
 >
 > Numbered 014 (even = inserted task) deliberately so it executes **before**
-> the 015a–015e skills-management batch. Follow-up: `014a` (shadow overrides
-> in the local file) is already written and executes after this task.
+> the 015a–015e skills-management batch. Follow-ups, both written: `014a`
+> (shadow overrides in the local file, container-side) and `014b` (CLI/config
+> feature parity for `--ctx`) execute after this task.
 
 ## Why this task exists
 
@@ -28,10 +27,11 @@ own name at `/ctx/<name>/`.
 
 **In scope:**
 
-- A new repo-root config file (working name **`.powbox.local.yml`** — see
-  OQ-1) read by the **host-side launch scripts**, both flavors:
+- A new repo-root config file, **`.powbox.local.yml`** (final), read by the
+  **host-side launch scripts**, both flavors:
   `scripts/launch-agent.ps1` and `scripts/launch-agent.sh`.
-- A `ctx:` list in that file, docker-compose-inspired dual syntax (see OQ-4):
+- A `ctx:` list in that file (section name final), docker-compose-inspired
+  dual syntax:
   **short form** — a host path string with optional `:rw` / `:ro` suffix,
   `ro` default; **long form** — an object with `path:` plus optional `name:`
   (mount alias) and `mode:` keys. No container-side path is ever specified —
@@ -40,14 +40,20 @@ own name at `/ctx/<name>/`.
   explicit `name:` alias or defaults to the path's basename (e.g.
   `C:\Code\OtherRepo:rw` → `/ctx/OtherRepo` read-write;
   `/home/alice/code/DocumentRepo` → `/ctx/DocumentRepo` read-only).
-- Warnings for duplicate target names (see OQ-4) and non-existent host paths
-  (**settled:** warn + skip for config entries; the CLI argument keeps its
-  hard error).
-- Precedence rules: `.powbox.local.yml` over `.powbox.yml` (**settled:**
-  top-level section clobber); explicit CLI `--ctx` over both (see OQ-3).
-- Generalizing the existing container-reuse **mount-change detection** from
-  "one `/ctx` mount source" to "the set of `/ctx` + `/ctx/*` mounts, including
-  each mount's rw/ro mode".
+- Warnings for duplicate target names (warn + skip the later entry, suggest a
+  `name:` alias) and non-existent host paths (warn + skip for config entries;
+  the CLI argument keeps its hard error).
+- Precedence rules: `.powbox.local.yml` over `.powbox.yml` (top-level section
+  clobber); explicit CLI `--ctx` over both.
+- **Uniform mount layout, CLI included:** the single CLI `--ctx <path>` now
+  also mounts at `/ctx/<basename>` (read-only; hard error on a missing path
+  or unusable basename) — the legacy flattened-onto-`/ctx` layout is retired.
+- **Recreate detection via config hash:** replace the single-`/ctx`
+  mount-source comparison with a hash of the canonical derived mount set,
+  stored as a docker label (see "Recreate detection" under Precedence).
+- A startup **gitignore guard**: warn when `.powbox.local.yml` exists in a
+  git repo and is not ignored (`git check-ignore -q`); never edit the
+  user's `.gitignore`.
 - Documentation: README "Read-Only Context Volume" section (title no longer
   accurate), `docs/architecture.md` if it mentions `/ctx`.
 
@@ -56,11 +62,8 @@ own name at `/ctx/<name>/`.
 - Any container-side behavior change. The container cannot act on host paths;
   it just sees whatever is mounted under `/ctx`. (`shadow:` overrides via the
   local file are **task 014a** — already written; execute after this task.)
-- Changing what the existing single `--ctx` CLI argument does (layout stays
-  flattened-onto-`/ctx` for backward compatibility, unless OQ-3 resolves
-  otherwise).
-- Multi-value or `:rw`-suffixed **CLI** syntax (`--ctx a:rw --ctx b`) — only
-  if OQ-3 resolves in favor of it.
+- Full CLI/config feature parity — repeatable `--ctx`, per-occurrence modes
+  and aliases — is **task 014b** (already written; executes after this task).
 
 ## Context and references
 
@@ -93,8 +96,9 @@ own name at `/ctx/<name>/`.
 
 ### Config file
 
-`.powbox.local.yml` at the workspace root, gitignored by the user (see OQ-8),
-sharing the `.powbox.yml` schema so any setting can live in either file:
+`.powbox.local.yml` at the workspace root, gitignored by the user (the
+launcher warns when it isn't — see Implementation notes), sharing the
+`.powbox.yml` schema so any setting can live in either file:
 
 ```yaml
 # .powbox.local.yml — user-specific, never committed
@@ -129,14 +133,15 @@ For each `ctx` entry, in listed order:
    must not be misread as a mode separator; only a trailing `:ro`/`:rw`
    counts. Long form: read `path:` (required), `name:` and `mode:` (optional).
    Warn + skip an entry with an unknown `mode:` value or missing `path:`.
-2. Resolve and validate the host path; warn (**settled** — not abort) if it
-   does not exist or is not a directory, and skip the entry.
+2. Expand a leading `~` to the user's home directory; resolve a relative
+   path against the workspace root. Environment variables are **not**
+   expanded — entries are otherwise literal. Then validate: warn (not abort)
+   if the result does not exist or is not a directory, and skip the entry.
 3. Target name = the `name:` alias if given, else the folder's basename.
    Validate it is a single, safe path segment (non-empty, no `/` or `\`, not
    `.`/`..`); warn + skip otherwise. Mount `-v <host>:/ctx/<name>:<mode>`.
 4. Duplicate target names after alias resolution: warn + skip the later
-   entry, with the warning suggesting a `name:` alias as the fix (final
-   confirmation: OQ-4).
+   entry, with the warning suggesting a `name:` alias as the fix.
 
 The result flattens any odd combination of host folders into one predictable,
 easy-to-reference list of directories under `/ctx`. Mixing rw/ro is entirely
@@ -149,16 +154,37 @@ the user's responsibility.
   present in both is replaced wholesale by the local one (arrays never
   concatenate, so a local file can also *remove* committed entries, e.g.
   `ctx: []`).
-- An explicit CLI `--ctx <path>` wins over **all** configured context and
-  keeps today's exact behavior (single folder, flattened onto `/ctx`,
-  read-only) for one-off divergence (see OQ-3).
+- An explicit CLI `--ctx <path>` wins over **all** configured context for
+  one-off divergence. It mounts read-only at `/ctx/<basename>` — the same
+  uniform layout as config entries; the legacy flattened-onto-`/ctx` layout
+  is retired. (Full parity — repeatable, modes, aliases — is task 014b.)
 - `--resume` keeps its current semantics: resume exactly as created; if the
   configured context differs, print the existing warning-and-ignore notice.
-- Container-reuse detection: if the *set* of desired `/ctx*` mounts (sources
-  **and** modes **and** target names) differs from what the stopped container
-  was created with, recreate; if the container is *running*, fail with the
-  existing "stop the container first" guidance. Omitted config + omitted
-  `--ctx` keeps today's "keep whatever is already mounted" behavior.
+
+### Recreate detection (config-hash label)
+
+After deriving the desired mounts (from CLI or config — the CLI is just a
+one-item set), canonicalize them as sorted `name|normalized-path|mode` lines
+(normalization via the existing `normalize_ctx_path` /
+`ConvertFrom-DockerDesktopPath` helpers), hash the result, and store it as a
+docker **label** (e.g. `powbox.ctx-hash`) at container creation. On a later
+launch, compare the freshly derived hash against the label: differ + stopped
+⇒ recreate; differ + running ⇒ the existing "stop the container first" error.
+
+Hashing the **derived set** — not the raw section text — is deliberate:
+cosmetic edits (comments, reordering, whitespace) never trigger recreation,
+while a previously warn-skipped missing host path that now exists *does*
+(the resolved set changed). Mode flips (`ro`→`rw`) are detected too — the
+old `.Mounts`-source comparison could not see them.
+
+- **"Don't care" is preserved:** no `--ctx` and no `ctx:` key anywhere ⇒
+  skip the comparison entirely and keep whatever is mounted, exactly like
+  today's omitted `--ctx`. An explicit `ctx: []` (key present, empty list)
+  means "no context": it hashes as the empty set and recreates a stopped
+  container that still has ctx mounts.
+- **Legacy containers** (created before this feature, no label): fall back
+  to the old single-`/ctx` mount-source comparison for that launch; any
+  recreation from then on writes the label.
 
 ## Target files or areas
 
@@ -175,8 +201,14 @@ the user's responsibility.
 - **Parity is mandatory:** every behavior (parsing, warnings, dedup, diff
   detection) must be implemented equivalently in both the `.sh` and `.ps1`
   launchers, matching each script's existing style.
-- The mount-diff comparison should reuse the existing normalization helpers
-  (`normalize_ctx_path`, `ConvertFrom-DockerDesktopPath`) per mount.
+- The existing normalization helpers (`normalize_ctx_path`,
+  `ConvertFrom-DockerDesktopPath`) move into the canonicalization step that
+  feeds the hash. Hash with what each host has natively (`sha256sum` /
+  `shasum` on Unix, `Get-FileHash` or the .NET crypto classes in PowerShell)
+  — no new host dependencies.
+- Gitignore guard: one `git check-ignore -q .powbox.local.yml` call, gated on
+  the file existing, git being on PATH, and the workspace being a git repo;
+  silent otherwise. Warn-only — never write to the user's `.gitignore`.
 - **Settled (OQ-7):** hand-rolled, deliberately dumb, schema-constrained
   mini-parser in both scripts — no host dependency (`yq`, modules) and no
   container round-trip. The exact shape it must handle: top-level `key:`
@@ -195,70 +227,54 @@ the user's responsibility.
 - The container does **not** need to know about this feature; `/ctx` simply
   contains subdirectories instead of (or in addition to) flattened content.
 
-## Resolved decisions
+## Resolved decisions (complete ledger)
 
-- **OQ-2 — Merge semantics: RESOLVED (a).** Top-level section clobber:
-  sections combine across the two files; a section present in both is
-  replaced wholesale by the local one. Arrays never concatenate (so a local
-  file can remove committed entries).
-- **OQ-5 — Non-existent configured path: RESOLVED (a).** Config entries warn
-  + skip so a stale local line never bricks a launch; the explicit CLI
-  `--ctx` argument keeps today's hard error.
-- **OQ-6 — `shadow:` in the local file: RESOLVED → task 014a.** Written as
+- **OQ-1 — File name: `.powbox.local.yml`.** Shared schema with
+  `.powbox.yml`; the local-overrides pattern (`settings.local.json`,
+  `docker-compose.override.yml`) leaves room for future local-only settings.
+- **OQ-2 — Merge semantics: top-level section clobber.** Sections combine
+  across the two files; a section present in both is replaced wholesale by
+  the local one. Arrays never concatenate (so a local file can remove
+  committed entries, e.g. `ctx: []`).
+- **OQ-3 — CLI `--ctx` layout: uniform `/ctx/<basename>`.** The CLI argument
+  also mounts under its basename; the flattened layout is retired so the
+  project name is always visible in context paths and the recreate logic
+  handles exactly one layout shape. Full CLI/config parity (repeatable
+  `--ctx`, modes, aliases) is deferred to **task 014b**.
+- **OQ-4 — Entry format: docker-compose-style dual syntax.** Short string
+  form `<path>[:ro|:rw]`; long object form `path:` + optional `name:`/`mode:`
+  for aliases and Windows-colon safety. Duplicate target names after alias
+  resolution: warn + skip the later entry, warning suggests `name:` as the
+  fix. Auto-suffixing rejected (order-dependent, silently changes paths).
+- **OQ-5 — Non-existent configured path: warn + skip.** A stale local line
+  never bricks a launch; the explicit CLI `--ctx` keeps today's hard error.
+- **OQ-6 — `shadow:` in the local file: task 014a.** Written as
   `tasks/014a-shadow-overrides-in-local-config.md`; container-side, executes
   after this task. 014 stays host-side-only.
-- **OQ-7 — Host-side YAML parsing: RESOLVED (a).** Hand-rolled
-  schema-constrained mini-parser in both launchers. Alternatives rejected:
-  requiring `yq`/`powershell-yaml` on the host adds prerequisites powbox
-  deliberately avoids; delegating parsing to a throw-away container was
-  considered and rejected as far too heavy for the job — it also breaks
-  bootstrap ordering (the launcher needs the config *before* the image is
-  guaranteed to exist locally) and adds a `docker run` to every launch.
+- **OQ-7 — Host-side YAML parsing: hand-rolled mini-parser.** In both
+  launchers, schema-constrained (see Implementation notes). Rejected:
+  requiring `yq`/`powershell-yaml` on the host (prerequisites powbox
+  deliberately avoids) and parsing inside a throw-away container (far too
+  heavy, breaks bootstrap ordering — the launcher needs the config *before*
+  the image is guaranteed to exist locally — and adds a `docker run` to
+  every launch).
+- **Recreate detection: hash of the canonical derived mount set, stored as a
+  docker label.** See "Recreate detection" under Precedence. Raw-text
+  hashing rejected (cosmetic edits would recreate; a missing-then-created
+  host path would go undetected); mount-set inspection rejected (fiddly
+  N-mount cross-platform normalization, blind to `ro`/`rw`).
+- **OQ-8 — Gitignore: docs + launcher warning.** README documents the
+  requirement; the launcher warns via `git check-ignore -q` when the file
+  exists in a git repo and is not ignored. Never edits `.gitignore`
+  (automation rejected as too invasive).
+- **OQ-9 — Path conveniences: `~` + workspace-root-relative.** Both trivial
+  and eval-free in sh and PowerShell. Environment variables stay literal
+  (bash would need a hand-rolled no-eval expansion loop; platform-divergent
+  syntax for little gain in a machine-local file).
+- **OQ-10 — Section name: `ctx:`.** Mirrors the CLI flag and the `/ctx`
+  mount root.
 
-## Open questions (resolve before implementation)
-
-- **OQ-1 — File name.** `.powbox.local.yml` (shared schema with
-  `.powbox.yml`, any setting committable *or* local — maintainer leaning, and
-  the draft's working assumption) vs `.powbox.context.yml` (narrow,
-  self-describing, no merge semantics needed). *Recommendation:
-  `.powbox.local.yml` — the local-overrides pattern (`settings.local.json`,
-  `docker-compose.override.yml`) is well understood and leaves room for future
-  local-only settings without another filename.*
-- **OQ-3 — CLI `--ctx` interplay.** (a) `--ctx <path>` fully overrides
-  configured context and keeps today's flattened single-mount layout; (b)
-  same override but the CLI path now also mounts at `/ctx/<basename>` for
-  consistency; (c) CLI becomes repeatable with `:rw` suffix support and
-  *merges* with config. *Recommendation: (a) — matches the maintainer's
-  "one-off divergent behavior" intent, zero regression risk; (c) can be a
-  later task if ever needed.*
-- **OQ-4 — Entry format & duplicate names (reframed).** Maintainer proposal:
-  allow explicit mount aliases via an exploded-object entry form instead of
-  auto-suffixing. Draft spec adopts docker-compose-style dual syntax — short
-  string form (`<path>[:ro|:rw]`) for the common case, long object form
-  (`path:` + optional `name:` + optional `mode:`) when an alias is wanted or
-  to avoid the Windows `:` ambiguity. Duplicates after alias resolution:
-  warn + skip the later entry, warning suggests `name:`. **Confirm:** dual
-  syntax as specced, and warn-+-skip-later as the duplicate rule (an explicit
-  alias now being the sanctioned fix). *Recommendation: yes to both — the
-  long form makes every collision user-resolvable, keeps one-liners terse,
-  and stays within the mini-parser's one-level shape.*
-- **OQ-8 — Gitignore responsibility.** (a) purely the user's job, documented
-  (add `.powbox.local.yml` to the repo's `.gitignore`); (b) launcher warns at
-  startup when the file exists, is in a git repo, and is not ignored; (c)
-  extend the `enable-worktrees` skill (or a sibling) to add the ignore line.
-  *Recommendation: (b) — a one-line, cheap `git check-ignore` guard prevents
-  the obvious foot-gun (committing machine-specific absolute paths) without
-  writing to the user's repo uninvited; document (a) regardless.*
-- **OQ-9 — Path conveniences.** Should entries support `~`,
-  `$HOME`/`%USERPROFILE%`, or relative paths (relative to the workspace
-  root)? *Recommendation: expand `~` and environment variables using each
-  shell's native mechanism, allow relative paths resolved against the
-  workspace root; all cheap and each launcher's platform idiom.*
-- **OQ-10 — Naming of the section.** `ctx:` (matches the flag and `/ctx`)
-  vs `context:` (self-describing). *Recommendation: `ctx:` — mirrors the
-  CLI flag and the in-container path; less to explain.*
-
-## Acceptance criteria (draft — re-baseline after OQ resolution)
+## Acceptance criteria
 
 1. With a `.powbox.local.yml` declaring three folders — one short-form `:rw`,
    one short-form default, one long-form with a `name:` alias — a plain `cc`
@@ -266,19 +282,31 @@ the user's responsibility.
    `/ctx/<name>` with the expected mode and the correct host content.
    Verified on both a bash host and a PowerShell host.
 2. `--ctx <path>` on the CLI ignores the configured context entirely and
-   behaves byte-for-byte like today (single flattened read-only `/ctx`).
-3. Editing the local file's `ctx` list (add/remove/change mode) and re-running
-   `cc` against a **stopped** container recreates it with the new mount set;
-   against a **running** container it fails with the existing "stop first"
-   message; `--resume` warns and resumes unchanged.
+   mounts read-only at `/ctx/<basename>` (uniform layout). Relaunching over a
+   stopped legacy container (flattened `/ctx`, no label) recreates it once
+   via the legacy-fallback comparison.
+3. Editing the local file's `ctx` list (add/remove an entry, change a mode or
+   alias) changes the hash: a **stopped** container is recreated with the new
+   mount set; a **running** one fails with the existing "stop first" message;
+   `--resume` warns and resumes unchanged. A cosmetic-only edit (comment,
+   reordering, whitespace) does **not** recreate; a warn-skipped missing path
+   that now exists **does**.
 4. A missing host path warns and is skipped (launch proceeds); a duplicate
-   target name warns, skips the later entry, and suggests a `name:` alias
-   (pending OQ-4 confirmation) — never a silent wrong mount, never an abort.
+   target name warns, skips the later entry, and suggests a `name:` alias —
+   never a silent wrong mount, never an abort.
 5. No config file + no `--ctx` ⇒ behavior identical to today (including the
    "keep whatever is already mounted" reuse path).
 6. The container image is unchanged; no new host dependencies are required.
 7. README and architecture docs describe the file, the schema, precedence,
-   and the rw warning ("mixing rw/ro is the user's responsibility").
+   and the rw warning ("mixing rw/ro is the user's responsibility");
+   in-container docs describing a flattened `/ctx`
+   (`docker/shared/container-agent.md.tmpl`, `AGENTS.md`) are updated to the
+   `/ctx/<name>` layout.
+8. Entries with a leading `~` or a workspace-root-relative path resolve
+   correctly; environment variables are left literal.
+9. The gitignore guard warns exactly when `.powbox.local.yml` exists in a git
+   repo and is not ignored, and stays silent otherwise (ignored, absent, not
+   a repo, git not on PATH).
 
 ## Validation
 
@@ -295,8 +323,9 @@ the user's responsibility.
 ## Review plan
 
 Reviewer should check: (1) sh/ps1 behavioral parity line by line for parsing,
-warnings, and diff detection; (2) that the mount-diff generalization cannot
-regress the existing single-`--ctx` reuse flows; (3) Windows path handling
+warnings, and hash derivation; (2) that the label-hash recreate detection —
+including the legacy no-label fallback and the "don't care" (no config, no
+`--ctx`) path — cannot regress the existing reuse flows; (3) Windows path handling
 (drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath` usage); (4)
 that the mini-parser fails safe (warn + ignore) on YAML it doesn't understand;
 (5) docs accurately reflect resolved OQ decisions.

@@ -30,9 +30,9 @@ every powbox container install and keep current that plugin automatically.
     metadata AND updates installed plugins from it), `claude plugin update
     <plugin>@<marketplace>`.
   - State lives under `~/.claude/plugins/` (`cache/`,
-    `known_marketplaces.json`, `installed-plugins.json`) — i.e. on the
-    persistent claude-config volume, so installation is once per volume, not
-    per container start.
+    `known_marketplaces.json`, `installed_plugins.json` — underscore, not
+    hyphen; verified on CLI 2.1.201) — i.e. on the persistent claude-config
+    volume, so installation is once per volume, not per container start.
   - No `version` field in the manifests → commit-SHA versioning: every new
     commit on agent-skills main is detected as an update.
   - Auto-update is per-marketplace, OFF by default for third-party
@@ -53,7 +53,7 @@ every powbox container install and keep current that plugin automatically.
 ## Implementation notes
 
 1. **Install-if-absent, in the claude entrypoint hook:** if
-   `dev-skills@agent-skills` is not installed (check `installed-plugins.json`
+   `dev-skills@agent-skills` is not installed (check `installed_plugins.json`
    or `claude plugin list` output), run `marketplace add` + `plugin install`.
    Both must be best-effort: bounded by a timeout (a few seconds each), all
    failures logged to stderr with a clear "skills plugin unavailable, will
@@ -83,7 +83,7 @@ approach is chosen.
 ## Acceptance criteria
 
 - Fresh container + fresh claude-config volume + network: after start,
-  `claude plugin list` (or `installed-plugins.json`) shows
+  `claude plugin list` (or `installed_plugins.json`) shows
   `dev-skills@agent-skills`, and `/dev-skills:address-review` is invocable.
 - Same container restarted: hook takes the fast path (observably cheap; no
   reinstall).

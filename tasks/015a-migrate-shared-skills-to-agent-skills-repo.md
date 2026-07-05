@@ -84,6 +84,41 @@ description rather than forcing a bad generalization.
    accepted. The powbox repo retains the history of the originals until task 015b
    deletes them.
 
+## Maintainer rulings (2026-07-05, pre-implementation audit)
+
+A portability audit of all 10 skills (both flavors) ran before implementation;
+its full findings live in `tasks/015a-portability-audit.md` (companion file on
+this branch — deleted, not archived, when this task closes; see task 015d).
+The rulings below bind the implementer:
+
+1. **The presumptive 8/2 split is confirmed — migrate all 8.** None is
+   irreducibly powbox-bound; the worktree orchestrators' coupling is confined
+   to plumbing sections, not the algorithms.
+2. **No wrapper skills, in either direction.** Powbox specifics are handled by
+   runtime capability detection inside the generalized text: keep the safety
+   contracts as requirements, implement them with vanilla `git worktree`/`gh`,
+   and mention powbox helpers (`wt-bootstrap`/`wt-enter`/`wt-remove`,
+   `gh-review-threads`, `gitcat`) only as optional accelerators — "if available
+   on PATH, prefer it". `address-review`'s existing gh-review-threads fallback
+   pattern is the template. The powbox-only mechanics evicted from the skills
+   (tmpfs shadowing, `$CONTAINER_NAME` scoping, `SHADOW_TMPFS_SIZE`, powbox
+   remediation steps) move to powbox's container docs in task 015b — do NOT
+   carry them into agent-skills.
+3. **Scrub vestigial/momentary phrasing** everywhere: "baked"/"image-baked",
+   "older image"/"base image", `agent-update`, "this container",
+   `wf-address-tasks`/"Claude dynamic workflows" parentheticals.
+4. **Portability edits only; keep per-flavor idioms; do not normalize the
+   codex flavors' line-reflow drift** (keeps the review diff = generalization
+   only). Restructuring `resolve-open-questions` into "core protocol + item
+   sources" is a deliberate follow-up PR in agent-skills, not part of this
+   migration; likewise the option of bundling a `gh-review-threads` script
+   into the plugin. File both as issues on agent-skills when the PR opens.
+5. **Two semantic traps must be handled, not translated literally:**
+   `wt-remove --force` and `git worktree remove --force` have OPPOSITE safety
+   semantics (public text: "never force-remove a dirty worktree"); and the
+   "tmpfs shadowing makes `git worktree prune` unnecessary" claim must be
+   INVERTED for plain machines, which do want prune/remove hygiene.
+
 ## Target files or areas
 
 - `Roubtec/agent-skills`: `plugins/dev-skills/skills/**`,

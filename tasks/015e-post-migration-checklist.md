@@ -32,9 +32,9 @@ order.
 4. **Merge the jabko branch** `add-dev-skill-support` — **only after** the
    plugin is populated (task 015a merged) and step 3 passes; before that, the
    settings would prompt collaborators to install an empty/broken plugin.
-   Before merging, drop the `[drop]`-marked commit carrying these task files
-   (e.g. `git rebase` it away or revert it) — they are transport cargo, not
-   jabko content.
+   (Verified 2026-07-05: the `[drop]`-marked transport-cargo commit is already
+   gone from the branch — it now carries only the `.claude/settings.json`
+   pointer and a gitignore commit, so no rebase is needed before merging.)
 5. **Announce to colleagues:** install one-liner
    (`claude plugin marketplace add Roubtec/agent-skills && claude plugin
    install dev-skills@agent-skills`), the auto-update toggle, the namespaced

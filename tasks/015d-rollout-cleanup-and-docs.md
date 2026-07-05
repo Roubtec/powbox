@@ -55,6 +55,9 @@ channels, and document the new custody split.
      skills; where each is edited (agent-skills repo vs powbox repo) and how
      each updates (marketplace update at session start vs update-skills.sh).
    - Note the invocation change (`/address-review` → `/dev-skills:address-review`).
+4. **Delete `tasks/015a-portability-audit.md`** (do not move it to `done/`) —
+   it was a pre-implementation working document for task 015a and is not to be
+   preserved once the migration has landed.
 
 ## Target files or areas
 

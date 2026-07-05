@@ -168,9 +168,11 @@ because `:` is its field delimiter yet a valid POSIX path character, so it
 breaks on a `:` in **either** the host source or the derived target. Instead,
 derive the ctx mounts into a **generated compose overlay** — e.g. a temp
 `compose.ctx.yml` — declaring each mount under the `agent` service in
-docker-compose **long syntax**, and add that file to the `COMPOSE_ARGS` `-f`
-chain exactly like the existing `compose.selfhosted.yml` / `compose.fuse.yml` /
-`compose.netdev.yml` overlays:
+docker-compose **long syntax**, and add that file to the `-f` chain of **only
+the final agent-run** `docker compose … run` (`scripts/launch-agent.sh:1160`,
+`scripts/launch-agent.ps1:1072`) — see "Scope the overlay to the final agent
+run only" below — in the same long-syntax spirit as the existing
+`compose.selfhosted.yml` / `compose.fuse.yml` / `compose.netdev.yml` overlays:
 
 ```yaml
 services:
@@ -185,10 +187,22 @@ services:
 Long syntax passes source and target as separate YAML scalars, so `:`, `,`, and
 `|` all flow through untouched — there is no delimiter to collide with, and the
 round-1 `--mount` comma limitation is gone (this is the compose-native form of
-the long-syntax idea that `--mount` was reaching for). The implementer's one
-obligation is to **emit each value as a correctly-quoted YAML scalar** — quote
-or escape a path containing YAML metacharacters (a leading `!`/`&`/`*`/`#`, a
-`: ` sequence, quotes, or a Windows backslash) so the overlay always parses.
+the long-syntax idea that `--mount` was reaching for). The implementer has **two
+emission obligations, both mandatory**:
+
+1. **Correctly-quoted YAML scalar** — quote or escape a path containing YAML
+   metacharacters (a leading `!`/`&`/`*`/`#`, a `: ` sequence, quotes, or a
+   Windows backslash) so the overlay always parses.
+2. **Doubled `$` for Compose interpolation** — Compose runs variable
+   interpolation on values *after* YAML parsing (`$FOO`/`${FOO}` are substituted;
+   [Docker's interpolation docs](https://docs.docker.com/reference/compose-file/interpolation/)
+   require `$$` for a literal dollar), so **every `$` in the `source` and
+   `target` scalars must be emitted as `$$`**. This is independent of, and
+   additional to, YAML quoting — a quoted `"$FOO"` is still interpolated — and it
+   is what keeps the "environment variables stay literal" guarantee (OQ-9); skip
+   it and a host path or derived name containing `$FOO`/`${FOO}` mounts the wrong
+   directory or fails the overlay.
+
 Compose merges `volumes:` across `-f` files by target, so the unique
 `/ctx/<name>` targets append cleanly — the same merge-by-target the self-hosted
 overlay already relies on when its `workspace:/workspace/${PROJECT_NAME}` entry
@@ -196,6 +210,17 @@ overlay already relies on when its `workspace:/workspace/${PROJECT_NAME}` entry
 `compose.shared.yml`. The recreate-detection
 label is still written by the same `docker compose run --label` invocation,
 unchanged.
+
+**Scope the overlay to the final agent run only — not the shared
+`COMPOSE_ARGS`.** `COMPOSE_ARGS`/`$composeArgs`
+(`scripts/launch-agent.sh:495`, `scripts/launch-agent.ps1:332`) is reused for
+the root workspace-prep runs (`:961`/`:985` sh, `:861`/`:886` ps1) and the
+detached image-store writer (`:1149` sh, `:953` ps1) as well as the final agent
+run. Adding the ctx overlay to that shared list would mount every context
+folder — including `rw` user folders — into those root/writer helpers before the
+agent even starts. Append the overlay to a **final-run-specific** `-f` list (or
+only after all helper runs have completed), never to the shared `COMPOSE_ARGS`,
+so external context reaches only the agent container.
 
 The result flattens any odd combination of host folders into one predictable,
 easy-to-reference list of directories under `/ctx`. Mixing rw/ro is entirely
@@ -234,13 +259,28 @@ path characters** by separating fields with **NUL (`\0`)** — the one byte that
 cannot occur in a POSIX or Windows path, an alias, or the mode (`ro`/`rw`) — at
 a fixed arity of three fields per record. Canonical order comes from sorting
 the records by `name` (unique after duplicate-name dedup and a validated safe
-segment, so a clean sort key) before serialization. Serialize each record as
+segment, so a clean sort key) before serialization — but the sort **must be a
+byte-wise ordinal comparison**, not the default line-oriented, locale/culture-
+sensitive sort of either shell. A `name` may legally contain a newline (the very
+reason the fields are NUL-, not newline-, delimited): a line-oriented `sort`
+would split such a record and corrupt the boundary, and a locale/culture-aware
+collation would order the same set differently on the two hosts — either one
+breaks the byte-identical-stream requirement. Sort the **entries** (each keyed
+by its single-field `name`, *before* the three fields are serialized together),
+not the already-joined records. On Unix, emit one NUL-terminated `name` per
+entry and order them with `LC_ALL=C sort -z` (`-z` makes NUL — not newline — the
+record separator, so a `name` containing a newline stays one sort unit; the `C`
+locale forces byte ordering), then materialize each entry's three fields in that
+order; in PowerShell, sort the entry objects by `name` with an explicit ordinal
+comparer (e.g. `[System.StringComparer]::Ordinal`), never the default
+culture-aware `Sort-Object`. Serialize each record as
 its three fields **each terminated by a NUL** — a trailing `\0` after every
 field, including the last, so both launchers emit a byte-identical stream (use
 a terminator, not a separator, to avoid an off-by-one divergence between the
 two implementations). Concretely: normalize each path via the existing
 `normalize_ctx_path` / `ConvertFrom-DockerDesktopPath` helpers, sort entries by
-name, then on Unix feed `printf '%s\0%s\0%s\0' "$name" "$path" "$mode"` per
+name with the ordinal comparison above, then on Unix feed
+`printf '%s\0%s\0%s\0' "$name" "$path" "$mode"` per
 entry to `sha256sum`; in PowerShell append `[char]0` after each of the three
 fields per record and hash the UTF-8 bytes. (Percent-escaping the structural characters is an acceptable
 alternative where NUL is awkward to thread through a pipeline, but NUL needs no
@@ -274,10 +314,15 @@ old `.Mounts`-source comparison could not see them.
 
 - `scripts/launch-agent.sh` — config discovery, `ctx` parsing (POSIX-safe),
   mount-set derivation, warnings, generalized mount-diff detection, and the
-  generated `compose.ctx.yml` overlay added to `COMPOSE_ARGS` (`:495`) so it
-  reaches the `docker compose … run` at `:1160`.
-- `scripts/launch-agent.ps1` — the same, PowerShell-native (`$composeArgs` at
-  `:332`, `docker compose … run` at `:1072`).
+  generated `compose.ctx.yml` overlay added to the `-f` chain of **only the
+  final agent-run** `docker compose … run` (`:1160`) — **not** the shared
+  `COMPOSE_ARGS` (`:495`), which is reused by the root workspace-prep runs
+  (`:961`, `:985`) and the detached image-store writer (`:1149`); those helpers
+  must not see user context mounts (especially `rw` folders).
+- `scripts/launch-agent.ps1` — the same, PowerShell-native (final agent run
+  `docker compose … run` at `:1072`; keep the overlay off the shared
+  `$composeArgs` (`:332`) reused by the root prep at `:861`/`:886` and the writer
+  at `:953`).
 - `README.md`, `docs/architecture.md` — feature docs, section retitle, config
   examples, precedence table.
 - In-container docs that describe a flattened `/ctx` and must move to the
@@ -315,12 +360,16 @@ old `.Mounts`-source comparison could not see them.
 - Comments (`#`), blank lines, and quoted values should parse; anchors,
   nested maps beyond the long-form entry keys, multi-doc YAML, etc. are out
   of scope for the mini-parser.
-- Absent file, or a present file with **no** `ctx:` key ⇒ "don't care": behave
-  exactly as today (keep whatever is already mounted; skip the recreate
-  comparison). An explicit `ctx: []` is **not** the same — per Recreate
-  detection above it is the empty set ("no context"): it hashes as empty and
-  recreates a *stopped* container that still carries ctx mounts (running ⇒ the
-  "stop first" error).
+- **No `ctx:` key in _either_ file** (both absent, or present with no `ctx:`
+  key) ⇒ "don't care": behave exactly as today (keep whatever is already
+  mounted; skip the recreate comparison). A `ctx:` key present in **either**
+  file determines the set — in particular the committed `.powbox.yml`'s `ctx:`
+  still applies when the local file omits the key (only a *present* local
+  `ctx:` clobbers it), so a present-but-`ctx:`-less local file is **not** on its
+  own a "don't care". An explicit `ctx: []` is also **not** the same — per
+  Recreate detection above it is the empty set ("no context"): it hashes as
+  empty and recreates a *stopped* container that still carries ctx mounts
+  (running ⇒ the "stop first" error).
 - Beware Windows edge cases: drive-root entries (`C:\` has no basename),
   trailing slashes/backslashes, UNC paths (`\\server\share`) — define and
   document behavior (reasonable: warn-and-skip anything without a usable
@@ -368,13 +417,16 @@ old `.Mounts`-source comparison could not see them.
   path is `docker compose run`, which accepts only `-v/--volume` — **not**
   `--mount`. Ctx (and CLI `--ctx`) mounts are therefore emitted into a
   generated `compose.ctx.yml` overlay in docker-compose long syntax (`type:
-  bind` + `source`/`target`/`read_only`), added to the `-f` chain alongside the
-  existing overlays. Long syntax is colon- **and** comma-safe (separate YAML
-  scalars), so no path character needs banning; the sole implementer obligation
-  is correctly-quoted YAML. Rejected: colon-packed `-v` (breaks on a `:` in
-  either position — valid POSIX) and the round-1 `--mount` flag form
-  (unsupported by `docker compose run`, confirmed against `--help`). Rationale
-  and verification in "Mount form" under Mount derivation.
+  bind` + `source`/`target`/`read_only`), added to the `-f` chain of **only the
+  final agent run** (never the shared `COMPOSE_ARGS`, which is reused by the
+  root-prep and image-store-writer helper runs that must not see user context).
+  Long syntax is colon- **and** comma-safe (separate YAML
+  scalars), so no path character needs banning; the two implementer obligations
+  are (a) correctly-quoted YAML and (b) doubling every `$` to `$$` so Compose
+  does not interpolate `$FOO`/`${FOO}` in a path or name. Rejected: colon-packed
+  `-v` (breaks on a `:` in either position — valid POSIX) and the round-1
+  `--mount` flag form (unsupported by `docker compose run`, confirmed against
+  `--help`). Rationale and verification in "Mount form" under Mount derivation.
 - **OQ-8 — Gitignore: docs + launcher warning.** README documents the
   requirement; the launcher warns via `git check-ignore -q` when the file
   exists in a git repo and is not ignored. Never edits `.gitignore`
@@ -412,10 +464,19 @@ old `.Mounts`-source comparison could not see them.
    containing a `:`, `,`, or other POSIX-legal character mounts correctly under
    `/ctx/<name>` via the generated long-form `volumes:` overlay — `docker
    compose run` accepts it and the container is actually created (no
-   `incorrect volume format` / unsupported-flag failure).
+   `incorrect volume format` / unsupported-flag failure). A host path or name
+   containing a literal `$` (`$FOO`, `${BAR}`) mounts that exact directory —
+   Compose does **not** interpolate it — because the overlay emitter doubled each
+   `$` to `$$`.
 5. No config file + no `--ctx` ⇒ behavior identical to today (including the
    "keep whatever is already mounted" reuse path).
-6. The container image is unchanged; no new host dependencies are required.
+6. No new host dependencies are required. The **agent image does change** —
+   this task edits baked in-container docs (`docker/shared/container-agent.md.tmpl`
+   and both `docker/{claude,codex}/agent-container/skills/enable-worktrees/SKILL.md`,
+   all copied into the image by `docker/agent/Dockerfile:44-47`) — so shipping the
+   updated `/ctx/<name>` guidance requires an **agent-image rebuild** (`build.sh` /
+   `build.ps1`), validated so the shipped image reflects the new layout. The host
+   launch scripts (`launch-agent.*`) run on the host and are not baked.
 7. README and architecture docs describe the file, the schema, precedence,
    and the rw warning ("mixing rw/ro is the user's responsibility"); **every**
    in-container doc describing a flattened `/ctx` is updated to the
@@ -435,37 +496,60 @@ old `.Mounts`-source comparison could not see them.
 - `shellcheck` passes on `launch-agent.sh`; `Invoke-ScriptAnalyzer` (per
   `PSScriptAnalyzerSettings.psd1`) passes on `launch-agent.ps1`.
 - Manual end-to-end on at least one host flavor: create a local config with
-  two context folders (one rw, and one whose directory name contains a `:`),
-  launch, verify mounts via `docker inspect --format '{{json .Mounts}}'` and by
+  two context folders (one rw, and one whose directory name contains a `:` and a
+  literal `$`), launch, verify mounts via
+  `docker inspect --format '{{json .Mounts}}'` and by
   touching a file in the rw mount from inside the container; verify the ro
-  mount rejects writes and the colon-named folder mounted (the generated
-  `compose.ctx.yml` overlay carried it, rather than failing at
-  `docker compose run`). Inspect the generated overlay to confirm well-formed,
-  quoted YAML.
+  mount rejects writes and the colon/`$`-named folder mounted at its literal path
+  (the generated `compose.ctx.yml` overlay carried it, rather than failing at
+  `docker compose run` or Compose interpolating the `$`). Inspect the generated
+  overlay to confirm well-formed, quoted YAML with every `$` doubled to `$$`.
+- Confirm the ctx overlay reaches **only** the final agent container: the root
+  workspace-prep runs (`launch-agent.sh:961`/`:985`, `launch-agent.ps1:861`/`:886`)
+  and the detached image-store writer (`launch-agent.sh:1149`,
+  `launch-agent.ps1:953`) must **not** carry any `/ctx/*` mount
+  (`docker inspect` those helper containers, or assert the overlay is absent
+  from their compose arg list).
+- Because the baked in-container docs change, rebuild the agent image
+  (`build.sh` / `build.ps1`) and confirm the shipped image carries the
+  `/ctx/<name>` layout guidance rather than the retired flattened text (e.g.
+  grep the baked `container-agent.md.tmpl` / `enable-worktrees/SKILL.md` copies
+  under `/home/node/.agent-container/` inside a container from the fresh image).
 - Exercise the reuse/recreate matrix from acceptance criterion 3.
 - Negative / edge tests: bogus path entry, duplicate basenames, malformed YAML
   line — each warns as specified and never aborts with a stack trace; an inline
   `ctx: []` parses as the empty set (not malformed) and drops committed mounts
   (stopped ⇒ recreate, running ⇒ "stop first"); a host path or alias containing
-  `|` or a newline does **not** collide in the hash with a different mount set
-  (injective NUL-separated canonicalization).
+  `|` or a newline does **not** collide in the hash with a different mount set,
+  and the sh and ps1 launchers produce the **byte-identical** hash for that set
+  (injective NUL-separated canonicalization + byte-wise ordinal `LC_ALL=C sort
+  -z` / `[StringComparer]::Ordinal` sort, so a newline-bearing name neither
+  corrupts a record boundary nor diverges the two implementations).
 
 ## Review plan
 
 Reviewer should check: (1) sh/ps1 behavioral parity line by line for parsing,
 warnings, and hash derivation; (2) that the label-hash recreate detection —
-including the legacy no-label fallback and the "don't care" (no config, no
-`--ctx`) path — cannot regress the existing reuse flows, **and** that the hash
-canonicalization is injective (NUL-separated fields at fixed arity; a `|` or
-newline in a path/alias cannot make two different sets hash equal); (3) Windows
+including the legacy no-label fallback and the "don't care" (no `ctx:` key in
+either file, no `--ctx`) path — cannot regress the existing reuse flows, **and**
+that the hash canonicalization is injective (NUL-separated fields at fixed arity;
+a `|` or newline in a path/alias cannot make two different sets hash equal)
+**and deterministic across launchers** (a byte-wise ordinal `LC_ALL=C sort -z` /
+`[StringComparer]::Ordinal` sort, so a newline in a name cannot corrupt a record
+boundary and locale/culture differences cannot diverge the sh and ps1 hashes);
+(3) Windows
 path handling (drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath`
 usage); (4) that the mini-parser fails safe (warn + ignore) on YAML it doesn't
 understand, **including** recognizing the inline `ctx: []` empty-list override
 as the empty set rather than as malformed/absent;
 (5) docs accurately reflect resolved OQ decisions, **including** the full
 `/ctx` doc sweep (both `enable-worktrees/SKILL.md` copies, not just the
-tmpl/AGENTS.md); (6) ctx mounts are emitted as a generated long-form `volumes:`
+tmpl/AGENTS.md) and the agent-image rebuild the baked-doc edits require;
+(6) ctx mounts are emitted as a generated long-form `volumes:`
 compose overlay added to the `-f` chain — **not** `-v`/`--mount` flags, which
 `docker compose run` would reject or mis-split — with values emitted as
-correctly-quoted YAML (so a `:`/`,` in a path or name mounts rather than
-failing) and merged by target so other mounts are not clobbered.
+correctly-quoted YAML **and every `$` doubled to `$$`** (so a `:`/`,`/`$` in a
+path or name mounts literally rather than failing or being interpolated),
+merged by target so other mounts are not clobbered, and scoped to the **final
+agent run only** — never the shared `COMPOSE_ARGS` reused by the root-prep and
+image-store-writer helper runs.

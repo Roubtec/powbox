@@ -40,6 +40,11 @@ a mount problem — all without touching the committed `.powbox.yml`.
   silently acquire the `node_modules`/`.worktrees` project volumes. Detect the
   `shadow:` key with the host-side mini-parser 014 already ships (this task runs
   after 014); a committed `.powbox.yml` stays a project marker exactly as today.
+- **Call-site plumbing** so the override notice is not silently discarded: both
+  `detect-shadows.sh` invokers (`docker/shared/entrypoint-core.sh:189`,
+  `docker/shared/pnpm-shadow-doctor:163`) currently redirect stderr to
+  `/dev/null`; forward the override line through so it reaches the startup log,
+  symmetrically in both (see Context and references).
 - Unit tests in `scripts/test-detect-shadows.sh` covering the new precedence.
 - Docs: README "Workspace Shadow Mounts" auto-detection list (step 3 mentions
   `.powbox.yml` only) and any `docs/` page describing shadow detection.
@@ -67,10 +72,18 @@ a mount problem — all without touching the committed `.powbox.yml`.
   present-but-empty from absent — required for the clobber rule. The
   container ships `yq`, so no mini-parser is needed here (unlike 014's
   host side).
-- **Call sites (no changes expected):** `docker/shared/entrypoint-core.sh:189`
-  (startup detection) and `docker/shared/pnpm-shadow-doctor:163` (mid-session
-  re-detection before installs) both invoke `detect-shadows.sh <workspace>`,
-  so both pick up the new behavior for free.
+- **Call sites — a small change is needed to surface the override notice:**
+  `docker/shared/entrypoint-core.sh:189` (startup detection) and
+  `docker/shared/pnpm-shadow-doctor:163` (mid-session re-detection before
+  installs) both invoke `detect-shadows.sh <workspace>` and pick up the new
+  target-list behavior for free — **but both currently discard stderr with
+  `2>/dev/null`** (`… < <(detect-shadows.sh "$dir" 2>/dev/null || true)`), which
+  would also swallow the informational override line this task adds, so it would
+  never reach the startup log the notice is meant for. Forward that one line at
+  each site — e.g. stop blanket-discarding stderr, or capture stderr and re-echo
+  just the `detect-shadows: … overridden by .powbox.local.yml` line — while
+  still suppressing the ordinary validation noise the `2>/dev/null` was hiding.
+  Do it symmetrically in both sites.
 - **Bake location:** `docker/base/Dockerfile:355` and
   `scripts/base-source-files.txt:30` — the script is baked into the **base**
   image, so shipping this requires a base-image rebuild (`build.sh` /
@@ -99,7 +112,9 @@ a mount problem — all without touching the committed `.powbox.yml`.
 - Emit one informational line to stderr when a local override is in effect
   (e.g. `detect-shadows: shadow list overridden by .powbox.local.yml`), so a
   confusing "why isn't my committed shadow applied?" session is diagnosable
-  from the startup log.
+  from the startup log — **but note both call sites currently discard
+  `detect-shadows.sh` stderr (`2>/dev/null`); forwarding this line requires the
+  call-site change in Scope**, or the diagnostic never appears.
 - Keep the script `shellcheck`-clean and matching its existing style (tabs,
   guard comments explaining *why*).
 
@@ -107,7 +122,9 @@ a mount problem — all without touching the committed `.powbox.yml`.
 
 1. Local file with a `shadow:` list ⇒ exactly that list is emitted (validated
    as today); committed `shadow:` entries are ignored, and an informational
-   override line is printed to stderr.
+   override line is printed to stderr **and survives to the startup log** — the
+   `entrypoint-core.sh` / `pnpm-shadow-doctor` call sites forward it rather than
+   swallowing it with `2>/dev/null`.
 2. Local file present but **without** a `shadow:` key ⇒ committed `.powbox.yml`
    behavior, unchanged.
 3. Local `shadow: []` ⇒ zero custom shadows even when the committed file
@@ -142,4 +159,6 @@ the existing validation paths (containment, `.git/` guards, glob gating);
 not `// empty` coalescing); (3) both launchers' classification checks were
 updated symmetrically and gate on a `shadow:` **key** rather than the mere
 existence of `.powbox.local.yml` (a `ctx:`-only local file must not classify as
-a project); (4) new tests fail against the pre-change script.
+a project); (4) new tests fail against the pre-change script; (5) both
+`detect-shadows.sh` call sites forward the override notice instead of swallowing
+it with `2>/dev/null`, so the diagnostic actually reaches the startup log.

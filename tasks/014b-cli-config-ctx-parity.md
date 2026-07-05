@@ -142,7 +142,10 @@ and triples the flag surface.
 ## Validation
 
 - `shellcheck` on `launch-agent.sh` and `shell/powbox.sh`;
-  `Invoke-ScriptAnalyzer` on the three touched `.ps1` files.
+  `Invoke-ScriptAnalyzer` on **all four** touched `.ps1` files —
+  `commands/claude-container.ps1`, `commands/codex-container.ps1`,
+  `shell/powbox.ps1`, and `scripts/launch-agent.ps1` (the wrapper chain's
+  `-Ctx` array forwarding changes every one of them).
 - Manual: multi-mount launch on at least one host flavor, verifying mounts
   and modes via `docker inspect --format '{{json .Mounts}}'`; rerun with the
   same values (reuses) and with one mode flipped (recreates stopped).

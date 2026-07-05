@@ -194,12 +194,33 @@ the user's responsibility.
 ### Recreate detection (config-hash label)
 
 After deriving the desired mounts (from CLI or config — the CLI is just a
-one-item set), canonicalize them as sorted `name|normalized-path|mode` lines
-(normalization via the existing `normalize_ctx_path` /
-`ConvertFrom-DockerDesktopPath` helpers), hash the result, and store it as a
-docker **label** (e.g. `powbox.ctx-hash`) at container creation. On a later
-launch, compare the freshly derived hash against the label: differ + stopped
-⇒ recreate; differ + running ⇒ the existing "stop the container first" error.
+one-item set), serialize them into an **injective** canonical form, hash it,
+and store the digest as a docker **label** (e.g. `powbox.ctx-hash`) at
+container creation. On a later launch, compare the freshly derived hash
+against the label: differ + stopped ⇒ recreate; differ + running ⇒ the
+existing "stop the container first" error.
+
+**Injective canonicalization — no delimiter collisions.** A naive
+`name|path|mode` join is *not* injective: `|` and newlines are legal in POSIX
+host paths (and in a basename-derived alias), so two different mount sets can
+render to identical text and hash equal — silently reusing a container after a
+real ctx change (an alias `a|b` + path `/x` vs alias `a` + path `b|/x` both
+give `a|b|/x|ro`). Make it collision-free **without escaping or banning legal
+path characters** by separating fields with **NUL (`\0`)** — the one byte that
+cannot occur in a POSIX or Windows path, an alias, or the mode (`ro`/`rw`) — at
+a fixed arity of three fields per record. Canonical order comes from sorting
+the records by `name` (unique after duplicate-name dedup and a validated safe
+segment, so a clean sort key) before serialization. Serialize each record as
+its three fields **each terminated by a NUL** — a trailing `\0` after every
+field, including the last, so both launchers emit a byte-identical stream (use
+a terminator, not a separator, to avoid an off-by-one divergence between the
+two implementations). Concretely: normalize each path via the existing
+`normalize_ctx_path` / `ConvertFrom-DockerDesktopPath` helpers, sort entries by
+name, then on Unix feed `printf '%s\0%s\0%s\0' "$name" "$path" "$mode"` per
+entry to `sha256sum`; in PowerShell append `[char]0` after each of the three
+fields per record and hash the UTF-8 bytes. (Percent-escaping the structural characters is an acceptable
+alternative where NUL is awkward to thread through a pipeline, but NUL needs no
+escaping because it is already illegal in every field.)
 
 Hashing the **derived set** — not the raw section text — is deliberate:
 cosmetic edits (comments, reordering, whitespace) never trigger recreation,
@@ -251,10 +272,14 @@ old `.Mounts`-source comparison could not see them.
 - **Settled (OQ-7):** hand-rolled, deliberately dumb, schema-constrained
   mini-parser in both scripts — no host dependency (`yq`, modules) and no
   container round-trip. The exact shape it must handle: top-level `key:`
-  lines; under `ctx:`, list items that are either `- <string>` or an object
-  item (`- path: <v>` followed by indented `name:`/`mode:` lines). One level,
-  no recursion. Reject/warn on anything it cannot understand rather than
-  guessing.
+  lines; a top-level `key: []` **inline empty list** — notably `ctx: []`, the
+  load-bearing "remove all committed entries" override, which must be
+  recognized as *key present, empty set* (distinct from an absent key) and
+  **not** dismissed as malformed, or the empty-set drop of committed mounts
+  becomes unreachable; under a block `ctx:`, list items that are either
+  `- <string>` or an object item (`- path: <v>` followed by indented
+  `name:`/`mode:` lines). One level, no recursion. Reject/warn on anything it
+  cannot understand rather than guessing.
 - Comments (`#`), blank lines, and quoted values should parse; anchors,
   nested maps beyond the long-form entry keys, multi-doc YAML, etc. are out
   of scope for the mini-parser.
@@ -376,17 +401,25 @@ old `.Mounts`-source comparison could not see them.
   `docker inspect --format '{{json .Mounts}}'` and by touching a file in the
   rw mount from inside the container; verify the ro mount rejects writes.
 - Exercise the reuse/recreate matrix from acceptance criterion 3.
-- Negative tests: bogus path entry, duplicate basenames, malformed YAML line
-  — each warns as specified and never aborts with a stack trace.
+- Negative / edge tests: bogus path entry, duplicate basenames, malformed YAML
+  line — each warns as specified and never aborts with a stack trace; an inline
+  `ctx: []` parses as the empty set (not malformed) and drops committed mounts
+  (stopped ⇒ recreate, running ⇒ "stop first"); a host path or alias containing
+  `|` or a newline does **not** collide in the hash with a different mount set
+  (injective NUL-separated canonicalization).
 
 ## Review plan
 
 Reviewer should check: (1) sh/ps1 behavioral parity line by line for parsing,
 warnings, and hash derivation; (2) that the label-hash recreate detection —
 including the legacy no-label fallback and the "don't care" (no config, no
-`--ctx`) path — cannot regress the existing reuse flows; (3) Windows path handling
-(drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath` usage); (4)
-that the mini-parser fails safe (warn + ignore) on YAML it doesn't understand;
+`--ctx`) path — cannot regress the existing reuse flows, **and** that the hash
+canonicalization is injective (NUL-separated fields at fixed arity; a `|` or
+newline in a path/alias cannot make two different sets hash equal); (3) Windows
+path handling (drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath`
+usage); (4) that the mini-parser fails safe (warn + ignore) on YAML it doesn't
+understand, **including** recognizing the inline `ctx: []` empty-list override
+as the empty set rather than as malformed/absent;
 (5) docs accurately reflect resolved OQ decisions; (6) the launcher emits the
 `--mount type=bind,src=,dst=[,ro]` form (not colon-packed `-v`) for ctx mounts,
 so a `:` in a host path or derived name mounts rather than failing, and a `,`

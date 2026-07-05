@@ -29,7 +29,11 @@ own name at `/ctx/<name>/`.
 
 - A new repo-root config file, **`.powbox.local.yml`** (final), read by the
   **host-side launch scripts**, both flavors:
-  `scripts/launch-agent.ps1` and `scripts/launch-agent.sh`.
+  `scripts/launch-agent.ps1` and `scripts/launch-agent.sh`. Because the two
+  files share one schema, the launchers parse the `ctx:` section from **both**
+  `.powbox.yml` (committed) and `.powbox.local.yml` (user-local) — not from the
+  local file alone — with the local file taking precedence per the clobber rule
+  below.
 - A `ctx:` list in that file (section name final), docker-compose-inspired
   dual syntax:
   **short form** — a host path string with optional `:rw` / `:ro` suffix,
@@ -182,9 +186,18 @@ old `.Mounts`-source comparison could not see them.
   today's omitted `--ctx`. An explicit `ctx: []` (key present, empty list)
   means "no context": it hashes as the empty set and recreates a stopped
   container that still has ctx mounts.
-- **Legacy containers** (created before this feature, no label): fall back
-  to the old single-`/ctx` mount-source comparison for that launch; any
-  recreation from then on writes the label.
+- **Legacy containers** (created before this feature, no label): a no-label
+  container necessarily still carries the retired flattened-`/ctx` layout, so a
+  plain source-only comparison is not enough — relaunched with the same `--ctx`
+  path it would see an unchanged mount source and wrongly reuse the flattened
+  mount, never migrating to `/ctx/<basename>` nor gaining the label. Instead,
+  whenever the desired context set is determined at all — a CLI `--ctx`, or a
+  `ctx:` key present in config (a non-empty set migrates to `/ctx/<basename>`;
+  an explicit `ctx: []` drops the mount entirely) — treat the missing label as a
+  mismatch and recreate once (stopped ⇒ recreate; running ⇒ the "stop the
+  container first" error); the recreation writes the label. Only the genuine
+  "don't care" case (no `--ctx`, no `ctx:` key) keeps the old behavior of
+  leaving the existing flattened mount untouched.
 
 ## Target files or areas
 
@@ -219,7 +232,12 @@ old `.Mounts`-source comparison could not see them.
 - Comments (`#`), blank lines, and quoted values should parse; anchors,
   nested maps beyond the long-form entry keys, multi-doc YAML, etc. are out
   of scope for the mini-parser.
-- Empty `ctx:` list or absent file ⇒ behave exactly as today.
+- Absent file, or a present file with **no** `ctx:` key ⇒ "don't care": behave
+  exactly as today (keep whatever is already mounted; skip the recreate
+  comparison). An explicit `ctx: []` is **not** the same — per Recreate
+  detection above it is the empty set ("no context"): it hashes as empty and
+  recreates a *stopped* container that still carries ctx mounts (running ⇒ the
+  "stop first" error).
 - Beware Windows edge cases: drive-root entries (`C:\` has no basename),
   trailing slashes/backslashes, UNC paths (`\\server\share`) — define and
   document behavior (reasonable: warn-and-skip anything without a usable

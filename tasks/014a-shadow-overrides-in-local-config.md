@@ -1,9 +1,10 @@
 # 014a — Honor `shadow:` overrides in `.powbox.local.yml` (container-side schema parity)
 
 > Follow-up to task 014 (resolution of its OQ-6). Execute **after** 014 so the
-> local file's name and merge semantics are settled and documented; the code
-> here is otherwise independent (container-side only, plus a two-line host
-> classification tweak).
+> local file's name and merge semantics are settled and documented — **and** so
+> the host-side YAML mini-parser 014 introduces is available, since the
+> project-classification change below reuses it to detect a `shadow:` key. The
+> container-side shadow work is otherwise independent.
 
 ## Why this task exists
 
@@ -28,19 +29,26 @@ a mount problem — all without touching the committed `.powbox.yml`.
   wholly replaces the committed one — including the present-but-empty case
   (`shadow: []` locally disables all committed custom shadows). If the local
   file is absent or has no `shadow:` key, the committed file applies as today.
-- Host launchers' **project classification** check: a repo that has *only*
-  `.powbox.local.yml` (no committed `.powbox.yml`) must still be classified as
-  a powbox project so the `agent-nm`/`agent-wt` volumes mount
-  (`scripts/launch-agent.sh:421-428`, `scripts/launch-agent.ps1:255-262` —
-  existence test only, no host-side parsing).
+- Host launchers' **project classification** check: a repo whose
+  `.powbox.local.yml` declares a **`shadow:` key** (a real powbox opt-in) must
+  be classified as a powbox project so the `agent-nm`/`agent-wt` volumes mount,
+  even with no committed `.powbox.yml`
+  (`scripts/launch-agent.sh:421-428`, `scripts/launch-agent.ps1:255-262`).
+  **Do not** key this on the mere *existence* of `.powbox.local.yml`: task 014
+  makes it the normal home for a `ctx:`-only list (mounting arbitrary reference
+  folders into an otherwise non-dev workspace), and those users must not
+  silently acquire the `node_modules`/`.worktrees` project volumes. Detect the
+  `shadow:` key with the host-side mini-parser 014 already ships (this task runs
+  after 014); a committed `.powbox.yml` stays a project marker exactly as today.
 - Unit tests in `scripts/test-detect-shadows.sh` covering the new precedence.
 - Docs: README "Workspace Shadow Mounts" auto-detection list (step 3 mentions
   `.powbox.yml` only) and any `docs/` page describing shadow detection.
 
 **Out of scope:**
 
-- The `ctx:` section and everything host-side beyond the existence check
-  (task 014).
+- The `ctx:` section and all other host-side parsing (task 014). This task's
+  *only* host-side addition is the `shadow:`-key check that gates project
+  classification, reusing 014's mini-parser.
 - Any new schema sections or a generic merge engine — this is one section,
   one rule.
 - Changes to the `enable-worktrees` skill's behavior (it verifies the
@@ -107,8 +115,11 @@ a mount problem — all without touching the committed `.powbox.yml`.
 4. No local file ⇒ byte-for-byte today's behavior (existing tests still pass).
 5. Containment/security validation rejects a local entry escaping the
    workspace root exactly as it does for committed entries.
-6. A repo containing only `.powbox.local.yml` is classified as a powbox
-   project by both host launchers (nm/wt volumes mount).
+6. A repo whose only powbox file is a `.powbox.local.yml` **declaring a
+   `shadow:` key** is classified as a powbox project by both host launchers
+   (nm/wt volumes mount); a `.powbox.local.yml` carrying only a `ctx:` list (no
+   `shadow:` key, no committed `.powbox.yml`) is **not** classified as a
+   project.
 7. README auto-detection docs mention the local override and the empty-list
    disable trick.
 
@@ -129,4 +140,6 @@ Reviewer should check: (1) the source-selection change did not weaken any of
 the existing validation paths (containment, `.git/` guards, glob gating);
 (2) present-but-empty vs absent-key is genuinely distinguished (`has("shadow")`,
 not `// empty` coalescing); (3) both launchers' classification checks were
-updated symmetrically; (4) new tests fail against the pre-change script.
+updated symmetrically and gate on a `shadow:` **key** rather than the mere
+existence of `.powbox.local.yml` (a `ctx:`-only local file must not classify as
+a project); (4) new tests fail against the pre-change script.

@@ -235,10 +235,12 @@ overlay_sh="$WORK_ROOT/ctx-sh.yml"
 overlay_ps="$WORK_ROOT/ctx-ps.yml"
 out_sh="$(run_sh_overlay "$ws" "$overlay_sh")"
 out_ps="$(run_ps_overlay "$ws" "$overlay_ps")"
+printf -v source_dollar_needle 'dollar\044\044name,pipe|dir'
+printf -v target_dollar_needle 'target\044\044NAME,pipe|'
 assert_eq "overlay hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
 assert_contains "source dollar escaped" "$(cat "$overlay_sh")" 'source: '
-assert_contains "source doubles dollar" "$(cat "$overlay_sh")" "dollar\$\$name,pipe|dir"
-assert_contains "target doubles dollar" "$(cat "$overlay_sh")" "target\$\$NAME,pipe|"
+assert_contains "source doubles dollar" "$(cat "$overlay_sh")" "$source_dollar_needle"
+assert_contains "target doubles dollar" "$(cat "$overlay_sh")" "$target_dollar_needle"
 if cmp -s "$overlay_sh" "$overlay_ps"; then
 	ok "bash and PowerShell overlays match"
 else

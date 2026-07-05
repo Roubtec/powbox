@@ -1126,6 +1126,40 @@ if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
 	exit 0
 fi
 
+CTX_CONFIG_PRESENT=false
+if [ "$ISOLATED" != true ]; then
+	powbox_warn_if_local_config_not_ignored "$PROJECT_PATH"
+	if powbox_effective_ctx_config_present "$PROJECT_PATH"; then
+		CTX_CONFIG_PRESENT=true
+	fi
+fi
+
+CTX_DESIRED_PRESENT=false
+CTX_HASH=""
+CTX_MOUNT_NAMES=()
+CTX_MOUNT_PATHS=()
+CTX_MOUNT_MODES=()
+if [ "$RESUME" != true ]; then
+	powbox_derive_ctx_mounts "$PROJECT_PATH"
+fi
+
+if [ "${POWBOX_PRINT_CTX:-}" = "1" ]; then
+	printf 'CTX_CONFIG_PRESENT=%s\n' "$CTX_CONFIG_PRESENT"
+	printf 'CTX_DESIRED_PRESENT=%s\n' "$CTX_DESIRED_PRESENT"
+	printf 'CTX_HASH=%s\n' "$CTX_HASH"
+	printf 'CTX_MOUNT_COUNT=%s\n' "${#CTX_MOUNT_NAMES[@]}"
+	for i in "${!CTX_MOUNT_NAMES[@]}"; do
+		printf 'CTX_MOUNT_%s_NAME=%s\n' "$i" "${CTX_MOUNT_NAMES[$i]}"
+		printf 'CTX_MOUNT_%s_PATH=%s\n' "$i" "${CTX_MOUNT_PATHS[$i]}"
+		printf 'CTX_MOUNT_%s_MODE=%s\n' "$i" "${CTX_MOUNT_MODES[$i]}"
+	done
+	if [ -n "${POWBOX_CTX_OVERLAY_OUT:-}" ] && [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
+		powbox_write_ctx_compose_overlay "$POWBOX_CTX_OVERLAY_OUT"
+		printf 'CTX_OVERLAY=%s\n' "$POWBOX_CTX_OVERLAY_OUT"
+	fi
+	exit 0
+fi
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
 # Self-hosted overlay: replaces the host workspace BIND mount in compose.shared.yml
@@ -1161,40 +1195,6 @@ else
 	export WORKSPACE_PATH="$PROJECT_PATH"
 fi
 export PROJECT_NAME
-
-CTX_CONFIG_PRESENT=false
-if [ "$ISOLATED" != true ]; then
-	powbox_warn_if_local_config_not_ignored "$PROJECT_PATH"
-	if powbox_effective_ctx_config_present "$PROJECT_PATH"; then
-		CTX_CONFIG_PRESENT=true
-	fi
-fi
-
-CTX_DESIRED_PRESENT=false
-CTX_HASH=""
-CTX_MOUNT_NAMES=()
-CTX_MOUNT_PATHS=()
-CTX_MOUNT_MODES=()
-if [ "$RESUME" != true ]; then
-	powbox_derive_ctx_mounts "$PROJECT_PATH"
-fi
-
-if [ "${POWBOX_PRINT_CTX:-}" = "1" ]; then
-	printf 'CTX_CONFIG_PRESENT=%s\n' "$CTX_CONFIG_PRESENT"
-	printf 'CTX_DESIRED_PRESENT=%s\n' "$CTX_DESIRED_PRESENT"
-	printf 'CTX_HASH=%s\n' "$CTX_HASH"
-	printf 'CTX_MOUNT_COUNT=%s\n' "${#CTX_MOUNT_NAMES[@]}"
-	for i in "${!CTX_MOUNT_NAMES[@]}"; do
-		printf 'CTX_MOUNT_%s_NAME=%s\n' "$i" "${CTX_MOUNT_NAMES[$i]}"
-		printf 'CTX_MOUNT_%s_PATH=%s\n' "$i" "${CTX_MOUNT_PATHS[$i]}"
-		printf 'CTX_MOUNT_%s_MODE=%s\n' "$i" "${CTX_MOUNT_MODES[$i]}"
-	done
-	if [ -n "${POWBOX_CTX_OVERLAY_OUT:-}" ] && [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
-		powbox_write_ctx_compose_overlay "$POWBOX_CTX_OVERLAY_OUT"
-		printf 'CTX_OVERLAY=%s\n' "$POWBOX_CTX_OVERLAY_OUT"
-	fi
-	exit 0
-fi
 
 GH_HOST_CONFIG_DIR="${GH_HOST_CONFIG_DIR:-$HOME/.config/gh}"
 GIT_CONFIG_PATH="${GIT_CONFIG_PATH:-$HOME/.gitconfig}"
@@ -1842,7 +1842,7 @@ trap cleanup_ctx_compose_file EXIT
 
 FINAL_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}")
 if [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
-	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX.yml")"
+	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX")"
 	powbox_write_ctx_compose_overlay "$CTX_COMPOSE_FILE"
 	FINAL_COMPOSE_ARGS+=(-f "$CTX_COMPOSE_FILE")
 fi

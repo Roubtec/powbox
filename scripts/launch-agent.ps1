@@ -313,7 +313,7 @@ function Expand-Powbox-LeadingTilde ([string]$Path) {
 
 function Test-Powbox-AbsolutePath ([string]$Path) {
   if ($Path -match '^/' -or $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^\\\\' -or $Path -match '^//') { return $true }
-  return [System.IO.Path]::IsPathFullyQualified($Path)
+  return $false
 }
 
 function Resolve-Powbox-DirectoryPath ([string]$Path) {
@@ -754,6 +754,39 @@ if ($env:POWBOX_PRINT_IDENTITY -eq "1") {
   exit 0
 }
 
+$ctxConfigPresent = $false
+if (-not $Isolated) {
+  Write-Powbox-LocalConfigIgnoreWarning $resolvedProject
+  $ctxConfigPresent = Test-Powbox-EffectiveCtxConfigPresent $resolvedProject
+}
+
+$ctxDesiredPresent = $false
+$ctxHash = ""
+$ctxMounts = @()
+if (-not $Resume) {
+  $ctxResult = Resolve-Powbox-CtxMountSet $resolvedProject
+  $ctxDesiredPresent = $ctxResult.DesiredPresent
+  $ctxHash = $ctxResult.Hash
+  $ctxMounts = @($ctxResult.Mounts)
+}
+
+if ($env:POWBOX_PRINT_CTX -eq "1") {
+  Write-Output "CTX_CONFIG_PRESENT=$($ctxConfigPresent.ToString().ToLowerInvariant())"
+  Write-Output "CTX_DESIRED_PRESENT=$($ctxDesiredPresent.ToString().ToLowerInvariant())"
+  Write-Output "CTX_HASH=$ctxHash"
+  Write-Output "CTX_MOUNT_COUNT=$($ctxMounts.Count)"
+  for ($i = 0; $i -lt $ctxMounts.Count; $i++) {
+    Write-Output "CTX_MOUNT_${i}_NAME=$($ctxMounts[$i].Name)"
+    Write-Output "CTX_MOUNT_${i}_PATH=$($ctxMounts[$i].Path)"
+    Write-Output "CTX_MOUNT_${i}_MODE=$($ctxMounts[$i].Mode)"
+  }
+  if ($env:POWBOX_CTX_OVERLAY_OUT -and $ctxMounts.Count -gt 0) {
+    Write-Powbox-CtxComposeOverlay $env:POWBOX_CTX_OVERLAY_OUT $ctxMounts
+    Write-Output "CTX_OVERLAY=$env:POWBOX_CTX_OVERLAY_OUT"
+  }
+  exit 0
+}
+
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.agent.yml"
@@ -801,39 +834,6 @@ else {
 }
 $env:PROJECT_NAME = $projectSlug
 $workspaceMount = "/workspace/$projectSlug"
-
-$ctxConfigPresent = $false
-if (-not $Isolated) {
-  Write-Powbox-LocalConfigIgnoreWarning $resolvedProject
-  $ctxConfigPresent = Test-Powbox-EffectiveCtxConfigPresent $resolvedProject
-}
-
-$ctxDesiredPresent = $false
-$ctxHash = ""
-$ctxMounts = @()
-if (-not $Resume) {
-  $ctxResult = Resolve-Powbox-CtxMountSet $resolvedProject
-  $ctxDesiredPresent = $ctxResult.DesiredPresent
-  $ctxHash = $ctxResult.Hash
-  $ctxMounts = @($ctxResult.Mounts)
-}
-
-if ($env:POWBOX_PRINT_CTX -eq "1") {
-  Write-Output "CTX_CONFIG_PRESENT=$($ctxConfigPresent.ToString().ToLowerInvariant())"
-  Write-Output "CTX_DESIRED_PRESENT=$($ctxDesiredPresent.ToString().ToLowerInvariant())"
-  Write-Output "CTX_HASH=$ctxHash"
-  Write-Output "CTX_MOUNT_COUNT=$($ctxMounts.Count)"
-  for ($i = 0; $i -lt $ctxMounts.Count; $i++) {
-    Write-Output "CTX_MOUNT_${i}_NAME=$($ctxMounts[$i].Name)"
-    Write-Output "CTX_MOUNT_${i}_PATH=$($ctxMounts[$i].Path)"
-    Write-Output "CTX_MOUNT_${i}_MODE=$($ctxMounts[$i].Mode)"
-  }
-  if ($env:POWBOX_CTX_OVERLAY_OUT -and $ctxMounts.Count -gt 0) {
-    Write-Powbox-CtxComposeOverlay $env:POWBOX_CTX_OVERLAY_OUT $ctxMounts
-    Write-Output "CTX_OVERLAY=$env:POWBOX_CTX_OVERLAY_OUT"
-  }
-  exit 0
-}
 
 $ghHostConfigPath = if ($env:GH_HOST_CONFIG_DIR) { $env:GH_HOST_CONFIG_DIR } else { "$env:APPDATA\GitHub CLI" }
 $gitConfigPath = if ($env:GIT_CONFIG_PATH) { $env:GIT_CONFIG_PATH } else { Join-Path $env:USERPROFILE ".gitconfig" }

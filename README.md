@@ -372,27 +372,49 @@ Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with 
 - A local-only repo with no fetchable remote cannot be used in this mode — the container clones over the network via `gh`/HTTPS, so there must be something to clone. Use dir-mounted mode for purely-local trees.
 - There is no host⇄container sync; egress is push/PR by design (syncing back to the host would defeat the isolation goal).
 
-## Read-Only Context Volume
+## Context Mounts
 
-Pass `--ctx <path>` to mount a host directory as a read-only volume at `/ctx` inside the container.
+Pass `--ctx <path>` to mount one host directory read-only under `/ctx/<basename>` inside the container.
 This is useful for giving the agent access to reference code, data sources, or other content without allowing modifications.
 
 ```bash
 ./commands/claude-container.sh ~/projects/myapp --ctx ~/datasets/reference
 ```
 
-The volume is only present when `--ctx` is specified; otherwise `/ctx` is an empty directory.
+That example makes the host folder available at `/ctx/reference`.
+The CLI form accepts one path, always read-only, and it overrides any configured context for that launch.
+
+For multiple folders, add a `ctx:` list to `.powbox.local.yml` in the workspace root.
+The file is user-local and should be ignored by git; the launcher warns if it exists in a git repo and `git check-ignore -q .powbox.local.yml` does not ignore it.
+
+```yaml
+# .powbox.local.yml
+ctx:
+  - ~/projects/reference-repo:rw
+  - docs/specs
+  - path: ../shared-style-guide
+    name: style-guide
+    mode: ro
+```
+
+Each entry mounts at `/ctx/<name>` where `name:` is the explicit alias or the source folder basename.
+Short form accepts a trailing `:ro` or `:rw` mode suffix and defaults to `ro`; long form accepts `path:`, optional `name:`, and optional `mode:`.
+Config paths may start with `~` and relative paths resolve from the workspace root; environment variables are left literal.
+Missing configured paths warn and are skipped, and duplicate target names warn and skip later entries; use `name:` to disambiguate.
+
+Committed `.powbox.yml` can also contain `ctx:` using the same schema.
+Top-level sections merge by clobber: `.powbox.local.yml` replaces `.powbox.yml` for any section it defines, so local `ctx: []` is an explicit empty context set rather than an append.
 
 ### Context Changes on Resume
 
-When reusing a stopped container (the default, or with `--persist`), the launch script compares the requested `--ctx` mount against what the container was originally created with.
-If the value differs (including going from no context to a new path, or switching between paths), the stopped container is removed and recreated with the updated mount.
+When reusing a stopped container (the default, or with `--persist`), the launcher compares a hash of the derived ctx mount set against the `powbox.ctx-hash` label recorded when the container was created.
+If the desired set differs (including switching paths, aliases, modes, CLI/config source, or going to explicit `ctx: []`), the stopped container is removed and recreated with the updated mounts.
 Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) is unaffected by this recreation.
 
-Omitting `--ctx` is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
-To explicitly clear a previously mounted context, use `--volatile` to force a fresh container.
+Omitting `--ctx` and having no effective `ctx:` key is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
+To explicitly clear a previously mounted context on a stopped container, use `ctx: []`; use `--volatile` when you want a fresh container regardless of labels.
 
-Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value passed alongside is ignored (a warning is printed).
+Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value or configured `ctx:` is ignored (a warning is printed).
 To apply a ctx change, omit `--resume` and let the script auto-detect and recreate as needed.
 
 ## Workspace Shadow Mounts
@@ -627,7 +649,7 @@ cc -Isolated owner/repo -Name feature-a
 # Resume that named self-hosted Claude instance later
 cci feature-a
 
-# Launch either agent with a read-only reference volume at /ctx
+# Launch either agent with a read-only reference folder at /ctx/specs
 cc -Ctx C:\Docs\specs
 
 # Prune orphaned node_modules volumes (dry run first)
@@ -702,7 +724,7 @@ cx --exec "fix the failing tests"
 # Self-hosted: clone the repo into a private volume (see "Self-Hosted Mode")
 cc --isolated owner/repo --name feature-a
 
-# Launch either agent with a read-only reference volume at /ctx
+# Launch either agent with a read-only reference folder at /ctx/specs
 cc --ctx ~/docs/specs
 
 # Prune orphaned node_modules volumes (prompts for confirmation)

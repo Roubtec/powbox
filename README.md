@@ -375,7 +375,7 @@ Self-hosted containers are flagged in `cc-list` / `cx-list` / `agent-list` with 
 ## Context Mounts
 
 Pass `--ctx <path>` to mount host directories under `/ctx/<basename>` inside the container.
-This is useful for giving the agent access to reference code, data sources, or other content without allowing modifications.
+This is useful for giving the agent access to reference code, data sources, or other content as read-only by default; add `:rw` only when the agent should be allowed to modify that source.
 
 ```bash
 ./commands/claude-container.sh ~/projects/myapp --ctx ~/datasets/reference

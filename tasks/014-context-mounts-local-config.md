@@ -483,8 +483,12 @@ old `.Mounts`-source comparison could not see them.
    `/ctx/<name>` layout — not only `docker/shared/container-agent.md.tmpl` and
    root `AGENTS.md` but also both baked
    `docker/{claude,codex}/agent-container/skills/enable-worktrees/SKILL.md`
-   (they tell agents the powbox README is "readable at `/ctx`"). A repo-wide
-   `/ctx` grep finds nothing still pointing at the flattened path.
+   (they tell agents the powbox README is "readable at `/ctx`"). Validate by
+   grepping for the **flattened-layout wording** and confirming none remains:
+   no doc still says the README is "readable at `/ctx`", and no filesystem-layout
+   table still glosses `/ctx` as a single "context volume" mount point
+   (`| /ctx |` rows). A bare `/ctx` grep is deliberately *not* the check — it
+   still (correctly) matches the new `/ctx/<name>` references.
 8. Entries with a leading `~` or a workspace-root-relative path resolve
    correctly; environment variables are left literal.
 9. The gitignore guard warns exactly when `.powbox.local.yml` exists in a git

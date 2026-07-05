@@ -121,13 +121,6 @@ if [ "$ISOLATED" != true ]; then
 	fi
 fi
 
-if [ -n "$CTX_PATH" ] && [ ! -d "$CTX_PATH" ]; then
-	echo "Error: context path does not exist: ${CTX_PATH}" >&2
-	exit 1
-fi
-if [ -n "$CTX_PATH" ]; then
-	CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"
-fi
 if [ "$ISOLATED" != true ]; then
 	PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
 	# Only strip the trailing slash when the path is not the filesystem root ("/"), since
@@ -204,37 +197,657 @@ repo_identity() {
 	printf '%s' "${id%.git}"
 }
 
-# Normalise a path for /ctx comparison.
-# On Windows (MSYS/Cygwin), Docker Desktop may report bind-mount sources using
-# Linux-style prefixes rather than the native drive:/... form that the shell sees.
-# Convert all known representations to a canonical drive:/... form so an unchanged
-# mount compares equal regardless of which format Docker happens to report.
-# On Linux/macOS paths are returned as-is (case-sensitive, trailing slash stripped).
-# Backslash-to-slash conversion is Windows-only; on POSIX systems a backslash is
-# a valid path character and must not be silently altered.
-normalize_ctx_path() {
-	local p
-	p="$1"
-	case "$(uname -s)" in
-	MINGW* | MSYS* | CYGWIN*)
-		# Normalize backslashes to forward slashes (Windows paths only).
-		p="$(printf '%s' "$p" | sed 's|\\|/|g')"
-		# Lowercase first so that the prefix patterns below only need to match [a-z].
-		# This must stay above the sed substitutions — moving it after them would
-		# leave prefixes intact when Docker reports an uppercase drive letter.
-		p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
-		# /run/desktop/mnt/host/c and /run/desktop/mnt/host/c/... → c: and c:/...
-		p="$(printf '%s' "$p" | sed 's|^/run/desktop/mnt/host/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-		# /host_mnt/c and /host_mnt/c/... → c: and c:/...
-		p="$(printf '%s' "$p" | sed 's|^/host_mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-		# /mnt/c and /mnt/c/... → c: and c:/...
-		p="$(printf '%s' "$p" | sed 's|^/mnt/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-		# MSYS/Git Bash native form: /c and /c/... → c: and c:/...
-		p="$(printf '%s' "$p" | sed 's|^/\([a-z]\)\(/.*\)\{0,1\}$|\1:\2|')"
-		;;
+# Full SHA256 of stdin, used for ctx mount-set labels. Kept separate from
+# project_hash, whose 12-char truncation is part of the container-name contract.
+powbox_sha256_stdin() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk '{print $1}'
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst -sha256 | sed 's/^.* //'
+	else
+		echo "Error: no hashing command found (need sha256sum, shasum, or openssl)." >&2
+		return 1
+	fi
+}
+
+powbox_warn() {
+	echo "Warning: $*" >&2
+}
+
+powbox_trim() {
+	local s="$1" c
+	while [ -n "$s" ]; do
+		c="${s:0:1}"
+		case "$c" in
+		" " | $'\t' | $'\r') s="${s:1}" ;;
+		*) break ;;
+		esac
+	done
+	while [ -n "$s" ]; do
+		c="${s: -1}"
+		case "$c" in
+		" " | $'\t' | $'\r') s="${s:0:${#s}-1}" ;;
+		*) break ;;
+		esac
+	done
+	printf '%s' "$s"
+}
+
+powbox_strip_yaml_comment() {
+	local s="$1" out="" quote="" c next prev_blank=true
+	local i
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		if [ -z "$quote" ]; then
+			case "$c" in
+			"'")
+				quote="'"
+				out+="$c"
+				prev_blank=false
+				;;
+			'"')
+				quote='"'
+				out+="$c"
+				prev_blank=false
+				;;
+			"#")
+				if [ "$prev_blank" = true ]; then
+					break
+				fi
+				out+="$c"
+				prev_blank=false
+				;;
+			" " | $'\t')
+				out+="$c"
+				prev_blank=true
+				;;
+			*)
+				out+="$c"
+				prev_blank=false
+				;;
+			esac
+		elif [ "$quote" = "'" ]; then
+			out+="$c"
+			if [ "$c" = "'" ]; then
+				next="${s:i+1:1}"
+				if [ "$next" = "'" ]; then
+					out+="$next"
+					i=$((i + 1))
+				else
+					quote=""
+				fi
+			fi
+		else
+			out+="$c"
+			if [ "$c" = "\\" ]; then
+				next="${s:i+1:1}"
+				if [ -n "$next" ]; then
+					out+="$next"
+					i=$((i + 1))
+				fi
+			elif [ "$c" = '"' ]; then
+				quote=""
+			fi
+		fi
+	done
+	printf '%s' "$out"
+}
+
+powbox_parse_yaml_scalar() {
+	local raw outvar first c next out="" esc context
+	raw="$(powbox_trim "$(powbox_strip_yaml_comment "$1")")"
+	outvar="$2"
+	context="$3"
+	if [ -z "$raw" ]; then
+		printf -v "$outvar" '%s' ""
+		return 0
+	fi
+	first="${raw:0:1}"
+	if [ "$first" = "'" ]; then
+		local i
+		for ((i = 1; i < ${#raw}; i++)); do
+			c="${raw:i:1}"
+			if [ "$c" = "'" ]; then
+				next="${raw:i+1:1}"
+				if [ "$next" = "'" ]; then
+					out+="'"
+					i=$((i + 1))
+				elif [ "$i" -eq $((${#raw} - 1)) ]; then
+					printf -v "$outvar" '%s' "$out"
+					return 0
+				else
+					powbox_warn "$context has trailing content after a quoted scalar; skipping."
+					return 1
+				fi
+			else
+				out+="$c"
+			fi
+		done
+		powbox_warn "$context has an unterminated single-quoted scalar; skipping."
+		return 1
+	fi
+	if [ "$first" = '"' ]; then
+		local i
+		for ((i = 1; i < ${#raw}; i++)); do
+			c="${raw:i:1}"
+			if [ "$c" = "\\" ]; then
+				i=$((i + 1))
+				if [ "$i" -ge "${#raw}" ]; then
+					powbox_warn "$context has a dangling escape in a double-quoted scalar; skipping."
+					return 1
+				fi
+				esc="${raw:i:1}"
+				case "$esc" in
+				'"' | "\\" | "/") out+="$esc" ;;
+				b) out+=$'\b' ;;
+				f) out+=$'\f' ;;
+				n) out+=$'\n' ;;
+				r) out+=$'\r' ;;
+				t) out+=$'\t' ;;
+				*)
+					powbox_warn "$context uses an unsupported YAML escape \\${esc}; skipping."
+					return 1
+					;;
+				esac
+			elif [ "$c" = '"' ]; then
+				if [ "$i" -eq $((${#raw} - 1)) ]; then
+					printf -v "$outvar" '%s' "$out"
+					return 0
+				fi
+				powbox_warn "$context has trailing content after a quoted scalar; skipping."
+				return 1
+			else
+				out+="$c"
+			fi
+		done
+		powbox_warn "$context has an unterminated double-quoted scalar; skipping."
+		return 1
+	fi
+	printf -v "$outvar" '%s' "$raw"
+}
+
+powbox_split_yaml_key_value() {
+	local line parsed_key parsed_value
+	line="$(powbox_trim "$(powbox_strip_yaml_comment "$1")")"
+	if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_.-]*):(.*)$ ]]; then
+		parsed_key="${BASH_REMATCH[1]}"
+		parsed_value="${BASH_REMATCH[2]}"
+		printf -v "$2" '%s' "$parsed_key"
+		printf -v "$3" '%s' "$parsed_value"
+		return 0
+	fi
+	return 1
+}
+
+powbox_file_has_top_section() {
+	local file="$1" section="$2" line stripped key value
+	[ -f "$file" ] || return 1
+	while IFS= read -r line || [ -n "$line" ]; do
+		line="${line%$'\r'}"
+		stripped="$(powbox_trim "$(powbox_strip_yaml_comment "$line")")"
+		[ -n "$stripped" ] || continue
+		case "${line:0:1}" in
+		" " | $'\t') continue ;;
+		esac
+		if powbox_split_yaml_key_value "$line" key value && [ "$key" = "$section" ]; then
+			return 0
+		fi
+	done <"$file"
+	return 1
+}
+
+powbox_effective_ctx_config_present() {
+	local workspace="$1"
+	if powbox_file_has_top_section "${workspace}/.powbox.local.yml" ctx; then
+		return 0
+	fi
+	powbox_file_has_top_section "${workspace}/.powbox.yml" ctx
+}
+
+powbox_parse_ctx_finish_object() {
+	if [ "$ctx_obj_open" != true ]; then
+		return 0
+	fi
+	if [ "$ctx_obj_bad" = true ]; then
+		ctx_obj_open=false
+		return 0
+	fi
+	if [ "$ctx_obj_path_set" != true ] || [ -z "$ctx_obj_path" ]; then
+		powbox_warn "${ctx_obj_origin} is missing required path; skipping."
+		ctx_obj_open=false
+		return 0
+	fi
+	POWBOX_PARSE_CTX_PATHS+=("$ctx_obj_path")
+	POWBOX_PARSE_CTX_NAMES+=("$ctx_obj_name")
+	POWBOX_PARSE_CTX_MODES+=("$ctx_obj_mode")
+	POWBOX_PARSE_CTX_ORIGINS+=("$ctx_obj_origin")
+	ctx_obj_open=false
+}
+
+powbox_parse_ctx_file() {
+	local file="$1" line stripped key value value_trim rest parsed
+	local line_no=0 in_ctx=false
+	local ctx_obj_open=false ctx_obj_bad=false ctx_obj_path_set=false
+	local ctx_obj_path="" ctx_obj_name="" ctx_obj_mode="" ctx_obj_origin=""
+	POWBOX_PARSE_CTX_PRESENT=false
+	POWBOX_PARSE_CTX_PATHS=()
+	POWBOX_PARSE_CTX_NAMES=()
+	POWBOX_PARSE_CTX_MODES=()
+	POWBOX_PARSE_CTX_ORIGINS=()
+	[ -f "$file" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		line_no=$((line_no + 1))
+		line="${line%$'\r'}"
+		stripped="$(powbox_trim "$(powbox_strip_yaml_comment "$line")")"
+		[ -n "$stripped" ] || continue
+
+		case "${line:0:1}" in
+		" " | $'\t') ;;
+		*)
+			if [ "$in_ctx" = true ]; then
+				powbox_parse_ctx_finish_object
+			fi
+			in_ctx=false
+			if ! powbox_split_yaml_key_value "$line" key value; then
+				continue
+			fi
+			if [ "$key" = "ctx" ]; then
+				POWBOX_PARSE_CTX_PRESENT=true
+				value_trim="$(powbox_trim "$value")"
+				case "$value_trim" in
+				"")
+					in_ctx=true
+					;;
+				"[]")
+					in_ctx=false
+					;;
+				*)
+					powbox_warn "${file}:${line_no}: unsupported inline ctx value; use a block list or ctx: []."
+					;;
+				esac
+			fi
+			continue
+			;;
+		esac
+
+		[ "$in_ctx" = true ] || continue
+		if [ "${stripped:0:1}" = "-" ]; then
+			powbox_parse_ctx_finish_object
+			rest="$(powbox_trim "${stripped:1}")"
+			if [ -z "$rest" ]; then
+				ctx_obj_open=true
+				ctx_obj_bad=false
+				ctx_obj_path_set=false
+				ctx_obj_path=""
+				ctx_obj_name=""
+				ctx_obj_mode=""
+				ctx_obj_origin="${file}:${line_no}"
+				continue
+			fi
+			if powbox_split_yaml_key_value "$rest" key value; then
+				ctx_obj_open=true
+				ctx_obj_bad=false
+				ctx_obj_path_set=false
+				ctx_obj_path=""
+				ctx_obj_name=""
+				ctx_obj_mode=""
+				ctx_obj_origin="${file}:${line_no}"
+				case "$key" in
+				path | name | mode)
+					if powbox_parse_yaml_scalar "$value" parsed "${file}:${line_no}: ctx.${key}"; then
+						case "$key" in
+						path)
+							ctx_obj_path="$parsed"
+							ctx_obj_path_set=true
+							;;
+						name) ctx_obj_name="$parsed" ;;
+						mode) ctx_obj_mode="$parsed" ;;
+						esac
+					else
+						ctx_obj_bad=true
+					fi
+					;;
+				*)
+					powbox_warn "${file}:${line_no}: unsupported ctx object key '${key}'; skipping entry."
+					ctx_obj_bad=true
+					;;
+				esac
+			else
+				if powbox_parse_yaml_scalar "$rest" parsed "${file}:${line_no}: ctx entry"; then
+					POWBOX_PARSE_CTX_PATHS+=("$parsed")
+					POWBOX_PARSE_CTX_NAMES+=("")
+					POWBOX_PARSE_CTX_MODES+=("")
+					POWBOX_PARSE_CTX_ORIGINS+=("${file}:${line_no}")
+				fi
+			fi
+			continue
+		fi
+
+		if [ "$ctx_obj_open" = true ]; then
+			if ! powbox_split_yaml_key_value "$stripped" key value; then
+				powbox_warn "${file}:${line_no}: unsupported ctx object syntax; skipping entry."
+				ctx_obj_bad=true
+				continue
+			fi
+			case "$key" in
+			path | name | mode)
+				if powbox_parse_yaml_scalar "$value" parsed "${file}:${line_no}: ctx.${key}"; then
+					case "$key" in
+					path)
+						ctx_obj_path="$parsed"
+						ctx_obj_path_set=true
+						;;
+					name) ctx_obj_name="$parsed" ;;
+					mode) ctx_obj_mode="$parsed" ;;
+					esac
+				else
+					ctx_obj_bad=true
+				fi
+				;;
+			*)
+				powbox_warn "${file}:${line_no}: unsupported ctx object key '${key}'; skipping entry."
+				ctx_obj_bad=true
+				;;
+			esac
+		else
+			powbox_warn "${file}:${line_no}: ctx property without a list item; skipping."
+		fi
+	done <"$file"
+	if [ "$in_ctx" = true ]; then
+		powbox_parse_ctx_finish_object
+	fi
+}
+
+powbox_load_effective_ctx_config() {
+	local workspace="$1"
+	local base_present=false local_present=false
+	local -a base_paths=() base_names=() base_modes=() base_origins=()
+	local -a local_paths=() local_names=() local_modes=() local_origins=()
+
+	powbox_parse_ctx_file "${workspace}/.powbox.yml"
+	if [ "$POWBOX_PARSE_CTX_PRESENT" = true ]; then
+		base_present=true
+		base_paths=("${POWBOX_PARSE_CTX_PATHS[@]}")
+		base_names=("${POWBOX_PARSE_CTX_NAMES[@]}")
+		base_modes=("${POWBOX_PARSE_CTX_MODES[@]}")
+		base_origins=("${POWBOX_PARSE_CTX_ORIGINS[@]}")
+	fi
+
+	powbox_parse_ctx_file "${workspace}/.powbox.local.yml"
+	if [ "$POWBOX_PARSE_CTX_PRESENT" = true ]; then
+		local_present=true
+		local_paths=("${POWBOX_PARSE_CTX_PATHS[@]}")
+		local_names=("${POWBOX_PARSE_CTX_NAMES[@]}")
+		local_modes=("${POWBOX_PARSE_CTX_MODES[@]}")
+		local_origins=("${POWBOX_PARSE_CTX_ORIGINS[@]}")
+	fi
+
+	POWBOX_CTX_CONFIG_PRESENT=false
+	POWBOX_CTX_CONFIG_PATHS=()
+	POWBOX_CTX_CONFIG_NAMES=()
+	POWBOX_CTX_CONFIG_MODES=()
+	POWBOX_CTX_CONFIG_ORIGINS=()
+	if [ "$local_present" = true ]; then
+		POWBOX_CTX_CONFIG_PRESENT=true
+		POWBOX_CTX_CONFIG_PATHS=("${local_paths[@]}")
+		POWBOX_CTX_CONFIG_NAMES=("${local_names[@]}")
+		POWBOX_CTX_CONFIG_MODES=("${local_modes[@]}")
+		POWBOX_CTX_CONFIG_ORIGINS=("${local_origins[@]}")
+	elif [ "$base_present" = true ]; then
+		POWBOX_CTX_CONFIG_PRESENT=true
+		POWBOX_CTX_CONFIG_PATHS=("${base_paths[@]}")
+		POWBOX_CTX_CONFIG_NAMES=("${base_names[@]}")
+		POWBOX_CTX_CONFIG_MODES=("${base_modes[@]}")
+		POWBOX_CTX_CONFIG_ORIGINS=("${base_origins[@]}")
+	fi
+}
+
+powbox_expand_leading_tilde() {
+	local path="$1"
+	if [ "$path" = "~" ] && [ -n "${HOME:-}" ]; then
+		printf '%s' "$HOME"
+	elif [[ "$path" == \~/* ]] && [ -n "${HOME:-}" ]; then
+		printf '%s/%s' "$HOME" "${path#"~/"}"
+	else
+		printf '%s' "$path"
+	fi
+}
+
+powbox_path_is_absolute() {
+	case "$1" in
+	/* | [A-Za-z]:/* | [A-Za-z]:\\* | \\\\*) return 0 ;;
+	*) return 1 ;;
 	esac
-	# Strip trailing slash.
-	printf '%s' "${p%/}"
+}
+
+powbox_resolve_config_ctx_dir() {
+	local raw="$1" workspace="$2" origin="$3" outvar="$4" path resolved_path
+	path="$(powbox_expand_leading_tilde "$raw")"
+	if ! powbox_path_is_absolute "$path"; then
+		path="${workspace}/${path}"
+	fi
+	if [ ! -d "$path" ]; then
+		powbox_warn "${origin}: context path does not exist or is not a directory; skipping: ${raw}"
+		return 1
+	fi
+	resolved_path="$(cd "$path" && pwd -P)" || {
+		powbox_warn "${origin}: failed to resolve context path; skipping: ${raw}"
+		return 1
+	}
+	if [ "$resolved_path" != "/" ]; then
+		resolved_path="${resolved_path%/}"
+	fi
+	printf -v "$outvar" '%s' "$resolved_path"
+}
+
+powbox_resolve_cli_ctx_dir() {
+	local raw="$1" outvar="$2" resolved_path
+	if [ ! -d "$raw" ]; then
+		echo "Error: context path does not exist: ${raw}" >&2
+		exit 1
+	fi
+	resolved_path="$(cd "$raw" && pwd -P)" || {
+		echo "Error: failed to resolve context path: ${raw}" >&2
+		exit 1
+	}
+	if [ "$resolved_path" != "/" ]; then
+		resolved_path="${resolved_path%/}"
+	fi
+	printf -v "$outvar" '%s' "$resolved_path"
+}
+
+powbox_path_basename() {
+	local path="$1"
+	path="${path%/}"
+	printf '%s' "${path##*/}"
+}
+
+powbox_validate_ctx_name() {
+	local name="$1"
+	[ -n "$name" ] || return 1
+	[ "$name" != "." ] || return 1
+	[ "$name" != ".." ] || return 1
+	case "$name" in
+	*/* | *\\*) return 1 ;;
+	esac
+	return 0
+}
+
+powbox_add_ctx_mount() {
+	local name="$1" path="$2" mode="$3" origin="$4" duplicate
+	if ! powbox_validate_ctx_name "$name"; then
+		if [ "$origin" = "--ctx" ]; then
+			echo "Error: context mount name derived from ${path} is not a usable single path segment: ${name}" >&2
+			exit 1
+		fi
+		powbox_warn "${origin}: context mount name is not a usable single path segment; skipping: ${name}"
+		return 1
+	fi
+	for duplicate in "${CTX_MOUNT_NAMES[@]}"; do
+		if [ "$duplicate" = "$name" ]; then
+			powbox_warn "${origin}: duplicate ctx target name '${name}'; skipping later entry. Add a name: alias to disambiguate."
+			return 1
+		fi
+	done
+	CTX_MOUNT_NAMES+=("$name")
+	CTX_MOUNT_PATHS+=("$path")
+	CTX_MOUNT_MODES+=("$mode")
+}
+
+powbox_byte_less() {
+	local LC_ALL=C
+	[[ "$1" < "$2" ]]
+}
+
+powbox_ctx_sorted_indices() {
+	local -a sorted=()
+	local i j pos existing
+	for i in "${!CTX_MOUNT_NAMES[@]}"; do
+		pos="${#sorted[@]}"
+		for ((j = 0; j < ${#sorted[@]}; j++)); do
+			existing="${sorted[$j]}"
+			if powbox_byte_less "${CTX_MOUNT_NAMES[$i]}" "${CTX_MOUNT_NAMES[$existing]}"; then
+				pos="$j"
+				break
+			fi
+		done
+		sorted=("${sorted[@]:0:$pos}" "$i" "${sorted[@]:$pos}")
+	done
+	POWBOX_CTX_SORTED_INDICES=("${sorted[@]}")
+}
+
+powbox_emit_ctx_canonical() {
+	local i
+	powbox_ctx_sorted_indices
+	for i in "${POWBOX_CTX_SORTED_INDICES[@]}"; do
+		printf '%s\0%s\0%s\0' "${CTX_MOUNT_NAMES[$i]}" "${CTX_MOUNT_PATHS[$i]}" "${CTX_MOUNT_MODES[$i]}"
+	done
+}
+
+powbox_ctx_hash() {
+	powbox_emit_ctx_canonical | powbox_sha256_stdin
+}
+
+powbox_derive_ctx_mounts() {
+	local workspace="$1" resolved raw_path raw_name raw_mode mode name origin i
+	CTX_DESIRED_PRESENT=false
+	CTX_HASH=""
+	CTX_MOUNT_NAMES=()
+	CTX_MOUNT_PATHS=()
+	CTX_MOUNT_MODES=()
+
+	if [ -n "$CTX_PATH" ]; then
+		CTX_DESIRED_PRESENT=true
+		powbox_resolve_cli_ctx_dir "$CTX_PATH" resolved
+		name="$(powbox_path_basename "$resolved")"
+		powbox_add_ctx_mount "$name" "$resolved" ro "--ctx"
+		CTX_HASH="$(powbox_ctx_hash)"
+		return 0
+	fi
+
+	if [ "$ISOLATED" = true ]; then
+		return 0
+	fi
+
+	powbox_load_effective_ctx_config "$workspace"
+	if [ "$POWBOX_CTX_CONFIG_PRESENT" != true ]; then
+		return 0
+	fi
+	CTX_DESIRED_PRESENT=true
+	for i in "${!POWBOX_CTX_CONFIG_PATHS[@]}"; do
+		raw_path="${POWBOX_CTX_CONFIG_PATHS[$i]}"
+		raw_name="${POWBOX_CTX_CONFIG_NAMES[$i]}"
+		raw_mode="${POWBOX_CTX_CONFIG_MODES[$i]}"
+		origin="${POWBOX_CTX_CONFIG_ORIGINS[$i]}"
+
+		mode="$raw_mode"
+		if [ -z "$mode" ]; then
+			case "$raw_path" in
+			*:ro)
+				mode=ro
+				raw_path="${raw_path%:ro}"
+				;;
+			*:rw)
+				mode=rw
+				raw_path="${raw_path%:rw}"
+				;;
+			*)
+				mode=ro
+				;;
+			esac
+		fi
+		case "$mode" in
+		ro | rw) ;;
+		*)
+			powbox_warn "${origin}: unsupported ctx mode '${mode}'; expected ro or rw; skipping."
+			continue
+			;;
+		esac
+		if [ -z "$raw_path" ]; then
+			powbox_warn "${origin}: ctx entry has an empty path; skipping."
+			continue
+		fi
+		if ! powbox_resolve_config_ctx_dir "$raw_path" "$workspace" "$origin" resolved; then
+			continue
+		fi
+		if [ -n "$raw_name" ]; then
+			name="$raw_name"
+		else
+			name="$(powbox_path_basename "$resolved")"
+		fi
+		powbox_add_ctx_mount "$name" "$resolved" "$mode" "$origin" || true
+	done
+	CTX_HASH="$(powbox_ctx_hash)"
+}
+
+powbox_yaml_double_quote() {
+	local s="${1//$/\$\$}" out="" c
+	local i
+	for ((i = 0; i < ${#s}; i++)); do
+		c="${s:i:1}"
+		case "$c" in
+		"\\") out+="\\\\" ;;
+		'"') out+="\\\"" ;;
+		$'\n') out+="\\n" ;;
+		$'\r') out+="\\r" ;;
+		$'\t') out+="\\t" ;;
+		*) out+="$c" ;;
+		esac
+	done
+	printf '"%s"' "$out"
+}
+
+powbox_write_ctx_compose_overlay() {
+	local file="$1" i read_only_value target
+	{
+		printf 'services:\n'
+		printf '  agent:\n'
+		printf '    volumes:\n'
+		for i in "${!CTX_MOUNT_NAMES[@]}"; do
+			if [ "${CTX_MOUNT_MODES[$i]}" = ro ]; then
+				read_only_value=true
+			else
+				read_only_value=false
+			fi
+			target="/ctx/${CTX_MOUNT_NAMES[$i]}"
+			printf '      - type: bind\n'
+			printf '        source: %s\n' "$(powbox_yaml_double_quote "${CTX_MOUNT_PATHS[$i]}")"
+			printf '        target: %s\n' "$(powbox_yaml_double_quote "$target")"
+			printf '        read_only: %s\n' "$read_only_value"
+		done
+	} >"$file"
+}
+
+powbox_warn_if_local_config_not_ignored() {
+	local workspace="$1"
+	[ -f "${workspace}/.powbox.local.yml" ] || return 0
+	command -v git >/dev/null 2>&1 || return 0
+	git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+	if ! git -C "$workspace" check-ignore -q -- .powbox.local.yml; then
+		powbox_warn ".powbox.local.yml exists but is not ignored by git. Add it to .gitignore to keep local-only host paths out of commits."
+	fi
 }
 
 # Per-instance volume names that only exist in one mode. Declared empty up front
@@ -527,6 +1140,40 @@ else
 fi
 export PROJECT_NAME
 
+CTX_CONFIG_PRESENT=false
+if [ "$ISOLATED" != true ]; then
+	powbox_warn_if_local_config_not_ignored "$PROJECT_PATH"
+	if powbox_effective_ctx_config_present "$PROJECT_PATH"; then
+		CTX_CONFIG_PRESENT=true
+	fi
+fi
+
+CTX_DESIRED_PRESENT=false
+CTX_HASH=""
+CTX_MOUNT_NAMES=()
+CTX_MOUNT_PATHS=()
+CTX_MOUNT_MODES=()
+if [ "$RESUME" != true ]; then
+	powbox_derive_ctx_mounts "$PROJECT_PATH"
+fi
+
+if [ "${POWBOX_PRINT_CTX:-}" = "1" ]; then
+	printf 'CTX_CONFIG_PRESENT=%s\n' "$CTX_CONFIG_PRESENT"
+	printf 'CTX_DESIRED_PRESENT=%s\n' "$CTX_DESIRED_PRESENT"
+	printf 'CTX_HASH=%s\n' "$CTX_HASH"
+	printf 'CTX_MOUNT_COUNT=%s\n' "${#CTX_MOUNT_NAMES[@]}"
+	for i in "${!CTX_MOUNT_NAMES[@]}"; do
+		printf 'CTX_MOUNT_%s_NAME=%s\n' "$i" "${CTX_MOUNT_NAMES[$i]}"
+		printf 'CTX_MOUNT_%s_PATH=%s\n' "$i" "${CTX_MOUNT_PATHS[$i]}"
+		printf 'CTX_MOUNT_%s_MODE=%s\n' "$i" "${CTX_MOUNT_MODES[$i]}"
+	done
+	if [ -n "${POWBOX_CTX_OVERLAY_OUT:-}" ] && [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
+		powbox_write_ctx_compose_overlay "$POWBOX_CTX_OVERLAY_OUT"
+		printf 'CTX_OVERLAY=%s\n' "$POWBOX_CTX_OVERLAY_OUT"
+	fi
+	exit 0
+fi
+
 GH_HOST_CONFIG_DIR="${GH_HOST_CONFIG_DIR:-$HOME/.config/gh}"
 GIT_CONFIG_PATH="${GIT_CONFIG_PATH:-$HOME/.gitconfig}"
 
@@ -551,6 +1198,8 @@ if [ "$RESUME" = true ]; then
 	fi
 	if [ -n "$CTX_PATH" ]; then
 		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
+	elif [ "$CTX_CONFIG_PRESENT" = true ]; then
+		echo "Note: configured ctx mounts are ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
 	fi
 	if [ "$CONTINUE" = true ]; then
 		echo "Note: --continue is ignored with --resume; container will restart with the CMD it was originally created with. Omit --resume to apply a continue-flag change." >&2
@@ -614,21 +1263,22 @@ if [ "$ISOLATED" = true ] && [ -n "$CLONE_REF" ] && [ "$RECLONE" != true ] &&
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
-	# Detect whether the requested /ctx mount differs from the existing container.
-	# If it does, remove the stopped container so it gets recreated with the correct mounts.
-	# When --ctx is omitted, keep whatever is already mounted (or not) — the user can add
-	# --volatile to force a clean slate.
-	EXISTING_CTX="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-
-	if [ -n "$CTX_PATH" ]; then
-		EXISTING_NORM="$(normalize_ctx_path "$EXISTING_CTX")"
-		WANT_NORM="$(normalize_ctx_path "$CTX_PATH")"
-		if [ "$EXISTING_NORM" != "$WANT_NORM" ]; then
+	# Context mounts are frozen at container creation. When this launch has an
+	# explicit desired set (CLI --ctx, ctx: in config, or explicit ctx: []), compare
+	# the canonical mount-set hash label and recreate stopped mismatches. When there
+	# is no desired set, keep whatever ctx mounts the container already has.
+	if [ "$CTX_DESIRED_PRESENT" = true ]; then
+		EXISTING_CTX_HASH="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.ctx-hash"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+		if [ "$EXISTING_CTX_HASH" != "$CTX_HASH" ]; then
 			if [ "$CONTAINER_RUNNING" = true ]; then
-				echo "Container ${CONTAINER_NAME} is running with a different /ctx mount. Stop the container first, then relaunch with the new --ctx path." >&2
+				echo "Container ${CONTAINER_NAME} is running with a different ctx mount set. Stop the container first, then relaunch with the new ctx configuration." >&2
 				exit 1
 			fi
-			echo "Context mount changed (was '${EXISTING_CTX}', now '${CTX_PATH}'); recreating container."
+			if [ -z "$EXISTING_CTX_HASH" ]; then
+				echo "Context mount set changed (existing container has no powbox.ctx-hash label, now '${CTX_HASH}'); recreating container."
+			else
+				echo "Context mount set changed (was '${EXISTING_CTX_HASH}', now '${CTX_HASH}'); recreating container."
+			fi
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
 				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
@@ -637,8 +1287,11 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 			fi
 			CONTAINER_EXISTS=false
 		fi
-	elif [ -n "$EXISTING_CTX" ]; then
-		echo "Note: container has /ctx mounted from a previous session (${EXISTING_CTX}). Use --volatile to start fresh or --ctx to change it."
+	else
+		EXISTING_CTX_DESTS="$(docker inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | awk '$0 == "/ctx" || index($0, "/ctx/") == 1 { print }' | paste -sd ', ' - || true)"
+		if [ -n "$EXISTING_CTX_DESTS" ]; then
+			echo "Note: container has ctx mounts from a previous session (${EXISTING_CTX_DESTS}). Use --volatile to start fresh or --ctx/config ctx to change them."
+		fi
 	fi
 fi
 
@@ -646,7 +1299,7 @@ fi
 # normalised set string ("fuse,tun" / "fuse" / "tun" / "none"). The device list is
 # frozen at container creation — `docker start` can't add /dev/fuse or /dev/net/tun
 # to an existing container — so this is recorded as a label and a change recreates a
-# stopped container (mirrors the /ctx and --continue handling). 'auto' resolves
+# stopped container (mirrors ctx mount-set and --continue handling). 'auto' resolves
 # against the launcher host's /dev here, so the same host yields a stable value;
 # 'on' forces both devices, 'off' neither. The compose-file selection below derives
 # from the same value, so the label and the actual attach never disagree.
@@ -909,9 +1562,9 @@ if [ -d "$GH_HOST_CONFIG_DIR" ]; then
 	GH_CONFIG_ARGS=(-v "${GH_HOST_CONFIG_DIR}:/home/node/.config/gh-host:ro")
 fi
 
-CTX_ARGS=()
-if [ -n "$CTX_PATH" ]; then
-	CTX_ARGS=(-v "${CTX_PATH}:/ctx:ro")
+CTX_LABEL_ARGS=()
+if [ "$CTX_DESIRED_PRESENT" = true ]; then
+	CTX_LABEL_ARGS=(--label "powbox.ctx-hash=${CTX_HASH}")
 fi
 
 # Pre-create and chown the per-instance volumes to node so the entrypoint (which
@@ -941,7 +1594,7 @@ if [ "$ISOLATED" = true ]; then
 	#     clone. Docker leaves a NON-empty volume untouched, so the placeholder makes
 	#     the chown stick. seed-workspace.sh empties the dir again just before cloning.
 	#     Only write it when the volume is empty: a REUSED instance (recreated for a
-	#     non-reclone reason — a /ctx or Podman-device change, or the stopped
+	#     non-reclone reason — a ctx or Podman-device change, or the stopped
 	#     container pruned while its agent-ws-* volume remains) already holds a .git
 	#     checkout, which is non-empty (so the chown sticks without help) and which
 	#     seed-workspace.sh's reuse path does NOT clean — writing the placeholder there
@@ -1157,15 +1810,30 @@ case ",${PODMAN_DEVICE_MODE}," in
 	;;
 esac
 
-docker compose "${COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
+CTX_COMPOSE_FILE=""
+cleanup_ctx_compose_file() {
+	if [ -n "$CTX_COMPOSE_FILE" ]; then
+		rm -f "$CTX_COMPOSE_FILE"
+	fi
+}
+trap cleanup_ctx_compose_file EXIT
+
+FINAL_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}")
+if [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
+	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX.yml")"
+	powbox_write_ctx_compose_overlay "$CTX_COMPOSE_FILE"
+	FINAL_COMPOSE_ARGS+=(-f "$CTX_COMPOSE_FILE")
+fi
+
+docker compose "${FINAL_COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
 	--name "$CONTAINER_NAME" \
 	--label "powbox.continue=${CONTINUE_LABEL}" \
 	--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
+	"${CTX_LABEL_ARGS[@]}" \
 	"${SELFHOSTED_LABEL[@]}" \
 	"${EXTRA_ENV[@]}" \
 	"${GIT_CONFIG_ARGS[@]}" \
 	"${GH_CONFIG_ARGS[@]}" \
-	"${CTX_ARGS[@]}" \
 	"${WORKSPACE_VOL_ARGS[@]}" \
 	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
 	-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \

@@ -50,6 +50,446 @@ function Get-Powbox-Hash12 ([string]$Value) {
   ).Replace("-", "").Substring(0, 12).ToLowerInvariant()
 }
 
+function Get-Powbox-HashHexFromByteArray ([byte[]]$Bytes) {
+  return [System.BitConverter]::ToString(
+    [System.Security.Cryptography.SHA256]::Create().ComputeHash($Bytes)
+  ).Replace("-", "").ToLowerInvariant()
+}
+
+function Write-Powbox-Warning ([string]$Message) {
+  Write-Warning $Message
+}
+
+function ConvertFrom-Powbox-YamlCommentedLine ([string]$Line) {
+  $out = [System.Text.StringBuilder]::new()
+  $quote = [char]0
+  $prevBlank = $true
+  for ($i = 0; $i -lt $Line.Length; $i++) {
+    $c = $Line[$i]
+    if ($quote -eq [char]0) {
+      switch ($c) {
+        "'" { $quote = "'"; [void]$out.Append($c); $prevBlank = $false; continue }
+        '"' { $quote = '"'; [void]$out.Append($c); $prevBlank = $false; continue }
+        "#" {
+          if ($prevBlank) { return $out.ToString() }
+          [void]$out.Append($c); $prevBlank = $false; continue
+        }
+        " " { [void]$out.Append($c); $prevBlank = $true; continue }
+        "`t" { [void]$out.Append($c); $prevBlank = $true; continue }
+        default { [void]$out.Append($c); $prevBlank = $false; continue }
+      }
+    }
+    elseif ($quote -eq "'") {
+      [void]$out.Append($c)
+      if ($c -eq "'") {
+        if (($i + 1) -lt $Line.Length -and $Line[$i + 1] -eq "'") {
+          $i++
+          [void]$out.Append($Line[$i])
+        }
+        else { $quote = [char]0 }
+      }
+    }
+    else {
+      [void]$out.Append($c)
+      if ($c -eq '\') {
+        if (($i + 1) -lt $Line.Length) {
+          $i++
+          [void]$out.Append($Line[$i])
+        }
+      }
+      elseif ($c -eq '"') { $quote = [char]0 }
+    }
+  }
+  return $out.ToString()
+}
+
+function ConvertFrom-Powbox-YamlScalar ([string]$Value, [string]$Context) {
+  $raw = (ConvertFrom-Powbox-YamlCommentedLine $Value).Trim(" ", "`t", "`r")
+  if ($raw -eq "") { return [pscustomobject]@{ Ok = $true; Value = "" } }
+  if ($raw[0] -eq "'") {
+    $out = [System.Text.StringBuilder]::new()
+    for ($i = 1; $i -lt $raw.Length; $i++) {
+      $c = $raw[$i]
+      if ($c -eq "'") {
+        if (($i + 1) -lt $raw.Length -and $raw[$i + 1] -eq "'") {
+          [void]$out.Append("'")
+          $i++
+        }
+        elseif ($i -eq ($raw.Length - 1)) {
+          return [pscustomobject]@{ Ok = $true; Value = $out.ToString() }
+        }
+        else {
+          Write-Powbox-Warning "$Context has trailing content after a quoted scalar; skipping."
+          return [pscustomobject]@{ Ok = $false; Value = "" }
+        }
+      }
+      else { [void]$out.Append($c) }
+    }
+    Write-Powbox-Warning "$Context has an unterminated single-quoted scalar; skipping."
+    return [pscustomobject]@{ Ok = $false; Value = "" }
+  }
+  if ($raw[0] -eq '"') {
+    $out = [System.Text.StringBuilder]::new()
+    for ($i = 1; $i -lt $raw.Length; $i++) {
+      $c = $raw[$i]
+      if ($c -eq '\') {
+        $i++
+        if ($i -ge $raw.Length) {
+          Write-Powbox-Warning "$Context has a dangling escape in a double-quoted scalar; skipping."
+          return [pscustomobject]@{ Ok = $false; Value = "" }
+        }
+        $esc = $raw[$i]
+        switch ($esc) {
+          '"' { [void]$out.Append('"') }
+          '\' { [void]$out.Append('\') }
+          '/' { [void]$out.Append('/') }
+          'b' { [void]$out.Append("`b") }
+          'f' { [void]$out.Append("`f") }
+          'n' { [void]$out.Append("`n") }
+          'r' { [void]$out.Append("`r") }
+          't' { [void]$out.Append("`t") }
+          default {
+            Write-Powbox-Warning "$Context uses an unsupported YAML escape \$esc; skipping."
+            return [pscustomobject]@{ Ok = $false; Value = "" }
+          }
+        }
+      }
+      elseif ($c -eq '"') {
+        if ($i -eq ($raw.Length - 1)) {
+          return [pscustomobject]@{ Ok = $true; Value = $out.ToString() }
+        }
+        Write-Powbox-Warning "$Context has trailing content after a quoted scalar; skipping."
+        return [pscustomobject]@{ Ok = $false; Value = "" }
+      }
+      else { [void]$out.Append($c) }
+    }
+    Write-Powbox-Warning "$Context has an unterminated double-quoted scalar; skipping."
+    return [pscustomobject]@{ Ok = $false; Value = "" }
+  }
+  return [pscustomobject]@{ Ok = $true; Value = $raw }
+}
+
+function Split-Powbox-YamlKeyValue ([string]$Line) {
+  $trimmed = (ConvertFrom-Powbox-YamlCommentedLine $Line).Trim(" ", "`t", "`r")
+  if ($trimmed -match '^([A-Za-z_][A-Za-z0-9_.-]*):(.*)$') {
+    return [pscustomobject]@{ Key = $Matches[1]; Value = $Matches[2] }
+  }
+  return $null
+}
+
+function Test-Powbox-TopSection ([string]$File, [string]$Section) {
+  if (-not (Test-Path $File -PathType Leaf)) { return $false }
+  foreach ($line in [System.IO.File]::ReadLines($File)) {
+    $stripped = (ConvertFrom-Powbox-YamlCommentedLine $line).Trim(" ", "`t", "`r")
+    if ($stripped -eq "") { continue }
+    if ($line[0] -eq ' ' -or $line[0] -eq "`t") { continue }
+    $kv = Split-Powbox-YamlKeyValue $line
+    if ($kv -and $kv.Key -eq $Section) { return $true }
+  }
+  return $false
+}
+
+function Test-Powbox-EffectiveCtxConfigPresent ([string]$Workspace) {
+  if (Test-Powbox-TopSection (Join-Path $Workspace ".powbox.local.yml") "ctx") { return $true }
+  return (Test-Powbox-TopSection (Join-Path $Workspace ".powbox.yml") "ctx")
+}
+
+function Complete-Powbox-CtxObject ([ref]$Current, [System.Collections.IList]$Entries) {
+  $obj = $Current.Value
+  if ($null -eq $obj) { return }
+  if ($obj.Bad) { $Current.Value = $null; return }
+  if (-not $obj.PathSet -or $obj.Path -eq "") {
+    Write-Powbox-Warning "$($obj.Origin) is missing required path; skipping."
+    $Current.Value = $null
+    return
+  }
+  [void]$Entries.Add([pscustomobject]@{ Path = $obj.Path; Name = $obj.Name; Mode = $obj.Mode; Origin = $obj.Origin })
+  $Current.Value = $null
+}
+
+function Read-Powbox-CtxFile ([string]$File) {
+  $entries = [System.Collections.Generic.List[object]]::new()
+  $present = $false
+  if (-not (Test-Path $File -PathType Leaf)) {
+    return [pscustomobject]@{ Present = $false; Entries = @() }
+  }
+  $inCtx = $false
+  $current = $null
+  $lineNo = 0
+  foreach ($lineRaw in [System.IO.File]::ReadLines($File)) {
+    $lineNo++
+    $line = $lineRaw.TrimEnd("`r")
+    $stripped = (ConvertFrom-Powbox-YamlCommentedLine $line).Trim(" ", "`t", "`r")
+    if ($stripped -eq "") { continue }
+    if ($line[0] -ne ' ' -and $line[0] -ne "`t") {
+      if ($inCtx) { Complete-Powbox-CtxObject ([ref]$current) $entries }
+      $inCtx = $false
+      $kv = Split-Powbox-YamlKeyValue $line
+      if (-not $kv) { continue }
+      if ($kv.Key -eq "ctx") {
+        $present = $true
+        $valueTrim = $kv.Value.Trim(" ", "`t", "`r")
+        if ($valueTrim -eq "") { $inCtx = $true }
+        elseif ($valueTrim -eq "[]") { $inCtx = $false }
+        else { Write-Powbox-Warning "${File}:${lineNo}: unsupported inline ctx value; use a block list or ctx: []." }
+      }
+      continue
+    }
+    if (-not $inCtx) { continue }
+    if ($stripped.StartsWith("-")) {
+      Complete-Powbox-CtxObject ([ref]$current) $entries
+      $rest = $stripped.Substring(1).Trim(" ", "`t", "`r")
+      if ($rest -eq "") {
+        $current = @{ Path = ""; Name = ""; Mode = ""; Origin = "${File}:${lineNo}"; PathSet = $false; Bad = $false }
+        continue
+      }
+      $kv = Split-Powbox-YamlKeyValue $rest
+      if ($kv) {
+        $current = @{ Path = ""; Name = ""; Mode = ""; Origin = "${File}:${lineNo}"; PathSet = $false; Bad = $false }
+        if ($kv.Key -in @("path", "name", "mode")) {
+          $parsed = ConvertFrom-Powbox-YamlScalar $kv.Value "${File}:${lineNo}: ctx.$($kv.Key)"
+          if ($parsed.Ok) {
+            switch ($kv.Key) {
+              "path" { $current.Path = $parsed.Value; $current.PathSet = $true }
+              "name" { $current.Name = $parsed.Value }
+              "mode" { $current.Mode = $parsed.Value }
+            }
+          }
+          else { $current.Bad = $true }
+        }
+        else {
+          Write-Powbox-Warning "${File}:${lineNo}: unsupported ctx object key '$($kv.Key)'; skipping entry."
+          $current.Bad = $true
+        }
+      }
+      else {
+        $parsed = ConvertFrom-Powbox-YamlScalar $rest "${File}:${lineNo}: ctx entry"
+        if ($parsed.Ok) {
+          [void]$entries.Add([pscustomobject]@{ Path = $parsed.Value; Name = ""; Mode = ""; Origin = "${File}:${lineNo}" })
+        }
+      }
+      continue
+    }
+    if ($null -ne $current) {
+      $kv = Split-Powbox-YamlKeyValue $stripped
+      if (-not $kv) {
+        Write-Powbox-Warning "${File}:${lineNo}: unsupported ctx object syntax; skipping entry."
+        $current.Bad = $true
+        continue
+      }
+      if ($kv.Key -in @("path", "name", "mode")) {
+        $parsed = ConvertFrom-Powbox-YamlScalar $kv.Value "${File}:${lineNo}: ctx.$($kv.Key)"
+        if ($parsed.Ok) {
+          switch ($kv.Key) {
+            "path" { $current.Path = $parsed.Value; $current.PathSet = $true }
+            "name" { $current.Name = $parsed.Value }
+            "mode" { $current.Mode = $parsed.Value }
+          }
+        }
+        else { $current.Bad = $true }
+      }
+      else {
+        Write-Powbox-Warning "${File}:${lineNo}: unsupported ctx object key '$($kv.Key)'; skipping entry."
+        $current.Bad = $true
+      }
+    }
+    else {
+      Write-Powbox-Warning "${File}:${lineNo}: ctx property without a list item; skipping."
+    }
+  }
+  if ($inCtx) { Complete-Powbox-CtxObject ([ref]$current) $entries }
+  return [pscustomobject]@{ Present = $present; Entries = @($entries) }
+}
+
+function Read-Powbox-EffectiveCtxConfig ([string]$Workspace) {
+  $base = Read-Powbox-CtxFile (Join-Path $Workspace ".powbox.yml")
+  $local = Read-Powbox-CtxFile (Join-Path $Workspace ".powbox.local.yml")
+  if ($local.Present) { return $local }
+  if ($base.Present) { return $base }
+  return [pscustomobject]@{ Present = $false; Entries = @() }
+}
+
+function Expand-Powbox-LeadingTilde ([string]$Path) {
+  if (($Path -eq "~" -or $Path.StartsWith("~/") -or $Path.StartsWith("~\")) -and $HOME) {
+    if ($Path -eq "~") { return $HOME }
+    return (Join-Path $HOME $Path.Substring(2))
+  }
+  return $Path
+}
+
+function Test-Powbox-AbsolutePath ([string]$Path) {
+  if ($Path -match '^/' -or $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^\\\\' -or $Path -match '^//') { return $true }
+  return [System.IO.Path]::IsPathFullyQualified($Path)
+}
+
+function Resolve-Powbox-DirectoryPath ([string]$Path) {
+  $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+  try {
+    $linkTarget = [System.IO.DirectoryInfo]::new($resolved).ResolveLinkTarget($true)
+    if ($linkTarget) { $resolved = $linkTarget.FullName }
+  }
+  catch {
+    # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; keep Resolve-Path's result.
+    Write-Debug "ResolveLinkTarget unavailable for ctx path: $($_.Exception.Message)"
+  }
+  $pathRoot = [System.IO.Path]::GetPathRoot($resolved)
+  if ($pathRoot -and $resolved.Length -gt $pathRoot.Length) {
+    $resolved = $resolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+  }
+  return $resolved
+}
+
+function Resolve-Powbox-ConfigCtxDirectory ([string]$RawPath, [string]$Workspace, [string]$Origin) {
+  $path = Expand-Powbox-LeadingTilde $RawPath
+  if (-not (Test-Powbox-AbsolutePath $path)) { $path = Join-Path $Workspace $path }
+  if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+    Write-Powbox-Warning "${Origin}: context path does not exist or is not a directory; skipping: $RawPath"
+    return $null
+  }
+  try { return (Resolve-Powbox-DirectoryPath $path) }
+  catch {
+    Write-Powbox-Warning "${Origin}: failed to resolve context path; skipping: $RawPath"
+    return $null
+  }
+}
+
+function Resolve-Powbox-CliCtxDirectory ([string]$RawPath) {
+  if (-not (Test-Path -LiteralPath $RawPath -PathType Container)) {
+    Write-Error "Error: context path does not exist: $RawPath"
+    exit 1
+  }
+  try { return (Resolve-Powbox-DirectoryPath $RawPath) }
+  catch {
+    Write-Error "Error: failed to resolve context path: $RawPath"
+    exit 1
+  }
+}
+
+function Get-Powbox-PathBasename ([string]$Path) {
+  return [System.IO.DirectoryInfo]::new($Path).Name
+}
+
+function Test-Powbox-CtxName ([string]$Name) {
+  if ([string]::IsNullOrEmpty($Name)) { return $false }
+  if ($Name -eq "." -or $Name -eq "..") { return $false }
+  if ($Name.Contains("/") -or $Name.Contains("\")) { return $false }
+  return $true
+}
+
+function Add-Powbox-CtxMount ([System.Collections.IList]$Mounts, [string]$Name, [string]$Path, [string]$Mode, [string]$Origin) {
+  if (-not (Test-Powbox-CtxName $Name)) {
+    if ($Origin -eq "-Ctx") {
+      Write-Error "Context mount name derived from $Path is not a usable single path segment: $Name"
+      exit 1
+    }
+    Write-Powbox-Warning "${Origin}: context mount name is not a usable single path segment; skipping: $Name"
+    return
+  }
+  foreach ($mount in $Mounts) {
+    if ($mount.Name -ceq $Name) {
+      Write-Powbox-Warning "${Origin}: duplicate ctx target name '$Name'; skipping later entry. Add a name: alias to disambiguate."
+      return
+    }
+  }
+  [void]$Mounts.Add([pscustomobject]@{ Name = $Name; Path = $Path; Mode = $Mode })
+}
+
+function Get-Powbox-CtxHash ([object[]]$Mounts) {
+  $sorted = @($Mounts)
+  [array]::Sort($sorted, [System.Comparison[object]]{ param($a, $b) [StringComparer]::Ordinal.Compare($a.Name, $b.Name) })
+  $utf8 = [System.Text.Encoding]::UTF8
+  $stream = [System.IO.MemoryStream]::new()
+  foreach ($mount in $sorted) {
+    foreach ($field in @($mount.Name, $mount.Path, $mount.Mode)) {
+      $bytes = $utf8.GetBytes($field)
+      $stream.Write($bytes, 0, $bytes.Length)
+      $stream.WriteByte(0)
+    }
+  }
+  return (Get-Powbox-HashHexFromByteArray $stream.ToArray())
+}
+
+function Resolve-Powbox-CtxMountSet ([string]$Workspace) {
+  $mounts = [System.Collections.Generic.List[object]]::new()
+  if ($Ctx -ne "") {
+    $resolved = Resolve-Powbox-CliCtxDirectory $Ctx
+    $name = Get-Powbox-PathBasename $resolved
+    Add-Powbox-CtxMount -Mounts $mounts -Name $name -Path $resolved -Mode "ro" -Origin "-Ctx"
+    return [pscustomobject]@{ DesiredPresent = $true; Hash = (Get-Powbox-CtxHash @($mounts)); Mounts = @($mounts) }
+  }
+  if ($Isolated) { return [pscustomobject]@{ DesiredPresent = $false; Hash = ""; Mounts = @() } }
+  $config = Read-Powbox-EffectiveCtxConfig $Workspace
+  if (-not $config.Present) { return [pscustomobject]@{ DesiredPresent = $false; Hash = ""; Mounts = @() } }
+  foreach ($entry in $config.Entries) {
+    $rawPath = $entry.Path
+    $mode = $entry.Mode
+    if ($mode -eq "") {
+      if ($rawPath.EndsWith(":ro")) { $mode = "ro"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
+      elseif ($rawPath.EndsWith(":rw")) { $mode = "rw"; $rawPath = $rawPath.Substring(0, $rawPath.Length - 3) }
+      else { $mode = "ro" }
+    }
+    if ($mode -notin @("ro", "rw")) {
+      Write-Powbox-Warning "$($entry.Origin): unsupported ctx mode '$mode'; expected ro or rw; skipping."
+      continue
+    }
+    if ($rawPath -eq "") {
+      Write-Powbox-Warning "$($entry.Origin): ctx entry has an empty path; skipping."
+      continue
+    }
+    $resolved = Resolve-Powbox-ConfigCtxDirectory -RawPath $rawPath -Workspace $Workspace -Origin $entry.Origin
+    if ($null -eq $resolved) { continue }
+    $name = if ($entry.Name -ne "") { $entry.Name } else { Get-Powbox-PathBasename $resolved }
+    Add-Powbox-CtxMount -Mounts $mounts -Name $name -Path $resolved -Mode $mode -Origin $entry.Origin
+  }
+  return [pscustomobject]@{ DesiredPresent = $true; Hash = (Get-Powbox-CtxHash @($mounts)); Mounts = @($mounts) }
+}
+
+function ConvertTo-Powbox-YamlDoubleQuoted ([string]$Value) {
+  $s = $Value.Replace('$', '$$')
+  $out = [System.Text.StringBuilder]::new()
+  foreach ($c in $s.ToCharArray()) {
+    switch ($c) {
+      '\' { [void]$out.Append('\\') }
+      '"' { [void]$out.Append('\"') }
+      "`n" { [void]$out.Append('\n') }
+      "`r" { [void]$out.Append('\r') }
+      "`t" { [void]$out.Append('\t') }
+      default { [void]$out.Append($c) }
+    }
+  }
+  return '"' + $out.ToString() + '"'
+}
+
+function Write-Powbox-CtxComposeOverlay ([string]$File, [object[]]$Mounts) {
+  $lines = [System.Collections.Generic.List[string]]::new()
+  [void]$lines.Add("services:")
+  [void]$lines.Add("  agent:")
+  [void]$lines.Add("    volumes:")
+  foreach ($mount in $Mounts) {
+    $readOnly = if ($mount.Mode -eq "ro") { "true" } else { "false" }
+    [void]$lines.Add("      - type: bind")
+    [void]$lines.Add("        source: $(ConvertTo-Powbox-YamlDoubleQuoted $mount.Path)")
+    [void]$lines.Add("        target: $(ConvertTo-Powbox-YamlDoubleQuoted ("/ctx/" + $mount.Name))")
+    [void]$lines.Add("        read_only: $readOnly")
+  }
+  [System.IO.File]::WriteAllText($File, (($lines -join [Environment]::NewLine) + [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Test-Powbox-Command ([string]$CommandName) {
+  return $null -ne (Get-Command $CommandName -ErrorAction SilentlyContinue)
+}
+
+function Write-Powbox-LocalConfigIgnoreWarning ([string]$Workspace) {
+  if (-not (Test-Path (Join-Path $Workspace ".powbox.local.yml") -PathType Leaf)) { return }
+  if (-not (Test-Powbox-Command "git")) { return }
+  git -C $Workspace rev-parse --is-inside-work-tree *> $null
+  if ($LASTEXITCODE -ne 0) { return }
+  git -C $Workspace check-ignore -q -- .powbox.local.yml *> $null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Powbox-Warning ".powbox.local.yml exists but is not ignored by git. Add it to .gitignore to keep local-only host paths out of commits."
+  }
+}
+
 # Canonical "host/owner/repo" key for a repo spec (lowercased, .git stripped, any
 # userinfo removed) so different repos sharing a basename get distinct identities,
 # while the SAME repo expressed different ways (owner/repo slug, https URL,
@@ -85,12 +525,6 @@ if (-not $Isolated -and -not (Test-Path $ProjectPath -PathType Container)) {
   Write-Error "Error: project path does not exist: $ProjectPath"
   exit 1
 }
-
-if ($Ctx -ne "" -and -not (Test-Path $Ctx -PathType Container)) {
-  Write-Error "Error: context path does not exist: $Ctx"
-  exit 1
-}
-$resolvedCtx = if ($Ctx -ne "") { (Resolve-Path $Ctx).Path } else { "" }
 
 # Per-instance volume names that only exist in one mode. Declared up front so they
 # are always defined when referenced in the other mode.
@@ -371,6 +805,39 @@ else {
 $env:PROJECT_NAME = $projectSlug
 $workspaceMount = "/workspace/$projectSlug"
 
+$ctxConfigPresent = $false
+if (-not $Isolated) {
+  Write-Powbox-LocalConfigIgnoreWarning $resolvedProject
+  $ctxConfigPresent = Test-Powbox-EffectiveCtxConfigPresent $resolvedProject
+}
+
+$ctxDesiredPresent = $false
+$ctxHash = ""
+$ctxMounts = @()
+if (-not $Resume) {
+  $ctxResult = Resolve-Powbox-CtxMountSet $resolvedProject
+  $ctxDesiredPresent = $ctxResult.DesiredPresent
+  $ctxHash = $ctxResult.Hash
+  $ctxMounts = @($ctxResult.Mounts)
+}
+
+if ($env:POWBOX_PRINT_CTX -eq "1") {
+  Write-Output "CTX_CONFIG_PRESENT=$($ctxConfigPresent.ToString().ToLowerInvariant())"
+  Write-Output "CTX_DESIRED_PRESENT=$($ctxDesiredPresent.ToString().ToLowerInvariant())"
+  Write-Output "CTX_HASH=$ctxHash"
+  Write-Output "CTX_MOUNT_COUNT=$($ctxMounts.Count)"
+  for ($i = 0; $i -lt $ctxMounts.Count; $i++) {
+    Write-Output "CTX_MOUNT_${i}_NAME=$($ctxMounts[$i].Name)"
+    Write-Output "CTX_MOUNT_${i}_PATH=$($ctxMounts[$i].Path)"
+    Write-Output "CTX_MOUNT_${i}_MODE=$($ctxMounts[$i].Mode)"
+  }
+  if ($env:POWBOX_CTX_OVERLAY_OUT -and $ctxMounts.Count -gt 0) {
+    Write-Powbox-CtxComposeOverlay $env:POWBOX_CTX_OVERLAY_OUT $ctxMounts
+    Write-Output "CTX_OVERLAY=$env:POWBOX_CTX_OVERLAY_OUT"
+  }
+  exit 0
+}
+
 $ghHostConfigPath = if ($env:GH_HOST_CONFIG_DIR) { $env:GH_HOST_CONFIG_DIR } else { "$env:APPDATA\GitHub CLI" }
 $gitConfigPath = if ($env:GIT_CONFIG_PATH) { $env:GIT_CONFIG_PATH } else { Join-Path $env:USERPROFILE ".gitconfig" }
 
@@ -395,6 +862,9 @@ if ($Resume) {
   }
   if ($Ctx -ne "") {
     Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
+  }
+  elseif ($ctxConfigPresent) {
+    Write-Host "Note: configured ctx mounts are ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
   }
   if ($Continue) {
     Write-Host "Note: -Continue is ignored with -Resume; container will restart with the CMD it was originally created with. Omit -Resume to apply a continue-flag change." -ForegroundColor Yellow
@@ -467,47 +937,43 @@ if ($Isolated -and $Ref -ne "" -and -not $Reclone) {
 }
 
 if (-not $Volatile -and $containerExists) {
-  # Detect whether the requested /ctx mount differs from the existing container.
-  # If it does, remove the stopped container so it gets recreated with the correct mounts.
-  # When -Ctx is omitted, keep whatever is already mounted (or not) — the user can add
-  # -Volatile to force a clean slate.
-  $existingCtx = (docker inspect --format '{{range .Mounts}}{{if eq .Destination "/ctx"}}{{.Source}}{{end}}{{end}}' $containerName 2>$null)
-  if ($LASTEXITCODE -ne 0) { $existingCtx = "" }
-
-  if ($Ctx -ne "") {
-    $wantCtx = $resolvedCtx
-    # Normalise for comparison: Docker Desktop may report Windows bind-mount sources
-    # using Linux-style paths (e.g. /run/desktop/mnt/host/c/..., /host_mnt/c/...,
-    # /mnt/c/...).  Convert those known prefixes to drive:/... form so both sides
-    # use the same representation before comparing.
-    function ConvertFrom-DockerDesktopPath ([string]$p) {
-      $p = $p -replace '\\', '/'
-      if ($p -match '^/run/desktop/mnt/host/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
-      if ($p -match '^/host_mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
-      if ($p -match '^/mnt/([a-z])/(.+)$') { return "$($Matches[1]):/$($Matches[2])" }
-      return $p
-    }
-    $existingNorm = (ConvertFrom-DockerDesktopPath $existingCtx).TrimEnd('/').ToLowerInvariant()
-    $wantNorm = (ConvertFrom-DockerDesktopPath $wantCtx).TrimEnd('/').ToLowerInvariant()
-    if ($existingNorm -ne $wantNorm) {
+  # Context mounts are frozen at container creation. When this launch has an
+  # explicit desired set (CLI -Ctx, ctx: in config, or explicit ctx: []), compare
+  # the canonical mount-set hash label and recreate stopped mismatches. When there
+  # is no desired set, keep whatever ctx mounts the container already has.
+  if ($ctxDesiredPresent) {
+    $existingCtxHash = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.ctx-hash")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingCtxHash)) { $existingCtxHash = "" }
+    else { $existingCtxHash = $existingCtxHash.Trim() }
+    if ($existingCtxHash -ne $ctxHash) {
       if ($containerRunning) {
-        Write-Error "Container $containerName is running with a different /ctx mount. Stop the container first, then relaunch with the new -Ctx path."
+        Write-Error "Container $containerName is running with a different ctx mount set. Stop the container first, then relaunch with the new ctx configuration."
         exit 1
       }
-      Write-Host "Context mount changed (was '$existingCtx', now '$resolvedCtx'); recreating container."
+      if ($existingCtxHash -eq "") {
+        Write-Host "Context mount set changed (existing container has no powbox.ctx-hash label, now '$ctxHash'); recreating container."
+      }
+      else {
+        Write-Host "Context mount set changed (was '$existingCtxHash', now '$ctxHash'); recreating container."
+      }
       docker rm $containerName *> $null
       if ($LASTEXITCODE -ne 0) {
         docker container inspect $containerName *> $null
         if ($LASTEXITCODE -eq 0) {
-          Write-Error "Failed to remove container $containerName after detecting a /ctx mount change."
+          Write-Error "Failed to remove container $containerName after detecting a ctx mount-set change."
           exit 1
         }
       }
       $containerExists = $false
     }
   }
-  elseif ($existingCtx -ne "") {
-    Write-Host "Note: container has /ctx mounted from a previous session ($existingCtx). Use -Volatile to start fresh or -Ctx to change it."
+  else {
+    $existingCtxDestinations = (docker inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' $containerName 2>$null)
+    if ($LASTEXITCODE -ne 0) { $existingCtxDestinations = "" }
+    $ctxDestinations = @($existingCtxDestinations -split "`r?`n" | Where-Object { $_ -eq "/ctx" -or $_.StartsWith("/ctx/") })
+    if ($ctxDestinations.Count -gt 0) {
+      Write-Host "Note: container has ctx mounts from a previous session ($($ctxDestinations -join ', ')). Use -Volatile to start fresh or -Ctx/config ctx to change them."
+    }
   }
 }
 
@@ -515,7 +981,7 @@ if (-not $Volatile -and $containerExists) {
 # normalised set string ("fuse,tun" / "fuse" / "tun" / "none"). The device list is
 # frozen at container creation — `docker start` can't add /dev/fuse or /dev/net/tun
 # to an existing container — so this is recorded as a label and a change recreates a
-# stopped container (mirrors the /ctx and -Continue handling). 'auto' resolves against
+# stopped container (mirrors ctx mount-set and -Continue handling). 'auto' resolves against
 # the launcher host's /dev here (on a Windows host shell /dev/* is absent, so auto ->
 # none; force with POWBOX_PODMAN=on for the Docker Desktop VM); 'on' forces both
 # devices, 'off' neither. The compose-file selection below derives from the same
@@ -809,11 +1275,6 @@ if (Test-Path $ghHostConfigPath) {
   $ghConfigArgs = @("-v", "${ghHostConfigPath}:/home/node/.config/gh-host:ro")
 }
 
-$ctxArgs = @()
-if ($resolvedCtx -ne "") {
-  $ctxArgs = @("-v", "${resolvedCtx}:/ctx:ro")
-}
-
 # Pre-create and chown the per-instance volumes to node so the entrypoint (which
 # runs as node) can write into them. Self-hosted mode has ONE workspace volume (it
 # must be node-owned before the entrypoint clones into it) and no nm/wt shadows;
@@ -845,7 +1306,7 @@ if ($Isolated) {
   # unable to write the clone. A NON-empty volume is left untouched, so the
   # placeholder makes the chown stick. seed-workspace.sh empties the dir again just
   # before cloning. Only write it when the volume is empty: a REUSED instance
-  # (recreated for a non-reclone reason — a /ctx or Podman-device change, or the
+  # (recreated for a non-reclone reason — a ctx or Podman-device change, or the
   # stopped container pruned while its agent-ws-* volume remains) already holds a
   # .git checkout (non-empty, so the chown sticks without help) that
   # seed-workspace.sh's reuse path does NOT clean — writing the placeholder there
@@ -969,6 +1430,9 @@ if (",$podmanDevices," -like "*,fuse,*") {
 # Both API keys flow through via compose.agent.yml so a delegated peer agent can
 # authenticate too.
 $envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "--label", "powbox.podman-devices=$podmanDevices", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent")
+if ($ctxDesiredPresent) {
+  $envArgs += @("--label", "powbox.ctx-hash=$ctxHash")
+}
 # Point pnpm at the co-located store only when this project actually mounts the
 # worktrees volume the store lives in (dir-mounted JS/powbox project) or in
 # self-hosted mode (store is a subdir of the one workspace volume). Omitting it for a
@@ -1069,14 +1533,30 @@ else {
   }
 }
 
-docker compose @composeArgs run @runArgs `
-  @envArgs `
-  @gitConfigArgs `
-  @ghConfigArgs `
-  @ctxArgs `
-  @workspaceVolArgs `
-  -v "${podmanVolume}:/home/node/.local/share/containers" `
-  -v "agent-podman-imagestore:/mnt/podman-imagestore:ro" `
-  -w $workspaceMount `
-  agent `
-  @command
+$ctxComposeFile = ""
+$finalComposeArgs = @($composeArgs)
+try {
+  if ($ctxMounts.Count -gt 0) {
+    $ctxComposeFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "powbox-compose-ctx-$([guid]::NewGuid().ToString('N')).yml")
+    Write-Powbox-CtxComposeOverlay $ctxComposeFile $ctxMounts
+    $finalComposeArgs += @("-f", $ctxComposeFile)
+  }
+
+  docker compose @finalComposeArgs run @runArgs `
+    @envArgs `
+    @gitConfigArgs `
+    @ghConfigArgs `
+    @workspaceVolArgs `
+    -v "${podmanVolume}:/home/node/.local/share/containers" `
+    -v "agent-podman-imagestore:/mnt/podman-imagestore:ro" `
+    -w $workspaceMount `
+    agent `
+    @command
+  $finalExitCode = $LASTEXITCODE
+}
+finally {
+  if ($ctxComposeFile -ne "" -and (Test-Path $ctxComposeFile)) {
+    Remove-Item -LiteralPath $ctxComposeFile -Force
+  }
+}
+exit $finalExitCode

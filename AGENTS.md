@@ -19,7 +19,7 @@ Teach or question the user if that is in the best interest of the final product.
 | Path | Purpose |
 |------|---------|
 | `/workspace/<project-slug>` | Bind-mounted project directory (working directory; slug is `<name>-<hash>`) |
-| `/ctx` | Optional read-only context volume (`--ctx`) |
+| `/ctx` | Optional context mount root; external folders are mounted under `/ctx/<name>` via `--ctx` or `ctx:` config |
 | `/home/node/.claude` | Claude config volume (`claude-config`); always mounted regardless of primary agent |
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |

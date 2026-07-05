@@ -50,10 +50,10 @@ This task brings the argument to feature parity for a single invocation.
 
 - Task 014 (`tasks/014-context-mounts-local-config.md`): entry normalization
   rules (`~` expansion, basename/alias validation), duplicate semantics, the
-  "Recreate detection (config-hash label)" section, the `--mount` mount form,
-  and the uniform `/ctx/<name>` layout — reused here, **except relative-path
-  resolution**, which keeps the CLI's caller-cwd semantics (see Implementation
-  notes).
+  "Recreate detection (config-hash label)" section, the generated
+  compose-overlay mount form (long-form `volumes:`), and the uniform
+  `/ctx/<name>` layout — reused here, **except relative-path resolution**,
+  which keeps the CLI's caller-cwd semantics (see Implementation notes).
 - Current single-value plumbing: `scripts/launch-agent.sh:25,77-79,124-129`
   and `scripts/launch-agent.ps1:14,89-93` (as of 014's baseline; 014 will
   have reshaped these).
@@ -67,9 +67,21 @@ This task brings the argument to feature parity for a single invocation.
 e.g. `--ctx C:\Code\OtherRepo:rw --ctx Docs=C:\Users\a\Documents\Specs`.
 One grammar shared with the config file (same trailing-token mode split,
 same Windows drive-letter care); `=` is not a legal filename character on
-Windows and rare on Unix, and the form is unambiguous because the value is a
-single shell token. The alias, when present, is everything before the
-**first** `=`, validated by 014's alias rules (single safe path segment).
+Windows and rare on Unix. The alias is the substring before the **first** `=`
+**only when that substring is itself a valid alias segment** (014's rule: a
+single safe path segment — no `/` or `\`); otherwise the value carries no alias
+and is taken as a path in full. This keeps ordinary POSIX paths that contain a
+`=` addressable rather than regressing them: any path with a separator before
+the `=` (`./fixtures=a`, `/data/run=1/refs`, `C:\x=y`) is unambiguous because
+its pre-`=` token holds a `/` or `\` and so cannot be a valid alias. The
+residual ambiguity is a **relative path whose first `=` falls within its first
+segment** — i.e. no separator precedes that `=` (`fixtures=a` reads as alias
+`fixtures` → path `a`; `run=1/refs` reads as alias `run` → path `1/refs`);
+disambiguate it by writing `./fixtures=a` or by using the config long form
+(`- path: fixtures=a`), whose standalone `path:` scalar never `=`-splits — the
+same "compact form for the common case, exploded config as the escape hatch"
+rule 014 uses for the `:` mode-suffix ambiguity. The `:ro`/`:rw` mode still
+splits from the trailing token exactly as in 014.
 
 *Considered & declined:* companion flags (`--ctx-rw <path>` +
 `--ctx-name <name>`) — no suffix parsing, but the positional coupling
@@ -91,9 +103,9 @@ and triples the flag surface.
   `CTX_PATH="$(cd "$CTX_PATH" && pwd -P)"`). Otherwise `cc ../app --ctx refs`
   from a sibling directory would silently switch from mounting `./refs` to
   `../app/refs` (or fail if only the former exists). Share 014's validation,
-  alias, hash, and `--mount` construction; branch **only** the relative-path
-  base (workspace root for config entries, caller cwd for CLI values). `~`
-  expansion and everything else stay common.
+  alias, hash, and compose-overlay construction; branch **only** the
+  relative-path base (workspace root for config entries, caller cwd for CLI
+  values). `~` expansion and everything else stay common.
 - Keep 014's hard-error character for everything CLI: fail before any
   container mutation (validate the full set first, then act).
 - Match each script's existing arg-parsing style; keep sh/ps1 behavioral
@@ -120,6 +132,12 @@ and triples the flag surface.
    directory, not the workspace root: `cc ../app --ctx refs` run from a
    sibling directory mounts the caller's `./refs`, matching pre-014 CLI
    behavior — never `../app/refs`.
+8. A CLI `--ctx` value whose path contains `=` stays addressable: a value with
+   a path separator before the `=` (`--ctx ./fixtures=a`, `--ctx /x=y/refs`)
+   mounts that whole path with no alias; a `name=path` whose pre-`=` token is a
+   valid alias segment (`--ctx Docs=/p`) still aliases as before. A bare
+   single-segment `=` name (`--ctx fixtures=a`) is disambiguated with a `./`
+   prefix or the config long form — documented, not silently mis-split.
 
 ## Validation
 
@@ -137,7 +155,9 @@ Reviewer should check: (1) the CLI grammar matches the settled
 `[name=]path[:mode]` form and shares 014's normalization/validation/hash code
 rather than duplicating it, **while branching relative-path resolution** to the
 caller's cwd (not the workspace root — config-relative semantics must not leak
-onto CLI values); (2) sh/ps1
+onto CLI values) **and applying the `=` alias split only when the pre-`=` token
+is a valid alias segment** (so a POSIX path containing `=` is not regressed);
+(2) sh/ps1
 parity, including the `[string[]]` binding vs repeated-flag difference;
 (3) validation happens before any destructive step; (4) single-value
 behavior is a strict superset of post-014 behavior.

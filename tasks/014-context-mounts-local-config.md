@@ -81,6 +81,12 @@ own name at `/ctx/<name>/`.
   - `scripts/launch-agent.ps1:14`, `:89-93`, `:396-397`, `:470-510`
     (same logic, incl. `ConvertFrom-DockerDesktopPath` normalization for
     Windows/Docker-Desktop path comparison), `:812-814` (`$ctxArgs`).
+  - **Launch mechanism:** the container is created by `docker compose … run`
+    (`launch-agent.sh:1160`, `launch-agent.ps1:1072`) with the `-f` overlay
+    chain in `COMPOSE_ARGS` (`:495` / `:332`); `CTX_ARGS`/`$ctxArgs` are spread
+    into that `run`. `docker compose run` accepts **only** `-v/--volume` (no
+    `--mount`), which is why ctx mounts must go through a generated long-form
+    `volumes:` overlay rather than mount flags (see "Mount form").
 - **Pass-through wrappers** (must not need changes beyond docs, since the
   config file is read by the launch scripts themselves): 
   `commands/claude-container.ps1`, `commands/codex-container.ps1`,
@@ -140,38 +146,56 @@ For each `ctx` entry, in listed order:
 2. Expand a leading `~` to the user's home directory; resolve a relative
    path against the workspace root. Environment variables are **not**
    expanded — entries are otherwise literal. Then validate: warn (not abort)
-   and skip the entry if the resolved path does not exist, is not a
-   directory, or contains a comma (`,` is the `--mount` field delimiter and
-   cannot be carried — see "Mount form").
+   and skip the entry if the resolved path does not exist or is not a
+   directory.
 3. Target name = the `name:` alias if given, else the folder's basename.
-   Validate it is a single, safe path segment (non-empty, no `/`, `\`, or `,`,
-   not `.`/`..`); warn + skip otherwise. A `:` **is** allowed — the mount form
-   below carries it. Build the mount with the exploded `--mount` form, not the
-   colon-packed `-v`:
-   `--mount type=bind,src=<host>,dst=/ctx/<name>[,ro]` (omit the `,ro` token
-   for `rw`).
+   Validate it is a single, safe path segment (non-empty, no `/` or `\`, not
+   `.`/`..`); warn + skip otherwise. `:`, `,`, and any other character legal in
+   a POSIX path segment are fine — the mount form below carries them. Emit the
+   mount as a long-form `volumes:` entry into the generated ctx compose overlay
+   (see "Mount form"): a `type: bind` mapping with `source: <host>`,
+   `target: /ctx/<name>`, and `read_only: true` for `ro` / `false` for `rw`.
 4. Duplicate target names after alias resolution: warn + skip the later
    entry, with the warning suggesting a `name:` alias as the fix.
 
-**Mount form — `--mount`, not `-v`.** Build every ctx mount (config entries
-*and* the CLI `--ctx`) with the exploded
-`--mount type=bind,src=<host>,dst=/ctx/<name>[,ro]` form — read-write omits the
-`,ro` token — rather than the colon-packed `-v <host>:/ctx/<name>:<mode>`. This
-is the CLI equivalent of docker-compose's *long* volume syntax (separate
-`source:`/`target:` fields), and it is required for correctness, not style:
-`-v` treats `:` as its field delimiter, so a `:` in **either** the resolved
-host path **or** the derived target name — both valid POSIX path characters —
-makes the engine reject the mount as `incorrect volume format`. `--mount`
-passes source and target as separate fields, so colons flow through untouched
-(verified on podman 5.4.2). This is why step 3 no longer needs to ban colons,
-and why an ambiguous *mode suffix* is disambiguated at the parsing layer (the
-long-form config object with a standalone `path:`/`mode:`), not by mangling the
-path. The one residual limitation is a literal **comma**: it is `--mount`'s
-field delimiter and podman's CSV-quoting escape is unreliable, so a resolved
-host path or derived name containing `,` is rejected up front (config: warn +
-skip; CLI: hard error) with a clear message instead of a cryptic engine error.
-Commas in directory names are far rarer than colons, so this is a strictly
-smaller hole than the retired `-v` form.
+**Mount form — generated compose overlay, long-form `volumes:`.** The launcher
+never passes `-v`/`--mount` flags for ctx. The container is created with
+`docker compose … run` (`scripts/launch-agent.sh:1160`,
+`scripts/launch-agent.ps1:1072`), and **`docker compose run` supports only
+`-v/--volume`, not `--mount`** (verified: `docker compose run --help` lists no
+`--mount`). A colon-packed `-v <host>:/ctx/<name>:<mode>` is also unusable
+because `:` is its field delimiter yet a valid POSIX path character, so it
+breaks on a `:` in **either** the host source or the derived target. Instead,
+derive the ctx mounts into a **generated compose overlay** — e.g. a temp
+`compose.ctx.yml` — declaring each mount under the `agent` service in
+docker-compose **long syntax**, and add that file to the `COMPOSE_ARGS` `-f`
+chain exactly like the existing `compose.selfhosted.yml` / `compose.fuse.yml` /
+`compose.netdev.yml` overlays:
+
+```yaml
+services:
+  agent:
+    volumes:
+      - type: bind
+        source: <normalized-host-path>
+        target: /ctx/<name>
+        read_only: true   # ro; false for rw
+```
+
+Long syntax passes source and target as separate YAML scalars, so `:`, `,`, and
+`|` all flow through untouched — there is no delimiter to collide with, and the
+round-1 `--mount` comma limitation is gone (this is the compose-native form of
+the long-syntax idea that `--mount` was reaching for). The implementer's one
+obligation is to **emit each value as a correctly-quoted YAML scalar** — quote
+or escape a path containing YAML metacharacters (a leading `!`/`&`/`*`/`#`, a
+`: ` sequence, quotes, or a Windows backslash) so the overlay always parses.
+Compose merges `volumes:` across `-f` files by target, so the unique
+`/ctx/<name>` targets append cleanly — the same merge-by-target the self-hosted
+overlay already relies on when its `workspace:/workspace/${PROJECT_NAME}` entry
+(`compose.selfhosted.yml`) overrides the host bind at that same target in
+`compose.shared.yml`. The recreate-detection
+label is still written by the same `docker compose run --label` invocation,
+unchanged.
 
 The result flattens any odd combination of host folders into one predictable,
 easy-to-reference list of directories under `/ctx`. Mixing rw/ro is entirely
@@ -249,10 +273,18 @@ old `.Mounts`-source comparison could not see them.
 ## Target files or areas
 
 - `scripts/launch-agent.sh` — config discovery, `ctx` parsing (POSIX-safe),
-  mount-set derivation, warnings, generalized mount-diff detection, mount args.
-- `scripts/launch-agent.ps1` — the same, PowerShell-native.
+  mount-set derivation, warnings, generalized mount-diff detection, and the
+  generated `compose.ctx.yml` overlay added to `COMPOSE_ARGS` (`:495`) so it
+  reaches the `docker compose … run` at `:1160`.
+- `scripts/launch-agent.ps1` — the same, PowerShell-native (`$composeArgs` at
+  `:332`, `docker compose … run` at `:1072`).
 - `README.md`, `docs/architecture.md` — feature docs, section retitle, config
   examples, precedence table.
+- In-container docs that describe a flattened `/ctx` and must move to the
+  `/ctx/<name>` layout: `docker/shared/container-agent.md.tmpl`, root
+  `AGENTS.md`, and both baked
+  `docker/{claude,codex}/agent-container/skills/enable-worktrees/SKILL.md`
+  (each tells agents the powbox README is "readable at `/ctx`").
 - (`docker/shared/detect-shadows.sh` is **not** touched here — that is
   task 014a.)
 
@@ -332,15 +364,17 @@ old `.Mounts`-source comparison could not see them.
   hashing rejected (cosmetic edits would recreate; a missing-then-created
   host path would go undetected); mount-set inspection rejected (fiddly
   N-mount cross-platform normalization, blind to `ro`/`rw`).
-- **Mount form: `--mount`, not `-v`.** Ctx (and CLI `--ctx`) mounts use the
-  exploded `--mount type=bind,src=,dst=[,ro]` form so a `:` in a host path or
-  derived name — valid POSIX, but rejected by colon-packed `-v` — mounts
-  correctly (the CLI analog of docker-compose long syntax). A literal `,` (the
-  `--mount` field delimiter) stays unsupported: warn + skip (config) / hard
-  error (CLI). Rationale and verification in "Mount form" under Mount
-  derivation. `-v` rejected: it cannot express a colon-containing path in
-  either position, and the review found no way to escape that within the short
-  form.
+- **Mount form: generated compose overlay, long-form `volumes:`.** The launch
+  path is `docker compose run`, which accepts only `-v/--volume` — **not**
+  `--mount`. Ctx (and CLI `--ctx`) mounts are therefore emitted into a
+  generated `compose.ctx.yml` overlay in docker-compose long syntax (`type:
+  bind` + `source`/`target`/`read_only`), added to the `-f` chain alongside the
+  existing overlays. Long syntax is colon- **and** comma-safe (separate YAML
+  scalars), so no path character needs banning; the sole implementer obligation
+  is correctly-quoted YAML. Rejected: colon-packed `-v` (breaks on a `:` in
+  either position — valid POSIX) and the round-1 `--mount` flag form
+  (unsupported by `docker compose run`, confirmed against `--help`). Rationale
+  and verification in "Mount form" under Mount derivation.
 - **OQ-8 — Gitignore: docs + launcher warning.** README documents the
   requirement; the launcher warns via `git check-ignore -q` when the file
   exists in a git repo and is not ignored. Never edits `.gitignore`
@@ -375,17 +409,21 @@ old `.Mounts`-source comparison could not see them.
 4. A missing host path warns and is skipped (launch proceeds); a duplicate
    target name warns, skips the later entry, and suggests a `name:` alias —
    never a silent wrong mount, never an abort. A host path or derived name
-   containing a `:` mounts correctly under `/ctx/<name>` (the `--mount` form
-   carries it); one containing a `,` is warn-skipped (config) / hard-errored
-   (CLI) with a clear message, never a raw engine failure.
+   containing a `:`, `,`, or other POSIX-legal character mounts correctly under
+   `/ctx/<name>` via the generated long-form `volumes:` overlay — `docker
+   compose run` accepts it and the container is actually created (no
+   `incorrect volume format` / unsupported-flag failure).
 5. No config file + no `--ctx` ⇒ behavior identical to today (including the
    "keep whatever is already mounted" reuse path).
 6. The container image is unchanged; no new host dependencies are required.
 7. README and architecture docs describe the file, the schema, precedence,
-   and the rw warning ("mixing rw/ro is the user's responsibility");
-   in-container docs describing a flattened `/ctx`
-   (`docker/shared/container-agent.md.tmpl`, `AGENTS.md`) are updated to the
-   `/ctx/<name>` layout.
+   and the rw warning ("mixing rw/ro is the user's responsibility"); **every**
+   in-container doc describing a flattened `/ctx` is updated to the
+   `/ctx/<name>` layout — not only `docker/shared/container-agent.md.tmpl` and
+   root `AGENTS.md` but also both baked
+   `docker/{claude,codex}/agent-container/skills/enable-worktrees/SKILL.md`
+   (they tell agents the powbox README is "readable at `/ctx`"). A repo-wide
+   `/ctx` grep finds nothing still pointing at the flattened path.
 8. Entries with a leading `~` or a workspace-root-relative path resolve
    correctly; environment variables are left literal.
 9. The gitignore guard warns exactly when `.powbox.local.yml` exists in a git
@@ -397,9 +435,13 @@ old `.Mounts`-source comparison could not see them.
 - `shellcheck` passes on `launch-agent.sh`; `Invoke-ScriptAnalyzer` (per
   `PSScriptAnalyzerSettings.psd1`) passes on `launch-agent.ps1`.
 - Manual end-to-end on at least one host flavor: create a local config with
-  two context folders (one rw), launch, verify mounts via
-  `docker inspect --format '{{json .Mounts}}'` and by touching a file in the
-  rw mount from inside the container; verify the ro mount rejects writes.
+  two context folders (one rw, and one whose directory name contains a `:`),
+  launch, verify mounts via `docker inspect --format '{{json .Mounts}}'` and by
+  touching a file in the rw mount from inside the container; verify the ro
+  mount rejects writes and the colon-named folder mounted (the generated
+  `compose.ctx.yml` overlay carried it, rather than failing at
+  `docker compose run`). Inspect the generated overlay to confirm well-formed,
+  quoted YAML.
 - Exercise the reuse/recreate matrix from acceptance criterion 3.
 - Negative / edge tests: bogus path entry, duplicate basenames, malformed YAML
   line — each warns as specified and never aborts with a stack trace; an inline
@@ -420,7 +462,10 @@ path handling (drive letters vs `:rw` suffix, `ConvertFrom-DockerDesktopPath`
 usage); (4) that the mini-parser fails safe (warn + ignore) on YAML it doesn't
 understand, **including** recognizing the inline `ctx: []` empty-list override
 as the empty set rather than as malformed/absent;
-(5) docs accurately reflect resolved OQ decisions; (6) the launcher emits the
-`--mount type=bind,src=,dst=[,ro]` form (not colon-packed `-v`) for ctx mounts,
-so a `:` in a host path or derived name mounts rather than failing, and a `,`
-is rejected up front with a clear message.
+(5) docs accurately reflect resolved OQ decisions, **including** the full
+`/ctx` doc sweep (both `enable-worktrees/SKILL.md` copies, not just the
+tmpl/AGENTS.md); (6) ctx mounts are emitted as a generated long-form `volumes:`
+compose overlay added to the `-f` chain — **not** `-v`/`--mount` flags, which
+`docker compose run` would reject or mis-split — with values emitted as
+correctly-quoted YAML (so a `:`/`,` in a path or name mounts rather than
+failing) and merged by target so other mounts are not clobbered.

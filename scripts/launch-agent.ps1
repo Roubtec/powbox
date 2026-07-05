@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("claude", "codex")]
   [string]$Agent,
@@ -11,7 +11,7 @@
   [switch]$Continue,
   [switch]$Volatile,
   [string]$Exec = "",
-  [string]$Ctx = "",
+  [string[]]$Ctx = @(),
   # Self-hosted ("-Isolated") mode: the container clones the repo into a private
   # per-instance volume instead of bind-mounting a host dir. All of these stay
   # inert (and dir-mounted mode stays byte-for-byte unchanged) unless -Isolated.
@@ -352,11 +352,12 @@ function Resolve-Powbox-ConfigCtxDirectory ([string]$RawPath, [string]$Workspace
 }
 
 function Resolve-Powbox-CliCtxDirectory ([string]$RawPath) {
-  if (-not (Test-Path -LiteralPath $RawPath -PathType Container)) {
+  $path = Expand-Powbox-LeadingTilde $RawPath
+  if (-not (Test-Path -LiteralPath $path -PathType Container)) {
     Write-Error "Error: context path does not exist: $RawPath"
     exit 1
   }
-  try { return (Resolve-Powbox-DirectoryPath $RawPath) }
+  try { return (Resolve-Powbox-DirectoryPath $path) }
   catch {
     Write-Error "Error: failed to resolve context path: $RawPath"
     exit 1
@@ -374,10 +375,10 @@ function Test-Powbox-CtxName ([string]$Name) {
   return $true
 }
 
-function Add-Powbox-CtxMount ([System.Collections.IList]$Mounts, [string]$Name, [string]$Path, [string]$Mode, [string]$Origin) {
+function Add-Powbox-CtxMount ([System.Collections.IList]$Mounts, [string]$Name, [string]$Path, [string]$Mode, [string]$Origin, [bool]$Strict = $false) {
   if (-not (Test-Powbox-CtxName $Name)) {
-    if ($Origin -eq "-Ctx") {
-      Write-Error "Context mount name derived from $Path is not a usable single path segment: $Name"
+    if ($Strict) {
+      Write-Error "Error: context mount name derived from $Path is not a usable single path segment: $Name"
       exit 1
     }
     Write-Powbox-Warning "${Origin}: context mount name is not a usable single path segment; skipping: $Name"
@@ -385,11 +386,50 @@ function Add-Powbox-CtxMount ([System.Collections.IList]$Mounts, [string]$Name, 
   }
   foreach ($mount in $Mounts) {
     if ($mount.Name -ceq $Name) {
+      if ($Strict) {
+        Write-Error "Error: duplicate ctx target name '$Name' across -Ctx values. Add an alias to disambiguate."
+        exit 1
+      }
       Write-Powbox-Warning "${Origin}: duplicate ctx target name '$Name'; skipping later entry. Add a name: alias to disambiguate."
       return
     }
   }
   [void]$Mounts.Add([pscustomobject]@{ Name = $Name; Path = $Path; Mode = $Mode })
+}
+
+function Split-Powbox-CliCtxValue ([string]$Value) {
+  if ([string]::IsNullOrEmpty($Value)) {
+    Write-Error "Error: -Ctx value has an empty path."
+    exit 1
+  }
+  $path = $Value
+  $mode = "ro"
+  if ($path.EndsWith(":ro")) {
+    $mode = "ro"
+    $path = $path.Substring(0, $path.Length - 3)
+  }
+  elseif ($path.EndsWith(":rw")) {
+    $mode = "rw"
+    $path = $path.Substring(0, $path.Length - 3)
+  }
+  if ($path -eq "") {
+    Write-Error "Error: -Ctx value has an empty path: $Value"
+    exit 1
+  }
+  $name = ""
+  $equalsIndex = $path.IndexOf("=")
+  if ($equalsIndex -ge 0) {
+    $aliasCandidate = $path.Substring(0, $equalsIndex)
+    if (Test-Powbox-CtxName $aliasCandidate) {
+      $name = $aliasCandidate
+      $path = $path.Substring($equalsIndex + 1)
+      if ($path -eq "") {
+        Write-Error "Error: -Ctx value has an empty path: $Value"
+        exit 1
+      }
+    }
+  }
+  return [pscustomobject]@{ Path = $path; Name = $name; Mode = $mode }
 }
 
 function Get-Powbox-CtxHash ([object[]]$Mounts) {
@@ -409,10 +449,13 @@ function Get-Powbox-CtxHash ([object[]]$Mounts) {
 
 function Resolve-Powbox-CtxMountSet ([string]$Workspace) {
   $mounts = [System.Collections.Generic.List[object]]::new()
-  if ($Ctx -ne "") {
-    $resolved = Resolve-Powbox-CliCtxDirectory $Ctx
-    $name = Get-Powbox-PathBasename $resolved
-    Add-Powbox-CtxMount -Mounts $mounts -Name $name -Path $resolved -Mode "ro" -Origin "-Ctx"
+  if (@($Ctx).Count -gt 0) {
+    foreach ($ctxValue in @($Ctx)) {
+      $parsed = Split-Powbox-CliCtxValue $ctxValue
+      $resolved = Resolve-Powbox-CliCtxDirectory $parsed.Path
+      $name = if ($parsed.Name -ne "") { $parsed.Name } else { Get-Powbox-PathBasename $resolved }
+      Add-Powbox-CtxMount -Mounts $mounts -Name $name -Path $resolved -Mode $parsed.Mode -Origin "-Ctx" -Strict $true
+    }
     return [pscustomobject]@{ DesiredPresent = $true; Hash = (Get-Powbox-CtxHash @($mounts)); Mounts = @($mounts) }
   }
   if ($Isolated) { return [pscustomobject]@{ DesiredPresent = $false; Hash = ""; Mounts = @() } }
@@ -711,6 +754,7 @@ else {
 }
 
 $containerName = "$Agent-$projectSlug"
+$workspaceMount = "/workspace/$projectSlug"
 # pnpm store path under the workspace mount (same mount as .worktrees/<task> in
 # both modes — a per-container volume in dir-mounted mode, the one workspace volume
 # in self-hosted mode — so per-worktree `pnpm install` hardlinks from the store).
@@ -839,7 +883,6 @@ else {
   $env:WORKSPACE_PATH = $resolvedProject
 }
 $env:PROJECT_NAME = $projectSlug
-$workspaceMount = "/workspace/$projectSlug"
 
 $ghHostConfigPath = if ($env:GH_HOST_CONFIG_DIR) { $env:GH_HOST_CONFIG_DIR } else { "$env:APPDATA\GitHub CLI" }
 $gitConfigPath = if ($env:GIT_CONFIG_PATH) { $env:GIT_CONFIG_PATH } else { Join-Path $env:USERPROFILE ".gitconfig" }
@@ -863,7 +906,7 @@ if ($Resume) {
     Write-Error "No persisted container named $containerName was found. Start it once normally, or with -Persist if you want to be explicit."
     exit 1
   }
-  if ($Ctx -ne "") {
+  if (@($Ctx).Count -gt 0) {
     Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
   }
   elseif ($ctxConfigPresent) {

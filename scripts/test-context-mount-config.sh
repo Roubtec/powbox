@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Unit tests for host-side ctx mount config parsing in launch-agent.{sh,ps1}.
-# These use POWBOX_PRINT_CTX=1, so they do not need Docker or a built image.
+# These use POWBOX_PRINT_CTX=1 or a fake docker shim, so they do not need Docker
+# or a built image.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -43,6 +44,44 @@ run_ps() {
 	POWBOX_PRINT_CTX=1 pwsh -NoProfile -File "$LAUNCH_PS" codex "$ws" "$@" 2>&1
 }
 
+run_sh_no_print() {
+	local ws="$1"
+	shift
+	bash "$LAUNCH_SH" codex "$ws" "$@" 2>&1
+}
+
+run_ps_no_print() {
+	local ws="$1"
+	shift
+	pwsh -NoProfile -File "$LAUNCH_PS" codex "$ws" "$@" 2>&1
+}
+
+run_ps_ctx_values_from() {
+	local cwd="$1" ws="$2" joined="" value
+	shift 2
+	for value in "$@"; do
+		if [ -n "$joined" ]; then
+			joined+=$'\n'
+		fi
+		joined+="$value"
+	done
+	(
+		cd "$cwd"
+		# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+		POWBOX_PRINT_CTX=1 \
+			POWBOX_TEST_LAUNCH_PS="$LAUNCH_PS" \
+			POWBOX_TEST_WS="$ws" \
+			POWBOX_TEST_CTX_VALUES="$joined" \
+			pwsh -NoProfile -Command '$ctx = if ($env:POWBOX_TEST_CTX_VALUES -eq "") { @() } else { $env:POWBOX_TEST_CTX_VALUES -split "`n" }; & $env:POWBOX_TEST_LAUNCH_PS codex $env:POWBOX_TEST_WS -Ctx $ctx' 2>&1
+	)
+}
+
+run_ps_ctx_values() {
+	local ws="$1"
+	shift
+	run_ps_ctx_values_from "$PWD" "$ws" "$@"
+}
+
 run_sh_overlay() {
 	local ws="$1" overlay="$2"
 	shift 2
@@ -71,7 +110,7 @@ assert_eq() {
 
 assert_contains() {
 	local label="$1" text="$2" needle="$3"
-	if printf '%s' "$text" | grep -qF "$needle"; then
+	if printf '%s' "$text" | grep -qF -- "$needle"; then
 		ok "$label"
 	else
 		ko "$label (missing '$needle')"
@@ -80,7 +119,7 @@ assert_contains() {
 
 assert_not_contains() {
 	local label="$1" text="$2" needle="$3"
-	if printf '%s' "$text" | grep -qF "$needle"; then
+	if printf '%s' "$text" | grep -qF -- "$needle"; then
 		ko "$label (unexpected '$needle')"
 	else
 		ok "$label"
@@ -196,6 +235,137 @@ assert_eq "CLI count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 1
 assert_contains "CLI basename target" "$out_sh" "CTX_MOUNT_0_NAME=cli"
 assert_contains "CLI mode is ro" "$out_sh" "CTX_MOUNT_0_MODE=ro"
 assert_eq "CLI hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+
+echo "Test: CLI --ctx accepts multiple values, modes, aliases, and config/hash parity"
+ws="$(new_ws cli-multi)"
+mkdir -p "$ws/config" "$ws/refA" "$ws/docs"
+cat >"$ws/.powbox.local.yml" <<'YAML'
+ctx:
+  - config
+YAML
+out_sh="$(run_sh "$ws" --ctx "$ws/refA" --ctx "Docs=$ws/docs:rw")"
+out_ps="$(run_ps_ctx_values "$ws" "$ws/refA" "Docs=$ws/docs:rw")"
+assert_eq "CLI multi bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 2
+assert_eq "CLI multi PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 2
+assert_contains "CLI multi basename target" "$out_sh" "CTX_MOUNT_0_NAME=refA"
+assert_contains "CLI multi basename mode" "$out_sh" "CTX_MOUNT_0_MODE=ro"
+assert_contains "CLI multi alias target" "$out_sh" "CTX_MOUNT_1_NAME=Docs"
+assert_contains "CLI multi alias mode" "$out_sh" "CTX_MOUNT_1_MODE=rw"
+assert_not_contains "CLI multi ignores configured ctx" "$out_sh" "NAME=config"
+assert_eq "CLI multi hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+cli_multi_hash="$(value_of "$out_sh" CTX_HASH)"
+cat >"$ws/.powbox.local.yml" <<YAML
+ctx:
+  - "$ws/refA"
+  - path: "$ws/docs"
+    name: Docs
+    mode: rw
+YAML
+config_hash="$(value_of "$(run_sh "$ws")" CTX_HASH)"
+assert_eq "CLI and equivalent config hash match" "$cli_multi_hash" "$config_hash"
+
+echo "Test: CLI relative ctx resolves from caller cwd"
+caller_ws="$(new_ws cli-caller-cwd)"
+mkdir -p "$caller_ws/project" "$caller_ws/refs" "$caller_ws/project/refs"
+out_sh="$(
+	cd "$caller_ws"
+	POWBOX_PRINT_CTX=1 bash "$LAUNCH_SH" codex "$caller_ws/project" --ctx refs 2>&1
+)"
+out_ps="$(
+	cd "$caller_ws"
+	POWBOX_PRINT_CTX=1 pwsh -NoProfile -File "$LAUNCH_PS" codex "$caller_ws/project" -Ctx refs 2>&1
+)"
+assert_contains "CLI relative bash caller path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/refs")"
+assert_contains "CLI relative PowerShell caller path" "$out_ps" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/refs")"
+assert_not_contains "CLI relative bash not workspace path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/project/refs")"
+assert_not_contains "CLI relative PowerShell not workspace path" "$out_ps" "CTX_MOUNT_0_PATH=$(realpath "$caller_ws/project/refs")"
+
+echo "Test: CLI literal leading tilde ctx resolves from HOME"
+tilde_ws="$(new_ws cli-tilde)"
+fake_home="$WORK_ROOT/fake-home"
+# shellcheck disable=SC2088 # This regression requires a literal leading tilde.
+literal_tilde_ctx='~/existing-dir'
+mkdir -p "$tilde_ws/project" "$fake_home/existing-dir"
+out_sh="$(HOME="$fake_home" run_sh "$tilde_ws/project" --ctx "$literal_tilde_ctx")"
+out_ps="$(HOME="$fake_home" run_ps "$tilde_ws/project" -Ctx "$literal_tilde_ctx")"
+assert_eq "CLI tilde bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 1
+assert_eq "CLI tilde PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 1
+assert_contains "CLI tilde bash path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$fake_home/existing-dir")"
+assert_contains "CLI tilde PowerShell path" "$out_ps" "CTX_MOUNT_0_PATH=$(realpath "$fake_home/existing-dir")"
+assert_eq "CLI tilde hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+
+echo "Test: CLI equals split only when the prefix is a valid alias"
+eq_ws="$(new_ws cli-equals)"
+mkdir -p "$eq_ws/project" "$eq_ws/fixtures=a" "$eq_ws/a"
+out_sh="$(
+	cd "$eq_ws"
+	POWBOX_PRINT_CTX=1 bash "$LAUNCH_SH" codex "$eq_ws/project" --ctx ./fixtures=a --ctx fixtures=a 2>&1
+)"
+out_ps="$(run_ps_ctx_values_from "$eq_ws" "$eq_ws/project" "./fixtures=a" "fixtures=a")"
+assert_eq "CLI equals bash count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 2
+assert_eq "CLI equals PowerShell count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 2
+assert_contains "CLI path with equals remains path" "$out_sh" "CTX_MOUNT_0_NAME=fixtures=a"
+assert_contains "CLI path with equals path" "$out_sh" "CTX_MOUNT_0_PATH=$(realpath "$eq_ws/fixtures=a")"
+assert_contains "CLI bare equals uses alias" "$out_sh" "CTX_MOUNT_1_NAME=fixtures"
+assert_contains "CLI bare equals alias path" "$out_sh" "CTX_MOUNT_1_PATH=$(realpath "$eq_ws/a")"
+assert_eq "CLI equals hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+
+echo "Test: invalid CLI ctx values fail hard"
+ws="$(new_ws cli-invalid)"
+mkdir -p "$ws/a" "$ws/b"
+set +e
+out_sh="$(run_sh "$ws" --ctx "same=$ws/a" --ctx "same=$ws/b")"
+status_sh=$?
+out_ps="$(run_ps_ctx_values "$ws" "same=$ws/a" "same=$ws/b")"
+status_ps=$?
+set -e
+assert_eq "CLI duplicate bash status" "$status_sh" 1
+assert_eq "CLI duplicate PowerShell status" "$status_ps" 1
+assert_contains "CLI duplicate bash error" "$out_sh" "duplicate ctx target name 'same'"
+assert_contains "CLI duplicate PowerShell error" "$out_ps" "duplicate ctx target name 'same'"
+set +e
+out_sh="$(run_sh "$ws" --ctx "$ws/missing")"
+status_sh=$?
+out_ps="$(run_ps "$ws" -Ctx "$ws/missing")"
+status_ps=$?
+set -e
+assert_eq "CLI missing path bash status" "$status_sh" 1
+assert_eq "CLI missing path PowerShell status" "$status_ps" 1
+assert_contains "CLI missing path bash error" "$out_sh" "context path does not exist"
+assert_contains "CLI missing path PowerShell error" "$out_ps" "context path does not exist"
+set +e
+out_sh="$(run_sh "$ws" --ctx)"
+status_sh=$?
+out_ps="$(run_ps "$ws" -Ctx "")"
+status_ps=$?
+set -e
+assert_eq "CLI missing value bash status" "$status_sh" 1
+assert_eq "CLI empty value PowerShell status" "$status_ps" 1
+assert_contains "CLI missing value bash error" "$out_sh" "missing path for --ctx"
+assert_contains "CLI empty value PowerShell error" "$out_ps" "-Ctx value has an empty path"
+
+echo "Test: CLI ctx validation runs before Docker setup"
+ws="$(new_ws cli-before-docker)"
+fake_bin="$WORK_ROOT/fake-bin"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/docker" <<'SH'
+#!/usr/bin/env bash
+echo "FAKE_DOCKER_CALLED $*" >&2
+exit 42
+SH
+chmod +x "$fake_bin/docker"
+set +e
+out_sh="$(PATH="$fake_bin:$PATH" run_sh_no_print "$ws" --ctx "")"
+status_sh=$?
+out_ps="$(PATH="$fake_bin:$PATH" run_ps_no_print "$ws" -Ctx "")"
+status_ps=$?
+set -e
+assert_eq "empty ctx before Docker bash status" "$status_sh" 1
+assert_eq "empty ctx before Docker PowerShell status" "$status_ps" 1
+assert_contains "empty ctx before Docker bash error" "$out_sh" "--ctx value has an empty path"
+assert_contains "empty ctx before Docker PowerShell error" "$out_ps" "-Ctx value has an empty path"
+assert_not_contains "empty ctx before Docker bash skips docker" "$out_sh" "FAKE_DOCKER_CALLED"
+assert_not_contains "empty ctx before Docker PowerShell skips docker" "$out_ps" "FAKE_DOCKER_CALLED"
 
 echo "Test: missing configured paths and duplicate target names warn and skip"
 ws="$(new_ws missing-duplicate)"

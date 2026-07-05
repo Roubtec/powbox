@@ -22,7 +22,7 @@ PERSIST=false
 RESUME=false
 CONTINUE=false
 EXEC_TASK=""
-CTX_PATH=""
+CTX_VALUES=()
 # Self-hosted ("--isolated") mode: the container clones the repo into a private
 # per-instance volume instead of bind-mounting a host dir. All of the following
 # stay inert (and dir-mounted mode stays byte-for-byte unchanged) unless
@@ -76,7 +76,11 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--ctx)
 		shift
-		CTX_PATH="${1:?missing path for --ctx}"
+		if [ "$#" -eq 0 ]; then
+			echo "Error: missing path for --ctx" >&2
+			exit 1
+		fi
+		CTX_VALUES+=("$1")
 		;;
 	--exec)
 		if [ "$AGENT" != "codex" ]; then
@@ -665,12 +669,13 @@ powbox_resolve_config_ctx_dir() {
 }
 
 powbox_resolve_cli_ctx_dir() {
-	local raw="$1" outvar="$2" resolved_path
-	if [ ! -d "$raw" ]; then
+	local raw="$1" outvar="$2" path resolved_path
+	path="$(powbox_expand_leading_tilde "$raw")"
+	if [ ! -d "$path" ]; then
 		echo "Error: context path does not exist: ${raw}" >&2
 		exit 1
 	fi
-	resolved_path="$(cd "$raw" && pwd -P)" || {
+	resolved_path="$(cd "$path" && pwd -P)" || {
 		echo "Error: failed to resolve context path: ${raw}" >&2
 		exit 1
 	}
@@ -698,9 +703,9 @@ powbox_validate_ctx_name() {
 }
 
 powbox_add_ctx_mount() {
-	local name="$1" path="$2" mode="$3" origin="$4" duplicate
+	local name="$1" path="$2" mode="$3" origin="$4" strict="${5:-false}" duplicate
 	if ! powbox_validate_ctx_name "$name"; then
-		if [ "$origin" = "--ctx" ]; then
+		if [ "$strict" = true ]; then
 			echo "Error: context mount name derived from ${path} is not a usable single path segment: ${name}" >&2
 			exit 1
 		fi
@@ -709,6 +714,10 @@ powbox_add_ctx_mount() {
 	fi
 	for duplicate in "${CTX_MOUNT_NAMES[@]}"; do
 		if [ "$duplicate" = "$name" ]; then
+			if [ "$strict" = true ]; then
+				echo "Error: duplicate ctx target name '${name}' across --ctx values. Add an alias to disambiguate." >&2
+				exit 1
+			fi
 			powbox_warn "${origin}: duplicate ctx target name '${name}'; skipping later entry. Add a name: alias to disambiguate."
 			return 1
 		fi
@@ -716,6 +725,43 @@ powbox_add_ctx_mount() {
 	CTX_MOUNT_NAMES+=("$name")
 	CTX_MOUNT_PATHS+=("$path")
 	CTX_MOUNT_MODES+=("$mode")
+}
+
+powbox_parse_cli_ctx_value() {
+	local raw="$1" out_path="$2" out_name="$3" out_mode="$4" path name="" mode=ro alias_candidate
+	if [ -z "$raw" ]; then
+		echo "Error: --ctx value has an empty path." >&2
+		exit 1
+	fi
+	path="$raw"
+	case "$path" in
+	*:ro)
+		mode=ro
+		path="${path%:ro}"
+		;;
+	*:rw)
+		mode=rw
+		path="${path%:rw}"
+		;;
+	esac
+	if [ -z "$path" ]; then
+		echo "Error: --ctx value has an empty path: ${raw}" >&2
+		exit 1
+	fi
+	if [[ "$path" == *=* ]]; then
+		alias_candidate="${path%%=*}"
+		if powbox_validate_ctx_name "$alias_candidate"; then
+			name="$alias_candidate"
+			path="${path#*=}"
+			if [ -z "$path" ]; then
+				echo "Error: --ctx value has an empty path: ${raw}" >&2
+				exit 1
+			fi
+		fi
+	fi
+	printf -v "$out_path" '%s' "$path"
+	printf -v "$out_name" '%s' "$name"
+	printf -v "$out_mode" '%s' "$mode"
 }
 
 powbox_byte_less() {
@@ -753,18 +799,25 @@ powbox_ctx_hash() {
 }
 
 powbox_derive_ctx_mounts() {
-	local workspace="$1" resolved raw_path raw_name raw_mode raw_short_form mode name origin i
+	local workspace="$1" resolved raw_path raw_name raw_mode raw_short_form mode name origin i cli_mode
 	CTX_DESIRED_PRESENT=false
 	CTX_HASH=""
 	CTX_MOUNT_NAMES=()
 	CTX_MOUNT_PATHS=()
 	CTX_MOUNT_MODES=()
 
-	if [ -n "$CTX_PATH" ]; then
+	if [ "${#CTX_VALUES[@]}" -gt 0 ]; then
 		CTX_DESIRED_PRESENT=true
-		powbox_resolve_cli_ctx_dir "$CTX_PATH" resolved
-		name="$(powbox_path_basename "$resolved")"
-		powbox_add_ctx_mount "$name" "$resolved" ro "--ctx"
+		for i in "${!CTX_VALUES[@]}"; do
+			powbox_parse_cli_ctx_value "${CTX_VALUES[$i]}" raw_path raw_name cli_mode
+			powbox_resolve_cli_ctx_dir "$raw_path" resolved
+			if [ -n "$raw_name" ]; then
+				name="$raw_name"
+			else
+				name="$(powbox_path_basename "$resolved")"
+			fi
+			powbox_add_ctx_mount "$name" "$resolved" "$cli_mode" "--ctx" true
+		done
 		CTX_HASH="$(powbox_ctx_hash)"
 		return 0
 	fi
@@ -1225,7 +1278,7 @@ if [ "$RESUME" = true ]; then
 		echo "No persisted container named ${CONTAINER_NAME} was found. Start it once normally, or with --persist if you want to be explicit." >&2
 		exit 1
 	fi
-	if [ -n "$CTX_PATH" ]; then
+	if [ "${#CTX_VALUES[@]}" -gt 0 ]; then
 		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
 	elif [ "$CTX_CONFIG_PRESENT" = true ]; then
 		echo "Note: configured ctx mounts are ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2

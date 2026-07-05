@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Detect workspace subpackage directories that need node_modules shadowing.
 #
-# Scans for pnpm, npm, and yarn workspace declarations plus an optional
-# .powbox.yml override file.  Outputs one absolute path per line — each
+# Scans for pnpm, npm, and yarn workspace declarations plus optional
+# .powbox.yml / .powbox.local.yml override files.  Outputs one absolute path per line — each
 # path is a directory to shadow with tmpfs so that host-native binaries
 # (e.g. Windows) never mix with container-native (Linux) binaries.
 #
@@ -27,7 +27,7 @@ expand_workspace_patterns() {
 		[ -z "$pattern" ] && continue
 		# Skip negation/exclusion patterns (pnpm supports "!pattern").
 		case "$pattern" in
-			'!'*) continue ;;
+		'!'*) continue ;;
 		esac
 		# Intentionally unquoted to allow glob expansion.
 		# shellcheck disable=SC2086
@@ -56,9 +56,18 @@ if [ -f "$PKG_JSON" ]; then
 	' "$PKG_JSON" 2>/dev/null || true)
 fi
 
-# --- .powbox.yml custom shadow paths ---
+# --- .powbox.yml / .powbox.local.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"
-if [ -f "$POWBOX_YML" ]; then
+POWBOX_LOCAL_YML="$WORKSPACE_DIR/.powbox.local.yml"
+SHADOW_YML=""
+if [ -f "$POWBOX_LOCAL_YML" ] && [ "$(yq -r 'has("shadow")' "$POWBOX_LOCAL_YML" 2>/dev/null || true)" = true ]; then
+	SHADOW_YML="$POWBOX_LOCAL_YML"
+	echo "detect-shadows: shadow list overridden by .powbox.local.yml" >&2
+elif [ -f "$POWBOX_YML" ]; then
+	SHADOW_YML="$POWBOX_YML"
+fi
+
+if [ -n "$SHADOW_YML" ]; then
 	workspace_resolved="$(realpath -- "$WORKSPACE_DIR")"
 
 	# Append a resolved path to the shadow list iff it stays strictly under
@@ -72,59 +81,59 @@ if [ -f "$POWBOX_YML" ]; then
 			return
 		fi
 		case "$resolved" in
-			"$workspace_resolved"/*)
-				shadows+=("$resolved")
-				;;
-			*)
-				echo "detect-shadows: skipping '$original' — resolves outside workspace root." >&2
-				;;
+		"$workspace_resolved"/*)
+			shadows+=("$resolved")
+			;;
+		*)
+			echo "detect-shadows: skipping '$original' — resolves outside workspace root." >&2
+			;;
 		esac
 	}
 
 	while IFS= read -r pattern; do
 		[ -z "$pattern" ] && continue
 		case "$pattern" in
-			'!'*) continue ;;
+		'!'*) continue ;;
 		esac
 		# .powbox.yml patterns resolve to the path itself (not appending /node_modules)
 		# so the user has full control over what gets shadowed.
 		case "$pattern" in
-			*[][*?]*)
-				# Glob pattern: expand it and keep the existence gate — a glob
-				# cannot be mkdir'd, so only matching directories make sense.
-				# shellcheck disable=SC2086
-				for shadow_dir in $WORKSPACE_DIR/$pattern; do
-					[ -d "$shadow_dir" ] || continue
-					# Resolve symlinks / ".." and validate it stays under WORKSPACE_DIR.
-					resolved="$(realpath -- "$shadow_dir")" || continue
-					add_shadow_path "$resolved" "$shadow_dir"
-				done
+		*[][*?]*)
+			# Glob pattern: expand it and keep the existence gate — a glob
+			# cannot be mkdir'd, so only matching directories make sense.
+			# shellcheck disable=SC2086
+			for shadow_dir in $WORKSPACE_DIR/$pattern; do
+				[ -d "$shadow_dir" ] || continue
+				# Resolve symlinks / ".." and validate it stays under WORKSPACE_DIR.
+				resolved="$(realpath -- "$shadow_dir")" || continue
+				add_shadow_path "$resolved" "$shadow_dir"
+			done
+			;;
+		*)
+			# Literal path: emit it even when it does not exist yet, so
+			# committed declarations (e.g. gitignored worktree dirs absent on
+			# a fresh checkout) are created and shadowed at startup.  realpath
+			# -m tolerates non-existent paths; shadow-mounts.sh mkdir -p's them.
+			#
+			# Exception: a literal under .git/ is only safe to create when
+			# .git is a real directory (the main checkout).  When .git is
+			# absent (non-git folder) or a file (a linked worktree, whose
+			# .git/worktrees metadata lives in the *main* repo), emitting the
+			# path would make shadow-mounts.sh mkdir a bogus .git/ tree or
+			# fail outright on the non-directory parent.  Skip it loudly.
+			case "$pattern" in
+			.git | .git/*)
+				if [ ! -d "$WORKSPACE_DIR/.git" ]; then
+					echo "detect-shadows: skipping '$pattern' — \$WORKSPACE_DIR/.git is not a directory (non-git checkout or linked worktree)." >&2
+					continue
+				fi
 				;;
-			*)
-				# Literal path: emit it even when it does not exist yet, so
-				# committed declarations (e.g. gitignored worktree dirs absent on
-				# a fresh checkout) are created and shadowed at startup.  realpath
-				# -m tolerates non-existent paths; shadow-mounts.sh mkdir -p's them.
-				#
-				# Exception: a literal under .git/ is only safe to create when
-				# .git is a real directory (the main checkout).  When .git is
-				# absent (non-git folder) or a file (a linked worktree, whose
-				# .git/worktrees metadata lives in the *main* repo), emitting the
-				# path would make shadow-mounts.sh mkdir a bogus .git/ tree or
-				# fail outright on the non-directory parent.  Skip it loudly.
-				case "$pattern" in
-					.git | .git/*)
-						if [ ! -d "$WORKSPACE_DIR/.git" ]; then
-							echo "detect-shadows: skipping '$pattern' — \$WORKSPACE_DIR/.git is not a directory (non-git checkout or linked worktree)." >&2
-							continue
-						fi
-						;;
-				esac
-				resolved="$(realpath -m -- "$WORKSPACE_DIR/$pattern")" || continue
-				add_shadow_path "$resolved" "$WORKSPACE_DIR/$pattern"
-				;;
+			esac
+			resolved="$(realpath -m -- "$WORKSPACE_DIR/$pattern")" || continue
+			add_shadow_path "$resolved" "$WORKSPACE_DIR/$pattern"
+			;;
 		esac
-	done < <(yq -r '.shadow[]? // empty' "$POWBOX_YML" 2>/dev/null || true)
+	done < <(yq -r '.shadow[]? // empty' "$SHADOW_YML" 2>/dev/null || true)
 fi
 
 # Deduplicate and output.

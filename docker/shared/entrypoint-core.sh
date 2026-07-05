@@ -73,6 +73,7 @@ if [ -n "${POWBOX_WORKSPACE_DIR:-}" ] && [ -n "${POWBOX_WORKSPACE_HOST_PATH:-}" 
 	# image-baked, so this is not expected) must never abort container startup under set -e.
 	if [ -r "$_shp" ]; then
 		# shellcheck source=docker/shared/sensitive-host-path.sh
+		# shellcheck disable=SC1091
 		. "$_shp"
 		powbox_record_workspace_source "$POWBOX_WORKSPACE_DIR" "$POWBOX_WORKSPACE_HOST_PATH"
 	fi
@@ -186,7 +187,7 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue
 		_dir="${_dir%/}"
-		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2>/dev/null || true)
+		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2> >(grep -Fx 'detect-shadows: shadow list overridden by .powbox.local.yml' >&2 || true) || true)
 		if [ "${#_targets[@]}" -gt 0 ]; then
 			if sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
 				# The subpackage node_modules just (re)mounted above are ephemeral tmpfs:

@@ -16,9 +16,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DETECT="$SCRIPT_DIR/../docker/shared/detect-shadows.sh"
+DOCTOR="$SCRIPT_DIR/../docker/shared/pnpm-shadow-doctor"
 
 if [ ! -f "$DETECT" ]; then
 	echo "FATAL: detect-shadows.sh not found at $DETECT" >&2
+	exit 1
+fi
+if [ ! -f "$DOCTOR" ]; then
+	echo "FATAL: pnpm-shadow-doctor not found at $DOCTOR" >&2
 	exit 1
 fi
 
@@ -52,6 +57,24 @@ write_powbox() {
 	} >"$ws/.powbox.yml"
 }
 
+# write_powbox_local <ws> <entry...> — write a .powbox.local.yml shadow list.
+write_powbox_local() {
+	local ws="$1"
+	shift
+	{
+		echo "shadow:"
+		local entry
+		for entry in "$@"; do
+			printf '  - "%s"\n' "$entry"
+		done
+	} >"$ws/.powbox.local.yml"
+}
+
+write_powbox_local_empty() {
+	local ws="$1"
+	printf 'shadow: []\n' >"$ws/.powbox.local.yml"
+}
+
 # run_out <ws> — stdout of detect-shadows (stderr silenced).
 run_out() {
 	bash "$DETECT" "$1" 2>/dev/null
@@ -60,6 +83,10 @@ run_out() {
 # run_err <ws> — stderr of detect-shadows (stdout silenced).
 run_err() {
 	{ bash "$DETECT" "$1" >/dev/null; } 2>&1
+}
+
+run_doctor_err() {
+	{ PATH="$(dirname "$DETECT"):$PATH" bash "$DOCTOR" --quiet "$1" >/dev/null || true; } 2>&1
 }
 
 ok() {
@@ -101,12 +128,31 @@ assert_no_output() {
 	fi
 }
 
+# assert_output_exact <ws> <expected-output> <msg>
+assert_output_exact() {
+	local out
+	out="$(run_out "$1")"
+	if [ "$out" = "$2" ]; then
+		ok "$3"
+	else
+		ko "$3 (expected exactly: $(printf '%s' "$2" | tr '\n' ' '); got: $(printf '%s' "$out" | tr '\n' ' '))"
+	fi
+}
+
 # assert_stderr <ws> <substring> <msg>
 assert_stderr() {
 	if run_err "$1" | grep -qF "$2"; then
 		ok "$3"
 	else
 		ko "$3 (expected stderr to contain '$2')"
+	fi
+}
+
+assert_stderr_absent() {
+	if run_err "$1" | grep -qF "$2"; then
+		ko "$3 (did not expect stderr to contain '$2')"
+	else
+		ok "$3"
 	fi
 }
 
@@ -176,6 +222,67 @@ ws="$(new_ws root-self)"
 write_powbox "$ws" '.'
 assert_no_output "$ws" "'.' (resolves to workspace root) not shadowed"
 assert_stderr "$ws" "workspace root itself" "'.' rejected with a workspace-root diagnostic, not 'outside'"
+
+echo "Test: local shadow list replaces committed custom shadows"
+ws="$(new_ws local-override)"
+write_powbox "$ws" committed-cache
+write_powbox_local "$ws" local-cache
+assert_output_exact "$ws" "$ws/local-cache" "local shadow list emits exactly the local entry"
+assert_absent "$ws" "$ws/committed-cache" "committed shadow ignored under local override"
+assert_stderr "$ws" "shadow list overridden by .powbox.local.yml" "local override diagnostic emitted"
+
+echo "Test: local file without shadow key falls back to committed shadows"
+ws="$(new_ws local-no-shadow-key)"
+write_powbox "$ws" committed-cache
+cat >"$ws/.powbox.local.yml" <<'YAML'
+ctx: []
+YAML
+assert_output_exact "$ws" "$ws/committed-cache" "ctx-only local file does not replace committed shadow list"
+assert_stderr_absent "$ws" "shadow list overridden by .powbox.local.yml" "ctx-only local file emits no override diagnostic"
+
+echo "Test: local shadow empty list disables committed custom shadows but not workspace auto-detection"
+ws="$(new_ws local-empty-shadow)"
+mkdir -p "$ws/pkgs/a"
+cat >"$ws/pnpm-workspace.yaml" <<'YAML'
+packages:
+  - "pkgs/*"
+YAML
+write_powbox "$ws" committed-cache
+write_powbox_local_empty "$ws"
+assert_output_exact "$ws" "$ws/pkgs/a/node_modules" "shadow: [] disables committed custom shadows while keeping pnpm workspace shadows"
+assert_absent "$ws" "$ws/committed-cache" "committed shadow suppressed by local shadow: []"
+assert_stderr "$ws" "shadow list overridden by .powbox.local.yml" "local empty-list override diagnostic emitted"
+
+echo "Test: no local file preserves committed shadow behavior"
+ws="$(new_ws no-local)"
+write_powbox "$ws" committed-cache
+assert_output_exact "$ws" "$ws/committed-cache" "committed shadow emitted when no local file exists"
+
+echo "Test: escaping local literal is rejected and does not fall back to committed shadows"
+ws="$(new_ws local-escape)"
+write_powbox "$ws" committed-cache
+write_powbox_local "$ws" '../evil'
+assert_no_output "$ws" "escaping local literal emits nothing"
+assert_absent "$ws" "$ws/committed-cache" "committed shadow ignored even when overriding local entry is rejected"
+assert_stderr "$ws" "resolves outside workspace root" "escaping local literal rejected to stderr"
+
+echo "Test: pnpm-shadow-doctor forwards only the local override diagnostic"
+ws="$(new_ws doctor-stderr-filter)"
+cat >"$ws/package.json" <<'JSON'
+{}
+JSON
+write_powbox_local "$ws" '../evil'
+doctor_err="$(run_doctor_err "$ws")"
+if printf '%s\n' "$doctor_err" | grep -qxF "detect-shadows: shadow list overridden by .powbox.local.yml"; then
+	ok "doctor forwards the local override diagnostic"
+else
+	ko "doctor did not forward the local override diagnostic"
+fi
+if printf '%s\n' "$doctor_err" | grep -qF "resolves outside workspace root"; then
+	ko "doctor leaked ordinary validation noise"
+else
+	ok "doctor suppresses ordinary validation noise"
+fi
 
 echo "Test: pnpm workspace globs remain existence-gated on the package dir"
 ws="$(new_ws pnpm-ws)"

@@ -194,6 +194,10 @@ function Test-Powbox-EffectiveCtxConfigPresent ([string]$Workspace) {
   return (Test-Powbox-TopSection (Join-Path $Workspace ".powbox.yml") "ctx")
 }
 
+function Test-Powbox-LocalShadowConfigPresent ([string]$Workspace) {
+  return (Test-Powbox-TopSection (Join-Path $Workspace ".powbox.local.yml") "shadow")
+}
+
 function Complete-Powbox-CtxObject ([ref]$Current, [System.Collections.IList]$Entries) {
   $obj = $Current.Value
   if ($null -eq $obj) { return }
@@ -683,14 +687,16 @@ else {
   $worktreesVolume = "agent-wt-$Agent-$projectSlug"
   # Mount those volumes only when the host folder looks like a project that uses
   # them: a JS/Node project (package.json — covers npm/yarn/pnpm — or
-  # pnpm-workspace.yaml) or one that has opted into powbox via .powbox.yml (e.g. a
-  # non-JS repo that still wants persistent worktrees). A research/file-management
-  # folder matches none of these, so it gets no node_modules/.worktrees mounts and
-  # no host litter. The entrypoint's shadow loop independently finds nothing to
-  # shadow for such a folder, so launcher and entrypoint stay consistent.
+  # pnpm-workspace.yaml), one that has opted into powbox via committed .powbox.yml
+  # (e.g. a non-JS repo that still wants persistent worktrees), or one with a
+  # local-only shadow: key. A research/file-management folder, including one with
+  # only local ctx: mounts, gets no node_modules/.worktrees mounts and no host litter.
+  # The entrypoint's shadow loop independently finds nothing to shadow for such a
+  # folder, so launcher and entrypoint stay consistent.
   if ((Test-Path (Join-Path $resolvedProject 'package.json') -PathType Leaf) -or
     (Test-Path (Join-Path $resolvedProject 'pnpm-workspace.yaml') -PathType Leaf) -or
-    (Test-Path (Join-Path $resolvedProject '.powbox.yml') -PathType Leaf)) {
+    (Test-Path (Join-Path $resolvedProject '.powbox.yml') -PathType Leaf) -or
+    (Test-Powbox-LocalShadowConfigPresent $resolvedProject)) {
     $mountWorkspaceVolumes = $true
   }
   # The worktrees volume has a second, WIDER trigger: go.mod. A pure-Go repo gets

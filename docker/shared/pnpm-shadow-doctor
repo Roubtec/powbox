@@ -160,7 +160,7 @@ detect_empty_shadows() {
 		' "$_pkg_json" >/dev/null 2>&1; then
 			empty_shadows+=("$_p")
 		fi
-	done < <(detect-shadows.sh "$ws" 2>/dev/null || true)
+	done < <(detect-shadows.sh "$ws" 2> >(grep -Fx 'detect-shadows: shadow list overridden by .powbox.local.yml' >&2 || true) || true)
 }
 
 detect_empty_shadows

@@ -65,6 +65,18 @@ entirely (they arrive via the plugin channel in task 015c).
 5. If any powbox script enumerates skill names statically (check
    `container-agent.md.tmpl`, docs, tests), update those references — but the
    docs rewrite proper is task 015d.
+6. **Re-home the evicted worktree mechanics in
+   `docker/shared/container-agent.md.tmpl`** (ruling from task 015a: the
+   generalized skills mention `wt-bootstrap`/`wt-enter`/`wt-remove` only as
+   "if available" accelerators, so the container doc must carry the powbox
+   side). Add a short "Worktree helpers" section — in the same style as the
+   existing `gitcat`/`gh-review-threads` entries — documenting the three
+   helpers, that skills should prefer them over raw `git worktree` here, and
+   the powbox-only facts that left the skill texts: tmpfs-shadowed
+   `.git/worktrees`/`.claude/worktrees`, the `.worktrees` volume +
+   `$CONTAINER_NAME` scoping, `wt-remove`'s refuse-even-with-`--force` safety
+   (opposite of vanilla git), and `enable-worktrees` as the bootstrap-blocker
+   remedy.
 
 ## Target files or areas
 

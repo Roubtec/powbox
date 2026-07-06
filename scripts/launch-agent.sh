@@ -1892,17 +1892,22 @@ case ",${PODMAN_DEVICE_MODE}," in
 	;;
 esac
 
+CTX_COMPOSE_DIR=""
 CTX_COMPOSE_FILE=""
 cleanup_ctx_compose_file() {
 	if [ -n "$CTX_COMPOSE_FILE" ]; then
 		rm -f "$CTX_COMPOSE_FILE"
+	fi
+	if [ -n "$CTX_COMPOSE_DIR" ]; then
+		rmdir "$CTX_COMPOSE_DIR" 2>/dev/null || true
 	fi
 }
 trap cleanup_ctx_compose_file EXIT
 
 FINAL_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}")
 if [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
-	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX")"
+	CTX_COMPOSE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX")"
+	CTX_COMPOSE_FILE="${CTX_COMPOSE_DIR}/overlay.yml"
 	powbox_write_ctx_compose_overlay "$CTX_COMPOSE_FILE"
 	FINAL_COMPOSE_ARGS+=(-f "$CTX_COMPOSE_FILE")
 fi

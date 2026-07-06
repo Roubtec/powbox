@@ -53,9 +53,13 @@ every powbox container install and keep current that plugin automatically.
 ## Implementation notes
 
 1. **Install-if-absent, in the claude entrypoint hook:** if
-   `dev-skills@roubtec` is not installed (check `installed_plugins.json`
-   or `claude plugin list` output), run `marketplace add` + `plugin install`.
-   Both must be best-effort: bounded by a timeout (a few seconds each), all
+   `dev-skills@roubtec` is not installed **and enabled** (check
+   `claude plugin list`, which reports enable status —
+   `installed_plugins.json` alone only proves registration, not enablement),
+   run the idempotent `marketplace add` + `plugin install` (+ enable if the
+   plugin is registered but never enabled) sequence; decide and document
+   whether a plugin the user deliberately disabled is re-enabled or respected.
+   Every step must be best-effort: bounded by a timeout (a few seconds each), all
    failures logged to stderr with a clear "skills plugin unavailable, will
    retry next start" message, **never** failing container start.
 2. **Keep-current:** when the plugin IS already installed, run a non-blocking
@@ -66,7 +70,7 @@ every powbox container install and keep current that plugin automatically.
    otherwise note in the hook comment that auto-update can be toggled once per
    volume via `/plugin`.
 3. **Idempotency:** repeated container starts on a warm volume must be no-ops
-   (fast path: plugin present + update check). A cold/new claude-config volume
+   (fast path: plugin present and enabled + update check). A cold/new claude-config volume
    must converge to installed on first start with network, and self-heal on a
    later start if the first attempt happened offline.
 4. Namespacing note for docs/comments: skills arrive as

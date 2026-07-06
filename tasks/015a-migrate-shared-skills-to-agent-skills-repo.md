@@ -8,7 +8,7 @@
 The shared dev-workflow skills currently live inside the powbox repo and reach
 only powbox containers. They are moving to the standalone
 `Roubtec/agent-skills` plugin-marketplace repo so colleagues (who don't use
-powbox) can install them as the `dev-skills@agent-skills` Claude Code plugin,
+powbox) can install them as the `dev-skills@roubtec` Claude Code plugin,
 while powbox keeps consuming the same content. This task populates that repo;
 tasks 015b–015d rewire powbox afterwards.
 
@@ -29,7 +29,9 @@ tasks 015b–015d rewire powbox afterwards.
 
 - Target repo: `https://github.com/Roubtec/agent-skills` (currently **private**;
   main = `a2f4758`). Already scaffolded: `.claude-plugin/marketplace.json`
-  (marketplace name `agent-skills`, plugin entry `dev-skills` →
+  (marketplace name `roubtec` — the CLI reserves `agent-skills` for
+  github.com/anthropics repos, discovered during validation; repo name
+  unchanged — plugin entry `dev-skills` →
   `./plugins/dev-skills`), `plugins/dev-skills/.claude-plugin/plugin.json`
   (name `dev-skills`, **deliberately no `version` field** — Claude Code then
   versions by commit SHA, so every merge to main is a release), empty
@@ -139,7 +141,7 @@ The rulings below bind the implementer:
 ## Validation
 
 - `claude plugin marketplace add <local-clone-path>` +
-  `claude plugin install dev-skills@agent-skills` against the PR branch clone;
+  `claude plugin install dev-skills@roubtec` against the PR branch clone;
   confirm all 8 skills appear as `/dev-skills:<name>` and one of them executes
   sensibly in a scratch repo outside any powbox container.
 - JSON manifests still parse (`jq . .claude-plugin/marketplace.json`).

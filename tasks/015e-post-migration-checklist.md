@@ -19,15 +19,15 @@ order.
 3. **Colleague onboarding validation (one colleague, on jabko branch
    `add-dev-skill-support`):**
    - Open the repo in Claude Code, trust it → expect a prompt to install the
-     `agent-skills` marketplace + `dev-skills` plugin (driven by the
+     `roubtec` marketplace + `dev-skills` plugin (driven by the
      `.claude/settings.json` already on that branch).
    - Confirm `/dev-skills:address-review` (and one more skill) invocable.
    - **Empirical check of the undocumented path:** decline the prompt once,
      restart, note whether it re-prompts; then re-enable via `/plugin` →
-     Discover (or `claude plugin install dev-skills@agent-skills`). Record
+     Discover (or `claude plugin install dev-skills@roubtec`). Record
      what actually happens — this behavior is not documented and we advise
      colleagues based on this observation.
-   - Enable marketplace auto-update: `/plugin` → Marketplaces → `agent-skills`
+   - Enable marketplace auto-update: `/plugin` → Marketplaces → `roubtec`
      → Enable auto-update.
 4. **Merge the jabko branch** `add-dev-skill-support` — **only after** the
    plugin is populated (task 015a merged) and step 3 passes; before that, the
@@ -37,9 +37,9 @@ order.
    pointer and a gitignore commit, so no rebase is needed before merging.)
 5. **Announce to colleagues:** install one-liner
    (`claude plugin marketplace add Roubtec/agent-skills && claude plugin
-   install dev-skills@agent-skills`), the auto-update toggle, the namespaced
+   install dev-skills@roubtec`), the auto-update toggle, the namespaced
    invocation form, and the opt-out escape hatch
-   (`"dev-skills@agent-skills": false` in `.claude/settings.local.json` —
+   (`"dev-skills@roubtec": false` in `.claude/settings.local.json` —
    note: project-scope `true` beats user-settings `false`; only the local
    override wins).
 6. **Future shared repos:** copy the same `.claude/settings.json` block

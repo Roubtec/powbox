@@ -50,7 +50,7 @@ channels, and document the new custody split.
      story now excludes plugin-delivered skills).
    - `docker/shared/container-agent.md.tmpl` if it lists or explains skills.
    - Document the model: **plugin channel** = shared Claude skills
-     (`dev-skills@agent-skills`, SHA-versioned, merge-to-main = release);
+     (`dev-skills@roubtec`, SHA-versioned, merge-to-main = release);
      **bake + seed channel** = all Codex flavors + powbox-specific Claude
      skills; where each is edited (agent-skills repo vs powbox repo) and how
      each updates (marketplace update at session start vs update-skills.sh).

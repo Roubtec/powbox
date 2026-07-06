@@ -3,7 +3,7 @@
 ## Why this task exists
 
 Powbox containers deliberately consume the shared Claude skills through the
-**same channel as colleagues** — the `dev-skills@agent-skills` plugin — so the
+**same channel as colleagues** — the `dev-skills@roubtec` plugin — so the
 distribution path is dogfooded where it can be fixed fastest. This task makes
 every powbox container install and keep current that plugin automatically.
 
@@ -25,8 +25,8 @@ every powbox container install and keep current that plugin automatically.
   task is what brings them back, namespaced.
 - Verified plugin facts (current official docs, code.claude.com/docs):
   - Headless CLI: `claude plugin marketplace add Roubtec/agent-skills`,
-    `claude plugin install dev-skills@agent-skills` (user scope by default),
-    `claude plugin marketplace update agent-skills` (refreshes marketplace
+    `claude plugin install dev-skills@roubtec` (user scope by default),
+    `claude plugin marketplace update roubtec` (refreshes marketplace
     metadata AND updates installed plugins from it), `claude plugin update
     <plugin>@<marketplace>`.
   - State lives under `~/.claude/plugins/` (`cache/`,
@@ -53,13 +53,13 @@ every powbox container install and keep current that plugin automatically.
 ## Implementation notes
 
 1. **Install-if-absent, in the claude entrypoint hook:** if
-   `dev-skills@agent-skills` is not installed (check `installed_plugins.json`
+   `dev-skills@roubtec` is not installed (check `installed_plugins.json`
    or `claude plugin list` output), run `marketplace add` + `plugin install`.
    Both must be best-effort: bounded by a timeout (a few seconds each), all
    failures logged to stderr with a clear "skills plugin unavailable, will
    retry next start" message, **never** failing container start.
 2. **Keep-current:** when the plugin IS already installed, run a non-blocking
-   `claude plugin marketplace update agent-skills` (same timeout/tolerance
+   `claude plugin marketplace update roubtec` (same timeout/tolerance
    rules). Running it in the background so the container prompt isn't delayed
    is acceptable — decide and document. Additionally enable marketplace
    auto-update if a supported programmatic path exists (see caveat above);
@@ -84,7 +84,7 @@ approach is chosen.
 
 - Fresh container + fresh claude-config volume + network: after start,
   `claude plugin list` (or `installed_plugins.json`) shows
-  `dev-skills@agent-skills`, and `/dev-skills:address-review` is invocable.
+  `dev-skills@roubtec`, and `/dev-skills:address-review` is invocable.
 - Same container restarted: hook takes the fast path (observably cheap; no
   reinstall).
 - Container started with GitHub unreachable (e.g. firewall test or bogus

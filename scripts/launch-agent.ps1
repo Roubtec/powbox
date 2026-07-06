@@ -317,7 +317,7 @@ function Expand-Powbox-LeadingTilde ([string]$Path) {
 
 function Test-Powbox-AbsolutePath ([string]$Path) {
   if ($Path -match '^/' -or $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^\\\\' -or $Path -match '^//') { return $true }
-  return $false
+  return [System.IO.Path]::IsPathFullyQualified($Path)
 }
 
 function Resolve-Powbox-DirectoryPath ([string]$Path) {

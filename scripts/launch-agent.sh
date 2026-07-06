@@ -1902,7 +1902,7 @@ trap cleanup_ctx_compose_file EXIT
 
 FINAL_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}")
 if [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
-	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX")"
+	CTX_COMPOSE_FILE="$(mktemp "${TMPDIR:-/tmp}/powbox-compose-ctx.XXXXXX.yml")"
 	powbox_write_ctx_compose_overlay "$CTX_COMPOSE_FILE"
 	FINAL_COMPOSE_ARGS+=(-f "$CTX_COMPOSE_FILE")
 fi

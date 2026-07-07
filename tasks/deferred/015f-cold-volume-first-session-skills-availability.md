@@ -8,7 +8,9 @@ Follow-up to **Task 015c** (deliver the `dev-skills@roubtec` Claude plugin chann
 
 Net effect: on a brand-new volume, the eight shared skills (`/dev-skills:*`) are **absent for the very first task** — including model-side Skill-tool matching, since nothing is installed yet — until the background install finishes AND the user reloads/restarts. It self-heals from the second session on (the plugin is then present on the persistent volume). It is therefore a **one-time, first-session-only** gap per volume.
 
-Review thread: https://github.com/Roubtec/powbox/pull/93#discussion_r3537771174 (codex, P2).
+The **same root limitation applies to the warm-volume keep-current path**: when a start's `plugin update` pulls a *newer* agent-skills commit, that new version only takes effect at the next session start too (the running session keeps the previously-cached skills), so the session that triggered the update runs the **stale** skills. This is the already-documented "updates apply at the NEXT session start (a restart)" behavior in `seed-claude-plugins.sh`; it shares this task's fix surface (whatever makes a just-installed plugin live also makes a just-updated one live — e.g. a bounded post-auth sync before `exec`, or a `/reload-plugins` hint).
+
+Review threads (same underlying concern, both codex P2): first raised at https://github.com/Roubtec/powbox/pull/93#discussion_r3537771174 and re-raised (with the warm-update facet spelled out) at https://github.com/Roubtec/powbox/pull/93#discussion_r3538614735.
 
 ## Why this was deferred (why the branch is defendable)
 
@@ -31,6 +33,7 @@ Confirm the ordering/latency trade-off with the maintainer before implementing o
 ## Acceptance
 
 - Fresh container + fresh `claude-config` volume + network: the eight `/dev-skills:*` skills are invocable in the **first** session (no manual `/reload-plugins` or restart needed), OR the user is clearly prompted to reload if the chosen approach is hint-based.
+- Warm volume where a start's `plugin update` pulls a newer agent-skills commit: that session runs (or is clearly prompted to reload to run) the **updated** skills, not the stale cached ones — the same mechanism that closes the cold-start first-session gap covers this warm-update-staleness case.
 - Container start is still never blocked on a slow/offline network (the cold-volume path degrades to the existing background self-heal).
 - Warm-volume starts are unchanged (cheap keep-current, no added latency).
 - Offline cold start still starts normally and self-heals on a later online start.

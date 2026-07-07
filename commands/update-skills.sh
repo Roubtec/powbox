@@ -12,8 +12,8 @@ set -euo pipefail
 #   - the Claude dynamic workflows (wf-*.js).
 # It does NOT manage the 8 shared Claude skills (address-review, address-tasks,
 # address-tasks-serialized, address-reviews, rebase-stack, resolve-open-questions,
-# review-tasks, write-tasks): task 015b stopped baking them for Claude, and they
-# now arrive through the SEPARATE plugin channel — the `dev-skills@roubtec`
+# review-tasks, write-tasks): task 015b stopped baking them for Claude, and as of
+# task 015c they arrive through the SEPARATE plugin channel — the `dev-skills@roubtec`
 # marketplace plugin installed/kept-current at session start by
 # docker/shared/seed-claude-plugins.sh (they appear namespaced as
 # `/dev-skills:<name>`). This command neither seeds nor refreshes them; on a

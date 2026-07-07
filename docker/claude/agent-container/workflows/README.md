@@ -178,8 +178,8 @@ would want to call it.
    answer one slash command, so these workflows are prefixed `wf-`
    (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the
    same-named Claude skills. As of task 015b those Claude skill copies are no
-   longer baked/seeded for Claude — they now arrive through the `dev-skills@roubtec`
-   plugin and are invoked namespaced (`/dev-skills:address-tasks`,
+   longer baked/seeded for Claude, and as of task 015c they arrive through the
+   `dev-skills@roubtec` plugin and are invoked namespaced (`/dev-skills:address-tasks`,
    `/dev-skills:address-review`), so on Claude the bare `address-tasks`/`address-review`
    slash names no longer exist at all — the `wf-` prefix stays as the mechanism that
    keeps the workflows distinct, now doubly safe. The Codex skills stay baked.

@@ -116,12 +116,18 @@ fi
 if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
 	: >"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
-	echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)" >&2
+	# Announce to the LOG FILE, not the agent's TUI stderr: the contract above is
+	# that this bootstrap "stays quiet" — nothing from it should reach the exec'd
+	# agent's terminal, so even this one status line goes to the log.
+	echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)" >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
+	# Best-effort spawn: this hook runs under `set -e`, so guard the whole launch
+	# with a trailing `|| true`. Plugin work is strictly off the critical path;
+	# a failure to spawn the background job must NEVER abort container startup.
 	if command -v setsid >/dev/null 2>&1; then
 		setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the TUI.
 		bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
-	fi
+	fi || true
 	# Do not `wait`; the job is intentionally fire-and-forget.
 fi

@@ -136,20 +136,34 @@ main() {
 	case "$(plugin_state)" in
 	enabled)
 		# KEEP-CURRENT fast path. agent-skills manifests carry no version field, so
-		# every new commit on main is a new SHA-version → `marketplace update`
-		# pulls it. This is the ONLY network op on a warm volume, and it is
-		# best-effort: a failed refresh just leaves the already-installed skills in
-		# place. Applied at the NEXT session start (plugin updates need a restart).
+		# every new commit on main is a new SHA-version. Keeping current takes TWO
+		# distinct CLI steps — the CLI deliberately separates them (plugins-reference):
+		#   1. `plugin marketplace update <name>` refreshes the marketplace CATALOG
+		#      (makes the new commit-SHA version visible), and
+		#   2. `plugin update <id>` pulls that new version into the INSTALLED plugin
+		#      cache (~/.claude/plugins/cache).
+		# `marketplace update` alone only refreshes listings; without the follow-up
+		# `plugin update` a new agent-skills commit would show in the catalog while
+		# the container kept running the OLD cached skills until a manual update.
+		# Both are the only network ops on a warm volume and both are best-effort: a
+		# failed refresh just leaves the already-installed skills in place, and
+		# `plugin update` no-ops ("already at the latest version") when the cached
+		# SHA already matches. Updates apply at the NEXT session start (a restart).
 		#
-		# Per-marketplace AUTO-UPDATE (updates at session start without this call)
+		# Per-marketplace AUTO-UPDATE (updates at session start without these calls)
 		# is OFF by default for third-party marketplaces and its on-disk schema is
 		# undocumented — we do NOT enable it programmatically (guessing the schema
 		# could corrupt plugin state). A user can opt in once per volume via
 		# `/plugin` → Marketplaces; this startup refresh makes that optional.
-		log "present and enabled; refreshing marketplace '${MARKETPLACE_NAME}' (keep-current)"
+		log "present and enabled; refreshing marketplace '${MARKETPLACE_NAME}' + plugin '${PLUGIN_ID}' (keep-current)"
 		if run_bounded "marketplace update ${MARKETPLACE_NAME}" \
 			claude plugin marketplace update "$MARKETPLACE_NAME"; then
-			log "marketplace refresh complete (updates apply next session start)"
+			if run_bounded "plugin update ${PLUGIN_ID}" \
+				claude plugin update "$PLUGIN_ID"; then
+				log "keep-current complete (updates apply next session start)"
+			else
+				log "plugin update unavailable, will retry next start"
+			fi
 		else
 			log "marketplace refresh unavailable, will retry next start"
 		fi

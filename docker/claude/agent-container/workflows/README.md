@@ -177,8 +177,11 @@ would want to call it.
 1. **Namespace overlap (resolved).** A workflow and a same-named skill would both
    answer one slash command, so these workflows are prefixed `wf-`
    (`/wf-address-tasks`, `/wf-address-review`) to stay distinct from the
-   same-named Claude skills (`address-tasks`, `address-review`). When
-   promoting, we'd likely retire the Claude skill copies (the Codex skills stay).
+   same-named Claude skills. As of task 015b those Claude skill copies are no
+   longer baked/seeded for Claude — they now arrive through the `dev-skills@roubtec`
+   plugin and are invoked namespaced (`/dev-skills:address-tasks`,
+   `/dev-skills:address-review`), which also removes the bare-name collision with
+   the `/wf-*` workflows. The Codex skills stay baked.
 2. **Agent worktree management under the runtime (confirmed).**
    `wf-address-tasks.js` has its agents run `wt-enter` / `cd` themselves (see
    "Worktrees" above) rather than using runtime isolation. The load-bearing

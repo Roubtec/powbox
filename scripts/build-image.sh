@@ -101,6 +101,66 @@ POWBOX_COMMIT="$(powbox_commit)"
 # false rebuild.
 POWBOX_BASE_RECIPE_DIGEST="$("${ROOT_DIR}/scripts/base-source-digest.sh" 2>/dev/null || true)"
 
+# --- agent-skills fetch (host-side, credentials never enter the image) --------
+# The Codex skill palette baked into the agent image is the UNION of the two
+# in-tree powbox-specific Codex skills and the shared dev-workflow skills that
+# now live in Roubtec/agent-skills (task 015b). We fetch that repo HERE, on the
+# host, where the gh credential helper is already configured — never with a
+# `RUN git clone` inside the Dockerfile. The repo is currently PRIVATE, so an
+# in-Dockerfile clone would require plumbing a GitHub token into the build
+# (risking it landing in a layer or the build cache). Cloning host-side into a
+# gitignored staging dir under the build context, which the Dockerfile COPYs,
+# keeps every credential out of the image entirely. The HTTPS clone URL below
+# keeps working unchanged when the repo later flips public — no edit needed.
+AGENT_SKILLS_REPO_URL="https://github.com/Roubtec/agent-skills.git"
+AGENT_SKILLS_REF="main"
+AGENT_SKILLS_STAGING="${ROOT_DIR}/.agent-skills-src"
+AGENT_SKILLS_COMMIT="unknown"
+
+fetch_agent_skills() {
+	# Shallow-clone (or refresh an existing shallow clone of) agent-skills main
+	# into the staging dir, then record its HEAD SHA. FAILS LOUDLY: any fetch
+	# error aborts the build with a clear message rather than baking a stale or
+	# empty seed dir. Called only for targets that build the agent image.
+	local err="agent-skills fetch failed; cannot build the Codex skill palette.
+Ensure this host is authenticated to GitHub (gh auth status) and can reach
+${AGENT_SKILLS_REPO_URL} (${AGENT_SKILLS_REF}). No image was built."
+
+	echo "Fetching Roubtec/agent-skills (${AGENT_SKILLS_REF}) for the Codex skill bake..."
+	if [ -d "$AGENT_SKILLS_STAGING/.git" ] &&
+		[ "$(git -C "$AGENT_SKILLS_STAGING" config --get remote.origin.url 2>/dev/null)" = "$AGENT_SKILLS_REPO_URL" ]; then
+		# Refresh the existing shallow clone to the tip of the ref. Either step
+		# failing (fetch or reset) is fatal, so guard the whole pair with an if.
+		if ! { git -C "$AGENT_SKILLS_STAGING" fetch --depth 1 origin "$AGENT_SKILLS_REF" >/dev/null 2>&1 &&
+			git -C "$AGENT_SKILLS_STAGING" reset --hard FETCH_HEAD >/dev/null 2>&1; }; then
+			echo "$err" >&2
+			exit 1
+		fi
+	else
+		# Fresh (or mismatched) staging dir: clone shallow from scratch.
+		rm -rf "$AGENT_SKILLS_STAGING"
+		git clone --depth 1 --branch "$AGENT_SKILLS_REF" \
+			"$AGENT_SKILLS_REPO_URL" "$AGENT_SKILLS_STAGING" >/dev/null 2>&1 || {
+			echo "$err" >&2
+			exit 1
+		}
+	fi
+
+	AGENT_SKILLS_COMMIT="$(git -C "$AGENT_SKILLS_STAGING" rev-parse HEAD 2>/dev/null)" || {
+		echo "$err" >&2
+		exit 1
+	}
+
+	# The Dockerfile COPYs exactly this path; if it is missing the union bake
+	# would silently produce an empty set, so fail here instead.
+	if [ ! -d "$AGENT_SKILLS_STAGING/codex/dev-skills/skills" ]; then
+		echo "agent-skills fetch succeeded but codex/dev-skills/skills/ is missing" >&2
+		echo "at ${AGENT_SKILLS_COMMIT}; refusing to build an empty Codex skill bake." >&2
+		exit 1
+	fi
+	echo "agent-skills at ${AGENT_SKILLS_COMMIT}"
+}
+
 image_label() {
 	# Echo a label value off a local image, or empty when the image/label is absent.
 	local v
@@ -206,7 +266,7 @@ run_bake() {
 
 	cmd+=("${target_args[@]}")
 
-	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} POWBOX_COMMIT_CODEX=${POWBOX_COMMIT_CODEX} ${cmd[*]}"
+	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} POWBOX_COMMIT_CODEX=${POWBOX_COMMIT_CODEX} AGENT_SKILLS_COMMIT=${AGENT_SKILLS_COMMIT} ${cmd[*]}"
 	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
 		CODEX_VERSION="$CODEX_VERSION" \
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
@@ -215,6 +275,7 @@ run_bake() {
 		POWBOX_COMMIT="$POWBOX_COMMIT" \
 		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
 		POWBOX_BASE_IMAGE_ID="$(base_image_id)" \
+		AGENT_SKILLS_COMMIT="$AGENT_SKILLS_COMMIT" \
 		"${cmd[@]}"
 }
 
@@ -248,12 +309,19 @@ ensure_base_image() {
 # user requests --pull on the agent target we refresh the base first (cascading
 # any digest change into the agent layers automatically) and then build the
 # agent.
+# The agent image bakes the union of the in-tree Codex skills and the
+# agent-skills Codex skills, so fetch the latter before any agent bake. Done
+# here (not for the base-only target) so `build.sh base` never needs network
+# access to agent-skills, and so the fetch fails the build BEFORE the base build
+# when it is going to fail at all.
 case "$TARGET" in
 all)
+	fetch_agent_skills
 	run_bake "$PULL" "$NO_CACHE" base
 	run_bake false "$NO_CACHE" agent
 	;;
 agent)
+	fetch_agent_skills
 	if [ "$PULL" = true ]; then
 		run_bake true false base
 	else

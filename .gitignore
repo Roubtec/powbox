@@ -3,3 +3,6 @@
 .claude/worktrees/
 node_modules/
 .worktrees/
+# Host-side staging clone of Roubtec/agent-skills, populated by build.sh for the
+# Codex skill bake (see scripts/build-image.sh). Never committed.
+.agent-skills-src/

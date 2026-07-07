@@ -26,3 +26,8 @@ echo "powbox commit that built each layer of this image:"
 printf '  base:        %s\n' "$(read_commit base)"
 printf '  codex:       %s\n' "$(read_commit codex)"
 printf '  claude/top:  %s\n' "$(read_commit claude)"
+
+# The Codex skill bake pulls its shared skills from Roubtec/agent-skills; this is
+# the SHA of that snapshot (not a powbox commit), so it prints separately.
+printf '\nagent-skills snapshot baked into the Codex skill palette:\n'
+printf '  agent-skills: %s\n' "$(read_commit agent-skills)"

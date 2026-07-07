@@ -4,3 +4,7 @@
 node_modules
 tasks
 .worktrees
+# Keep the agent-skills staging clone's own .git out of the build context; the
+# Dockerfile only COPYs .agent-skills-src/codex/dev-skills/skills/ (build.sh
+# populates the dir). The staging dir itself is intentionally NOT ignored.
+.agent-skills-src/.git

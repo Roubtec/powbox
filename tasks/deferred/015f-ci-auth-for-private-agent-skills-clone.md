@@ -12,8 +12,8 @@ Review thread: https://github.com/Roubtec/powbox/pull/92#discussion_r3537649590
 ## The concern
 
 Task 015b added a host-side fetch of `Roubtec/agent-skills` to the agent build:
-`fetch_agent_skills` in `scripts/build-image.sh:120-162` (and `Fetch-AgentSkills`
-in `scripts/build-image.ps1:67-101`) unconditionally clones
+`fetch_agent_skills` in `scripts/build-image.sh:120-178` (and `Fetch-AgentSkills`
+in `scripts/build-image.ps1:67-113`) unconditionally clones
 `https://github.com/Roubtec/agent-skills.git` for any target that builds the
 agent image (`./build.sh agent` / `./build.sh all`).
 

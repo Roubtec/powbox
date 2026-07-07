@@ -42,9 +42,35 @@ AUTH_WAIT="${POWBOX_PLUGIN_AUTH_WAIT:-25}"       # seconds to wait for gh git au
 NET_TIMEOUT="${POWBOX_PLUGIN_NET_TIMEOUT:-120}"  # per network op (add/install/update)
 LIST_TIMEOUT="${POWBOX_PLUGIN_LIST_TIMEOUT:-30}" # per local `plugin list`
 
+# Cross-container serialization. The claude-config volume is a SINGLE global named
+# volume mounted into EVERY powbox container (scripts/launch-agent.sh
+# SHARED_VOLUMES), so ~/.claude/plugins is state SHARED across concurrently
+# running containers — not per-container. Two containers booting at once would
+# otherwise both observe `absent` (cold volume) or both run `plugin update` (warm
+# volume) and race `marketplace add`/`plugin install`/update against the same
+# on-disk cache, corrupting plugin metadata or failing one bootstrap. We serialize
+# the whole check-then-mutate with an flock on a lockfile that lives ON that shared
+# volume, so every container locks the same host inode and the advisory lock
+# actually serializes them (see run_locked). Bound the wait so a waiter never
+# hangs forever; on timeout it skips (the holder is converging the shared state on
+# our behalf and the result lands on the shared volume for us too).
+LOCK_FILE="${POWBOX_PLUGIN_LOCK_FILE:-$HOME/.claude/.powbox-plugin-bootstrap.lock}"
+LOCK_WAIT="${POWBOX_PLUGIN_LOCK_WAIT:-300}" # seconds to wait for a peer container's bootstrap
+
 # Never hang on an interactive git credential prompt (private repo, no creds):
 # fail fast so the bounded timeout is the worst case, not a wedged clone.
 export GIT_TERMINAL_PROMPT=0
+
+# Preserve the marketplace clone when a refresh fails offline. `marketplace
+# update`/`add` runs a `git pull` under the hood; by default a FAILED pull makes
+# the CLI DELETE the stale clone, which — on the persistent, shared claude-config
+# volume — would strip the marketplace listing (and orphan the installed plugin's
+# provenance) rather than simply leaving the old skills in place. The CLI keeps
+# the existing clone on pull failure only when this is truthy (its env-boolean
+# helper accepts 1/true/yes/on). So a warm start with GitHub unreachable now
+# no-ops the refresh and keeps the already-installed skills, instead of losing the
+# marketplace state until the next successful online start.
+export CLAUDE_CODE_PLUGIN_KEEP_MARKETPLACE_ON_FAILURE=1
 
 log() { printf '%s dev-skills-plugin: %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '-')" "$*"; }
 
@@ -115,6 +141,34 @@ run_bounded() {
 	return 1
 }
 
+run_locked() {
+	# run_locked <fn> — run <fn> holding an exclusive flock on the SHARED
+	# claude-config volume, so concurrent containers cannot race the check-then-
+	# mutate on ~/.claude/plugins. Best-effort like everything else here:
+	#   - no flock binary        -> run unlocked (degrade, never block startup),
+	#   - lockfile can't be opened-> run unlocked,
+	#   - lock still held past    -> skip; the holder is converging the shared
+	#     LOCK_WAIT                  state for us and the result is on the shared
+	#                                volume, so we simply keep-current next start.
+	if ! command -v flock >/dev/null 2>&1; then
+		"$@"
+		return
+	fi
+	mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
+	if ! exec 9>"$LOCK_FILE"; then
+		log "could not open lock file $LOCK_FILE; proceeding without cross-container lock"
+		"$@"
+		return
+	fi
+	if flock -w "$LOCK_WAIT" 9; then
+		"$@"
+		flock -u 9
+	else
+		log "another container holds the plugin bootstrap lock after ${LOCK_WAIT}s; skipping this start (it is converging the shared claude-config volume; we keep-current next start)"
+	fi
+	exec 9>&- # release the lockfile fd
+}
+
 main() {
 	# The plugin state lives on the persistent claude-config volume, so this is a
 	# once-per-volume install and a per-start keep-current — cheap on warm volumes.
@@ -133,6 +187,20 @@ main() {
 		log "GitHub git auth not detected after ${AUTH_WAIT}s; attempting anyway (self-heals next start if offline)"
 	fi
 
+	# Serialize the check-then-mutate across containers sharing the claude-config
+	# volume. Auth-wait above stays OUTSIDE the lock (it's the same for every boot
+	# and would only lengthen the hold); only the state query + mutations below run
+	# under it.
+	run_locked converge_plugin_state
+	return 0
+}
+
+# converge_plugin_state — the check-then-mutate that run_locked serializes across
+# containers sharing the claude-config volume (see LOCK_FILE rationale above). The
+# `plugin_state` query and every mutating branch below run while we hold the lock,
+# so a concurrent container cannot slip its own install/update between our state
+# check and the action we take on it.
+converge_plugin_state() {
 	case "$(plugin_state)" in
 	enabled)
 		# KEEP-CURRENT fast path. agent-skills manifests carry no version field, so

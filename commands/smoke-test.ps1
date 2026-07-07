@@ -105,6 +105,9 @@ else {
 # .root only in self-hosted mode when .worktrees is not a mountpoint (no host
 # litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
 # GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
+# The opa probe goes past a bare version check: it writes a tiny Rego policy +
+# test and runs `opa test`, exercising the exact `opa test policy/...` contract a
+# policy-repo's CI runs (and that motivated baking opa in).
 & (Join-Path $rootDir "scripts/smoke-test-image.ps1") `
   -Image $Image `
   -Commands @(
@@ -156,6 +159,8 @@ else {
     'cd /tmp/powbox-golangci-probe/repo && golangci-lint cache status | grep -q "Dir: $HOME/.cache/golangci-lint"'
     'cd /tmp/powbox-golangci-probe/repo && POWBOX_SELF_HOSTED=1 golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/.root"'
     'mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go/bin/powbox-gobin-probe" && chmod +x "$HOME/go/bin/powbox-gobin-probe" && powbox-gobin-probe | grep -qx gobin-ok'
+    'opa version >/dev/null'
+    'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"'
     'file --version >/dev/null'
     'printf test | xxd >/dev/null'
     'envsubst --version >/dev/null'

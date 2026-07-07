@@ -335,6 +335,38 @@ RUN GO_VERSION=1.26.4 \
     && rm /tmp/golangci-lint.tar.gz \
     && printf 'export PATH="$HOME/go/bin:$PATH"\n' > /etc/profile.d/golang-gobin.sh
 
+# Install Open Policy Agent (`opa`), the Rego policy engine projects use to
+# unit-test authorization policy (`opa test policy/…`). Baked so a session
+# touching Rego can run the same policy tests its CI does locally instead of
+# leaning on the GitHub workflow that installs OPA — general-purpose tooling on
+# the same footing as the Go/golangci binaries above. Fetched as the pinned,
+# statically linked release binary from GitHub and sha256-pinned per arch
+# (checksums from the release's opa_linux_<arch>_static.sha256); bump the
+# version and both sums together (https://github.com/open-policy-agent/opa/releases).
+# The `_static` build is used deliberately — a single self-contained binary with
+# no glibc coupling, dropped straight onto PATH (no tarball to unpack).
+#
+# Version note: this is ONE baked release. `opa test` on a policy suite is
+# version-tolerant in practice (validated against a 1.4.x-pinned project's
+# tests), but a project that pins OPA to a specific engine for exact builtin
+# fidelity (e.g. a matching envoy sidecar) should still pin/verify its own —
+# the baked binary is for running the test suites, not certifying that a policy
+# loads byte-for-byte in a particular deployed engine version.
+#
+# Placed low so an OPA bump never busts the expensive apt/gh/mssql/pwsh/npm
+# layers above.
+RUN OPA_VERSION=1.18.2 \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) opa_sha256=9903e5125ac281104f2c4b7371d10cc3b74a98933743fcbfc174f9bf0ab20de8 ;; \
+        arm64) opa_sha256=9cad2e67d375aded483823349173fe100d9701d37635908edadeb0298603c58c ;; \
+        *) echo "no pinned OPA checksum for architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/opa \
+        "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_${arch}_static" \
+    && echo "${opa_sha256}  /usr/local/bin/opa" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/opa
+
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
 # helpers are intentionally NOT baked here; the agent image

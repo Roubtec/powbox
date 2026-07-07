@@ -114,6 +114,7 @@ COPY --chmod=755 \
     docker/shared/entrypoint-claude-hook.sh \
     docker/shared/entrypoint-codex-hook.sh \
     docker/shared/seed-skills.sh \
+    docker/shared/seed-claude-plugins.sh \
     docker/shared/powbox-provenance \
     docker/shared/gitcat \
     docker/shared/gh-review-threads \

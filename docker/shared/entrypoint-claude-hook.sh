@@ -91,3 +91,37 @@ if [ -f "$AGENT_TMPL" ]; then
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
+
+# Bring the shared Claude skills in through the SAME channel colleagues use — the
+# `dev-skills@roubtec` plugin (Roubtec/agent-skills marketplace) — rather than the
+# image bake (task 015b stopped baking them). Skills arrive NAMESPACED as
+# `/dev-skills:<name>` (e.g. `/dev-skills:address-review`); model-side Skill-tool
+# matching by description is unaffected, only the slash-command muscle memory.
+#
+# Run OUTSIDE the epoch gate above: keep-current must run on EVERY start, not just
+# when the image is newer than the volume.
+#
+# DETACHED + BACKGROUNDED, by design (see seed-claude-plugins.sh for the full
+# rationale). Container start must NEVER be blocked or failed by plugin work, and
+# — critically — the private repo is cloned over HTTPS, which needs git's gh
+# credential helper. That helper is configured by `gh auth setup-git` in
+# entrypoint-core.sh, which runs AFTER this hook (this hook is the primary agent's
+# AGENT_SETUP_HOOK, fired early in entrypoint-core.sh; earlier still, in
+# entrypoint-agent.sh, when Claude is the non-primary agent). So we do NOT run the
+# install inline here — it would race/precede auth. Instead we detach the helper
+# with `setsid`, which briefly waits for the credential helper before touching the
+# network. `setsid … </dev/null` reparents it to init (no zombie under the exec'd
+# agent) and its stdout/stderr go to a LOG FILE, never the agent's TUI stderr.
+# Read the log to see what happened: cat "$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log".
+if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
+	: >"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
+	echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)" >&2
+	if command -v setsid >/dev/null 2>&1; then
+		setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
+	else
+		# Fallback if setsid is somehow unavailable: still detach from the TUI.
+		bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
+	fi
+	# Do not `wait`; the job is intentionally fire-and-forget.
+fi

@@ -4,7 +4,12 @@
 node_modules
 tasks
 .worktrees
-# Keep the agent-skills staging clone's own .git out of the build context; the
-# Dockerfile only COPYs .agent-skills-src/codex/dev-skills/skills/ (build.sh
-# populates the dir). The staging dir itself is intentionally NOT ignored.
-.agent-skills-src/.git
+# The agent-skills staging clone (build.sh populates it) holds a whole repo —
+# its own .git, docs, and non-Codex flavor dirs — but the Dockerfile COPYs only
+# .agent-skills-src/codex/dev-skills/skills/. Exclude the entire staging tree and
+# re-include just that subpath, so the rest (notably .git) never enters the build
+# context: smaller context uploads and no unrelated files exposed to a remote
+# builder. Nested re-include under an excluded parent is honored by both BuildKit
+# and buildah/podman.
+.agent-skills-src
+!.agent-skills-src/codex/dev-skills/skills

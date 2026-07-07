@@ -129,10 +129,16 @@ ${AGENT_SKILLS_REPO_URL} (${AGENT_SKILLS_REF}). No image was built."
 	echo "Fetching Roubtec/agent-skills (${AGENT_SKILLS_REF}) for the Codex skill bake..."
 	if [ -d "$AGENT_SKILLS_STAGING/.git" ] &&
 		[ "$(git -C "$AGENT_SKILLS_STAGING" config --get remote.origin.url 2>/dev/null)" = "$AGENT_SKILLS_REPO_URL" ]; then
-		# Refresh the existing shallow clone to the tip of the ref. Either step
-		# failing (fetch or reset) is fatal, so guard the whole pair with an if.
+		# Refresh the existing shallow clone to the tip of the ref, then hard-clean
+		# it: reset --hard only rewinds TRACKED files, so a stray dir left in the
+		# gitignored staging checkout (a local test, an interrupted manual edit)
+		# would otherwise survive into codex/dev-skills/skills/ and be baked as a
+		# phantom skill. `git clean -ffdx` removes every untracked/ignored path so
+		# Docker consumes exactly the fetched tree. Any step failing (fetch, reset,
+		# or clean) is fatal, so guard the whole sequence with an if.
 		if ! { git -C "$AGENT_SKILLS_STAGING" fetch --depth 1 origin "$AGENT_SKILLS_REF" >/dev/null 2>&1 &&
-			git -C "$AGENT_SKILLS_STAGING" reset --hard FETCH_HEAD >/dev/null 2>&1; }; then
+			git -C "$AGENT_SKILLS_STAGING" reset --hard FETCH_HEAD >/dev/null 2>&1 &&
+			git -C "$AGENT_SKILLS_STAGING" clean -ffdx >/dev/null 2>&1; }; then
 			echo "$err" >&2
 			exit 1
 		fi
@@ -156,6 +162,16 @@ ${AGENT_SKILLS_REPO_URL} (${AGENT_SKILLS_REF}). No image was built."
 	if [ ! -d "$AGENT_SKILLS_STAGING/codex/dev-skills/skills" ]; then
 		echo "agent-skills fetch succeeded but codex/dev-skills/skills/ is missing" >&2
 		echo "at ${AGENT_SKILLS_COMMIT}; refusing to build an empty Codex skill bake." >&2
+		exit 1
+	fi
+	# ...and it must actually hold at least one skill sub-directory. An existing
+	# but EMPTY tree (an unexpected upstream prune, a bad partial fetch) would
+	# otherwise pass the -d check yet bake nothing, since the Dockerfile RUN loops
+	# the child dirs. Fail loudly here instead, matching the whole function's
+	# no-silent-empty-seed contract.
+	if [ -z "$(find "$AGENT_SKILLS_STAGING/codex/dev-skills/skills" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]; then
+		echo "agent-skills at ${AGENT_SKILLS_COMMIT} has an empty codex/dev-skills/skills/;" >&2
+		echo "refusing to build an empty Codex skill bake." >&2
 		exit 1
 	fi
 	echo "agent-skills at ${AGENT_SKILLS_COMMIT}"

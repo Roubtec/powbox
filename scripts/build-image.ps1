@@ -81,8 +81,12 @@ $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
       if ($originUrl) { $originUrl = $originUrl.Trim() }
     }
     if ((Test-Path $gitDir) -and ($originUrl -eq $script:AgentSkillsRepoUrl)) {
+      # reset --hard only rewinds TRACKED files; a stray dir left in the
+      # gitignored staging checkout would survive into codex/dev-skills/skills/
+      # and bake as a phantom skill, so hard-clean untracked/ignored paths too.
       git -C $script:AgentSkillsStaging fetch --depth 1 origin $script:AgentSkillsRef *> $null
       if ($LASTEXITCODE -eq 0) { git -C $script:AgentSkillsStaging reset --hard FETCH_HEAD *> $null }
+      if ($LASTEXITCODE -eq 0) { git -C $script:AgentSkillsStaging clean -ffdx *> $null }
       if ($LASTEXITCODE -ne 0) { Write-Error $err; exit 1 }
     } else {
       if (Test-Path $script:AgentSkillsStaging) { Remove-Item -Recurse -Force $script:AgentSkillsStaging }
@@ -93,8 +97,16 @@ $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Write-Error $err; exit 1 }
     $script:AgentSkillsCommit = $sha.Trim()
     # The Dockerfile COPYs exactly this path; fail here rather than bake empty.
-    if (-not (Test-Path (Join-Path $script:AgentSkillsStaging "codex/dev-skills/skills"))) {
+    $skillsDir = Join-Path $script:AgentSkillsStaging "codex/dev-skills/skills"
+    if (-not (Test-Path $skillsDir)) {
       Write-Error "agent-skills at $($script:AgentSkillsCommit) is missing codex/dev-skills/skills/; refusing to build an empty Codex skill bake."
+      exit 1
+    }
+    # ...and it must hold at least one skill sub-directory. An existing but EMPTY
+    # tree would pass Test-Path yet bake nothing (the Dockerfile RUN loops the
+    # child dirs), so fail loudly here too.
+    if (-not (Get-ChildItem -Path $skillsDir -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+      Write-Error "agent-skills at $($script:AgentSkillsCommit) has an empty codex/dev-skills/skills/; refusing to build an empty Codex skill bake."
       exit 1
     }
     Write-Host "agent-skills at $($script:AgentSkillsCommit)"

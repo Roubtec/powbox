@@ -18,7 +18,7 @@ set -euo pipefail
 # `/usr/local/bin/seed-claude-plugins.sh` (baked from
 # `docker/shared/seed-claude-plugins.sh`; they appear namespaced as
 # `/dev-skills:<name>`). This command neither seeds nor refreshes them; on a
-# volume seeded before 015b it classifies each of those 8 as an ORPHAN (marked
+# volume seeded before 015b it classifies each of those 8 as an `orphan` (marked
 # `.powbox-seeded`, no longer baked) so `--prune` retires the stale Claude copies.
 #
 # Skills (folders) and Claude dynamic workflows (flat .js files) are baked into

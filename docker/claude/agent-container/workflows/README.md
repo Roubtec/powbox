@@ -180,9 +180,11 @@ would want to call it.
    same-named Claude skills. As of task 015b those Claude skill copies are no
    longer baked/seeded for Claude, and as of task 015c they arrive through the
    `dev-skills@roubtec` plugin and are invoked namespaced (`/dev-skills:address-tasks`,
-   `/dev-skills:address-review`), so on Claude the bare `address-tasks`/`address-review`
-   slash names no longer exist at all — the `wf-` prefix stays as the mechanism that
-   keeps the workflows distinct, now doubly safe. The Codex skills stay baked.
+   `/dev-skills:address-review`), so on a fresh or pruned `claude-config` volume the
+   bare `address-tasks`/`address-review` slash names no longer exist on Claude (a
+   volume seeded before 015b can still carry the old unnamespaced seeded copies until
+   `agent-update-skills --prune` retires them) — the `wf-` prefix stays as the mechanism
+   that keeps the workflows distinct, now doubly safe. The Codex skills stay baked.
 2. **Agent worktree management under the runtime (confirmed).**
    `wf-address-tasks.js` has its agents run `wt-enter` / `cd` themselves (see
    "Worktrees" above) rather than using runtime isolation. The load-bearing

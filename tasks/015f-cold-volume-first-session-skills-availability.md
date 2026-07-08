@@ -123,6 +123,30 @@ Fold into this task (each justified solely by the public flip):
 permanent. If `agent-skills` were ever re-privatized, the credential-helper wait
 would have to return — out of scope here.
 
+### Review threads subsumed by this cleanup (PR #93)
+
+Two P2 review threads on `seed-claude-plugins.sh` critique the auth-detection this
+task deletes. Both are resolved by the removal above (not by a patch), so they are
+deferred here rather than fixed on #93 — any fix on #93 would be thrown away when this
+task lands:
+
+- **`gh_git_helper_ready` false-positive** — `seed-claude-plugins.sh:84`
+  (discussion r3539665707). The check accepts any global `gh auth git-credential`
+  helper, so a host `.gitconfig` copied into the container (`entrypoint-core.sh` seeds
+  `GIT_CONFIG_GLOBAL` from the host copy before running its own `gh auth setup-git`)
+  that carries an absolute helper path such as `/opt/homebrew/bin/gh auth
+  git-credential` reads as "auth ready" — even though that path does not exist in the
+  container — so the private clone starts with a broken helper, fails, and does not
+  retry after the container-local helper is installed. Removing `gh_git_helper_ready`
+  (public repo → no helper needed) removes the false-positive entirely.
+- **No same-boot retry after slow pre-auth startup** — `seed-claude-plugins.sh:188`
+  (discussion r3539665715). When `gh auth setup-git` has not run within `AUTH_WAIT`
+  (e.g. a large or root-owned workspace whose pre-auth heal/safe.directory loop exceeds
+  the 25s default), the single install attempt runs with `GIT_TERMINAL_PROMPT=0` before
+  the helper exists, fails, and only self-heals on the next start. Making the cold
+  install synchronous with no auth dependency (public repo) removes the timing window
+  and the need for an in-boot retry.
+
 ## Logging
 
 Because the cold install is now **synchronous before the TUI starts**, its output

@@ -9,6 +9,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LAUNCH_SH="${ROOT_DIR}/scripts/launch-agent.sh"
 LAUNCH_PS="${ROOT_DIR}/scripts/launch-agent.ps1"
+CLAUDE_SH="${ROOT_DIR}/commands/claude-container.sh"
+CLAUDE_PS="${ROOT_DIR}/commands/claude-container.ps1"
+CODEX_SH="${ROOT_DIR}/commands/codex-container.sh"
+CODEX_PS="${ROOT_DIR}/commands/codex-container.ps1"
+POWBOX_SH="${ROOT_DIR}/shell/powbox.sh"
+POWBOX_PS="${ROOT_DIR}/shell/powbox.ps1"
 
 pass=0
 fail=0
@@ -92,6 +98,96 @@ run_ps_overlay() {
 	local ws="$1" overlay="$2"
 	shift 2
 	POWBOX_PRINT_CTX=1 POWBOX_CTX_OVERLAY_OUT="$overlay" pwsh -NoProfile -File "$LAUNCH_PS" codex "$ws" "$@" 2>&1
+}
+
+run_sh_command_wrapper() {
+	local ws="$1"
+	shift
+	POWBOX_PRINT_CTX=1 "$CLAUDE_SH" "$ws" "$@" 2>&1
+}
+
+run_ps_command_wrapper() {
+	local ws="$1"
+	shift
+	POWBOX_PRINT_CTX=1 pwsh -NoProfile -File "$CLAUDE_PS" "$ws" "$@" 2>&1
+}
+
+run_sh_codex_command_wrapper() {
+	local ws="$1"
+	shift
+	POWBOX_PRINT_CTX=1 "$CODEX_SH" "$ws" "$@" 2>&1
+}
+
+run_ps_codex_command_wrapper() {
+	local ws="$1"
+	shift
+	POWBOX_PRINT_CTX=1 pwsh -NoProfile -File "$CODEX_PS" "$ws" "$@" 2>&1
+}
+
+run_sh_profile_cc() {
+	local ws="$1"
+	shift
+	(
+		# shellcheck disable=SC2030 # Intentionally scoped to this profile-helper subshell.
+		export POWBOX_PRINT_CTX=1 POWBOX_CD_AFTER_LAUNCH=0
+		# shellcheck disable=SC1090 # Test deliberately sources the checkout-local helper.
+		source "$POWBOX_SH"
+		cc "$ws" "$@"
+	) 2>&1
+}
+
+run_ps_profile_cc() {
+	local ws="$1"
+	# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+	POWBOX_PRINT_CTX=1 \
+		POWBOX_CD_AFTER_LAUNCH=0 \
+		POWBOX_TEST_POWBOX_PS="$POWBOX_PS" \
+		POWBOX_TEST_WS="$ws" \
+		pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; cc "$env:POWBOX_TEST_WS"' 2>&1
+}
+
+run_ps_profile_cc_ctx() {
+	local ws="$1" ctx="$2"
+	# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+	POWBOX_PRINT_CTX=1 \
+		POWBOX_CD_AFTER_LAUNCH=0 \
+		POWBOX_TEST_POWBOX_PS="$POWBOX_PS" \
+		POWBOX_TEST_WS="$ws" \
+		POWBOX_TEST_CTX="$ctx" \
+		pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; cc "$env:POWBOX_TEST_WS" -Ctx "$env:POWBOX_TEST_CTX"' 2>&1
+}
+
+run_sh_profile_cx() {
+	local ws="$1"
+	shift
+	(
+		# shellcheck disable=SC2031 # Intentionally scoped to this profile-helper subshell.
+		export POWBOX_PRINT_CTX=1 POWBOX_CD_AFTER_LAUNCH=0
+		# shellcheck disable=SC1090 # Test deliberately sources the checkout-local helper.
+		source "$POWBOX_SH"
+		cx "$ws" "$@"
+	) 2>&1
+}
+
+run_ps_profile_cx() {
+	local ws="$1"
+	# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+	POWBOX_PRINT_CTX=1 \
+		POWBOX_CD_AFTER_LAUNCH=0 \
+		POWBOX_TEST_POWBOX_PS="$POWBOX_PS" \
+		POWBOX_TEST_WS="$ws" \
+		pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; cx "$env:POWBOX_TEST_WS"' 2>&1
+}
+
+run_ps_profile_cx_ctx() {
+	local ws="$1" ctx="$2"
+	# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+	POWBOX_PRINT_CTX=1 \
+		POWBOX_CD_AFTER_LAUNCH=0 \
+		POWBOX_TEST_POWBOX_PS="$POWBOX_PS" \
+		POWBOX_TEST_WS="$ws" \
+		POWBOX_TEST_CTX="$ctx" \
+		pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; cx "$env:POWBOX_TEST_WS" -Ctx "$env:POWBOX_TEST_CTX"' 2>&1
 }
 
 value_of() {
@@ -221,6 +317,64 @@ out_ps="$(run_ps "$ws")"
 assert_eq "explicit empty count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 0
 assert_eq "explicit empty hash" "$(value_of "$out_sh" CTX_HASH)" e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 assert_eq "explicit empty hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+
+echo "Test: launch wrappers without CLI ctx honor configured ctx"
+ws="$(new_ws wrapper-config)"
+mkdir -p "$ws/ref" "$ws/cli"
+cat >"$ws/.powbox.local.yml" <<'YAML'
+ctx:
+  - path: ref
+    name: ref
+    mode: rw
+YAML
+out_sh="$(run_sh_command_wrapper "$ws")"
+out_ps="$(run_ps_command_wrapper "$ws")"
+out_sh_profile="$(run_sh_profile_cc "$ws")"
+out_ps_profile="$(run_ps_profile_cc "$ws")"
+out_sh_codex="$(run_sh_codex_command_wrapper "$ws")"
+out_ps_codex="$(run_ps_codex_command_wrapper "$ws")"
+out_sh_profile_cx="$(run_sh_profile_cx "$ws")"
+out_ps_profile_cx="$(run_ps_profile_cx "$ws")"
+assert_eq "bash command wrapper config count" "$(value_of "$out_sh" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell command wrapper config count" "$(value_of "$out_ps" CTX_MOUNT_COUNT)" 1
+assert_eq "bash profile cc config count" "$(value_of "$out_sh_profile" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell profile cc config count" "$(value_of "$out_ps_profile" CTX_MOUNT_COUNT)" 1
+assert_eq "bash Codex command wrapper config count" "$(value_of "$out_sh_codex" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell Codex command wrapper config count" "$(value_of "$out_ps_codex" CTX_MOUNT_COUNT)" 1
+assert_eq "bash profile cx config count" "$(value_of "$out_sh_profile_cx" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell profile cx config count" "$(value_of "$out_ps_profile_cx" CTX_MOUNT_COUNT)" 1
+assert_contains "wrapper config target" "$out_sh" "CTX_MOUNT_0_NAME=ref"
+assert_contains "wrapper config mode" "$out_sh" "CTX_MOUNT_0_MODE=rw"
+assert_eq "command wrapper hash parity" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_ps" CTX_HASH)"
+assert_eq "profile wrapper hash parity" "$(value_of "$out_sh_profile" CTX_HASH)" "$(value_of "$out_ps_profile" CTX_HASH)"
+assert_eq "Codex command wrapper hash parity" "$(value_of "$out_sh_codex" CTX_HASH)" "$(value_of "$out_ps_codex" CTX_HASH)"
+assert_eq "profile cx wrapper hash parity" "$(value_of "$out_sh_profile_cx" CTX_HASH)" "$(value_of "$out_ps_profile_cx" CTX_HASH)"
+assert_eq "Claude and Codex command wrapper hashes match" "$(value_of "$out_sh" CTX_HASH)" "$(value_of "$out_sh_codex" CTX_HASH)"
+assert_eq "profile cc and cx wrapper hashes match" "$(value_of "$out_sh_profile" CTX_HASH)" "$(value_of "$out_sh_profile_cx" CTX_HASH)"
+out_sh_cli="$(run_sh_command_wrapper "$ws" --ctx "$ws/cli")"
+out_ps_cli="$(run_ps_command_wrapper "$ws" -Ctx "$ws/cli")"
+out_sh_profile_cli="$(run_sh_profile_cc "$ws" --ctx "$ws/cli")"
+out_ps_profile_cli="$(run_ps_profile_cc_ctx "$ws" "$ws/cli")"
+out_sh_codex_cli="$(run_sh_codex_command_wrapper "$ws" --ctx "$ws/cli")"
+out_ps_codex_cli="$(run_ps_codex_command_wrapper "$ws" -Ctx "$ws/cli")"
+out_sh_profile_cx_cli="$(run_sh_profile_cx "$ws" --ctx "$ws/cli")"
+out_ps_profile_cx_cli="$(run_ps_profile_cx_ctx "$ws" "$ws/cli")"
+assert_eq "bash command wrapper CLI ctx count" "$(value_of "$out_sh_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell command wrapper CLI ctx count" "$(value_of "$out_ps_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "bash profile cc CLI ctx count" "$(value_of "$out_sh_profile_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell profile cc CLI ctx count" "$(value_of "$out_ps_profile_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "bash Codex command wrapper CLI ctx count" "$(value_of "$out_sh_codex_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell Codex command wrapper CLI ctx count" "$(value_of "$out_ps_codex_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "bash profile cx CLI ctx count" "$(value_of "$out_sh_profile_cx_cli" CTX_MOUNT_COUNT)" 1
+assert_eq "PowerShell profile cx CLI ctx count" "$(value_of "$out_ps_profile_cx_cli" CTX_MOUNT_COUNT)" 1
+assert_contains "wrapper CLI ctx target" "$out_sh_cli" "CTX_MOUNT_0_NAME=cli"
+assert_not_contains "wrapper CLI ctx ignores configured ctx" "$out_sh_cli" "CTX_MOUNT_0_NAME=ref"
+assert_eq "command wrapper CLI ctx hash parity" "$(value_of "$out_sh_cli" CTX_HASH)" "$(value_of "$out_ps_cli" CTX_HASH)"
+assert_eq "profile wrapper CLI ctx hash parity" "$(value_of "$out_sh_profile_cli" CTX_HASH)" "$(value_of "$out_ps_profile_cli" CTX_HASH)"
+assert_eq "Codex command wrapper CLI ctx hash parity" "$(value_of "$out_sh_codex_cli" CTX_HASH)" "$(value_of "$out_ps_codex_cli" CTX_HASH)"
+assert_eq "profile cx wrapper CLI ctx hash parity" "$(value_of "$out_sh_profile_cx_cli" CTX_HASH)" "$(value_of "$out_ps_profile_cx_cli" CTX_HASH)"
+assert_eq "Claude and Codex command wrapper CLI hashes match" "$(value_of "$out_sh_cli" CTX_HASH)" "$(value_of "$out_sh_codex_cli" CTX_HASH)"
+assert_eq "profile cc and cx wrapper CLI hashes match" "$(value_of "$out_sh_profile_cli" CTX_HASH)" "$(value_of "$out_sh_profile_cx_cli" CTX_HASH)"
 
 echo "Test: CLI --ctx overrides configured ctx"
 ws="$(new_ws cli-override)"

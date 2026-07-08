@@ -132,12 +132,23 @@ plugin_state() {
 
 run_bounded() {
 	# run_bounded <label> <cmd...> — bounded, quiet-on-success, logs on failure.
+	# CAPTURE the command's combined stdout+stderr so a FAILURE can surface its
+	# underlying cause (auth vs offline vs CLI error) in the bootstrap log — this
+	# log is the script's only diagnostic surface, so a bare "step failed" line
+	# without the command's own message makes bootstraps hard to debug. On SUCCESS
+	# we discard the output to honor the quiet-on-success contract.
 	local label="$1"
 	shift
-	if timeout "$NET_TIMEOUT" "$@" >/dev/null 2>&1; then
+	local out _line
+	if out="$(timeout "$NET_TIMEOUT" "$@" 2>&1)"; then
 		return 0
 	fi
 	log "step failed or timed out: $label"
+	if [ -n "$out" ]; then
+		while IFS= read -r _line; do
+			log "  | $_line"
+		done <<<"$out"
+	fi
 	return 1
 }
 

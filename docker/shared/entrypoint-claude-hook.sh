@@ -115,11 +115,19 @@ fi
 # Read the log to see what happened: cat "$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log".
 if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
-	: >"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
-	# Announce to the LOG FILE, not the agent's TUI stderr: the contract above is
-	# that this bootstrap "stays quiet" — nothing from it should reach the exec'd
-	# agent's terminal, so even this one status line goes to the log.
-	echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)" >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
+	# APPEND, never truncate. This log lives on the claude-config volume, which is a
+	# SINGLE named volume shared by EVERY powbox container (see seed-claude-plugins.sh's
+	# cross-container note). A `: >` truncation on each start would wipe a PEER
+	# container's in-progress bootstrap log, making concurrent-bootstrap debugging
+	# unreliable. Prepend a dated, container-tagged separator so each boot's block
+	# stays easy to find in the appended file instead. Everything still goes to the
+	# LOG FILE, not the agent's TUI stderr: the contract above is that this bootstrap
+	# "stays quiet" — nothing from it should reach the exec'd agent's terminal, so
+	# even this status line goes to the log.
+	{
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)"
+	} >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
 	# Best-effort spawn: this hook runs under `set -e`, so guard the whole launch
 	# with a trailing `|| true`. Plugin work is strictly off the critical path;
 	# a failure to spawn the background job must NEVER abort container startup.

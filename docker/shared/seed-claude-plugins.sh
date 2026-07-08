@@ -16,6 +16,12 @@
 #     plugins once at startup; a plugin that appears after that is invisible until
 #     /reload-plugins). On timeout/lock-miss the remaining work is detached to a
 #     background self-heal and the entrypoint proceeds — start is NEVER wedged.
+#     The foreground path is GATED on POWBOX_PLUGIN_ALLOW_SYNC_COLD, which the hook
+#     sets only when Claude is the PRIMARY agent. When Claude is NON-PRIMARY (e.g.
+#     PRIMARY_AGENT=codex) this hook runs during entrypoint-agent.sh's non-primary
+#     seeding — BEFORE init-firewall.sh runs and BEFORE the primary (Codex) prompt —
+#     so the cold install is BACKGROUNDED instead: it must not run network ops ahead
+#     of the firewall, nor delay a prompt that never uses these skills.
 #   - enabled (warm keep-current) -> self-forked to the BACKGROUND so a warm start
 #     adds no latency. A keep-current that pulls a newer commit applies next
 #     session (accepted one-session staleness — plugins load once at startup).
@@ -38,7 +44,25 @@
 
 set -uo pipefail
 
+# spawn_background re-execs this script by path (`bash "$SELF"`), which must resolve from
+# ANY working directory. BASH_SOURCE/$0 can be a bare `seed-claude-plugins.sh` (PATH
+# invocation) or a CWD-relative path; a detached background run whose CWD differs from the
+# launcher's would then fail to find it. Absolutize up front: keep an already-absolute
+# path; else prefer a `command -v` PATH lookup that resolves to an absolute path; else
+# fall back to dirname+pwd for a CWD-relative source. Best-effort — if none resolves,
+# spawn_background simply fails to launch (the foreground already did what it could).
 SELF="${BASH_SOURCE[0]:-$0}"
+case "$SELF" in
+/*) ;; # already absolute — nothing to do
+*)
+	if _abs="$(command -v "$SELF" 2>/dev/null)" && [ "${_abs#/}" != "$_abs" ]; then
+		SELF="$_abs"
+	elif [ -e "$SELF" ]; then
+		SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")" || true
+	fi
+	unset _abs
+	;;
+esac
 
 MARKETPLACE_REPO="Roubtec/agent-skills"
 MARKETPLACE_NAME="roubtec"
@@ -65,8 +89,24 @@ LIST_TIMEOUT="${POWBOX_PLUGIN_LIST_TIMEOUT:-30}" # per local `plugin list`
 # On either bound we detach the remaining work to the background and proceed, so the
 # worst case is exactly today's behavior (skills arrive a session late), never a
 # wedged prompt.
+# The full foreground worst case also includes the two bounded `claude plugin list`
+# state queries — the unlocked routing query in main() plus the authoritative one inside
+# the lock in converge_plugin_state — each capped by LIST_TIMEOUT. So the true ceiling is
+# ~COLD_INSTALL_BOUND + COLD_LOCK_WAIT + 2*LIST_TIMEOUT, not the install+lock bound alone.
 COLD_INSTALL_BOUND="${POWBOX_PLUGIN_COLD_INSTALL_BOUND:-50}" # total foreground install budget
 COLD_LOCK_WAIT="${POWBOX_PLUGIN_COLD_LOCK_WAIT:-15}"         # foreground wait for a peer's lock
+
+# Gate for the SYNCHRONOUS cold-foreground path. That path is only worthwhile — and only
+# SAFE — when Claude is the PRIMARY agent: its hook then runs from entrypoint-core.sh
+# AFTER init-firewall.sh, and the session being launched is the Claude one whose FIRST
+# prompt benefits from the skills being live. When Claude is NON-PRIMARY
+# (PRIMARY_AGENT=codex) the hook runs from entrypoint-agent.sh's non-primary seeding,
+# BEFORE the firewall is initialized and BEFORE the primary (Codex) prompt, so a
+# foreground cold install would run network ops ahead of the firewall and delay Codex
+# startup for a plugin set that session never uses. The hook passes
+# POWBOX_PLUGIN_ALLOW_SYNC_COLD=1 only in the primary-Claude case; the default 1 keeps a
+# by-hand run (no hook, no PRIMARY_AGENT) doing the immediate foreground install.
+ALLOW_SYNC_COLD="${POWBOX_PLUGIN_ALLOW_SYNC_COLD:-1}"
 
 # Cross-container serialization. The claude-config volume is a SINGLE global named
 # volume mounted into EVERY powbox container (scripts/launch-agent.sh
@@ -282,16 +322,26 @@ main() {
 		log "installed but DISABLED — respecting the user's choice, not re-enabling (re-enable via /plugin or 'claude plugin enable ${PLUGIN_ID}')"
 		;;
 	absent)
-		# COLD case: install synchronously in the foreground, bounded, before the
-		# entrypoint `exec`s claude, so the skills are live THIS session. A short lock
-		# wait keeps a peer bootstrap from blocking our startup; on lock-miss we detach
-		# to the background self-heal and proceed.
-		PLUGIN_SYNC_COLD=1
-		status_line "installing dev-skills plugin…"
-		if ! run_locked "$COLD_LOCK_WAIT" converge_plugin_state; then
-			log "peer holds the bootstrap lock after ${COLD_LOCK_WAIT}s; deferring cold install to background self-heal"
-			status_line "still installing in the background; run /reload-plugins shortly (or restart) if /dev-skills:* commands are missing"
+		if [ "$ALLOW_SYNC_COLD" != 1 ]; then
+			# Claude is NON-PRIMARY (e.g. PRIMARY_AGENT=codex): the foreground cold path is
+			# neither wanted nor safe here — this hook runs during entrypoint-agent.sh's
+			# non-primary seeding, BEFORE the firewall is initialized and BEFORE the primary
+			# prompt. Background the install so it self-heals like the pre-015g detached
+			# model; the skills land in the next (i.e. first real) Claude session.
+			log "cold volume, but foreground install not authorized (non-primary Claude session); backgrounding install"
 			spawn_background
+		else
+			# COLD case: install synchronously in the foreground, bounded, before the
+			# entrypoint `exec`s claude, so the skills are live THIS session. A short lock
+			# wait keeps a peer bootstrap from blocking our startup; on lock-miss we detach
+			# to the background self-heal and proceed.
+			PLUGIN_SYNC_COLD=1
+			status_line "installing dev-skills plugin…"
+			if ! run_locked "$COLD_LOCK_WAIT" converge_plugin_state; then
+				log "peer holds the bootstrap lock after ${COLD_LOCK_WAIT}s; deferring cold install to background self-heal"
+				status_line "still installing in the background; run /reload-plugins shortly (or restart) if /dev-skills:* commands are missing"
+				spawn_background
+			fi
 		fi
 		;;
 	unknown | *)

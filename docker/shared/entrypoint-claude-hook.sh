@@ -101,18 +101,22 @@ fi
 # Run OUTSIDE the epoch gate above: keep-current must run on EVERY start, not just
 # when the image is newer than the volume.
 #
-# DETACHED + BACKGROUNDED, by design (see seed-claude-plugins.sh for the full
-# rationale). Container start must NEVER be blocked or failed by plugin work, and
-# — critically — the private repo is cloned over HTTPS, which needs git's gh
-# credential helper. That helper is configured by `gh auth setup-git` in
-# entrypoint-core.sh, which runs AFTER this hook (this hook is the primary agent's
-# AGENT_SETUP_HOOK, fired early in entrypoint-core.sh; earlier still, in
-# entrypoint-agent.sh, when Claude is the non-primary agent). So we do NOT run the
-# install inline here — it would race/precede auth. Instead we detach the helper
-# with `setsid`, which briefly waits for the credential helper before touching the
-# network. `setsid … </dev/null` reparents it to init (no zombie under the exec'd
-# agent) and its stdout/stderr go to a LOG FILE, never the agent's TUI stderr.
-# Read the log to see what happened: cat "$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log".
+# SYNCHRONOUS, but bounded — and only the COLD case actually runs work in the
+# foreground (see seed-claude-plugins.sh for the full rationale). The agent-skills
+# repo is PUBLIC, so `claude plugin marketplace add` clones it anonymously with no
+# git credential helper — there is no dependency on `gh auth setup-git` and hence no
+# auth-ordering race, which is what previously forced this whole job to detach and
+# wait for that helper. So we call the script inline:
+#   - on a COLD (fresh) claude-config volume the script installs the plugin in the
+#     FOREGROUND (bounded ~COLD_INSTALL_BOUND + COLD_LOCK_WAIT) before we return and
+#     the entrypoint `exec`s claude, so the /dev-skills:* skills are live in the FIRST
+#     session; on timeout/lock-miss it detaches the remainder to a background
+#     self-heal and returns, so start is never wedged;
+#   - on a WARM volume the script self-backgrounds the cheap keep-current and returns
+#     immediately, adding no start latency.
+# stdout is left attached to the terminal so the script's single concise status line
+# is visible before Claude grabs the alternate screen buffer; stderr and all debug go
+# to the LOG FILE. Read it to see what happened: cat the log path below.
 if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
 	# APPEND, never truncate. This log lives on the claude-config volume, which is a
@@ -120,22 +124,19 @@ if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.
 	# cross-container note). A `: >` truncation on each start would wipe a PEER
 	# container's in-progress bootstrap log, making concurrent-bootstrap debugging
 	# unreliable. Prepend a dated, container-tagged separator so each boot's block
-	# stays easy to find in the appended file instead. Everything still goes to the
-	# LOG FILE, not the agent's TUI stderr: the contract above is that this bootstrap
-	# "stays quiet" — nothing from it should reach the exec'd agent's terminal, so
-	# even this status line goes to the log.
+	# stays easy to find in the appended file instead.
 	{
 		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-		echo "[claude-hook] dev-skills@roubtec plugin: bootstrapping in background (log: $PLUGIN_BOOTSTRAP_LOG)"
+		echo "[claude-hook] dev-skills@roubtec plugin: converging (cold install synchronous, warm keep-current backgrounded; log: $PLUGIN_BOOTSTRAP_LOG)"
 	} >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
-	# Best-effort spawn: this hook runs under `set -e`, so guard the whole launch
-	# with a trailing `|| true`. Plugin work is strictly off the critical path;
-	# a failure to spawn the background job must NEVER abort container startup.
-	if command -v setsid >/dev/null 2>&1; then
-		setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
-	else
-		# Fallback if setsid is somehow unavailable: still detach from the TUI.
-		bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$PLUGIN_BOOTSTRAP_LOG" 2>&1 &
-	fi || true
-	# Do not `wait`; the job is intentionally fire-and-forget.
+	# Best-effort: this hook runs under `set -e`, so guard the call with a trailing
+	# `|| true`. Plugin work is strictly off the critical path — a failure here must
+	# NEVER abort container startup, and the script itself is bounded so a synchronous
+	# call cannot wedge the prompt. POWBOX_PLUGIN_LOG points the script's debug log at
+	# the same shared file; stderr is folded into it while stdout stays on the terminal.
+	# SC2094: the env var and the stderr redirect name the same path, but the script
+	# does not read that file — it only appends — so there is no read/write conflict.
+	# shellcheck disable=SC2094
+	POWBOX_PLUGIN_LOG="$PLUGIN_BOOTSTRAP_LOG" \
+		bash /usr/local/bin/seed-claude-plugins.sh 2>>"$PLUGIN_BOOTSTRAP_LOG" || true
 fi

@@ -7,6 +7,40 @@ else
 	/usr/local/bin/init-firewall.sh
 fi
 
+# Non-primary Claude dev-skills plugin — converge it HERE, AFTER init-firewall.sh, so its
+# network ops (marketplace add/install/update, all to the PUBLIC Roubtec/agent-skills over
+# HTTPS) are ordered after the firewall, and DETACHED so they never delay the primary
+# agent's prompt. When Claude IS the primary agent its own setup hook (below) does this
+# inline, also post-firewall; the non-primary Claude hook already ran in entrypoint-agent.sh
+# (pre-firewall) and deliberately skipped the plugin, leaving it to us.
+# POWBOX_PLUGIN_BACKGROUND=1 takes the script's patient background branch (full bounds,
+# log-only, no status line, no re-spawn); we point its log at Claude's config dir
+# (CLAUDE_CONFIG_DIR is a Dockerfile ENV), not the primary agent's. `setsid` reparents the
+# detached run past the entrypoint's final `exec`. Best-effort: it must never affect startup.
+if [ "${PRIMARY_AGENT:-claude}" != claude ] &&
+	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
+	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
+	mkdir -p "$_claude_cfg" 2>/dev/null || true
+	{
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall non-primary Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[core] dev-skills@roubtec plugin: converging non-primary Claude post-firewall, detached (log: $_claude_plugin_log)"
+	} >>"$_claude_plugin_log" 2>/dev/null || true
+	# SC2094: POWBOX_PLUGIN_LOG and the stderr redirect name the same path, but the script
+	# only appends to it (never reads), so there is no read/write conflict.
+	if command -v setsid >/dev/null 2>&1; then
+		# shellcheck disable=SC2094
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
+			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+	else
+		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
+		# shellcheck disable=SC2094
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
+			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+	fi
+	unset _claude_cfg _claude_plugin_log
+fi
+
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
 AGENT_SETUP_HOOK="${AGENT_SETUP_HOOK:-}"
 GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/node/.config/gh}"

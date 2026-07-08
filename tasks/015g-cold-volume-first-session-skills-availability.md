@@ -1,4 +1,4 @@
-# Task 015f — Make the dev-skills plugin available in the FIRST session on a cold claude-config volume
+# Task 015g — Make the dev-skills plugin available in the FIRST session on a cold claude-config volume
 
 Follow-up to **Task 015c** (deliver the `dev-skills@roubtec` Claude plugin channel, PR #93).
 
@@ -117,7 +117,8 @@ Fold into this task (each justified solely by the public flip):
     prompt, but keep it.
 - **Sibling task:** the CI-auth `015f` (on task/015b, PR #92) is **resolved** by the
   same public flip and has been archived to `tasks/done/` with no code change.
-  Cross-referenced here so the two 015f records stay coherent.
+  Cross-referenced here to explain the numbering: that retired CI-auth task keeps
+  `015f`, so this cold-volume follow-up is renumbered `015g` to avoid clashing with it.
 
 **Assumption:** this task takes the 015e public flip as the plan of record and
 permanent. If `agent-skills` were ever re-privatized, the credential-helper wait
@@ -165,8 +166,8 @@ the earlier, now-resolved threads that first raised them are noted for provenanc
 
 Because the cold install is now **synchronous before the TUI starts**, its output
 appears on the normal terminal *before* Claude grabs the alternate screen buffer —
-so a single concise status line ("installing dev-skills plugin… done") is fine and
-even helpful. Keep everything else as debug to
+so a couple of concise status lines ("installing dev-skills plugin…" then a terminal
+"ready…"/"still installing…") are fine and even helpful. Keep everything else as debug to
 `$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log`. Do **not** invest in mid-session
 user hints: a backgrounded job's stdout cannot pierce the alternate buffer (it is
 visible only after session end), so hint-based approaches are useless here.

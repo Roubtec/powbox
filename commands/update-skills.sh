@@ -14,8 +14,9 @@ set -euo pipefail
 # address-tasks-serialized, address-reviews, rebase-stack, resolve-open-questions,
 # review-tasks, write-tasks): task 015b stopped baking them for Claude, and as of
 # task 015c they arrive through the SEPARATE plugin channel — the `dev-skills@roubtec`
-# marketplace plugin installed/kept-current at session start by
-# docker/shared/seed-claude-plugins.sh (they appear namespaced as
+# marketplace plugin installed/kept-current at session start by the image-baked
+# `/usr/local/bin/seed-claude-plugins.sh` (baked from
+# `docker/shared/seed-claude-plugins.sh`; they appear namespaced as
 # `/dev-skills:<name>`). This command neither seeds nor refreshes them; on a
 # volume seeded before 015b it classifies each of those 8 as an ORPHAN (marked
 # `.powbox-seeded`, no longer baked) so `--prune` retires the stale Claude copies.

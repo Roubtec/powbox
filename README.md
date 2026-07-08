@@ -171,7 +171,7 @@ Every skill powbox seeds carries a hidden `.powbox-seeded` ownership marker (rec
 Per-repo skills (e.g. `.claude/skills/<name>/` or `.agents/skills/<name>/`) still take precedence at invoke time, so any repo can override an individual skill without losing the rest.
 User-added skills in the same volume directory are unaffected by image rebuilds.
 
-Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`).
+Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`) — the exception being the plugin-delivered shared skills, which Claude invokes under their plugin namespace (`/dev-skills:<skill-name>`, e.g. `/dev-skills:address-review`), per the "Invocation change" note above.
 
 ### Claude Dynamic Workflows (experimental)
 

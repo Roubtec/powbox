@@ -52,6 +52,15 @@ variable "POWBOX_BASE_IMAGE_ID" {
   default = ""
 }
 
+# HEAD SHA of the Roubtec/agent-skills snapshot whose Codex skills are baked into
+# the agent image. Fetched host-side by scripts/build-image.{sh,ps1} into the
+# gitignored .agent-skills-src staging dir; recorded on the image so a container
+# can tell which agent-skills snapshot it carries (powbox-provenance /
+# /home/node/.powbox/agent-skills.commit).
+variable "AGENT_SKILLS_COMMIT" {
+  default = "unknown"
+}
+
 target "_common" {
   context = "."
   output = ["type=docker"]
@@ -80,6 +89,7 @@ target "agent" {
     POWBOX_COMMIT = POWBOX_COMMIT
     POWBOX_COMMIT_CODEX = POWBOX_COMMIT_CODEX
     POWBOX_BASE_IMAGE_ID = POWBOX_BASE_IMAGE_ID
+    AGENT_SKILLS_COMMIT = AGENT_SKILLS_COMMIT
   }
 }
 

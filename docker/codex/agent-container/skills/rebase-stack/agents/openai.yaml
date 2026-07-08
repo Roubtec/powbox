@@ -1,4 +1,0 @@
-interface:
-  display_name: "Rebase Stack"
-  short_description: "Rebase dependent branch stacks"
-  default_prompt: "Use $rebase-stack to restack the current branch chain onto main."

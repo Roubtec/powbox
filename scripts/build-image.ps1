@@ -48,6 +48,70 @@ try {
     $script:PowboxBaseRecipeDigest = ""
   }
 
+  # --- agent-skills fetch (host-side, credentials never enter the image) ------
+  # The Codex skill palette baked into the agent image is the UNION of the two
+  # in-tree powbox-specific Codex skills and the shared dev-workflow skills that
+  # now live in Roubtec/agent-skills (task 015b). Fetch that repo HERE, on the
+  # host where the gh credential helper is configured - never with a
+  # `RUN git clone` inside the Dockerfile. The repo is currently PRIVATE, so an
+  # in-Dockerfile clone would need a token plumbed into the build (risking it
+  # landing in a layer/cache). Cloning host-side into a gitignored staging dir
+  # under the build context, which the Dockerfile COPYs, keeps every credential
+  # out of the image. The HTTPS clone URL keeps working unchanged when the repo
+  # later flips public - no edit needed.
+  $script:AgentSkillsRepoUrl = "https://github.com/Roubtec/agent-skills.git"
+  $script:AgentSkillsRef = "main"
+  $script:AgentSkillsStaging = Join-Path $rootDir ".agent-skills-src"
+  $script:AgentSkillsCommit = "unknown"
+
+  function Fetch-AgentSkills {
+    # Shallow-clone (or refresh an existing shallow clone of) agent-skills main
+    # into the staging dir, then record its HEAD SHA. FAILS LOUDLY: any fetch
+    # error aborts the build rather than baking a stale/empty seed dir.
+    $err = @"
+agent-skills fetch failed; cannot build the Codex skill palette.
+Ensure this host is authenticated to GitHub (gh auth status) and can reach
+$($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
+"@
+    Write-Host "Fetching Roubtec/agent-skills ($($script:AgentSkillsRef)) for the Codex skill bake..."
+    $gitDir = Join-Path $script:AgentSkillsStaging ".git"
+    $originUrl = ""
+    if (Test-Path $gitDir) {
+      $originUrl = (git -C $script:AgentSkillsStaging config --get remote.origin.url 2>$null)
+      if ($originUrl) { $originUrl = $originUrl.Trim() }
+    }
+    if ((Test-Path $gitDir) -and ($originUrl -eq $script:AgentSkillsRepoUrl)) {
+      # reset --hard only rewinds TRACKED files; a stray dir left in the
+      # gitignored staging checkout would survive into codex/dev-skills/skills/
+      # and bake as a phantom skill, so hard-clean untracked/ignored paths too.
+      git -C $script:AgentSkillsStaging fetch --depth 1 origin $script:AgentSkillsRef *> $null
+      if ($LASTEXITCODE -eq 0) { git -C $script:AgentSkillsStaging reset --hard FETCH_HEAD *> $null }
+      if ($LASTEXITCODE -eq 0) { git -C $script:AgentSkillsStaging clean -ffdx *> $null }
+      if ($LASTEXITCODE -ne 0) { Write-Error $err; exit 1 }
+    } else {
+      if (Test-Path $script:AgentSkillsStaging) { Remove-Item -Recurse -Force $script:AgentSkillsStaging }
+      git clone --depth 1 --branch $script:AgentSkillsRef $script:AgentSkillsRepoUrl $script:AgentSkillsStaging *> $null
+      if ($LASTEXITCODE -ne 0) { Write-Error $err; exit 1 }
+    }
+    $sha = git -C $script:AgentSkillsStaging rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { Write-Error $err; exit 1 }
+    $script:AgentSkillsCommit = $sha.Trim()
+    # The Dockerfile COPYs exactly this path; fail here rather than bake empty.
+    $skillsDir = Join-Path $script:AgentSkillsStaging "codex/dev-skills/skills"
+    if (-not (Test-Path $skillsDir)) {
+      Write-Error "agent-skills at $($script:AgentSkillsCommit) is missing codex/dev-skills/skills/; refusing to build an empty Codex skill bake."
+      exit 1
+    }
+    # ...and it must hold at least one skill sub-directory. An existing but EMPTY
+    # tree would pass Test-Path yet bake nothing (the Dockerfile RUN loops the
+    # child dirs), so fail loudly here too.
+    if (-not (Get-ChildItem -Path $skillsDir -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+      Write-Error "agent-skills at $($script:AgentSkillsCommit) has an empty codex/dev-skills/skills/; refusing to build an empty Codex skill bake."
+      exit 1
+    }
+    Write-Host "agent-skills at $($script:AgentSkillsCommit)"
+  }
+
   function Get-ImageLabel {
     param([string]$Image, [string]$Label)
     $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
@@ -154,7 +218,7 @@ try {
 
     $docker_args += $Targets
 
-    Write-Host "Running: CLAUDE_CODE_VERSION=$ClaudeVersion CODEX_VERSION=$CodexVersion POWBOX_COMMIT=$($script:PowboxCommit) POWBOX_COMMIT_CODEX=$($script:PowboxCommitCodex) docker $($docker_args -join ' ')"
+    Write-Host "Running: CLAUDE_CODE_VERSION=$ClaudeVersion CODEX_VERSION=$CodexVersion POWBOX_COMMIT=$($script:PowboxCommit) POWBOX_COMMIT_CODEX=$($script:PowboxCommitCodex) AGENT_SKILLS_COMMIT=$($script:AgentSkillsCommit) docker $($docker_args -join ' ')"
     $env:CLAUDE_CODE_VERSION = $ClaudeVersion
     $env:CODEX_VERSION = $CodexVersion
     $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
@@ -162,6 +226,7 @@ try {
     $env:POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
     $env:POWBOX_COMMIT = $script:PowboxCommit
     $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
+    $env:AGENT_SKILLS_COMMIT = $script:AgentSkillsCommit
     # Resolved here (not at script top) so the agent target records the base it
     # actually builds FROM, including a base just rebuilt earlier this run.
     $env:POWBOX_BASE_IMAGE_ID = Get-BaseImageId
@@ -205,12 +270,19 @@ try {
   # user requests -Pull on the agent target we refresh the base first (cascading
   # any digest change into the agent layers automatically) and then build the
   # agent.
+  # The agent image bakes the union of the in-tree Codex skills and the
+  # agent-skills Codex skills, so fetch the latter before any agent bake. Done
+  # here (not for the base-only target) so `build.ps1 base` never needs network
+  # access to agent-skills, and so the fetch fails the build BEFORE the base
+  # build when it is going to fail at all.
   switch ($Target) {
     "all" {
+      Fetch-AgentSkills
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
       Invoke-Bake -Targets @("agent") -WithNoCache:$NoCache
     }
     "agent" {
+      Fetch-AgentSkills
       if ($Pull) {
         Invoke-Bake -Targets @("base") -WithPull
       } else {

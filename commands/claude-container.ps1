@@ -21,19 +21,24 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 
-& (Join-Path $rootDir "scripts/launch-agent.ps1") `
-  -Agent "claude" `
-  -ProjectPath $ProjectPath `
-  -Build:$Build `
-  -Detach:$Detach `
-  -Shell:$Shell `
-  -Persist:$Persist `
-  -Resume:$Resume `
-  -Continue:$Continue `
-  -Volatile:$Volatile `
-  -Ctx $Ctx `
-  -Isolated:$Isolated `
-  -Repo $Repo `
-  -Name $Name `
-  -Ref $Ref `
-  -Reclone:$Reclone
+$launchParams = @{
+  Agent       = "claude"
+  ProjectPath = $ProjectPath
+  Build       = $Build
+  Detach      = $Detach
+  Shell       = $Shell
+  Persist     = $Persist
+  Resume      = $Resume
+  Continue    = $Continue
+  Volatile    = $Volatile
+  Isolated    = $Isolated
+  Repo        = $Repo
+  Name        = $Name
+  Ref         = $Ref
+  Reclone     = $Reclone
+}
+if ($PSBoundParameters.ContainsKey('Ctx') -and @($Ctx).Count -gt 0) {
+  $launchParams.Ctx = $Ctx
+}
+
+& (Join-Path $rootDir "scripts/launch-agent.ps1") @launchParams

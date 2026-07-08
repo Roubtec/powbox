@@ -61,12 +61,25 @@ function cc {
         [Alias("Fresh")]
         [switch]$Reclone
     )
-    & "$env:POWBOX_ROOT\commands\claude-container.ps1" `
-        -ProjectPath $ProjectPath `
-        -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Ctx $Ctx `
-        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    $launchParams = @{
+        ProjectPath = $ProjectPath
+        Build       = $Build
+        Detach      = $Detach
+        Shell       = $Shell
+        Persist     = $Persist
+        Resume      = $Resume
+        Continue    = $Continue
+        Volatile    = $Volatile
+        Isolated    = $Isolated
+        Repo        = $Repo
+        Name        = $Name
+        Ref         = $Ref
+        Reclone     = $Reclone
+    }
+    if ($PSBoundParameters.ContainsKey('Ctx') -and @($Ctx).Count -gt 0) {
+        $launchParams.Ctx = $Ctx
+    }
+    & "$env:POWBOX_ROOT\commands\claude-container.ps1" @launchParams
     # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
     # never Set-Location into it.
     if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {
@@ -94,12 +107,26 @@ function cx {
         [Alias("Fresh")]
         [switch]$Reclone
     )
-    & "$env:POWBOX_ROOT\commands\codex-container.ps1" `
-        -ProjectPath $ProjectPath `
-        -Build:$Build -Detach:$Detach -Shell:$Shell `
-        -Persist:$Persist -Resume:$Resume -Continue:$Continue -Volatile:$Volatile `
-        -Exec $Exec -Ctx $Ctx `
-        -Isolated:$Isolated -Repo $Repo -Name $Name -Ref $Ref -Reclone:$Reclone
+    $launchParams = @{
+        ProjectPath = $ProjectPath
+        Build       = $Build
+        Detach      = $Detach
+        Shell       = $Shell
+        Persist     = $Persist
+        Resume      = $Resume
+        Continue    = $Continue
+        Volatile    = $Volatile
+        Exec        = $Exec
+        Isolated    = $Isolated
+        Repo        = $Repo
+        Name        = $Name
+        Ref         = $Ref
+        Reclone     = $Reclone
+    }
+    if ($PSBoundParameters.ContainsKey('Ctx') -and @($Ctx).Count -gt 0) {
+        $launchParams.Ctx = $Ctx
+    }
+    & "$env:POWBOX_ROOT\commands\codex-container.ps1" @launchParams
     # In self-hosted (-Isolated) mode the positional is a repo spec, not a path, so
     # never Set-Location into it.
     if ($PSBoundParameters.ContainsKey('ProjectPath') -and -not $Isolated -and $? -and (_Powbox-ShouldCd)) {

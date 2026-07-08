@@ -20,8 +20,14 @@
 #     sets only when Claude is the PRIMARY agent. When Claude is NON-PRIMARY (e.g.
 #     PRIMARY_AGENT=codex) this hook runs during entrypoint-agent.sh's non-primary
 #     seeding — BEFORE init-firewall.sh runs and BEFORE the primary (Codex) prompt —
-#     so the cold install is BACKGROUNDED instead: it must not run network ops ahead
-#     of the firewall, nor delay a prompt that never uses these skills.
+#     so the cold install is BACKGROUNDED instead: keeping it off the SYNCHRONOUS
+#     critical path so it never delays a Codex prompt that never uses these skills.
+#     NOTE: backgrounding here keeps the work off the prompt's critical path but does
+#     NOT by itself order it after the firewall — the detached run still races
+#     init-firewall.sh, so a non-primary cold/keep-current network op can fire before
+#     the firewall is up. That residual ordering gap is tracked in
+#     tasks/deferred/015h-plugin-bootstrap-firewall-ordering.md (public repo, hardcoded
+#     GitHub target, so low practical risk today).
 #   - enabled (warm keep-current) -> self-forked to the BACKGROUND so a warm start
 #     adds no latency. A keep-current that pulls a newer commit applies next
 #     session (accepted one-session staleness — plugins load once at startup).
@@ -70,13 +76,23 @@ PLUGIN_ID="dev-skills@${MARKETPLACE_NAME}"
 
 # Where the whole bootstrap logs its debug trail. The hook points this at
 # $AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log (which for Claude is ~/.claude/...);
-# the default keeps a standalone run self-contained. Only a single concise status
-# line ever reaches the terminal (see status_line); EVERYTHING else goes here.
+# the default keeps a standalone run self-contained. Only the cold foreground path
+# prints to the terminal, and only a few concise status lines (an "installing…" line
+# then a terminal "ready…"/"still installing…" line; see status_line); EVERYTHING
+# else — every debug detail, and all background-run output — goes here.
 PLUGIN_BOOTSTRAP_LOG="${POWBOX_PLUGIN_LOG:-$HOME/.claude/.powbox-plugin-bootstrap.log}"
 
 # Bounds.
 NET_TIMEOUT="${POWBOX_PLUGIN_NET_TIMEOUT:-120}"  # per network op (add/install/update)
 LIST_TIMEOUT="${POWBOX_PLUGIN_LIST_TIMEOUT:-30}" # per local `plugin list`
+
+# SIGKILL grace for EVERY bounded op. Plain `timeout N` only sends SIGTERM at N; a CLI (or
+# a child git process) that traps/blocks SIGTERM could then run PAST N, which on the cold
+# FOREGROUND path would push container start beyond COLD_INSTALL_BOUND and break the
+# never-wedged contract. `timeout --kill-after=<grace>` follows the TERM with a SIGKILL
+# after the grace, giving each op a HARD wall-clock ceiling of its bound + this grace.
+# Kept short so the extra worst-case slack per op is negligible.
+KILL_AFTER="${POWBOX_PLUGIN_KILL_AFTER:-5}"
 
 # COLD FOREGROUND bounds — these keep the synchronous first-boot install off the
 # critical path for more than a bounded moment. The install must finish before the
@@ -91,8 +107,10 @@ LIST_TIMEOUT="${POWBOX_PLUGIN_LIST_TIMEOUT:-30}" # per local `plugin list`
 # wedged prompt.
 # The full foreground worst case also includes the two bounded `claude plugin list`
 # state queries — the unlocked routing query in main() plus the authoritative one inside
-# the lock in converge_plugin_state — each capped by LIST_TIMEOUT. So the true ceiling is
-# ~COLD_INSTALL_BOUND + COLD_LOCK_WAIT + 2*LIST_TIMEOUT, not the install+lock bound alone.
+# the lock in converge_plugin_state — each capped by LIST_TIMEOUT, plus a short per-op
+# KILL_AFTER SIGKILL grace on every bounded op. So the true ceiling is
+# ~COLD_INSTALL_BOUND + COLD_LOCK_WAIT + 2*LIST_TIMEOUT (+ a few KILL_AFTER graces), not
+# the install+lock bound alone.
 COLD_INSTALL_BOUND="${POWBOX_PLUGIN_COLD_INSTALL_BOUND:-50}" # total foreground install budget
 COLD_LOCK_WAIT="${POWBOX_PLUGIN_COLD_LOCK_WAIT:-15}"         # foreground wait for a peer's lock
 
@@ -148,10 +166,11 @@ log() {
 		>>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
 }
 
-# User channel: one concise line on the REAL terminal (this runs synchronously in the
-# foreground before Claude grabs the alternate screen buffer, so stdout is visible).
-# Also mirrored into the log. Only the cold foreground path calls this; background
-# runs redirect stdout to the log and never emit a status line.
+# User channel: one concise line PER CALL on the REAL terminal (this runs synchronously
+# in the foreground before Claude grabs the alternate screen buffer, so stdout is
+# visible). Also mirrored into the log. Only the cold foreground path calls this, and it
+# calls it more than once — an "installing…" line then a terminal "ready…"/"still
+# installing…" line; background runs redirect stdout to the log and never emit one.
 status_line() {
 	printf 'dev-skills plugin: %s\n' "$*"
 	log "[status] $*"
@@ -162,7 +181,9 @@ status_line() {
 # registration, not enablement.
 plugin_state() {
 	local out
-	out="$(timeout "$LIST_TIMEOUT" claude plugin list --json 2>/dev/null)" || {
+	# --kill-after gives this foreground-critical state query the same hard ceiling as the
+	# install ops (see KILL_AFTER): a `plugin list` that ignores SIGTERM cannot stall start.
+	out="$(timeout --kill-after="$KILL_AFTER" "$LIST_TIMEOUT" claude plugin list --json 2>/dev/null)" || {
 		echo unknown
 		return
 	}
@@ -198,7 +219,7 @@ run_bounded() {
 	local secs="$1" label="$2"
 	shift 2
 	local out _line
-	if out="$(timeout "$secs" "$@" 2>&1)"; then
+	if out="$(timeout --kill-after="$KILL_AFTER" "$secs" "$@" 2>&1)"; then
 		return 0
 	fi
 	log "step failed or timed out: $label"
@@ -326,8 +347,12 @@ main() {
 			# Claude is NON-PRIMARY (e.g. PRIMARY_AGENT=codex): the foreground cold path is
 			# neither wanted nor safe here — this hook runs during entrypoint-agent.sh's
 			# non-primary seeding, BEFORE the firewall is initialized and BEFORE the primary
-			# prompt. Background the install so it self-heals like the pre-015g detached
-			# model; the skills land in the next (i.e. first real) Claude session.
+			# prompt, and a foreground install would BLOCK the Codex prompt. Background the
+			# install so it self-heals like the pre-015g detached model; the skills land in
+			# the next (i.e. first real) Claude session. CAVEAT: backgrounding keeps this off
+			# the Codex prompt's critical path but does NOT guarantee it runs after
+			# init-firewall.sh — the detached run races the firewall (residual ordering gap
+			# tracked in tasks/deferred/015h-plugin-bootstrap-firewall-ordering.md).
 			log "cold volume, but foreground install not authorized (non-primary Claude session); backgrounding install"
 			spawn_background
 		else

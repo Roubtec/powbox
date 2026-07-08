@@ -120,9 +120,11 @@ fi
 #     or delays the primary (Codex) prompt for skills that session never uses;
 #   - on a WARM volume the script self-backgrounds the cheap keep-current and returns
 #     immediately, adding no start latency.
-# stdout is left attached to the terminal so the script's single concise status line
-# is visible before Claude grabs the alternate screen buffer; stderr and all debug go
-# to the LOG FILE. Read it to see what happened: cat the log path below.
+# stdout is left attached to the terminal so the script's few concise status lines
+# are visible before Claude grabs the alternate screen buffer (the cold foreground path
+# prints an "installing…" line then a terminal "ready…"/"still installing…" line);
+# stderr and all debug go to the LOG FILE. Read it to see what happened: cat the log
+# path below.
 if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
 	# Authorize the SYNCHRONOUS cold foreground install ONLY when Claude is the PRIMARY

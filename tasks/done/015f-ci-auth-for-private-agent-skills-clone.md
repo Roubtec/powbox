@@ -1,3 +1,14 @@
+> **RESOLVED (2026-07-08) — superseded by the agent-skills public flip; archived, no code change.**
+> `Roubtec/agent-skills` was made **public** (task 015e step 2), so Tier 1's
+> unauthenticated HTTPS clone now succeeds with the clone URL unchanged. This is
+> exactly the transient-window resolution this task anticipated — **Decision option 1**
+> (accept the red until the flip), which has now happened — so acceptance criterion 2
+> ("After task 015e's public flip, Tier 1 clones agent-skills with no credential and no
+> code change") is satisfied. No CI credential (option 2) was provisioned. Moved from
+> `tasks/deferred/` to `tasks/done/`. The original task is preserved below for the record.
+>
+> ---
+
 # Task 015f — Authenticate Tier 1 CI to clone the (currently private) agent-skills repo
 
 Follow-up to **Task 015b** (consume agent-skills as a powbox build input, PR #92).

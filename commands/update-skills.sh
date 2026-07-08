@@ -4,6 +4,23 @@ set -euo pipefail
 # Refresh the image-baked agent skills (and Claude workflows) onto the persistent
 # config volumes.
 #
+# WHAT THIS MANAGES (post task 015 split-custody model): the bake+seed channel
+# only — the items powbox bakes into the image and seeds onto the config volumes:
+#   - the full Codex skill palette (the shared dev-workflow skills, fetched from
+#     Roubtec/agent-skills at build time, plus the powbox-specific Codex skills);
+#   - the powbox-specific Claude skills (enable-worktrees, session-learnings);
+#   - the Claude dynamic workflows (wf-*.js).
+# It does NOT manage the 8 shared Claude skills (address-review, address-tasks,
+# address-tasks-serialized, address-reviews, rebase-stack, resolve-open-questions,
+# review-tasks, write-tasks): task 015b stopped baking them for Claude, and as of
+# task 015c they arrive through the SEPARATE plugin channel — the `dev-skills@roubtec`
+# marketplace plugin installed/kept-current at session start by the image-baked
+# `/usr/local/bin/seed-claude-plugins.sh` (baked from
+# `docker/shared/seed-claude-plugins.sh`; they appear namespaced as
+# `/dev-skills:<name>`). This command neither seeds nor refreshes them; on a
+# volume seeded before 015b it classifies each of those 8 as an `orphan` (marked
+# `.powbox-seeded`, no longer baked) so `--prune` retires the stale Claude copies.
+#
 # Skills (folders) and Claude dynamic workflows (flat .js files) are baked into
 # powbox-agent:latest at build time and seeded onto the claude-config /
 # codex-config volumes the first time each item is absent (no-clobber, see

@@ -124,14 +124,39 @@ cx --build
 
 No volume cleanup is needed — the entrypoint conditionally re-renders the template on container start when the image epoch is greater than or equal to the last-written volume epoch.
 
-## Image-Baked Agent Skills
+## Agent Skills
+
+Skills reach the agents through **two custody channels**, split by who owns the source and how it updates. The shared dev-workflow skills live in the [`Roubtec/agent-skills`](https://github.com/Roubtec/agent-skills) repo; the powbox-specific skills live in this repo.
+
+| Channel | Delivers | Source of truth | How it updates |
+|---|---|---|---|
+| **Plugin** | the 8 shared Claude skills | `Roubtec/agent-skills` | `dev-skills@roubtec` marketplace plugin, refreshed each container start (applies next session) |
+| **Bake + seed** | the full Codex palette (8 shared + 2 powbox-specific) **and** the 2 powbox-specific Claude skills | `Roubtec/agent-skills` (the 8 shared, fetched at build time) + this repo (the powbox-specific ones) | baked into the image, seeded onto the config volumes, refreshed by `agent-update-skills` |
+
+The 8 shared skills are: `address-review`, `address-tasks`, `address-tasks-serialized`, `address-reviews`, `rebase-stack`, `resolve-open-questions`, `review-tasks`, `write-tasks`. The 2 powbox-specific skills are `enable-worktrees` and `session-learnings`.
+
+**Why the split:** the shared skills are consumed by colleagues too (outside powbox), so they are released from a single repo (`Roubtec/agent-skills`) as a Claude marketplace plugin — one source of truth, one release channel. The powbox-specific skills only make sense inside a powbox container, and Codex has no plugin runtime, so both are carried by the image bake instead.
+
+### End state per agent
+
+- **Claude in powbox:** the 8 shared skills as `/dev-skills:<name>` (plugin) **plus** `enable-worktrees` and `session-learnings` unnamespaced (seeded) — no duplicates.
+- **Codex in powbox:** the same 10-skill palette as before (8 shared + 2 powbox-specific), all seeded.
+- **Colleagues (Claude outside powbox):** the plugin only.
+
+**Invocation change:** because the shared skills now arrive namespaced under the plugin, their explicit slash-command form gained the `dev-skills:` prefix — `/address-review` is now `/dev-skills:address-review` (and likewise for the other seven). Implicit invocation is unaffected: each skill's `SKILL.md` description still drives the model-side Skill-tool match, prefix or not. The powbox-specific seeded skills keep their bare form (`/enable-worktrees`, `/session-learnings` on Claude; `$enable-worktrees`, `$session-learnings` on Codex).
+
+### Plugin channel — the shared Claude skills
+
+At container start the Claude entrypoint hook runs `/usr/local/bin/seed-claude-plugins.sh` (baked from `docker/shared/seed-claude-plugins.sh`; fully detached, best-effort, never blocking start): it adds the `Roubtec/agent-skills` marketplace and installs the `dev-skills@roubtec` plugin the first time, then on every later start refreshes it to keep it current — running `claude plugin marketplace update roubtec` **and** the follow-up `claude plugin update dev-skills@roubtec` (a marketplace refresh alone only updates the catalog listing; the `plugin update` is what pulls the new skills into the installed cache). The agent-skills manifests carry no version field, so **every commit on `main` is a new SHA-version** — merging a change to `agent-skills` main *is* the release. Because the bootstrap is detached, a fresh install or update is not guaranteed to be live in the session that triggered it: the refreshed skills apply on the next session start (or after `/reload-plugins`). A deliberately disabled plugin is respected and never re-enabled; an offline start logs a skip and self-heals on a later online start. Progress goes to `$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log`.
+
+### Bake + seed channel — the Codex palette and powbox-specific Claude skills
 
 Repo-agnostic skills are baked into the unified image, one tree per agent. They are designed to provide the same functionality across both agents, even though the per-agent SKILL.md files differ where the underlying mechanics differ (e.g. Claude uses its `Agent` tool with `subagent_type: "general-purpose"`; Codex uses its built-in `worker` / `explorer` subagent types).
 
-Per-agent sources (each copied into the image under `/home/node/.agent-container/<agent>/skills/`, which each agent's setup hook reads via `AGENT_SEED_DIR`):
+Sources (each copied into the image under `/home/node/.agent-container/<agent>/skills/`, which each agent's setup hook reads via `AGENT_SEED_DIR`):
 
-- Claude — `docker/claude/agent-container/skills/`
-- Codex — `docker/codex/agent-container/skills/` (each skill additionally ships an `agents/openai.yaml` for UI labels and default prompts)
+- Claude — `docker/claude/agent-container/skills/` (the powbox-specific skills only: `enable-worktrees`, `session-learnings`).
+- Codex — `docker/codex/agent-container/skills/` (the powbox-specific Codex skills; each ships an `agents/openai.yaml` for UI labels and default prompts) **plus** the 8 shared skills, which `scripts/build-image.*` fetches from `Roubtec/agent-skills` main at build time (into the gitignored `.agent-skills-src` staging dir) and bakes into the same tree. The agent-skills snapshot SHA is recorded on the image (`powbox-provenance` / `/home/node/.powbox/agent-skills.commit`).
 
 At container start, the entrypoint seeds the baked skills into each agent's user-level skills directory from the same epoch-gated block that re-renders the agent instruction template (every agent is seeded, not just the primary one):
 
@@ -141,18 +166,20 @@ At container start, the entrypoint seeds the baked skills into each agent's user
 Seeding is no-clobber at the skill-directory level: existing skill folders are never overwritten, so user-modified copies are preserved.
 This also means a rebuilt image with updated skill text does *not* replace the stale copies already on the volumes. To push the latest baked skills onto the volumes after a rebuild, run `agent-update-skills` (or `commands/update-skills.*` directly) — it copies each baked skill over the volume copy in one throwaway container, so you no longer need to enter a container, delete skills by hand, exit, and relaunch to re-seed. It works whether or not any agent containers are running (they share the volumes); skills you authored on the volume that are not baked into the image are left untouched. See [Refreshing Skills](#refreshing-skills) below.
 
-Every skill powbox seeds carries a hidden `.powbox-seeded` ownership marker (recording the image build epoch and the powbox commit that built it). The marker means *"powbox owns this copy"*: the refresher may overwrite or prune a marked skill, while a folder **without** the marker is treated as user-authored and is never touched. To adopt a seeded skill as your own (fork-and-keep), delete its `.powbox-seeded` (or rename the folder), and powbox leaves it alone for good.
+Every skill powbox seeds carries a hidden `.powbox-seeded` ownership marker (recording the image build epoch and the powbox commit that built it). The marker means *"powbox owns this copy"*: the refresher may overwrite or prune a marked skill, while a folder **without** the marker is treated as user-authored and is never touched. To adopt a seeded skill as your own (fork-and-keep), delete its `.powbox-seeded` (or rename the folder), and powbox leaves it alone for good. Because task 015b stopped baking the 8 shared skills for Claude while they remain baked for Codex, a `claude-config` volume seeded before that change still carries stale marked copies of those 8; `agent-update-skills --prune` retires exactly them (they are marked but no longer baked for Claude), leaving the plugin (the channel task 015c delivers) as their only Claude source.
 
 Per-repo skills (e.g. `.claude/skills/<name>/` or `.agents/skills/<name>/`) still take precedence at invoke time, so any repo can override an individual skill without losing the rest.
 User-added skills in the same volume directory are unaffected by image rebuilds.
 
-Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`).
+Each agent discovers these skills at startup and includes their `SKILL.md` frontmatter in the model-visible skills list, where the description drives implicit invocation. Both agents also accept the explicit invocation form (Claude: `/<skill-name>`; Codex: `$<skill-name>`) — the exception being the plugin-delivered shared skills, which Claude invokes under their plugin namespace (`/dev-skills:<skill-name>`, e.g. `/dev-skills:address-review`), per the "Invocation change" note above.
 
-#### Claude Dynamic Workflows (experimental)
+### Claude Dynamic Workflows (experimental)
 
 `docker/claude/agent-container/workflows/` holds Claude-only [dynamic workflows](https://code.claude.com/docs/en/workflows) — JavaScript orchestration scripts that the runtime executes in the background, spawning and sequencing subagents at scale. They are a testing-batch reimagining of the orchestration-heavy skills (`address-tasks`, `address-review`): the control flow becomes code instead of prose. The two converted workflows use **different worktree strategies** (the runtime's built-in `isolation: "worktree"` is deliberately *not* used — it can't honor powbox's `.worktrees/$CONTAINER_NAME/<slug>` convention and starts each agent from the default branch): `wf-address-tasks` fans out, so its agents create and reuse explicit `.worktrees/$CONTAINER_NAME/<slug>` worktrees through the same image-baked `wt-bootstrap`/`wt-enter`/`wt-remove` helpers the `address-tasks` skill uses (the workflow owns control flow; the scripts own the git mechanics); `wf-address-review` is a single-PR sequential pipeline, so every stage shares the one checkout on the PR branch. Codex has no workflow runtime, so there is no Codex sibling; the Claude entrypoint hook seeds these `.js` files into `~/.claude/workflows/` (no-clobber at startup, like skills) and stamps each with a hidden sibling `.<name>.js.powbox-seeded` marker, so they participate fully in the `.powbox-seeded` refresh/adopt/prune flow — `agent-update-skills` reports and acts on them as `workflow` items. See [the directory README](docker/claude/agent-container/workflows/README.md) for the conversion rationale, the worktree decision, and open questions.
 
 ### Refreshing Skills
+
+This covers the **bake + seed channel only** — the Codex palette, the powbox-specific Claude skills, and the Claude workflows. The 8 shared Claude skills are delivered by the `dev-skills@roubtec` plugin (see above), which the detached bootstrap refreshes at each container start (the refreshed skills apply on the next session start, or after `/reload-plugins`); `update-skills.*` neither seeds nor refreshes them for Claude, and on a `claude-config` volume seeded before task 015b it reports those 8 as obsolete seeds that `--prune` removes.
 
 Because seeding is no-clobber, editing a skill in this repo and rebuilding the image is not enough — the volumes still hold the previously-seeded copy. `commands/update-skills.*` closes that gap by copying the freshly baked skills over the volume copies in a single throwaway container, replacing the old manual dance (enter a container, delete skills, exit, relaunch to re-seed).
 

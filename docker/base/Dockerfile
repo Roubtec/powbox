@@ -311,6 +311,14 @@ COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d
 # it from the ENV PATH below, and zsh logins inherit that ENV PATH untouched
 # (Debian's zprofile never sources /etc/profile). Placed low in the file so a
 # Go bump never busts the expensive gh / mssql / pwsh / npm layers above.
+#
+# The tarball fetches carry --retry ... --retry-all-errors --http1.1: go.dev (and
+# occasionally github.com) intermittently reset the HTTP/2 stream mid-download on
+# hosted CI runners, which surfaces as `curl: (92) ... INTERNAL_ERROR` and hard-fails
+# the base build. Forcing HTTP/1.1 sidesteps that h2 stream-reset class outright, and
+# --retry-all-errors additionally rides out transient CDN 5xx/timeouts. Safe here
+# because both artifacts are sha256-pinned below, so a retried/partial download can
+# never smuggle in different bits.
 RUN GO_VERSION=1.26.4 \
     && GOLANGCI_LINT_VERSION=2.12.2 \
     && arch="$(dpkg --print-architecture)" \
@@ -321,13 +329,13 @@ RUN GO_VERSION=1.26.4 \
                golangci_sha256=44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a ;; \
         *) echo "no pinned Go/golangci-lint checksums for architecture: $arch" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
     && echo "${go_sha256}  /tmp/go.tar.gz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz \
     && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
     && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
-    && curl -fsSL -o /tmp/golangci-lint.tar.gz "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}.tar.gz" \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/golangci-lint.tar.gz "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}.tar.gz" \
     && echo "${golangci_sha256}  /tmp/golangci-lint.tar.gz" | sha256sum -c - \
     && mkdir -p /usr/local/libexec \
     && tar -C /usr/local/libexec --strip-components=1 --no-same-owner \
@@ -362,7 +370,7 @@ RUN OPA_VERSION=1.18.2 \
         arm64) opa_sha256=9cad2e67d375aded483823349173fe100d9701d37635908edadeb0298603c58c ;; \
         *) echo "no pinned OPA checksum for architecture: $arch" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL -o /usr/local/bin/opa \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /usr/local/bin/opa \
         "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_${arch}_static" \
     && echo "${opa_sha256}  /usr/local/bin/opa" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/opa

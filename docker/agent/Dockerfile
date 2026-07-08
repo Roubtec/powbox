@@ -30,8 +30,10 @@ ENV DISABLE_AUTOUPDATER=1
 # CLAUDE_CODE_VERSION (which agent-update does) is what lets Docker rebuild only
 # this layer when Claude — and only Claude — has a new release. Downloaded to a
 # file first (not `curl | bash`) so a failed download fails the build instead
-# of being masked by the pipeline's exit status.
-RUN curl -fsSL -o /tmp/claude-install.sh https://claude.ai/install.sh \
+# of being masked by the pipeline's exit status. --retry ... --retry-all-errors
+# --http1.1 rides out the same transient HTTP/2 stream resets / CDN blips that
+# flake the pinned toolchain downloads in the base image (see docker/base/Dockerfile).
+RUN curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/claude-install.sh https://claude.ai/install.sh \
     && bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
     && rm /tmp/claude-install.sh
 RUN rm -rf /home/node/.claude/downloads

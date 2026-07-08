@@ -166,8 +166,8 @@ the earlier, now-resolved threads that first raised them are noted for provenanc
 
 Because the cold install is now **synchronous before the TUI starts**, its output
 appears on the normal terminal *before* Claude grabs the alternate screen buffer —
-so a single concise status line ("installing dev-skills plugin… done") is fine and
-even helpful. Keep everything else as debug to
+so a couple of concise status lines ("installing dev-skills plugin…" then a terminal
+"ready…"/"still installing…") are fine and even helpful. Keep everything else as debug to
 `$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log`. Do **not** invest in mid-session
 user hints: a backgrounded job's stdout cannot pierce the alternate buffer (it is
 visible only after session end), so hint-based approaches are useless here.

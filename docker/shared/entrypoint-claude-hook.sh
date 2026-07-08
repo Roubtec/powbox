@@ -116,8 +116,9 @@ fi
 #     timeout/lock-miss it detaches the remainder to a background self-heal and returns,
 #     so start is never wedged. This foreground cold path is taken ONLY when Claude is
 #     the PRIMARY agent (we pass POWBOX_PLUGIN_ALLOW_SYNC_COLD below): a non-primary
-#     Claude backgrounds the install so it never runs network ops ahead of the firewall
-#     or delays the primary (Codex) prompt for skills that session never uses;
+#     Claude backgrounds the install so it never delays the primary (Codex) prompt for
+#     skills that session never uses (that backgrounded run still races init-firewall.sh
+#     rather than being ordered after it — residual gap tracked in tasks/deferred/015h);
 #   - on a WARM volume the script self-backgrounds the cheap keep-current and returns
 #     immediately, adding no start latency.
 # stdout is left attached to the terminal so the script's few concise status lines
@@ -132,10 +133,13 @@ if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.
 	# init-firewall.sh — and the launching session is the Claude one whose first prompt
 	# wants the skills live. When Claude is NON-PRIMARY (PRIMARY_AGENT=codex) this hook
 	# runs during entrypoint-agent.sh's non-primary seeding, BEFORE the firewall is up and
-	# BEFORE the primary (Codex) prompt; a foreground cold install there would run network
-	# ops ahead of the firewall and delay Codex startup for a plugin set that session never
-	# uses. So the non-primary case backgrounds the install (self-heals into the next, i.e.
-	# first real, Claude session). Default-primary when PRIMARY_AGENT is unset (hand runs).
+	# BEFORE the primary (Codex) prompt; a foreground cold install there would BLOCK Codex
+	# startup for a plugin set that session never uses. So the non-primary case backgrounds
+	# the install (self-heals into the next, i.e. first real, Claude session). Note the
+	# backgrounded run keeps the work off Codex's critical path but does NOT itself order it
+	# after init-firewall.sh — it still races the firewall (residual gap tracked in
+	# tasks/deferred/015h-plugin-bootstrap-firewall-ordering.md). Default-primary when
+	# PRIMARY_AGENT is unset (hand runs).
 	if [ "${PRIMARY_AGENT:-claude}" = claude ]; then
 		PLUGIN_ALLOW_SYNC_COLD=1
 		PLUGIN_COLD_MODE="synchronous (primary Claude)"

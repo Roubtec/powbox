@@ -9,10 +9,9 @@ When you change behavior described in a chapter doc (see the table below), updat
 
 Use one line per paragraph in Markdown if possible.
 
-## Working Tips
+## Code Review Guidelines
 
-Suggest alternative strategies or push back on the user's ideas if there are better practices recommended or the user appears to be inconsistent.
-Teach or question the user if that is in the best interest of the final product.
+Before doing a code review, read ALL existing review comments and threads on the PR for context before making suggestions. Findings previously delegated to follow-up work need not be re-raised unless the facts changed since the delegation.
 
 ## Key Paths
 

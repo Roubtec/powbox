@@ -42,7 +42,7 @@ agent_env() {
 		AGENT_INSTRUCTION_FILE="CLAUDE.md"
 		AGENT_LABEL="Claude Code (Anthropic)"
 		# shellcheck disable=SC2016
-		AGENT_ONESHOT='One-shot: `claude -p "<prompt>"` prints the final answer on stdout (`--output-format json` for machine-readable output; `--model <alias>` / `--effort <level>` to pick strength).'
+		AGENT_ONESHOT='One-shot: `claude -p "<prompt>"` prints the final answer on stdout (`--output-format json` for machine-readable output; `--model <alias>` / `--effort <level>` to pick strength). Print mode permits reads but denies Bash/Edit by default — right for review-type asks; add `--dangerously-skip-permissions` only when the sub-task must run commands or write.'
 		;;
 	codex)
 		AGENT_CONFIG_DIR="${CODEX_CONFIG_DIR:-/home/node/.codex}"

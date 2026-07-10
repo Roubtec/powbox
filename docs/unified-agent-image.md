@@ -59,7 +59,7 @@ Plan (as built):
 
 - Replace the two shims (`entrypoint-claude.sh`, `entrypoint-codex.sh`) with a single `entrypoint-agent.sh` that:
   1. Reads `PRIMARY_AGENT` (`claude` | `codex`) from the environment, falling back to `claude` for an unknown value.
-  2. Holds a small **agent registry** (`agent_env`) mapping each agent to its `AGENT_CONFIG_DIR`, hook, seed dir, name, binary, autonomy flag, instruction file, and label. Adding a harness = one case arm here plus listing it in `ALL_AGENTS`.
+  2. Holds a small **agent registry** (`agent_env`) mapping each agent to its `AGENT_CONFIG_DIR`, hook, seed dir, name, binary, autonomy flag, instruction file, label, and one-shot invocation fragment (`AGENT_ONESHOT`). Adding a harness = one case arm here plus listing it in `ALL_AGENTS`.
   3. Seeds every **non-primary** agent directly by exporting its `AGENT_*` vars and running its hook.
   4. Exports the **primary** agent's `AGENT_*` vars and `exec`s `entrypoint-core.sh`, which runs the primary's hook (so it is not run twice) alongside firewall/git/shadow setup before execing the CMD.
 - `entrypoint-core.sh` is unchanged (still runs the single `AGENT_SETUP_HOOK` and ends with `exec "$@"`).

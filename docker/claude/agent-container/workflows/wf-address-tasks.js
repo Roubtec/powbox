@@ -11,7 +11,7 @@
  *
  * Why a workflow rather than a skill
  * ----------------------------------
- * The control flow the skill spells out in prose — dependency waves, the 3-round
+ * The control flow the skill spells out in prose — dependency waves, the 6-round
  * loop, dependent waves gated on their prerequisites, "the implementer finishes
  * before its reviewer starts" — becomes ordinary JavaScript here, run
  * deterministically instead of relying on the model to follow it. Independent

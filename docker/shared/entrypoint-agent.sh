@@ -85,7 +85,7 @@ export_agent_env() {
 	AGENT_PEERS="$(peer_list "$1")"
 	export AGENT_CONFIG_DIR AGENT_SETUP_HOOK AGENT_SEED_DIR \
 		AGENT_NAME AGENT_BINARY AGENT_AUTONOMY_FLAG \
-		AGENT_INSTRUCTION_FILE AGENT_LABEL AGENT_PEERS
+		AGENT_INSTRUCTION_FILE AGENT_LABEL AGENT_ONESHOT AGENT_PEERS
 }
 
 # Seed every non-primary agent now. Hooks are idempotent and epoch-gated, and

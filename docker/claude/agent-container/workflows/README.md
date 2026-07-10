@@ -112,7 +112,7 @@ sequencing; `address-tasks` exists to claw parallelism back with its
 own worktree-per-task bootstrap. This workflow folds both into one: it runs the
 same explicit `.worktrees/$CONTAINER_NAME/<slug>` worktree-per-task model (see
 "Worktrees" above), but expresses the orchestration — dependency waves gated on
-their prerequisites, the 3-round implement→review→fix loop, "implementer
+their prerequisites, the 6-round implement→review→fix loop, "implementer
 finishes before its reviewer" — as deterministic JavaScript rather than prose.
 Independent tasks run concurrently via `parallel()` over distinct worktrees.
 

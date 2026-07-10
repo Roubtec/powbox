@@ -2,7 +2,7 @@
  * wf-address-tasks — dynamic-workflow form of the `address-tasks` skill.
  *
  * Resolve a batch of pre-planned task files into dependency waves, then for each
- * task run an implement -> review -> fix loop (max 3 rounds), scan reviewed
+ * task run an implement -> review -> fix loop (max 6 rounds), scan reviewed
  * sibling branches for add/add collisions before delivery and deconflict them
  * (an orchestrator-deputy agent renames one side, regenerates derived files, and
  * the changed branch is re-reviewed) — or hold a name that must stay identical —
@@ -11,7 +11,7 @@
  *
  * Why a workflow rather than a skill
  * ----------------------------------
- * The control flow the skill spells out in prose — dependency waves, the 3-round
+ * The control flow the skill spells out in prose — dependency waves, the 6-round
  * loop, dependent waves gated on their prerequisites, "the implementer finishes
  * before its reviewer starts" — becomes ordinary JavaScript here, run
  * deterministically instead of relying on the model to follow it. Independent
@@ -61,7 +61,7 @@
 // phase() titles still get their own progress group.
 export const meta = {
   name: "wf-address-tasks",
-  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 3 rounds), pre-PR collision guard that deconflicts add/add clashes (rename one side + re-review) or holds an imperative name, one PR per delivered task.",
+  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 6 rounds), pre-PR collision guard that deconflicts add/add clashes (rename one side + re-review) or holds an imperative name, one PR per delivered task.",
   whenToUse: "Execute a folder/glob of pre-planned task files end to end with per-task worktree isolation. Not for one-off coding requests or planning new tasks.",
   phases: [
     { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
@@ -72,7 +72,7 @@ export const meta = {
   ],
 };
 
-const MAX_ROUNDS = 3;
+const MAX_ROUNDS = 6;
 
 // Finish over fan-out (inherited from the skills' adaptive-throttling rule): a
 // wave that runs four-wide and dies to ENOSPC delivers nothing; the same wave

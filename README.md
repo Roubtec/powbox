@@ -270,7 +270,7 @@ Because the unified image ships both agent binaries on `PATH` and the entrypoint
 
 This is intended for delegated sub-tasks such as asking the other agent for an independent review, or handing it a self-contained piece of work.
 The peer runs against its own seeded config (login, skills, instruction file) and shares the same `/workspace` bind mount, so it sees the same files.
-The in-container instruction file (`CLAUDE.md` for Claude, `AGENTS.md` for Codex) renders a "Delegating to another agent" section listing each peer's executable and autonomy flag (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`).
+The in-container instruction file (`CLAUDE.md` for Claude, `AGENTS.md` for Codex) renders a "Delegating to another agent" section listing each peer's executable and autonomy flag (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`), its non-interactive one-shot form, and the best-effort semantics for delegated opinions (missing binary / failed login / exhausted usage = no opinion, not an error).
 
 ## Nested Containers (rootless Podman)
 

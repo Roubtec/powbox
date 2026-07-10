@@ -59,7 +59,7 @@ Plan (as built):
 
 - Replace the two shims (`entrypoint-claude.sh`, `entrypoint-codex.sh`) with a single `entrypoint-agent.sh` that:
   1. Reads `PRIMARY_AGENT` (`claude` | `codex`) from the environment, falling back to `claude` for an unknown value.
-  2. Holds a small **agent registry** (`agent_env`) mapping each agent to its `AGENT_CONFIG_DIR`, hook, seed dir, name, binary, autonomy flag, instruction file, and label. Adding a harness = one case arm here plus listing it in `ALL_AGENTS`.
+  2. Holds a small **agent registry** (`agent_env`) mapping each agent to its `AGENT_CONFIG_DIR`, hook, seed dir, name, binary, autonomy flag, instruction file, label, and one-shot invocation fragment (`AGENT_ONESHOT`). Adding a harness = one case arm here plus listing it in `ALL_AGENTS`.
   3. Seeds every **non-primary** agent directly by exporting its `AGENT_*` vars and running its hook.
   4. Exports the **primary** agent's `AGENT_*` vars and `exec`s `entrypoint-core.sh`, which runs the primary's hook (so it is not run twice) alongside firewall/git/shadow setup before execing the CMD.
 - `entrypoint-core.sh` is unchanged (still runs the single `AGENT_SETUP_HOOK` and ends with `exec "$@"`).
@@ -106,7 +106,7 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 ### Prompt template: advertise the peer agent
 
-`docker/shared/container-agent.md.tmpl` must tell each agent that the other executable is present and callable in-container. Add a short "Delegating to another agent" section listing the peer executable(s) and their autonomy flags (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`), framed as "available for delegated sub-tasks such as reviews."
+`docker/shared/container-agent.md.tmpl` must tell each agent that the other executable is present and callable in-container. Add a short "Delegating to another agent" section listing the peer executable(s) and their autonomy flags (e.g. `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`), framed as "available for delegated sub-tasks such as reviews." (As built, each peer bullet also carries the registry's `AGENT_ONESHOT` one-shot form, and the section states best-effort semantics for delegated opinions.)
 
 Because the peer list is the same for every agent now, it can be rendered from the agent registry rather than hardcoded per-agent, so adding a future harness updates every agent's prompt automatically. Exact mechanism (new `${AGENT_PEERS}`-style substitution vs a static block) is an implementation detail to settle in the relevant commit.
 

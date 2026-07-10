@@ -1,3 +1,5 @@
-# Claude Instructions
+# Task Management
 
-See [AGENTS.md](AGENTS.md)
+[AGENTS.md](AGENTS.md):
+
+@AGENTS.md

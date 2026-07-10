@@ -3,7 +3,7 @@
  *
  * Work through every UNRESOLVED review thread on one pull request: gather the
  * threads, fix what is right / push back on what is wrong, verify every
- * disposition with a fresh-eyes reviewer (max 3 rounds), then publish by default
+ * disposition with a fresh-eyes reviewer (max 6 rounds), then publish by default
  * (lease-safe push, reply + resolve threads, Summary comment, pings) — a `no-push`
  * run stays local-only and mutates nothing.
  * The re-review pings fire ONLY when the push actually advanced the branch with
@@ -60,7 +60,7 @@
 // phases are not declared; undeclared phase() titles get their own group.
 export const meta = {
   name: "wf-address-review",
-  description: "Address every unresolved review thread on one PR: fix or push back, verify with a fresh-eyes reviewer (max 3 rounds), then publish by default (use no-push for a local-only dry run).",
+  description: "Address every unresolved review thread on one PR: fix or push back, verify with a fresh-eyes reviewer (max 6 rounds), then publish by default (use no-push for a local-only dry run).",
   whenToUse: "Work through maintainer-vetted review feedback on a single PR hands-off. Not for new task batches (wf-address-tasks) or stack rebases.",
   phases: [
     { title: "Gather", detail: "resolve the PR, branch state, and unresolved threads" },
@@ -70,7 +70,7 @@ export const meta = {
   ],
 };
 
-const MAX_ROUNDS = 3;
+const MAX_ROUNDS = 6;
 
 const PACKET_SCHEMA = {
   type: "object",

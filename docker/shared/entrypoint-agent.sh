@@ -25,8 +25,11 @@ case " $ALL_AGENTS " in
 esac
 export PRIMARY_AGENT
 
-# Populate the AGENT_* variables for the named agent. AGENT_BINARY and
-# AGENT_LABEL feed the peer list rendered into each agent's instruction file.
+# Populate the AGENT_* variables for the named agent. AGENT_BINARY, AGENT_LABEL,
+# and AGENT_ONESHOT feed the peer list rendered into each agent's instruction
+# file; AGENT_ONESHOT is a Markdown fragment describing the peer's
+# non-interactive one-shot invocation (the right form for delegated reviews and
+# other fire-and-collect sub-tasks).
 agent_env() {
 	case "$1" in
 	claude)
@@ -38,6 +41,8 @@ agent_env() {
 		AGENT_AUTONOMY_FLAG="--dangerously-skip-permissions"
 		AGENT_INSTRUCTION_FILE="CLAUDE.md"
 		AGENT_LABEL="Claude Code (Anthropic)"
+		# shellcheck disable=SC2016
+		AGENT_ONESHOT='One-shot: `claude -p "<prompt>"` prints the final answer on stdout (`--output-format json` for machine-readable output; `--model <alias>` / `--effort <level>` to pick strength).'
 		;;
 	codex)
 		AGENT_CONFIG_DIR="${CODEX_CONFIG_DIR:-/home/node/.codex}"
@@ -48,6 +53,8 @@ agent_env() {
 		AGENT_AUTONOMY_FLAG="--dangerously-bypass-approvals-and-sandbox"
 		AGENT_INSTRUCTION_FILE="AGENTS.md"
 		AGENT_LABEL="Codex (OpenAI)"
+		# shellcheck disable=SC2016
+		AGENT_ONESHOT='One-shot: `codex exec --sandbox read-only -o <file> "<prompt>"` for read-only work like reviews (`codex review --base <branch>` is the purpose-built review form, run from the tree to review; note `--base` and a custom prompt are mutually exclusive); use `codex exec --dangerously-bypass-approvals-and-sandbox` only when the sub-task must write. `-m <model>` / `-c model_reasoning_effort=<level>` pick strength. Preflight with `codex login status` (non-zero exit = not logged in) — an unauthenticated `codex exec` burns ~30s of retries before failing.'
 		;;
 	*)
 		echo "entrypoint-agent: unknown agent '$1'" >&2
@@ -67,7 +74,7 @@ peer_list() {
 			# Backticks here are literal Markdown for the instruction file, not a
 			# command substitution; the %s placeholders carry the real values.
 			# shellcheck disable=SC2016
-			printf -- '- `%s %s` — %s\n' "$AGENT_BINARY" "$AGENT_AUTONOMY_FLAG" "$AGENT_LABEL"
+			printf -- '- `%s %s` — %s\n  %s\n' "$AGENT_BINARY" "$AGENT_AUTONOMY_FLAG" "$AGENT_LABEL" "$AGENT_ONESHOT"
 		)
 	done
 }

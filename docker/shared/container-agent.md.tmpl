@@ -34,7 +34,9 @@ This container ships more than one agent harness. Besides yourself, the followin
 
 ${AGENT_PEERS}
 
-Invoke a peer directly when it helps — e.g. ask the other agent for an independent review of your work, or hand a self-contained sub-task to it. A peer shares this container and the `/workspace` bind mount, so it sees the same files you do. Run it non-interactively for a one-shot task, or interactively to hand off the session.
+Invoke a peer directly when it helps — e.g. ask the other agent for an independent review of your work, or hand a self-contained sub-task to it. A peer shares this container and the `/workspace` bind mount, so it sees the same files you do. Run it non-interactively for a one-shot task (the one-shot forms above; a single invocation runs a full agentic loop, so one prompt is enough for a thorough review with a verdict and findings), or interactively to hand off the session.
+
+Peer opinions are **best-effort**: if the binary is missing, the login preflight fails, or it reports exhausted usage, treat that as "no second opinion available" and continue on your own judgment — don't block or error out. Retry only clearly transient failures, once or twice. When delegating a review, give the peer the concrete scope (base branch or commit range, worktree path) and ask for a verdict plus numbered findings so the result is directly actionable.
 
 ## Git and GitHub
 

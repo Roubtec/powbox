@@ -59,9 +59,15 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	# a fixed, guessable /tmp/.powbox-plugin-bootstrap.1.done — inviting a symlink/TOCTOU
 	# clobber when the seeder later does `: >"$POWBOX_PLUGIN_DONE_FILE"`. mktemp reserves an
 	# unguessable name; we only need the NAME (the wait below polls for the marker and the
-	# seeder's EXIT trap creates it), so remove the placeholder mktemp leaves behind. Fall
-	# back to the pid path only if mktemp is somehow unavailable — startup must not abort.
-	_plugin_done="$(mktemp /tmp/.powbox-plugin-bootstrap.XXXXXXXX.done 2>/dev/null || printf '%s' "/tmp/.powbox-plugin-bootstrap.$$.done")"
+	# seeder's EXIT trap creates it), so remove the placeholder mktemp leaves behind. If
+	# mktemp is somehow unavailable we DISABLE the marker (leave _plugin_done empty) rather
+	# than fall back to a predictable /tmp/.powbox-plugin-bootstrap.$$.done: at PID 1 that
+	# collapses to the same fixed, guessable path and reintroduces the symlink/TOCTOU clobber
+	# this hardening removes. An empty marker degrades safely — the seeder skips its EXIT
+	# trap on an empty POWBOX_PLUGIN_DONE_FILE and the wait below is guarded on a non-empty
+	# _plugin_done — so the bootstrap still detaches and merely skips the marker-based wait.
+	# startup must not abort.
+	_plugin_done="$(mktemp /tmp/.powbox-plugin-bootstrap.XXXXXXXX.done 2>/dev/null || true)"
 	rm -f "$_plugin_done" 2>/dev/null || true
 	# stderr first: a failed open of the log itself must stay silent too
 	# (redirections apply left-to-right).

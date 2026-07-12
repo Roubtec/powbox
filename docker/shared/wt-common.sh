@@ -18,7 +18,7 @@
 # wt_reap_orphan_dir <dir>
 #   <dir> = <root>/.worktrees/<container>/<slug>, already established NOT to be a
 #   live git worktree. Decide safely and act:
-#     * empty            -> rm -rf                                  prints "pruned"
+#     * empty            -> atomic rmdir                            prints "pruned"
 #     * has any content  -> move to <root>/.worktrees/.orphaned/<container>/<slug>.<ts>
 #                           (same persistent volume, out of the scanned base)
 #                                                         prints "quarantined:<dest>"
@@ -26,6 +26,12 @@
 #   The ONLY thing on stdout is that outcome token; all human diagnostics go to
 #   stderr. Never exits (best-effort) and always returns 0, so `set -e` callers
 #   keep going and branch on the token.
+#
+#   Emptiness is decided ATOMICALLY by `rmdir`, never by a separate probe: rmdir
+#   removes the directory only if it is truly empty and fails otherwise, so there
+#   is no TOCTOU window in which content appearing after an `ls` check could be
+#   recursively deleted. A non-empty (or otherwise un-rmdir-able) dir falls
+#   through to the preserve/quarantine path and is NEVER rm -rf'd.
 wt_reap_orphan_dir() {
 	local dir="$1"
 
@@ -34,19 +40,18 @@ wt_reap_orphan_dir() {
 		return 0
 	}
 
-	# Empty (no entries at all, including dotfiles)? Safe to delete outright.
-	if [ -z "$(ls -A -- "$dir" 2>/dev/null)" ]; then
-		if rm -rf -- "$dir" 2>/dev/null; then
-			printf 'pruned\n'
-			return 0
-		fi
-		echo "wt: warning: could not remove empty orphan dir $dir" >&2
-		printf 'kept\n'
+	# Empty? `rmdir` succeeds only for a truly-empty dir and is atomic — no
+	# TOCTOU window where content created after a probe could be deleted. If it
+	# fails, the dir has content (or cannot be removed): PRESERVE it below,
+	# never rm -rf.
+	if rmdir -- "$dir" 2>/dev/null; then
+		printf 'pruned\n'
 		return 0
 	fi
 
-	# Non-empty: PRESERVE. Move it aside rather than delete — it may be the only
-	# copy of dirty work whose worktree metadata was lost on recycle/migration.
+	# Non-empty (or un-rmdir-able): PRESERVE. Move it aside rather than delete —
+	# it may be the only copy of dirty work whose worktree metadata was lost on
+	# recycle/migration.
 	local wt_base slug container worktrees_root dest_base dest ts
 	wt_base="$(dirname -- "$dir")" # <root>/.worktrees/<container>
 	slug="$(basename -- "$dir")"

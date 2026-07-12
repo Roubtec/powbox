@@ -375,6 +375,24 @@ RUN OPA_VERSION=1.18.2 \
     && echo "${opa_sha256}  /usr/local/bin/opa" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/opa
 
+# General-purpose native/CGo/CMake build dependencies. `build-essential` (gcc,
+# g++, make) is already baked above; these add the build-orchestration and TLS/
+# compression dev pieces that every non-trivial native build reaches for — a
+# CMake/Ninja project, a CGo module wrapping a C library, or any build linking
+# `-lssl -lcrypto -lz`. `libssl-dev`/`zlib1g-dev` ship the headers and `.pc`
+# files so `pkg-config openssl` and `-lssl -lcrypto -lz` work with no runtime
+# apt install; the OpenSSL 3.x runtime itself is already present. Pure build-time
+# packages: no entrypoint, sudoers, or firewall interaction. Placed low so it
+# never busts the expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers
+# above it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    ninja-build \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
 # helpers are intentionally NOT baked here; the agent image

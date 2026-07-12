@@ -1,6 +1,6 @@
 ---
 name: enable-worktrees
-description: Prepare a repository for git-worktree-based parallel development — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees, tmpfs for metadata roots) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks) or for unrelated .gitignore edits.
+description: Prepare a repository for git-worktree-based parallel development — verify and fix the repo-root .powbox.yml declarations and .gitignore so worktree scaffolding stays container-local (persistent volume for .worktrees and its co-located .git/worktrees metadata, tmpfs for the harness .claude/worktrees root) and is never committed. Trigger when the user wants to enable, set up, or prepare a repo for parallel worktree tasks, or to fix a repo that is not worktree-ready. Do NOT trigger to actually execute a task batch (use address-tasks) or for unrelated .gitignore edits.
 ---
 
 Prepare the current repository to support the git-worktree parallel-development workflow.
@@ -15,7 +15,7 @@ Do **not** spawn worker or explorer subagents.
 ## What "worktree-ready" means
 
 Declared workspace subdirectories are kept container-local so writes there never reach the host bind mount.
-The launcher-mounted `.worktrees` volume takes precedence; declared roots that are not already mountpoints get tmpfs shadows.
+The launcher-mounted `.worktrees` volume takes precedence; `.git/worktrees` is bind-mounted from inside that volume (so per-worktree git metadata is durable, not tmpfs), and any other declared root that is not already a mountpoint gets a tmpfs shadow.
 For worktree-based parallelism a repo needs two committed things.
 
 1. **`.powbox.yml`** at the repo root declaring the worktree scaffolding as **literal** shadow paths. powbox's `detect-shadows.sh` creates literal paths (no `* ? [ ]` glob metacharacters) at container startup *even when they do not exist yet* and tmpfs-shadows any that are not already mountpoints, so committed declarations apply hands-free on a fresh checkout:
@@ -24,8 +24,9 @@ For worktree-based parallelism a repo needs two committed things.
    shadow:
      - .worktrees          # orchestrator-created worktrees (one per task)
      - .claude/worktrees   # harness-native worktrees (cross-agent parity)
-     - .git/worktrees      # per-worktree git metadata — keeps the host's own
-                           #   worktree registrations out of the container, and ours off the host
+     - .git/worktrees      # per-worktree git metadata — bind-mounted from the
+                           #   persistent .worktrees volume (durable across recycle),
+                           #   keeping the host's registrations out and ours off the host
    ```
 
    Task worktrees created by Codex's `address-tasks` live under `.worktrees/`.
@@ -40,7 +41,7 @@ For worktree-based parallelism a repo needs two committed things.
 
    `.git/worktrees` needs **no** gitignore entry — it lives inside the untracked `.git/` directory.
 
-Why this is safe and durable: the common `.git` (objects + refs) is *not* shadowed, so committed work persists on the host and survives container recycle. The powbox launcher backs `.worktrees` with a **persistent per-project volume** (which also holds the pnpm store, so worktree `pnpm install` hardlinks from it); `.claude/worktrees` and `.git/worktrees` stay ephemeral tmpfs. The `.worktrees` entry below is then a harmless **fallback** — skipped when the volume is mounted, used only if the container is launched without it.
+Why this is safe and durable: the common `.git` (objects + refs) is *not* shadowed, so committed work persists on the host and survives container recycle. The powbox launcher backs `.worktrees` with a **persistent per-project volume** (which also holds the pnpm store, so worktree `pnpm install` hardlinks from it), and `.git/worktrees` is bind-mounted from `.worktrees/.gitworktrees` inside that same volume — so per-worktree git metadata is durable too, and a worktree (including its uncommitted changes) survives a container stop/recreate with `git status` still working. Only `.claude/worktrees` (harness-native working trees) stays ephemeral tmpfs. Container registrations never leak onto the host: the bind hides the host's own `.git/worktrees` and keeps ours inside the container-local volume. The `.worktrees` entry below is then a harmless **fallback** — skipped when the volume is mounted, used only if the container is launched without it (in which case `.git/worktrees` falls back to tmpfs).
 powbox's README "Workspace Shadow Mounts → Git Worktree Parallel Development" has the full model (readable under `/ctx/<mount-name>` if the powbox repo is mounted as context, but this skill ships the contract so that is optional).
 
 ## Procedure
@@ -68,16 +69,23 @@ Every step is idempotent and surgical — preserve unrelated content, comments, 
      mountpoint -q "$root" || { echo "Unsafe worktree root (not a mountpoint): $root" >&2; exit 1; }
      findmnt -no TARGET,FSTYPE -T "$root"
    done
-   for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-     [ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
-       { echo "Unsafe worktree metadata root (expected tmpfs): $root" >&2; exit 1; }
-   done
+   # Harness working trees stay ephemeral tmpfs.
+   [ "$(findmnt -nro FSTYPE -T "$ROOT/.claude/worktrees")" = tmpfs ] ||
+     { echo "Unsafe harness worktree root (expected tmpfs): $ROOT/.claude/worktrees" >&2; exit 1; }
+   # Per-worktree git metadata must be durable (bound from the volume, non-tmpfs)
+   # whenever .worktrees is the persistent volume — a tmpfs .git/worktrees there
+   # would be lost on recycle. (Both tmpfs together is the volume-less fallback.)
+   wt_fs="$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")"
+   gitwt_fs="$(findmnt -nro FSTYPE -T "$ROOT/.git/worktrees")"
+   if [ "$wt_fs" != tmpfs ] && [ "$gitwt_fs" = tmpfs ]; then
+     echo "Unsafe: .git/worktrees is tmpfs while .worktrees is persistent — worktrees would not survive recycle. Rebuild/relaunch on an image with durable worktree metadata." >&2; exit 1
+   fi
    case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
      9p|drvfs|virtiofs) echo "Unsafe .worktrees host filesystem" >&2; exit 1 ;;
    esac
    ```
 
-   `.worktrees` is healthy when it is its own mount on any container-local filesystem — normally the per-project volume, or tmpfs as a fallback. The other two roots must be tmpfs. If a check fails, tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch; the repo config you wrote is still correct.
+   `.worktrees` is healthy when it is its own mount on any container-local filesystem — normally the per-project volume, or tmpfs as a fallback. `.git/worktrees` must be a mountpoint and, when `.worktrees` is the persistent volume, durable (non-tmpfs, bound from it); `.claude/worktrees` must be tmpfs. If a check fails, tell the user to rebuild the powbox image on the host (`./build.sh all`) and relaunch; the repo config you wrote is still correct.
 
 6. **Commit the config.** These files belong in version control so every teammate and every future container inherits a worktree-ready repo. Stage `.powbox.yml` and `.gitignore` and commit them following the repo's commit conventions — or, if the user prefers to review first, leave them staged and say so.
 

@@ -381,16 +381,22 @@ RUN OPA_VERSION=1.18.2 \
 # CMake/Ninja project, a CGo module wrapping a C library, or any build linking
 # `-lssl -lcrypto -lz`. `libssl-dev`/`zlib1g-dev` ship the headers and `.pc`
 # files so `pkg-config openssl` and `-lssl -lcrypto -lz` work with no runtime
-# apt install; the OpenSSL 3.x runtime itself is already present. Pure build-time
-# packages: no entrypoint, sudoers, or firewall interaction. Placed low so it
-# never busts the expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers
-# above it.
+# apt install; the OpenSSL 3.x runtime itself is already present. `ccache` is the
+# compiler cache: baked here, but its persistent cache dir is wired by the
+# launcher/entrypoint (CCACHE_DIR → .worktrees/.ccache, beside the Go caches) so
+# repeated large native builds survive container recreation. It stays OPT-IN per
+# build (no global CC/CXX or masquerade-PATH interposition here) — projects
+# activate it with `CC="ccache gcc"` or `cmake -DCMAKE_C_COMPILER_LAUNCHER=ccache`.
+# Pure build-time packages: no entrypoint, sudoers, or firewall interaction.
+# Placed low so it never busts the expensive gh / mssql / pwsh / npm / Podman /
+# Go / OPA layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
     libssl-dev \
     ninja-build \
     zlib1g-dev \
+    ccache \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the substrate startup scripts shared by every agent while still root.

@@ -18,7 +18,8 @@
 #     "wtBase": "<repo>/.worktrees/$CONTAINER_NAME",
 #     "remote": true|false,    // push/PR available; false is a fallback, NOT a blocker
 #     "availBytes": N,         // free bytes on the .worktrees mount
-#     "prunedOrphans": ["<slug>", ...]
+#     "prunedOrphans": ["<slug>", ...],       // EMPTY orphan dirs removed
+#     "quarantinedOrphans": ["<slug>", ...]   // NON-EMPTY orphans preserved (moved aside)
 #   }
 #
 # Exit 0 when ok (even with remote=false); exit 1 on a blocker.
@@ -33,6 +34,21 @@ command -v jq >/dev/null 2>&1 || {
 	echo '{"ok":false,"blocker":"jq not found on PATH"}'
 	exit 1
 }
+
+# Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so tests
+# exercise the checked-out version; fall back to the baked one. BASH_SOURCE
+# resolves to the full script path even when invoked via PATH, so dirname is safe.
+_wt_common=""
+for _cand in "$(dirname "${BASH_SOURCE[0]}")/wt-common.sh" "/usr/local/bin/wt-common.sh"; do
+	if [ -r "$_cand" ]; then
+		_wt_common="$_cand"
+		break
+	fi
+done
+[ -n "$_wt_common" ] || fail "cannot locate wt-common.sh"
+# shellcheck source=docker/shared/wt-common.sh
+. "$_wt_common"
+unset _wt_common _cand
 
 # Resolve the MAIN repo root even when invoked from inside a worktree:
 # --git-common-dir points at the shared .git, not the per-worktree gitdir.
@@ -73,10 +89,21 @@ else
 		mountpoint -q "$root" ||
 			fail "unsafe worktree root (not a mountpoint): $root — run enable-worktrees, then rebuild/relaunch if the image predates worktree-shadow support"
 	done
-	for root in "$ROOT/.claude/worktrees" "$ROOT/.git/worktrees"; do
-		[ "$(findmnt -nro FSTYPE -T "$root")" = tmpfs ] ||
-			fail "unsafe worktree metadata root (expected tmpfs): $root"
-	done
+	# Harness-native worktree working dirs stay ephemeral tmpfs.
+	[ "$(findmnt -nro FSTYPE -T "$ROOT/.claude/worktrees")" = tmpfs ] ||
+		fail "unsafe harness worktree root (expected tmpfs): $ROOT/.claude/worktrees"
+	# Per-worktree git metadata must share the .worktrees volume's durability:
+	# when .worktrees is the persistent per-container volume (non-tmpfs), its
+	# .git/worktrees must be bound from it (non-tmpfs) too — a tmpfs .git/worktrees
+	# alongside a persistent .worktrees is the exact bug this task fixes (a recycle
+	# keeps the working trees but strands the metadata that makes them usable).
+	# When .worktrees is the tmpfs fallback (no volume), a tmpfs .git/worktrees is
+	# consistent and fine.
+	_wt_fstype="$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")"
+	_gitwt_fstype="$(findmnt -nro FSTYPE -T "$ROOT/.git/worktrees")"
+	if [ "$_wt_fstype" != tmpfs ] && [ "$_gitwt_fstype" = tmpfs ]; then
+		fail "worktree git metadata ($ROOT/.git/worktrees) is ephemeral tmpfs while .worktrees is persistent ($_wt_fstype); a container recycle would strand the worktrees — rebuild/relaunch on an image with durable worktree metadata"
+	fi
 	case "$(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" in
 	9p | drvfs | virtiofs) fail "unsafe .worktrees host filesystem: $(findmnt -nro FSTYPE -T "$ROOT/.worktrees")" ;;
 	esac
@@ -85,21 +112,41 @@ fi
 # --- Prune ONLY this container's orphans --------------------------------------
 # A peer container's live worktrees live under its own $CONTAINER_NAME subdir
 # and are never scanned; the shared .pnpm-store and .gomodcache/.gocache sit at
-# the volume root. Each pruned orphan's scoped golangci-lint analysis cache
+# the volume root. Each reaped orphan's scoped golangci-lint analysis cache
 # (.golangci-cache/$CONTAINER_NAME/<slug>, written by the golangci-lint
-# wrapper) is dropped with it — best-effort, exactly the slug being pruned —
+# wrapper) is dropped with it — best-effort, exactly the slug being reaped —
 # so caches from crashed sessions do not accumulate.
+#
+# With durable worktree metadata a recycled worktree keeps its .git/worktrees
+# entry and passes the is-inside-work-tree test below, so it is KEPT (the whole
+# point). A dir that still fails the test is a genuine orphan (partial create, or
+# a pre-durable-metadata dir whose tmpfs metadata was lost); wt_reap_orphan_dir
+# deletes it only when EMPTY and otherwise preserves it (moves it aside) — it
+# never deletes the sole surviving copy of dirty work because metadata vanished.
 mkdir -p "$WT_BASE"
 git -C "$ROOT" worktree prune
 PRUNED=()
+QUARANTINED=()
 for d in "$WT_BASE"/*/; do
 	[ -e "$d" ] || continue
-	if ! git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-		rm -rf "$d"
-		rm -rf "$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$(basename "$d")" 2>/dev/null || true
-		PRUNED+=("$(basename "$d")")
-		echo "pruned orphaned worktree: $d" >&2
-	fi
+	d="${d%/}"
+	git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 && continue
+	slug="$(basename "$d")"
+	outcome="$(wt_reap_orphan_dir "$d")"
+	rm -rf "$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$slug" 2>/dev/null || true
+	case "$outcome" in
+	quarantined:*)
+		QUARANTINED+=("$slug")
+		echo "quarantined non-empty orphan (metadata lost): $d -> ${outcome#quarantined:}" >&2
+		;;
+	kept)
+		echo "left non-empty orphan in place (could not quarantine): $d" >&2
+		;;
+	*)
+		PRUNED+=("$slug")
+		echo "pruned empty orphaned worktree: $d" >&2
+		;;
+	esac
 done
 
 # --- Remote probe (failure is a fallback, not a blocker) -----------------------
@@ -127,9 +174,16 @@ fi
 
 AVAIL="$(findmnt -nbo AVAIL -T "$ROOT/.worktrees" 2>/dev/null || echo 0)"
 
+if [ ${#QUARANTINED[@]} -gt 0 ]; then
+	QUAR_JSON="$(printf '%s\n' "${QUARANTINED[@]}" | jq -R . | jq -s .)"
+else
+	QUAR_JSON='[]'
+fi
+
 jq -n \
 	--arg wtBase "$WT_BASE" \
 	--argjson remote "$REMOTE" \
 	--argjson avail "${AVAIL:-0}" \
-	--args '{ok: true, wtBase: $wtBase, remote: $remote, availBytes: $avail, prunedOrphans: $ARGS.positional}' \
+	--argjson quarantined "$QUAR_JSON" \
+	--args '{ok: true, wtBase: $wtBase, remote: $remote, availBytes: $avail, prunedOrphans: $ARGS.positional, quarantinedOrphans: $quarantined}' \
 	-- ${PRUNED[@]+"${PRUNED[@]}"}

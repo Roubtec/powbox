@@ -120,6 +120,7 @@ COPY --chmod=755 \
     docker/shared/powbox-provenance \
     docker/shared/gitcat \
     docker/shared/gh-review-threads \
+    docker/shared/wt-common.sh \
     docker/shared/wt-bootstrap \
     docker/shared/wt-enter \
     docker/shared/wt-remove \

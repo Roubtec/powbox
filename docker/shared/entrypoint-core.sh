@@ -65,15 +65,18 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	} 2>/dev/null >>"$_claude_plugin_log" || true
 	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the script
 	# only appends to it (never reads), so there is no read/write conflict.
+	# stderr first on the launch too: a failed open of the log must stay silent (the
+	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
+	# stderr back into the log.
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
 		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
-			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
 		# shellcheck disable=SC2094
 		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
-			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+			bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
 	unset _claude_cfg _claude_plugin_log
 fi

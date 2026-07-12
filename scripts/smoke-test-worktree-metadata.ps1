@@ -33,11 +33,21 @@ param(
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile - the launch-time wiring the
 # launcher supplies via compose.shared.yml and that smoke-test-podman.ps1 replicates.
 #
+# FAIL-CLOSED contract (round-3 review): this stage exists to guard the durable-bind
+# lifecycle, so a regression in that bind must NOT masquerade as a skip. Each inner
+# container runs an INDEPENDENT mount-capability preflight (a throwaway temp-over-temp
+# `mount --bind` that does NOT touch shadow-mounts.sh / bind_git_worktrees) and
+# self-skips (exit 42) ONLY when that preflight proves the runtime genuinely cannot
+# bind-mount, or the persistent .worktrees volume is not mounted. Once capability is
+# proven, a shadow-mounts.sh failure, a tmpfs fallback, a missing mountpoint, or a
+# bind that maps the wrong source is a HARD TEST FAILURE (non-42 exit), never a skip.
+#
 # Self-skips (no failure) when it cannot meaningfully run: the agent image is absent
-# (unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then it fails); or the host/runtime
-# cannot grant the container the mount privilege to establish the durable bind (e.g.
-# a rootless engine that blocks `mount --bind`, or a tmpfs fallback). The recreate
-# lifecycle runs for real on a native-Linux CI runner.
+# (unless POWBOX_SMOKE_REQUIRE_IMAGE is set, then it fails); or the independent
+# preflight proves the runtime cannot `mount --bind` at all, or the persistent
+# .worktrees volume is not mounted. A durable bind that fails to materialize AFTER
+# capability is proven is a hard failure, not a skip. The recreate lifecycle runs for
+# real on a native-Linux CI runner.
 
 $ErrorActionPreference = "Stop"
 
@@ -75,8 +85,10 @@ $runArgs = @(
 # a here-string would inherit this file's CRLF endings (*.ps1 is pinned to eol=crlf)
 # and the stray ^M would break /bin/bash -c on a Windows checkout. Positional args:
 # $1 = the dir-mounted repo, $2 = the per-worktree branch/slug, $3 = the container
-# subdir under .worktrees. Exit codes: 0 = ok; 42 = self-skip (no mount privilege /
-# no durable bind); other = genuine failure.
+# subdir under .worktrees. Exit codes: 0 = ok; 42 = self-skip, emitted ONLY by the
+# independent capability preflight (no bind-mount capability / no persistent
+# .worktrees volume); any OTHER non-zero = genuine failure, INCLUDING a durable-bind
+# regression detected after the preflight proved the runtime can mount.
 $setupScript = @(
   'set -u'
   'WS="$1"'
@@ -86,25 +98,61 @@ $setupScript = @(
   '# The fixture is created on the host; inside the container we touch it as root, so'
   '# silence git dubious-ownership on the borrowed checkout (a throwaway smoke fixture).'
   'git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
-  '# Establish the durable metadata bind exactly as the entrypoint does.'
+  '# Independent mount-capability PREFLIGHT (does NOT touch shadow-mounts.sh /'
+  '# bind_git_worktrees): a throwaway temp-over-temp mount --bind with the same cap'
+  '# wiring. ONLY its failure is a legitimate skip (exit 42), so a regression in the'
+  '# durable bind can no longer masquerade as a missing capability.'
+  'pfsrc="$(mktemp -d)"'
+  'pfdst="$(mktemp -d)"'
+  'if ! mount --bind "$pfsrc" "$pfdst" 2>/dev/null; then'
+  '  echo "  skip: runtime cannot perform mount --bind (no CAP_SYS_ADMIN / EPERM) - the durable-bind lifecycle cannot be exercised here"'
+  '  rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
+  '  exit 42'
+  'fi'
+  'umount "$pfdst" 2>/dev/null || umount -l "$pfdst" 2>/dev/null || true'
+  'rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
+  '# The persistent .worktrees volume must genuinely be mounted; otherwise there is'
+  '# nothing durable to co-locate into (a legit skip). The outer driver always mounts it.'
+  'if ! mountpoint -q "$WS/.worktrees"; then'
+  '  echo "  skip: the persistent .worktrees volume is not mounted at $WS/.worktrees - nothing durable to exercise"'
+  '  exit 42'
+  'fi'
+  'echo "  ok: mount capability confirmed and the persistent .worktrees volume is present (preflight)"'
+  '# Capability + volume are established. From HERE any failure to materialize the durable'
+  '# bind is a REGRESSION and a HARD FAILURE (exit 1, NOT a skip) - the case this stage'
+  '# exists to catch. Establish the bind exactly as the entrypoint does.'
   'smerr="$(mktemp)"'
   'if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then'
-  '  echo "  skip: shadow-mounts.sh could not establish the durable bind (no mount privilege on this runtime?)"'
+  '  echo "FAIL: shadow-mounts.sh failed to establish the durable bind despite mount capability being present - durable-bind REGRESSION" >&2'
   '  sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true'
-  '  exit 42'
+  '  exit 1'
   'fi'
   'if ! mountpoint -q "$WS/.git/worktrees"; then'
-  '  echo "  skip: .git/worktrees is not a mountpoint after shadow-mounts.sh (bind not established)"'
-  '  exit 42'
+  '  echo "FAIL: .git/worktrees is not a mountpoint after shadow-mounts.sh - the durable bind did not materialize (REGRESSION)" >&2'
+  '  exit 1'
   'fi'
-  '# A tmpfs here means no persistent .worktrees volume to co-locate into - the honest'
-  '# fallback, but NOT the durable path this stage exists to exercise.'
+  '# A tmpfs here means shadow-mounts.sh fell back instead of binding the persistent'
+  '# volume - a regression now that capability + volume are both proven present.'
   'fstype="$(findmnt -nro FSTYPE -T "$WS/.git/worktrees" 2>/dev/null || true)"'
   'if [ "$fstype" = tmpfs ]; then'
-  '  echo "  skip: durable bind fell back to tmpfs (no persistent .worktrees volume mounted)"'
-  '  exit 42'
+  '  echo "FAIL: durable bind fell back to tmpfs despite the persistent .worktrees volume being present - durable-bind REGRESSION" >&2'
+  '  exit 1'
   'fi'
-  'echo "  ok: durable .git/worktrees bind established from the persistent .worktrees volume"'
+  '# Prove the bind maps .git/worktrees onto the volume .gitworktrees dir (not merely'
+  '# onto some non-tmpfs fs): a sentinel written on the volume side must be visible'
+  '# through .git/worktrees; a mismatch means the bind points at the wrong source.'
+  'probe=".bindprobe.$$"'
+  'if ! : >"$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null; then'
+  '  echo "FAIL: cannot write into the volume .gitworktrees dir to verify the durable bind (REGRESSION)" >&2'
+  '  exit 1'
+  'fi'
+  'if [ ! -e "$WS/.git/worktrees/$probe" ]; then'
+  '  rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true'
+  '  echo "FAIL: .git/worktrees does not reflect the volume .gitworktrees dir - durable bind maps the wrong source (REGRESSION)" >&2'
+  '  exit 1'
+  'fi'
+  'rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true'
+  'echo "  ok: durable .git/worktrees bind established from the persistent .worktrees volume (verified maps .gitworktrees)"'
   'WTDIR="$WS/.worktrees/$CONT/$SLUG"'
   'if ! git -C "$WS" worktree add -q "$WTDIR" -b "$SLUG" >/dev/null 2>&1; then'
   '  echo "FAIL: git worktree add failed while creating the linked worktree" >&2'
@@ -130,14 +178,39 @@ $verifyScript = @(
   'CONT="$3"'
   'export HOME=/root'
   'git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
-  '# Re-establish the durable bind, as the entrypoint would on the recreated container.'
-  'smerr="$(mktemp)"'
-  'if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then'
-  '  echo "  skip: shadow-mounts.sh could not re-establish the durable bind on recreate"'
-  '  sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true'
+  '# Independent mount-capability PREFLIGHT (see Container A): only its failure is a'
+  '# legitimate skip. Once it passes, a bind that does not re-materialize on recreate is'
+  '# a durable-bind REGRESSION and a HARD FAILURE, never a skip.'
+  'pfsrc="$(mktemp -d)"'
+  'pfdst="$(mktemp -d)"'
+  'if ! mount --bind "$pfsrc" "$pfdst" 2>/dev/null; then'
+  '  echo "  skip: runtime cannot perform mount --bind (no CAP_SYS_ADMIN / EPERM) - the recreate lifecycle cannot be exercised here"'
+  '  rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
   '  exit 42'
   'fi'
-  'mountpoint -q "$WS/.git/worktrees" || { echo "  skip: durable bind not re-established on recreate"; exit 42; }'
+  'umount "$pfdst" 2>/dev/null || umount -l "$pfdst" 2>/dev/null || true'
+  'rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
+  'if ! mountpoint -q "$WS/.worktrees"; then'
+  '  echo "  skip: the persistent .worktrees volume is not mounted at $WS/.worktrees - nothing durable to exercise"'
+  '  exit 42'
+  'fi'
+  '# Re-establish the durable bind, as the entrypoint would on the recreated container.'
+  '# Capability is proven, so any failure here is a REGRESSION (hard failure, NOT skip).'
+  'smerr="$(mktemp)"'
+  'if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then'
+  '  echo "FAIL: shadow-mounts.sh failed to re-establish the durable bind on recreate despite mount capability - durable-bind REGRESSION" >&2'
+  '  sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true'
+  '  exit 1'
+  'fi'
+  'if ! mountpoint -q "$WS/.git/worktrees"; then'
+  '  echo "FAIL: durable bind not re-established on recreate (.git/worktrees is not a mountpoint) - REGRESSION" >&2'
+  '  exit 1'
+  'fi'
+  'fstype="$(findmnt -nro FSTYPE -T "$WS/.git/worktrees" 2>/dev/null || true)"'
+  'if [ "$fstype" = tmpfs ]; then'
+  '  echo "FAIL: durable bind fell back to tmpfs on recreate despite the persistent .worktrees volume being present - REGRESSION" >&2'
+  '  exit 1'
+  'fi'
   'WTDIR="$WS/.worktrees/$CONT/$SLUG"'
   '[ -d "$WTDIR" ] || { echo "FAIL: the linked worktree dir did not survive recreation ($WTDIR missing)" >&2; exit 1; }'
   '# 1. Metadata survived: git status works, and the admin dir is visible via the bind.'

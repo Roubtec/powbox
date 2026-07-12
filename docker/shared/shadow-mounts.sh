@@ -37,12 +37,26 @@ mounted=0
 # node_modules).  Override via SHADOW_TMPFS_SIZE (any value mount -o size= takes).
 TMPFS_SIZE="${SHADOW_TMPFS_SIZE:-2g}"
 
+# warn_bind_broken <wt> <dst> <reason>
+#   Loud stderr diagnostic for the case where a persistent .worktrees volume was
+#   detected but the durable .git/worktrees bind could not be established.  The
+#   caller still falls back to tmpfs (a working-but-ephemeral .git/worktrees
+#   beats none), but this fallback must never look like the normal "no volume
+#   present" launch — an operator has to be able to tell a broken durable bind
+#   from a launch mode that never had one.
+warn_bind_broken() {
+	echo "shadow-mounts: WARNING: persistent .worktrees volume found at '$1' but the durable .git/worktrees bind failed ($3); falling back to EPHEMERAL tmpfs for '$2' — linked-worktree metadata will NOT survive container recreation." >&2
+}
+
 # bind_git_worktrees <dst>
 #   <dst> is a resolved, /workspace-validated path ending in /.git/worktrees whose
 #   mountpoint dir already exists.  Bind the co-located persistent worktrees
 #   volume's .gitworktrees subdir over it so per-worktree git metadata persists.
 #   Returns 0 when it bound the durable metadata; returns 1 (caller falls back to
-#   tmpfs) when there is no persistent .worktrees volume to co-locate into.
+#   tmpfs) when there is no persistent .worktrees volume to co-locate into — or,
+#   with a LOUD stderr warning, when a persistent volume IS present but the
+#   durable bind could not be established, so a broken bind never masquerades as
+#   the normal no-volume fallback.
 bind_git_worktrees() {
 	local dst="$1"
 	local ws="${dst%/.git/worktrees}" # /workspace/<slug>
@@ -51,26 +65,47 @@ bind_git_worktrees() {
 	# Only bind when .worktrees is a PERSISTENT container-local mount (the
 	# launcher's agent-wt-* volume): a plain unmounted dir or the tmpfs fallback
 	# would make the "durable" metadata just as ephemeral as tmpfs, so in those
-	# cases the caller's tmpfs path is the honest choice.
+	# cases the caller's tmpfs path is the honest choice.  These two checks are
+	# the only SILENT return-1 paths: "no durable volume" is a normal launch
+	# mode, not a fault.
 	mountpoint -q "$wt" 2>/dev/null || return 1
 	case "$(findmnt -nro FSTYPE -T "$wt" 2>/dev/null || true)" in
 	tmpfs | '') return 1 ;;
 	esac
 
+	# From here on a persistent .worktrees volume IS present, so any failure
+	# means the durable metadata bind is BROKEN, not merely absent.  Warn loudly
+	# (warn_bind_broken) before the caller falls back to tmpfs: silently
+	# degrading would reintroduce the exact persistent-working-trees /
+	# ephemeral-metadata mismatch this bind exists to prevent (worktrees that
+	# survive a container recycle while their registrations vanish), and make it
+	# indistinguishable from a normal no-volume launch.
 	local src="$wt/.gitworktrees"
 	local rsrc
-	rsrc="$(realpath -m -- "$src")" || return 1
+	rsrc="$(realpath -m -- "$src")" || {
+		warn_bind_broken "$wt" "$dst" "cannot resolve bind source '$src'"
+		return 1
+	}
 	# Defence in depth: the bind SOURCE must also resolve under /workspace/.
 	case "$rsrc" in
 	"$workspace_root"/*) ;;
-	*) return 1 ;;
+	*)
+		warn_bind_broken "$wt" "$dst" "bind source '$rsrc' resolves outside /workspace/"
+		return 1
+		;;
 	esac
 
 	# Durable metadata dir inside the volume, owned by node (git runs as node).
-	mkdir -p "$rsrc" || return 1
+	mkdir -p "$rsrc" || {
+		warn_bind_broken "$wt" "$dst" "cannot create durable metadata dir '$rsrc'"
+		return 1
+	}
 	chown "$NODE_UID:$NODE_GID" "$rsrc" 2>/dev/null || true
 
-	mount --bind "$rsrc" "$dst" || return 1
+	mount --bind "$rsrc" "$dst" || {
+		warn_bind_broken "$wt" "$dst" "mount --bind '$rsrc' -> '$dst' failed"
+		return 1
+	}
 	echo "Worktree metadata: bound durable $rsrc -> $dst"
 	return 0
 }

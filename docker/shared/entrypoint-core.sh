@@ -309,7 +309,7 @@ for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR; do
 	_cache_dir="${!_cache_var:-}"
 	[ -n "$_cache_dir" ] || continue
 	if ! mkdir -p "$_cache_dir" 2>/dev/null; then
-		echo "Warning: cannot create cache dir $_cache_dir (${_cache_var}); unsetting it so the tool falls back to its default." >&2
+		echo "Warning: cannot create cache dir $_cache_dir; unsetting ${_cache_var} so its tool falls back to the image-default cache path." >&2
 		unset "$_cache_var"
 	fi
 done

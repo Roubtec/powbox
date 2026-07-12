@@ -139,6 +139,10 @@ fi
 	"strace -V >/dev/null" \
 	"gpg --version >/dev/null" \
 	"gcc --version >/dev/null" \
+	"cmake --version >/dev/null" \
+	"ninja --version >/dev/null" \
+	"pkg-config --version >/dev/null" \
+	"pkg-config --exists openssl zlib" \
 	"go version >/dev/null" \
 	"command -v gofmt >/dev/null" \
 	"golangci-lint version >/dev/null" \

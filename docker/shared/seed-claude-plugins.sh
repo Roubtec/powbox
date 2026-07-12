@@ -303,8 +303,11 @@ converge_keep_current() {
 	# Both are the only network ops on a warm volume and both are best-effort: a
 	# failed refresh just leaves the already-installed skills in place, and
 	# `plugin update` no-ops ("already at the latest version") when the cached
-	# SHA already matches. Updates apply at the NEXT session start (a restart) —
-	# this one-session staleness is accepted (plugins load once at startup).
+	# SHA already matches. Plugins load once at session start, so visibility
+	# hinges on the entrypoint's bounded wait (see header): a refresh finishing
+	# inside it applies to the IMMINENT session (the usual warm case); one that
+	# outruns the cap — or a launch with no waiter, like the hook's build-skew
+	# shim — lands at the next session start, an accepted one-session staleness.
 	#
 	# Per-marketplace AUTO-UPDATE (updates at session start without these calls)
 	# is OFF by default for third-party marketplaces and its on-disk schema is
@@ -316,7 +319,7 @@ converge_keep_current() {
 		claude plugin marketplace update "$MARKETPLACE_NAME"; then
 		if run_bounded "$NET_TIMEOUT" "plugin update ${PLUGIN_ID}" \
 			claude plugin update "$PLUGIN_ID"; then
-			log "keep-current complete (updates apply next session start)"
+			log "keep-current complete (applies this session if within the entrypoint wait, else next session)"
 		else
 			log "plugin update unavailable, will retry next start"
 		fi

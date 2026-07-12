@@ -99,6 +99,9 @@ fi
 # .root only in self-hosted mode when .worktrees is not a mountpoint (no host
 # litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
 # GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
+# The ccache probes prove the binary is baked, that it honors a CCACHE_DIR env
+# (so the launcher's .worktrees/.ccache wiring lands) and — the functional check —
+# that two identical `ccache gcc` compiles into a fresh cache produce a hit.
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/…` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
@@ -143,6 +146,9 @@ fi
 	"ninja --version >/dev/null" \
 	"pkg-config --version >/dev/null" \
 	"pkg-config --exists openssl zlib" \
+	"ccache --version >/dev/null" \
+	'CCACHE_DIR=/tmp/powbox-ccache-cfg-probe ccache --show-config | grep -q /tmp/powbox-ccache-cfg-probe' \
+	'd=/tmp/powbox-ccache-fn-probe && rm -rf "$d" && mkdir -p "$d" && printf "int main(void){return 0;}\n" > "$d/t.c" && export CCACHE_DIR="$d/cache" && ccache -z >/dev/null && ccache gcc -c "$d/t.c" -o "$d/a.o" && ccache gcc -c "$d/t.c" -o "$d/b.o" && ccache -s | grep -Eq "Hits:[[:space:]]+[1-9]"' \
 	"go version >/dev/null" \
 	"command -v gofmt >/dev/null" \
 	"golangci-lint version >/dev/null" \

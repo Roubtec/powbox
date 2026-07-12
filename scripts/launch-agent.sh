@@ -1150,6 +1150,12 @@ WT_STORE_DIR="${WORKSPACE_MOUNT}/.worktrees/.pnpm-store"
 # is safe and is the whole point (warm caches for every worktree).
 WT_GOMODCACHE_DIR="${WORKSPACE_MOUNT}/.worktrees/.gomodcache"
 WT_GOCACHE_DIR="${WORKSPACE_MOUNT}/.worktrees/.gocache"
+# ccache compiler cache beside the Go caches, same persistent mount and same
+# sharing rationale: content-addressed and lock-safe under concurrent builds, so
+# it is deliberately SHARED across a project's worktrees (warm objects for all).
+# Its in-container default (~/.cache/ccache) dies with the container. Opt-in per
+# build (baked binary + persistent dir only; no global CC/CXX interposition).
+WT_CCACHE_DIR="${WORKSPACE_MOUNT}/.worktrees/.ccache"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
 # container (agent + project), NOT just the project: a project's Claude and Codex
@@ -1772,18 +1778,20 @@ EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
 if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 	EXTRA_ENV+=(-e "PNPM_STORE_DIR=$WT_STORE_DIR")
 fi
-# Point the Go module + build caches into the same persistent mount — keyed on
-# the WIDER worktrees gate (or self-hosted mode, where .worktrees is a subdir of
-# the one workspace volume), NOT the JS gate above: a go.mod-only repo mounts
-# only the worktrees volume. Omitting them for a non-dev dir-mounted folder
-# stops the entrypoint from mkdir-ing cache dirs onto the host bind mount — go
-# just keeps its image-default (container-ephemeral) cache paths there instead.
-# Plain env is all `go` needs (no `go env -w`), matching the PNPM_STORE_DIR
-# precedent; the entrypoint pre-creates the dirs (guarded, warn-don't-abort).
+# Point the Go module + build caches (and the ccache compiler cache) into the
+# same persistent mount — keyed on the WIDER worktrees gate (or self-hosted mode,
+# where .worktrees is a subdir of the one workspace volume), NOT the JS gate
+# above: a go.mod-only repo mounts only the worktrees volume. Omitting them for a
+# non-dev dir-mounted folder stops the entrypoint from mkdir-ing cache dirs onto
+# the host bind mount — go/ccache just keep their image-default (container-
+# ephemeral) cache paths there instead. Plain env is all these tools need (no
+# `go env -w`, no ccache config), matching the PNPM_STORE_DIR precedent; the
+# entrypoint pre-creates the dirs (guarded, warn-don't-abort).
 if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 	EXTRA_ENV+=(
 		-e "GOMODCACHE=$WT_GOMODCACHE_DIR"
 		-e "GOCACHE=$WT_GOCACHE_DIR"
+		-e "CCACHE_DIR=$WT_CCACHE_DIR"
 	)
 fi
 

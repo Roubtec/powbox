@@ -137,7 +137,7 @@ echo "  ok: mount capability confirmed and the persistent .worktrees volume is p
 # Capability + volume are established. From HERE any failure to materialize the
 # durable bind is a REGRESSION and a HARD FAILURE (exit 1, NOT a skip) - the case this
 # stage exists to catch. Establish the bind exactly as the entrypoint does: bind the
-# persistent .worktrees volume s .gitworktrees subdir over .git/worktrees.
+# .gitworktrees subdir of the persistent .worktrees volume over .git/worktrees.
 smerr="$(mktemp)"
 if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then
 	echo "FAIL: shadow-mounts.sh failed to establish the durable bind despite mount capability being present - durable-bind REGRESSION" >&2

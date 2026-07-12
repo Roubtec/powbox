@@ -93,9 +93,55 @@ if [ -f "$AGENT_TMPL" ]; then
 fi
 
 # The dev-skills@roubtec plugin (the 8 shared Claude skills; task 015b stopped
-# baking them) is deliberately NOT converged here. entrypoint-core.sh does it for
-# EVERY launch — after init-firewall.sh (network ordering) and fully DETACHED,
-# because the claude CLI hangs (SIGTERM-immune) when invoked with the container
-# TTY as stdin, so no `claude plugin …` call may ever run on the entrypoint's
-# critical path (see seed-claude-plugins.sh for the full rationale). This hook
-# stays CLI-free and cheap.
+# baking them) is deliberately NOT converged here on current images.
+# entrypoint-core.sh does it for EVERY launch — after init-firewall.sh (network
+# ordering) and fully DETACHED, because the claude CLI hangs (SIGTERM-immune)
+# when invoked with the container TTY as stdin, so no `claude plugin …` call may
+# ever run on the entrypoint's critical path (see seed-claude-plugins.sh for the
+# full rationale). A core that owns the bootstrap announces it by exporting
+# POWBOX_PLUGIN_BOOTSTRAP=core before invoking this hook.
+#
+# BUILD-SKEW SHIM. entrypoint-core.sh is baked into the BASE image; this hook is
+# baked into the AGENT layer. The common `cc --build` path rebuilds only the
+# agent layer over an existing base, so this hook can run under an OLDER core
+# that converges the plugin only for NON-primary Claude — primary Claude was
+# this hook's job in that generation. Without a fallback, that combination
+# silently stops converging the plugin on primary-Claude launches (the common
+# case). So: when the handshake is absent and Claude is primary, launch the same
+# detached, best-effort bootstrap the new core would have. Ordering holds — as
+# primary Claude's setup hook we are invoked BY core AFTER init-firewall.sh.
+# (Non-primary Claude's hook run happens pre-firewall from entrypoint-agent.sh,
+# but there PRIMARY_AGENT != claude, so the gate below skips it and the old core
+# still converges non-primary Claude itself, post-firewall.) The writer guard is
+# defense-in-depth: the launcher clears AGENT_SETUP_HOOK for that role, so this
+# hook should never run there at all. No done-marker/bounded wait here: the old
+# core has no waiter, so a refresh simply lands next session — the shim restores
+# convergence, not the same-session wait. Harmless if ever run redundantly or
+# standalone: the seeder is detached, bounded, flock-serialized, idempotent, and
+# self-defends its stdin against a TTY.
+if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = claude ] &&
+	[ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
+	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+	# For primary Claude, AGENT_CONFIG_DIR IS Claude's config dir, so this is the
+	# same shared-volume log the core path appends to. APPEND, never truncate
+	# (see the core block: the claude-config volume is shared by every powbox
+	# container, so truncation would wipe a peer's in-progress bootstrap log).
+	_claude_plugin_log="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
+	{
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook build-skew plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[claude-hook] dev-skills@roubtec plugin: no core handshake (older base image?); converging post-firewall, detached (log: $_claude_plugin_log)"
+	} >>"$_claude_plugin_log" 2>/dev/null || true
+	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the
+	# script only appends to it (never reads), so there is no read/write conflict.
+	if command -v setsid >/dev/null 2>&1; then
+		# shellcheck disable=SC2094
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+	else
+		# Fallback if setsid is somehow unavailable: still detach from the hook.
+		# shellcheck disable=SC2094
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+	fi
+	unset _claude_plugin_log
+fi

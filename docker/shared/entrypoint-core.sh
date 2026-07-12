@@ -31,7 +31,25 @@ fi
 # SINGLE named volume shared by EVERY powbox container, so truncation would wipe a PEER
 # container's in-progress bootstrap log; the dated, container-tagged separator keeps each
 # boot's block easy to find instead.
-if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+#
+# SKIPPED for the image-store WRITER role: that container is short-lived by design —
+# Docker reaps it the moment seed-image-store.sh exits, which would SIGKILL a detached
+# plugin install/update MID-MUTATION against the shared claude-config volume (SIGKILL
+# also skips the seeder's EXIT trap), racing every peer container's bootstrap and
+# risking partial plugin state. The writer needs no skills anyway — it only pulls
+# images.
+#
+# Handshake for entrypoint-claude-hook.sh's build-skew shim: exporting this BEFORE the
+# setup-hook call below tells the hook that THIS core owns the plugin bootstrap for
+# every launch, so the hook must not. An OLDER base's core (which converged only
+# NON-primary Claude, leaving primary Claude to the hook) never sets it — that absence
+# is what tells a newer agent layer's hook to cover primary Claude itself. Exported
+# unconditionally (not inside the gate below): the hook re-checks the same
+# claude/seed-script preconditions, so "core owns it" is true whether or not the gate
+# fires.
+export POWBOX_PLUGIN_BOOTSTRAP=core
+if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
+	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
 	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
 	mkdir -p "$_claude_cfg" 2>/dev/null || true

@@ -19,9 +19,12 @@
 # primary-Claude start — and the synchronous cold install it was routing to never
 # survived a TTY launch either (it hung the same way, timed out, and deferred to
 # the background self-heal, so first-session skill availability was paid for but
-# never delivered). Hence: callers MUST detach and redirect stdin away from the
+# never delivered). Hence: callers SHOULD detach and redirect stdin away from the
 # TTY; a manual run is best done the same way
-# (`bash /usr/local/bin/seed-claude-plugins.sh </dev/null`).
+# (`bash /usr/local/bin/seed-claude-plugins.sh </dev/null`). As DEFENSE IN DEPTH
+# the script also swaps a TTY stdin for /dev/null itself (see below), so an
+# ad-hoc run or a future call site that forgets to detach cannot reintroduce the
+# hang — correctness must not hinge on every caller remembering the redirect.
 #
 # The entrypoint pairs the detached run with a BOUNDED, marker-based wait just
 # before it execs the agent (see POWBOX_PLUGIN_DONE_FILE below): a warm refresh
@@ -43,6 +46,16 @@
 # next start" logging.
 
 set -uo pipefail
+
+# DEFENSE IN DEPTH against the TTY hang: the claude CLI hangs (SIGTERM-immune)
+# when its stdin is the container TTY, and every `claude` child below inherits
+# OUR stdin. Callers should detach with `</dev/null` (see the invocation model
+# above), but the hang must not be reachable through a forgetful call site or an
+# ad-hoc manual run — so if stdin is (still) a TTY, replace it with /dev/null
+# ourselves. Nothing in this script reads stdin.
+if [ -t 0 ]; then
+	exec </dev/null
+fi
 
 MARKETPLACE_REPO="Roubtec/agent-skills"
 MARKETPLACE_NAME="roubtec"

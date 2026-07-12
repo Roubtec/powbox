@@ -127,10 +127,12 @@ if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = 
 	# (see the core block: the claude-config volume is shared by every powbox
 	# container, so truncation would wipe a peer's in-progress bootstrap log).
 	_claude_plugin_log="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
+	# stderr first: a failed open of the log itself must stay silent too
+	# (redirections apply left-to-right).
 	{
 		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook build-skew plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
 		echo "[claude-hook] dev-skills@roubtec plugin: no core handshake (older base image?); converging post-firewall, detached (log: $_claude_plugin_log)"
-	} >>"$_claude_plugin_log" 2>/dev/null || true
+	} 2>/dev/null >>"$_claude_plugin_log" || true
 	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the
 	# script only appends to it (never reads), so there is no read/write conflict.
 	if command -v setsid >/dev/null 2>&1; then

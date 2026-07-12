@@ -57,10 +57,12 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	# release our wait). $$ keeps it unique per boot; the rm clears a stale same-pid file.
 	_plugin_done="/tmp/.powbox-plugin-bootstrap.$$.done"
 	rm -f "$_plugin_done" 2>/dev/null || true
+	# stderr first: a failed open of the log itself must stay silent too
+	# (redirections apply left-to-right).
 	{
 		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
 		echo "[core] dev-skills@roubtec plugin: converging post-firewall, detached (log: $_claude_plugin_log)"
-	} >>"$_claude_plugin_log" 2>/dev/null || true
+	} 2>/dev/null >>"$_claude_plugin_log" || true
 	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the script
 	# only appends to it (never reads), so there is no read/write conflict.
 	if command -v setsid >/dev/null 2>&1; then

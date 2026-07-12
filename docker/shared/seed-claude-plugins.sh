@@ -73,9 +73,12 @@ PLUGIN_BOOTSTRAP_LOG="${POWBOX_PLUGIN_LOG:-$HOME/.claude/.powbox-plugin-bootstra
 # and a poll is also immune to `setsid` re-forking, which would break a
 # wait-on-pid). Touched via the EXIT trap so EVERY exit path — success, skip,
 # lock-miss, failure — releases the waiter; only a SIGKILL skips it, and then
-# the waiter's own cap covers us.
+# the waiter's own cap covers us. The brace group makes the stderr silence
+# cover a failed open of the marker itself: redirections apply left-to-right,
+# so a bare `: >file 2>/dev/null` would emit the open error before the
+# suppression takes effect.
 if [ -n "${POWBOX_PLUGIN_DONE_FILE:-}" ]; then
-	trap ': >"$POWBOX_PLUGIN_DONE_FILE" 2>/dev/null || true' EXIT
+	trap '{ : >"$POWBOX_PLUGIN_DONE_FILE"; } 2>/dev/null || true' EXIT
 fi
 
 # Bounds.
@@ -122,10 +125,12 @@ export GIT_TERMINAL_PROMPT=0
 # marketplace state until the next successful online start.
 export CLAUDE_CODE_PLUGIN_KEEP_MARKETPLACE_ON_FAILURE=1
 
-# Debug channel: appends to the bootstrap log, never a terminal.
+# Debug channel: appends to the bootstrap log, never a terminal. stderr is
+# silenced FIRST so even a failed open of the log itself stays quiet
+# (redirections apply left-to-right).
 log() {
 	printf '%s dev-skills-plugin: %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '-')" "$*" \
-		>>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
+		2>/dev/null >>"$PLUGIN_BOOTSTRAP_LOG" || true
 }
 
 # One of: enabled | disabled | absent | unknown. Prefers `claude plugin list

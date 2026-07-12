@@ -25,7 +25,7 @@ Before doing a code review, read ALL existing review comments and threads on the
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
 | `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted JS/powbox projects only |
 | `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the per-container pnpm store at `.worktrees/.pnpm-store`, the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), and the opt-in ccache compiler cache (`.worktrees/.ccache`); dir-mounted JS/powbox **or** `go.mod` projects |
-| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches as subdirs; replaces the bind mount and the two volumes above |
+| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / ccache as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 

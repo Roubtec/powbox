@@ -91,6 +91,26 @@ else {
   }
 }
 
+# Stage 0c - worktree orphan-safety unit test. The hermetic Bash test (a throwaway git
+# repo in a tmpdir; no host bash on Windows) runs INSIDE the agent image with the repo
+# mounted read-only. It points POWBOX_WT_ENTER/POWBOX_WT_REMOVE/POWBOX_WT_COMMON at the
+# BAKED /usr/local/bin copies, so it exercises the installed wt-enter/wt-remove and the
+# wt-common.sh they source (task 017's durable-metadata safety contract: a dir that is no
+# longer a live worktree is reaped only when empty, otherwise PRESERVED under
+# .worktrees/.orphaned/, so the sole copy of dirty work is never deleted when metadata is
+# lost). Self-skips (recorded in $skipped) when the image is absent.
+if (-not $imagePresent) {
+  Write-Warning "Skipping worktree orphan-safety unit test (Stage 0c) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0c: worktree orphan-safety unit test (image absent)")
+}
+else {
+  Write-Host "Running worktree orphan-safety unit test (baked helpers in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" -e POWBOX_WT_COMMON=/usr/local/bin/wt-common.sh -e POWBOX_WT_ENTER=/usr/local/bin/wt-enter -e POWBOX_WT_REMOVE=/usr/local/bin/wt-remove --entrypoint /bin/bash $Image /repo/scripts/test-wt-orphan-safety.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "worktree orphan-safety unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -134,6 +154,7 @@ else {
     'command -v wt-bootstrap >/dev/null'
     'command -v wt-enter >/dev/null'
     'command -v wt-remove >/dev/null'
+    '[ -r /usr/local/bin/wt-common.sh ]'
     'command -v powbox-provenance >/dev/null'
     'command -v gitcat >/dev/null'
     'command -v gh-review-threads >/dev/null'

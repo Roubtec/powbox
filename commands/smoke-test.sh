@@ -85,6 +85,34 @@ else
 	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent, no host jq)")
 fi
 
+# Stage 0c — worktree orphan-safety unit test. Hermetic (a throwaway git repo in a
+# tmpdir; no image, root, or volume needed), so it runs up front on the host source.
+# It guards the durable-worktree-metadata safety contract (task 017): a dir that is
+# no longer a live worktree (e.g. a pre-durable-metadata leftover whose tmpfs
+# .git/worktrees was lost) is reaped only when EMPTY and otherwise PRESERVED (moved
+# to .worktrees/.orphaned/), so wt-bootstrap/wt-enter/wt-remove never delete the sole
+# surviving copy of dirty work when metadata disappears.
+echo "Running worktree orphan-safety unit test ..."
+"${ROOT_DIR}/scripts/test-wt-orphan-safety.sh"
+
+# Stage 0d — the same test against the BAKED helpers. Stage 0c ran the /repo source;
+# this points POWBOX_WT_ENTER/POWBOX_WT_REMOVE/POWBOX_WT_COMMON at the agent-layer
+# copies at /usr/local/bin so it exercises the installed wt-enter/wt-remove and the
+# wt-common.sh they source (and their exec bits) — the artifacts agents actually run.
+# Needs the agent image; when absent, Stage 0c already covered the source, so record a
+# skip rather than re-run on the host.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running worktree orphan-safety unit test (baked helpers in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e POWBOX_WT_COMMON=/usr/local/bin/wt-common.sh \
+		-e POWBOX_WT_ENTER=/usr/local/bin/wt-enter \
+		-e POWBOX_WT_REMOVE=/usr/local/bin/wt-remove \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-wt-orphan-safety.sh
+else
+	echo "WARNING: skipping in-image worktree orphan-safety baked-helper test (Stage 0d) — image '$IMAGE' absent; Stage 0c already covered the /repo source on the host."
+	skipped+=("Stage 0d: worktree orphan-safety baked-helper test (image absent)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -127,6 +155,7 @@ fi
 	"command -v wt-bootstrap >/dev/null" \
 	"command -v wt-enter >/dev/null" \
 	"command -v wt-remove >/dev/null" \
+	"[ -r /usr/local/bin/wt-common.sh ]" \
 	"command -v powbox-provenance >/dev/null" \
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \

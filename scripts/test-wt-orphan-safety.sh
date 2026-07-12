@@ -19,14 +19,20 @@
 # Runs directly against the repo copies — no image build needed. Requires bash
 # and git on PATH (present in the agent image).
 #
+# The smoke harness re-runs this against the BAKED helpers by pointing the three
+# override vars at /usr/local/bin (matching how test-sensitive-host-path.sh is
+# smoke-driven): POWBOX_WT_COMMON / POWBOX_WT_ENTER / POWBOX_WT_REMOVE. wt-enter
+# and wt-remove locate wt-common.sh via their own sibling dir, so pointing them at
+# the baked binaries automatically exercises the baked wt-common too.
+#
 # Usage: scripts/test-wt-orphan-safety.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHARED="$SCRIPT_DIR/../docker/shared"
-WT_COMMON="$SHARED/wt-common.sh"
-WT_ENTER="$SHARED/wt-enter"
-WT_REMOVE="$SHARED/wt-remove"
+WT_COMMON="${POWBOX_WT_COMMON:-$SHARED/wt-common.sh}"
+WT_ENTER="${POWBOX_WT_ENTER:-$SHARED/wt-enter}"
+WT_REMOVE="${POWBOX_WT_REMOVE:-$SHARED/wt-remove}"
 
 for f in "$WT_COMMON" "$WT_ENTER" "$WT_REMOVE"; do
 	[ -f "$f" ] || {

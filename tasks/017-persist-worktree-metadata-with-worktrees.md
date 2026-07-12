@@ -31,9 +31,11 @@ Out of scope: changing the agent-skills worktree orchestration protocol, making 
 - `scripts/launch-agent.sh` and the PowerShell launcher counterpart where volume declarations must remain symmetric.
 - `docker/shared/entrypoint-core.sh`, `detect-shadows.sh`, and/or `shadow-mounts.sh` for mounting or restoring durable metadata without exposing it to the host checkout.
 - `docker/shared/wt-bootstrap`, `wt-enter`, and `wt-remove` for restart recovery and safe orphan handling.
-- `commands/prune-volumes.sh` and related volume inventory/migration checks if the design introduces or renames a volume.
+- `commands/prune-volumes.sh` **and** `commands/prune-volumes.ps1` (parity) plus related volume inventory/migration checks if the design introduces or renames a volume.
 - `commands/smoke-test.sh`, `commands/smoke-test.ps1`, and focused pure-shell tests.
-- `README.md`, `docs/architecture.md`, and `docs/entrypoint-and-runtime.md`.
+- `docker/shared/container-agent.md.tmpl` — the rendered in-container guidance currently tells agents the `.git/worktrees`/`.claude/worktrees` metadata roots are tmpfs shadows (Worktree helpers section); it must describe the new durability model or every new container keeps teaching the old one.
+- `docker/claude/agent-container/skills/enable-worktrees/SKILL.md` and `docker/codex/agent-container/skills/enable-worktrees/SKILL.md` — the enablement skills declare the tmpfs shadow topology in `.powbox.yml` and health-check that those roots ARE tmpfs; unchanged, a later `enable-worktrees` run would re-declare the old model and report the new topology as unhealthy.
+- `README.md`, `docs/architecture.md`, `docs/entrypoint-and-runtime.md`, and `docs/worktree-node-modules-hardlinks.md` (the latter currently codifies "worktree working dirs persistent, `.git/worktrees` metadata tmpfs" and records the rejection of its `A-coherent` alternative — this task effectively revisits that decision, so the chapter must be updated rather than left authoritatively recommending prune-on-recycle).
 
 ## Implementation notes
 

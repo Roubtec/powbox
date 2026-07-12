@@ -7,35 +7,46 @@ else
 	/usr/local/bin/init-firewall.sh
 fi
 
-# Non-primary Claude dev-skills plugin — converge it HERE, AFTER init-firewall.sh, so its
-# network ops (marketplace add/install/update, all to the PUBLIC Roubtec/agent-skills over
-# HTTPS) are ordered after the firewall, and DETACHED so they never delay the primary
-# agent's prompt. When Claude IS the primary agent its own setup hook (below) does this
-# inline, also post-firewall; the non-primary Claude hook already ran in entrypoint-agent.sh
-# (pre-firewall) and deliberately skipped the plugin, leaving it to us.
-# POWBOX_PLUGIN_BACKGROUND=1 takes the script's patient background branch (full bounds,
-# log-only, no status line, no re-spawn); we point its log at Claude's config dir
-# (CLAUDE_CONFIG_DIR is a Dockerfile ENV), not the primary agent's. `setsid` reparents the
-# detached run past the entrypoint's final `exec`. Best-effort: it must never affect startup.
-if [ "${PRIMARY_AGENT:-claude}" != claude ] &&
-	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+# Claude dev-skills plugin (dev-skills@roubtec, the 8 shared skills) — converge it HERE,
+# AFTER init-firewall.sh, so its network ops (marketplace add/install/update, all to the
+# PUBLIC Roubtec/agent-skills over HTTPS) are ordered after the firewall — and fully
+# DETACHED, for EVERY launch, whether Claude is the primary agent or not (the Claude hook
+# never touches the plugin).
+#
+# Detached is a CORRECTNESS requirement, not just latency hygiene: the claude CLI HANGS
+# (SIGTERM-immune; only SIGKILL ends it) when invoked with the container TTY as stdin, so
+# even a read-only `claude plugin list` on the entrypoint's foreground burned its full
+# 30s+5s bound on every start — task 015g's synchronous cold install never survived a TTY
+# launch either. So everything plugin-related runs with stdin </dev/null and stdio on the
+# log. Accepted consequence: on a COLD claude-config volume the FIRST session starts
+# without the /dev-skills:* skills until a /reload-plugins or restart; on a WARM volume an
+# update lands one session late (plugins load once at session start) — as before.
+#
+# The log is pointed at Claude's config dir (CLAUDE_CONFIG_DIR is a Dockerfile ENV), which
+# for a primary-Claude launch is also the primary's AGENT_CONFIG_DIR. `setsid` reparents
+# the detached run past the entrypoint's final `exec`. Best-effort: it must never affect
+# startup. APPEND to the log, never truncate: it lives on the claude-config volume, a
+# SINGLE named volume shared by EVERY powbox container, so truncation would wipe a PEER
+# container's in-progress bootstrap log; the dated, container-tagged separator keeps each
+# boot's block easy to find instead.
+if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
 	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
 	mkdir -p "$_claude_cfg" 2>/dev/null || true
 	{
-		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall non-primary Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-		echo "[core] dev-skills@roubtec plugin: converging non-primary Claude post-firewall, detached (log: $_claude_plugin_log)"
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[core] dev-skills@roubtec plugin: converging post-firewall, detached (log: $_claude_plugin_log)"
 	} >>"$_claude_plugin_log" 2>/dev/null || true
-	# SC2094: POWBOX_PLUGIN_LOG and the stderr redirect name the same path, but the script
+	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the script
 	# only appends to it (never reads), so there is no read/write conflict.
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
 			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
 			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
 	unset _claude_cfg _claude_plugin_log

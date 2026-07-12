@@ -131,7 +131,9 @@ fi
 # directories under /workspace/ have a different UID than the container's
 # 'node' user, which triggers git's dubious-ownership check.
 # This step is best-effort: a warning is logged if the config is not writable.
-if ! : >>"$GIT_CONFIG_GLOBAL" 2>/dev/null; then
+# Redirect stderr first so a failed open of the target does not leak a raw
+# shell error before 2>/dev/null takes effect (redirections apply left-to-right).
+if ! : 2>/dev/null >>"$GIT_CONFIG_GLOBAL"; then
 	echo "Warning: unable to update global git config at $GIT_CONFIG_GLOBAL; skipping safe.directory registration." >&2
 else
 	for _dir in /workspace/*/; do
@@ -385,7 +387,8 @@ if command -v podman >/dev/null 2>&1; then
 	esac
 	# Best-effort record of the committed driver for subsequent launches.
 	mkdir -p "$_containers_root" 2>/dev/null || true
-	printf '%s\n' "$_chosen_driver" >"$_driver_marker" 2>/dev/null || true
+	# stderr redirected first so a failed marker open leaks nothing to stderr.
+	printf '%s\n' "$_chosen_driver" 2>/dev/null >"$_driver_marker" || true
 
 	if [ "$_chosen_driver" = "overlay" ]; then
 		# Overlay path — the CONSUMER (read) side. The image ships no system

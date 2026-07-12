@@ -54,8 +54,14 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
 	mkdir -p "$_claude_cfg" 2>/dev/null || true
 	# Container-LOCAL done-marker (never the shared volume — a peer's bootstrap must not
-	# release our wait). $$ keeps it unique per boot; the rm clears a stale same-pid file.
-	_plugin_done="/tmp/.powbox-plugin-bootstrap.$$.done"
+	# release our wait). Use an UNPREDICTABLE mktemp name, NOT $$: this script is exec'd
+	# as PID 1 (entrypoint-agent.sh execs it), so $$ is always 1 and the path collapses to
+	# a fixed, guessable /tmp/.powbox-plugin-bootstrap.1.done — inviting a symlink/TOCTOU
+	# clobber when the seeder later does `: >"$POWBOX_PLUGIN_DONE_FILE"`. mktemp reserves an
+	# unguessable name; we only need the NAME (the wait below polls for the marker and the
+	# seeder's EXIT trap creates it), so remove the placeholder mktemp leaves behind. Fall
+	# back to the pid path only if mktemp is somehow unavailable — startup must not abort.
+	_plugin_done="$(mktemp /tmp/.powbox-plugin-bootstrap.XXXXXXXX.done 2>/dev/null || printf '%s' "/tmp/.powbox-plugin-bootstrap.$$.done")"
 	rm -f "$_plugin_done" 2>/dev/null || true
 	# stderr first: a failed open of the log itself must stay silent too
 	# (redirections apply left-to-right).

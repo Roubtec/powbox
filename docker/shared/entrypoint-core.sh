@@ -18,9 +18,11 @@ fi
 # even a read-only `claude plugin list` on the entrypoint's foreground burned its full
 # 30s+5s bound on every start — task 015g's synchronous cold install never survived a TTY
 # launch either. So everything plugin-related runs with stdin </dev/null and stdio on the
-# log. Accepted consequence: on a COLD claude-config volume the FIRST session starts
-# without the /dev-skills:* skills until a /reload-plugins or restart; on a WARM volume an
-# update lands one session late (plugins load once at session start) — as before.
+# log. The bounded, marker-based wait at the END of this script (before the final exec)
+# gives the refresh a chance to land before Claude enumerates plugins, so a warm update
+# usually applies THIS session; past that cap, on a COLD claude-config volume the FIRST
+# session starts without the /dev-skills:* skills until a /reload-plugins or restart, and
+# a slow warm update lands one session late (plugins load once at session start).
 #
 # The log is pointed at Claude's config dir (CLAUDE_CONFIG_DIR is a Dockerfile ENV), which
 # for a primary-Claude launch is also the primary's AGENT_CONFIG_DIR. `setsid` reparents
@@ -33,6 +35,10 @@ if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.
 	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
 	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
 	mkdir -p "$_claude_cfg" 2>/dev/null || true
+	# Container-LOCAL done-marker (never the shared volume — a peer's bootstrap must not
+	# release our wait). $$ keeps it unique per boot; the rm clears a stale same-pid file.
+	_plugin_done="/tmp/.powbox-plugin-bootstrap.$$.done"
+	rm -f "$_plugin_done" 2>/dev/null || true
 	{
 		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
 		echo "[core] dev-skills@roubtec plugin: converging post-firewall, detached (log: $_claude_plugin_log)"
@@ -41,12 +47,12 @@ if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.
 	# only appends to it (never reads), so there is no read/write conflict.
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
 			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
 			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
 	unset _claude_cfg _claude_plugin_log
@@ -438,6 +444,32 @@ if command -v podman >/dev/null 2>&1; then
 		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
 	fi
 	unset _xdg _containers_root _driver_marker _desired_driver _chosen_driver _imgstore
+fi
+
+# Bounded best-effort wait for the detached plugin bootstrap (primary Claude only —
+# a Codex prompt never uses the Claude plugin, so it should not wait for it). Claude
+# enumerates plugins ONCE at session start, so letting the (typically ~2-3s) refresh
+# finish BEFORE the exec means updated skills usually apply THIS session instead of one
+# session late. The wait sits HERE, at the end of startup, so the refresh overlaps all
+# the setup above and the typical added latency is well under the cap. Strictly bounded
+# and marker-based: we never wait ON the claude CLI (it can hang SIGTERM-immune on a
+# TTY — see the plugin block at the top), only poll for the done-marker the detached
+# run's EXIT trap touches; past the cap we proceed on the volume's current plugin state
+# (the refresh still lands for the next session). A cold-volume install usually
+# outlives the cap — that first session needs /reload-plugins, as documented.
+# POWBOX_PLUGIN_WAIT tunes the cap in whole seconds; 0 disables the wait.
+if [ -n "${_plugin_done:-}" ] && [ "${PRIMARY_AGENT:-claude}" = claude ]; then
+	_plugin_wait="${POWBOX_PLUGIN_WAIT:-4}"
+	case "$_plugin_wait" in
+	*[!0-9]* | '') _plugin_wait_ticks=40 ;;             # non-numeric override: fall back to the 4s default
+	*) _plugin_wait_ticks=$((10#$_plugin_wait * 10)) ;; # 10# so a leading zero can't trip octal parsing
+	esac
+	while [ "$_plugin_wait_ticks" -gt 0 ] && [ ! -e "$_plugin_done" ]; do
+		sleep 0.1
+		_plugin_wait_ticks=$((_plugin_wait_ticks - 1))
+	done
+	rm -f "$_plugin_done" 2>/dev/null || true
+	unset _plugin_done _plugin_wait _plugin_wait_ticks
 fi
 
 if [ "$#" -eq 0 ]; then

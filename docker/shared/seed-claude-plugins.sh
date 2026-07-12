@@ -23,11 +23,15 @@
 # TTY; a manual run is best done the same way
 # (`bash /usr/local/bin/seed-claude-plugins.sh </dev/null`).
 #
-# Accepted consequence: plugin state only ever applies at the NEXT session start
-# (Claude enumerates plugins once at startup). On a COLD (fresh) claude-config
-# volume the first session starts without the /dev-skills:* skills until a
-# /reload-plugins or restart; on a WARM volume an update lands one session late.
-# A deliberately DISABLED plugin is respected, never re-enabled.
+# The entrypoint pairs the detached run with a BOUNDED, marker-based wait just
+# before it execs the agent (see POWBOX_PLUGIN_DONE_FILE below): a warm refresh
+# typically finishes within that window, so updated skills usually apply THIS
+# session. Past the cap the session simply starts on the volume's current state:
+# a COLD (fresh) claude-config volume's install usually outlives the cap, so its
+# first session lacks the /dev-skills:* skills until a /reload-plugins or
+# restart, and a slow warm refresh lands one session late (Claude enumerates
+# plugins once at startup). A deliberately DISABLED plugin is respected, never
+# re-enabled.
 #
 # The agent-skills repo is PUBLIC, so `claude plugin marketplace add` clones it
 # ANONYMOUSLY over HTTPS — no git credential helper, no dependency on the
@@ -49,6 +53,17 @@ PLUGIN_ID="dev-skills@${MARKETPLACE_NAME}"
 # default keeps a standalone run self-contained. EVERYTHING goes here — this run
 # is detached from any terminal, so the log is the only diagnostic surface.
 PLUGIN_BOOTSTRAP_LOG="${POWBOX_PLUGIN_LOG:-$HOME/.claude/.powbox-plugin-bootstrap.log}"
+
+# Completion marker for the entrypoint's bounded wait. The caller passes a
+# container-local path and POLLS it rather than waiting on this process (the
+# entrypoint must never wait ON the claude CLI — see the TTY-hang note above —
+# and a poll is also immune to `setsid` re-forking, which would break a
+# wait-on-pid). Touched via the EXIT trap so EVERY exit path — success, skip,
+# lock-miss, failure — releases the waiter; only a SIGKILL skips it, and then
+# the waiter's own cap covers us.
+if [ -n "${POWBOX_PLUGIN_DONE_FILE:-}" ]; then
+	trap ': >"$POWBOX_PLUGIN_DONE_FILE" 2>/dev/null || true' EXIT
+fi
 
 # Bounds.
 NET_TIMEOUT="${POWBOX_PLUGIN_NET_TIMEOUT:-120}"  # per network op (add/install/update)

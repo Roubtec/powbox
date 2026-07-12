@@ -4,6 +4,7 @@ param(
   [switch]$SkipPodman,
   [switch]$SkipSelfHosted,
   [switch]$SkipDirMount,
+  [switch]$SkipWorktreeMeta,
   [switch]$RequireImage
 )
 
@@ -350,6 +351,44 @@ else {
   $dirmountSkip = Get-Content -LiteralPath $dirmountMarker.FullName -Raw -ErrorAction SilentlyContinue
   if ($dirmountSkip) { $skipped.Add("Stage 5: dir-mount ownership ($($dirmountSkip.Trim()))") }
   Remove-Item -LiteralPath $dirmountMarker.FullName -ErrorAction SilentlyContinue
+}
+
+# Stage 6 - durable worktree-metadata recreate lifecycle (task 017). The headline
+# acceptance criterion: in dir-mounted mode a linked git worktree and its
+# per-worktree admin metadata survive a container stop/recreate, because the metadata
+# is bound from the persistent .worktrees volume over .git/worktrees rather than
+# living in the tmpfs shadow that vanishes on recycle. It launches two throwaway
+# containers on ONE named agent-wt-style volume: the first establishes the durable
+# bind (via the real shadow-mounts.sh) and leaves a linked worktree DIRTY (tracked
+# mod + untracked file); the second recreates on the same volume and asserts git
+# status still works, the branch/HEAD is intact, both dirty changes survived, and the
+# host checkout's real .git/worktrees gained no registrations. Stage 0c only
+# unit-tests the orphan-reaping SAFETY net, not this central bind/survive path, so
+# this stage is what guards it. Needs the image AND a runtime that can grant the
+# container CAP_SYS_ADMIN for the `mount --bind`; it self-skips when the image is
+# absent (honouring -RequireImage / POWBOX_SMOKE_REQUIRE_IMAGE) or the mount
+# privilege is unavailable, running for real on native-Linux CI. Skip the whole stage
+# with -SkipWorktreeMeta; see scripts/smoke-test-worktree-metadata.ps1. The helper
+# throws on failure, so $ErrorActionPreference = "Stop" propagates that up.
+if ($SkipWorktreeMeta) {
+  Write-Host "Skipping worktree durable-metadata smoke test (-SkipWorktreeMeta)."
+  $skipped.Add("Stage 6: worktree durable-metadata (-SkipWorktreeMeta)")
+}
+else {
+  # Like Stage 5, the child returns success when it self-skips at runtime (image
+  # absent or no mount privilege), so completion alone cannot distinguish a real pass
+  # from a skip. Hand it the same marker mechanism and surface any skip in the banner.
+  $wtmetaMarker = New-TemporaryFile
+  try {
+    $env:POWBOX_SMOKE_SKIP_MARKER = $wtmetaMarker.FullName
+    & (Join-Path $rootDir "scripts/smoke-test-worktree-metadata.ps1") -Image $Image
+  }
+  finally {
+    Remove-Item Env:\POWBOX_SMOKE_SKIP_MARKER -ErrorAction SilentlyContinue
+  }
+  $wtmetaSkip = Get-Content -LiteralPath $wtmetaMarker.FullName -Raw -ErrorAction SilentlyContinue
+  if ($wtmetaSkip) { $skipped.Add("Stage 6: worktree durable-metadata ($($wtmetaSkip.Trim()))") }
+  Remove-Item -LiteralPath $wtmetaMarker.FullName -ErrorAction SilentlyContinue
 }
 
 if ($skipped.Count -gt 0) {

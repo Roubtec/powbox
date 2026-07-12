@@ -327,6 +327,38 @@ else
 	rm -f "$dirmount_marker"
 fi
 
+# Stage 6 — durable worktree-metadata recreate lifecycle (task 017). The headline
+# acceptance criterion: in dir-mounted mode a linked git worktree and its
+# per-worktree admin metadata survive a container stop/recreate, because the
+# metadata is bound from the persistent .worktrees volume over .git/worktrees rather
+# than living in the tmpfs shadow that vanishes on recycle. It launches two
+# throwaway containers on ONE named agent-wt-style volume: the first establishes the
+# durable bind (via the real shadow-mounts.sh) and leaves a linked worktree DIRTY
+# (tracked mod + untracked file); the second recreates on the same volume and
+# asserts git status still works, the branch/HEAD is intact, both dirty changes
+# survived, and the host checkout's real .git/worktrees gained no registrations.
+# scripts/test-wt-orphan-safety.sh (Stage 0c/0d) only unit-tests the orphan-reaping
+# SAFETY net, not this central bind/survive path, so this stage is what guards it.
+# Needs the image AND a runtime that can grant the container CAP_SYS_ADMIN for the
+# `mount --bind` — it self-skips (exit 0) when the image is absent (honouring
+# POWBOX_SMOKE_REQUIRE_IMAGE) or the mount privilege is unavailable, running for real
+# on native-Linux CI. Skip the whole stage with POWBOX_SMOKE_SKIP_WORKTREE_META=1;
+# see scripts/smoke-test-worktree-metadata.sh.
+if [ -n "${POWBOX_SMOKE_SKIP_WORKTREE_META:-}" ]; then
+	echo "Skipping worktree durable-metadata smoke test (POWBOX_SMOKE_SKIP_WORKTREE_META is set)."
+	skipped+=("Stage 6: worktree durable-metadata (POWBOX_SMOKE_SKIP_WORKTREE_META)")
+else
+	# Like Stage 5, the child exits 0 when it self-skips at runtime (image absent or
+	# no mount privilege), so its exit code alone cannot distinguish a real pass from
+	# a skip. Hand it the same marker mechanism and surface any skip in the banner.
+	wtmeta_marker="$(mktemp "${TMPDIR:-/tmp}/powbox-smoke-wtmeta-skip.XXXXXX")"
+	POWBOX_SMOKE_SKIP_MARKER="$wtmeta_marker" "${ROOT_DIR}/scripts/smoke-test-worktree-metadata.sh" "$IMAGE"
+	if [ -s "$wtmeta_marker" ]; then
+		skipped+=("Stage 6: worktree durable-metadata ($(cat "$wtmeta_marker"))")
+	fi
+	rm -f "$wtmeta_marker"
+fi
+
 if [ "${#skipped[@]}" -gt 0 ]; then
 	echo
 	echo "================ SMOKE TEST: STAGES SKIPPED ================"

@@ -24,7 +24,7 @@ Before doing a code review, read ALL existing review comments and threads on the
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
 | `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted JS/powbox projects only |
-| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the per-container pnpm store at `.worktrees/.pnpm-store`, the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), and the opt-in ccache compiler cache (`.worktrees/.ccache`); dir-mounted JS/powbox **or** `go.mod` projects |
+| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`, so worktrees survive container recycle), the per-container pnpm store at `.worktrees/.pnpm-store`, the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), and the opt-in ccache compiler cache (`.worktrees/.ccache`); dir-mounted JS/powbox **or** `go.mod` projects |
 | `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / ccache as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
@@ -53,7 +53,7 @@ Runs in-container (do these before handing off):
 Needs the host or CI (cannot run here):
 
 - Full image builds (`./build.sh base|agent|all`). The in-container `docker` is a Podman shim with no `buildx bake`, so `scripts/build-image.sh` fails fast with host-build guidance rather than emitting a confusing `unknown flag: --file`.
-- `commands/smoke-test.sh` and the per-stage smokes (`scripts/smoke-test-image.sh`, `scripts/smoke-test-dirmount.sh`, `scripts/smoke-test-podman.sh`, `scripts/smoke-test-selfhosted.sh`) — they need a real built image and, in some cases, a relaunchable container that the running agent container cannot provide.
+- `commands/smoke-test.sh` and the per-stage smokes (`scripts/smoke-test-image.sh`, `scripts/smoke-test-dirmount.sh`, `scripts/smoke-test-podman.sh`, `scripts/smoke-test-selfhosted.sh`, `scripts/smoke-test-worktree-metadata.sh`) — they need a real built image and, in some cases, a relaunchable container that the running agent container cannot provide.
 
 When validating a change requires a rebuilt image or a smoke run, stop and ask the user to build on the host (`./build.sh all`, or `build.ps1`) and restart the container from the rebuilt image — do not attempt an in-container build. Tier 1 CI also builds and smoke-tests image-affecting PRs targeting main (unless the PR is labeled `non-code`), so such a PR is normally covered.
 

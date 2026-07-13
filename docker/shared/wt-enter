@@ -28,6 +28,21 @@ die() {
 	exit 1
 }
 
+# Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so
+# tests exercise the checked-out version; fall back to the baked one. BASH_SOURCE
+# resolves to the full script path even when invoked via PATH, so dirname is safe.
+_wt_common=""
+for _cand in "$(dirname "${BASH_SOURCE[0]}")/wt-common.sh" "/usr/local/bin/wt-common.sh"; do
+	if [ -r "$_cand" ]; then
+		_wt_common="$_cand"
+		break
+	fi
+done
+[ -n "$_wt_common" ] || die "cannot locate wt-common.sh"
+# shellcheck source=docker/shared/wt-common.sh
+. "$_wt_common"
+unset _wt_common _cand
+
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then die "usage: wt-enter <slug> <branch> [<base>]"; fi
 SLUG="$1"
 BRANCH="$2"
@@ -60,10 +75,24 @@ if [ -d "$WT" ]; then
 		printf '%s\n' "$WT"
 		exit 0
 	fi
-	# Orphan from a recycled container: its tmpfs git metadata is gone, so it
-	# can never be a worktree again. Prune and fall through to recreate.
-	echo "wt-enter: pruning orphaned worktree dir $WT" >&2
-	rm -rf "$WT"
+	# Not a live worktree. With durable metadata a recycled worktree is reused
+	# above, so this is a partial create or a PRE-durable-metadata orphan whose
+	# tmpfs .git/worktrees was lost. Reap it SAFELY: empty dirs are removed;
+	# a non-empty dir (possibly the sole copy of dirty work) is moved to a
+	# quarantine dir, never deleted, and we recreate the worktree fresh beside it.
+	_outcome="$(wt_reap_orphan_dir "$WT")"
+	case "$_outcome" in
+	quarantined:*)
+		echo "wt-enter: preserved orphan at ${_outcome#quarantined:}; recreating $WT fresh" >&2
+		;;
+	kept)
+		die "orphaned dir $WT holds unsaved work that could not be quarantined; move it aside manually, then retry"
+		;;
+	*)
+		echo "wt-enter: cleared empty orphaned worktree dir $WT" >&2
+		;;
+	esac
+	unset _outcome
 	git -C "$ROOT" worktree prune
 fi
 

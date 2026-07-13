@@ -112,7 +112,9 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
 5. **`.worktrees` tmpfs shadow becomes a no-op fallback.** When the volume is
    mounted at `.worktrees`, `shadow-mounts.sh` skips it (already a mountpoint),
    so existing project `.powbox.yml` files that list `.worktrees` keep working
-   unchanged. `.claude/worktrees` and `.git/worktrees` stay tmpfs-shadowed.
+   unchanged. `.claude/worktrees` stays tmpfs-shadowed; `.git/worktrees` is now
+   bind-mounted from the volume (durable — see the metadata-coherence subsection,
+   updated by task 017).
 
 ### Result
 - Worktree `pnpm install` → hardlink (~tens of MB of metadata) instead of
@@ -122,21 +124,39 @@ Keep today's host-bind-mount workflow; only change where worktrees + the store l
 - Store persists per container; root install still copies once (separate mount) —
   fine, it is a one-time, persisted cost on the main checkout.
 
-### Sub-decision: worktree metadata coherence (`A-simple`, recommended)
+### Sub-decision: worktree metadata coherence — superseded by task 017
+> **Update (task 017): metadata is now DURABLE, co-located in the same volume.**
+> The `A-simple` design below (persistent working dirs + *ephemeral tmpfs*
+> `.git/worktrees`) shipped first, but its own downside — a container recycle
+> keeps the working dir while discarding the git metadata that makes it usable,
+> so `git status` fails and the survivor looks like an orphan — was the bug task
+> 017 fixes. `.git/worktrees` is now **bind-mounted from `.worktrees/.gitworktrees`
+> inside the same per-container volume**, so metadata shares the working trees'
+> lifecycle: a recycled worktree (and its uncommitted changes) survives and is
+> reused. This is the co-located, lighter form of `A-coherent` (see below) — it
+> adds **no** new volume and no prune-on-recycle discipline. The orphan cleanup
+> below is retained but made **safe**: it deletes a non-worktree dir only when
+> empty and otherwise preserves it under `.worktrees/.orphaned/`, so the sole copy
+> of dirty work is never deleted because its metadata vanished (covers migration
+> from pre-017 containers, whose tmpfs metadata is already gone). The rest of this
+> subsection is kept for historical context.
+
 `node_modules` lives **inside** each worktree dir, so the worktrees must be on
 the volume (not tmpfs) for the hardlink. That makes worktree *working dirs*
-persistent, while `.git/worktrees` *metadata* stays tmpfs (ephemeral). After a
-container recycle, stale `.worktrees/<owner>/<task>` dirs can be left behind
+persistent, while `.git/worktrees` *metadata* stayed tmpfs (ephemeral) under the
+original `A-simple` design. After a
+container recycle, stale `.worktrees/<owner>/<task>` dirs could be left behind
 (their `.git` pointer dangles) while the valuable `.pnpm-store` persists.
 Mitigation: a bootstrap cleanup step removes orphaned worktree dirs (those under
 this container's own subdir that `git worktree list` doesn't know about) at
 session start. This keeps the skill's "worktrees are disposable, commit + push"
-model intact.
+model intact. (Task 017 makes such orphans rare — durable metadata means a
+recycled worktree is reused, not orphaned — and makes the cleanup non-destructive.)
 
 **Peer-container isolation.** The `.worktrees` volume is now *per-container*
 (`agent-wt-<agent>-<proj>`), so the project's Claude and Codex containers no longer
-mount the same volume — each gets its own copy (and each keeps its own tmpfs
-`.git/worktrees` metadata). The namespacing below predates that split, from when
+mount the same volume — each gets its own copy (and, post-017, its own durable
+`.git/worktrees` metadata inside that volume). The namespacing below predates that split, from when
 the volume was shared between the two agents: with a shared volume a peer's live
 worktree had no metadata in the other container and was indistinguishable from a
 crash orphan, so a naive "prune everything `git worktree list` doesn't know" would
@@ -149,10 +169,18 @@ liveness — is what makes this safe: a container only ever reaps orphans it own
 so no cross-container liveness check or lockfile is needed, and any peer subdir is
 never scanned. The `.pnpm-store` stays at the volume root.
 
-*Alternative `A-coherent`*: also persist `.git/worktrees` (and
-`.claude/worktrees`) on volumes so worktrees fully survive recycle. More volumes
-and a real `git worktree prune` discipline; rejected for now because it fights
-the "disposable worktree" model.
+*Alternative `A-coherent`* (**adopted in a lighter form by task 017**): persist
+`.git/worktrees` so worktrees fully survive recycle. The original concern was
+"more volumes and a real `git worktree prune` discipline, fighting the disposable
+model." Task 017 sidesteps both: the metadata is co-located **inside the existing
+per-container `.worktrees` volume** (`.worktrees/.gitworktrees`, bind-mounted over
+`.git/worktrees`), so there is **no** extra volume; and instead of aggressive
+prune-on-recycle, orphan reaping is made non-destructive (empty-only delete,
+otherwise preserve). `.claude/worktrees` (harness-native working trees) is left
+tmpfs — it is out of scope and its working dirs are already ephemeral, so it has
+no persistent-dir/ephemeral-metadata mismatch to fix. So the model stays
+"disposable, commit + push," but a recycle no longer strands or silently
+discards work.
 
 ### Files Option A touches
 `scripts/launch-agent.sh` + `scripts/launch-agent.ps1` (new volume + store env),

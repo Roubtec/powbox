@@ -22,6 +22,21 @@ die() {
 	exit 1
 }
 
+# Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so
+# tests exercise the checked-out version; fall back to the baked one. BASH_SOURCE
+# resolves to the full script path even when invoked via PATH, so dirname is safe.
+_wt_common=""
+for _cand in "$(dirname "${BASH_SOURCE[0]}")/wt-common.sh" "/usr/local/bin/wt-common.sh"; do
+	if [ -r "$_cand" ]; then
+		_wt_common="$_cand"
+		break
+	fi
+done
+[ -n "$_wt_common" ] || die "cannot locate wt-common.sh"
+# shellcheck source=docker/shared/wt-common.sh
+. "$_wt_common"
+unset _wt_common _cand
+
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then die "usage: wt-remove <slug> [--force]"; fi
 SLUG="$1"
 FORCE="${2:-}"
@@ -64,12 +79,25 @@ case "$PWD/" in
 esac
 
 if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-	# Orphan: stale dir whose tmpfs git metadata is gone. Nothing in it is
-	# recoverable as a worktree; prune like wt-bootstrap does.
-	echo "wt-remove: pruning orphaned worktree dir $WT" >&2
-	rm -rf "$WT"
+	# Not a live worktree (stale/partial, or a pre-durable-metadata dir whose
+	# tmpfs .git/worktrees was lost). wt-remove's contract is to NEVER destroy
+	# work, and a dead-metadata dir can't be status-checked, so reap it safely:
+	# empty dirs are removed; a non-empty dir is preserved (moved aside), never
+	# rm -rf'd. The branch is always kept.
+	_outcome="$(wt_reap_orphan_dir "$WT")"
 	git -C "$ROOT" worktree prune
 	remove_lint_cache
+	case "$_outcome" in
+	quarantined:*)
+		echo "wt-remove: $WT was not a live worktree; preserved its contents at ${_outcome#quarantined:} (branch kept)" >&2
+		;;
+	kept)
+		echo "wt-remove: $WT is not a live worktree and could not be safely cleared; left in place (branch kept)" >&2
+		;;
+	*)
+		echo "wt-remove: cleared empty orphaned worktree dir $WT (branch kept)" >&2
+		;;
+	esac
 	exit 0
 fi
 

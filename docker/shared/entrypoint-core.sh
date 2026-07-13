@@ -209,6 +209,13 @@ fi
 # this covers subpackage directories detected from pnpm-workspace.yaml,
 # package.json workspaces, or .powbox.yml.  See README.md for details.
 #
+# One declared shadow is special-cased inside shadow-mounts.sh: .git/worktrees is
+# BIND-mounted from the persistent .worktrees volume's .gitworktrees subdir (not
+# tmpfs) when that volume is present, so linked-worktree git metadata survives a
+# container recycle alongside the working trees it describes (task 017); it falls
+# back to tmpfs when no persistent .worktrees volume is mounted. The loop here is
+# unchanged — the mount-kind decision lives in the one privileged helper.
+#
 # Skipped entirely in self-hosted mode: there is no host filesystem to shadow (the
 # whole workspace is one container-local volume), and a tmpfs over a subpackage's
 # node_modules would break the hardlinking that the single-volume layout exists to

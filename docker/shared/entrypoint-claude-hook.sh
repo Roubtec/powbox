@@ -153,15 +153,34 @@ if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = 
 	# stderr first on the launch too: a failed open of the log must stay silent (the
 	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
 	# stderr back into the log.
+	#
+	# Chain the Codex shared-skill sync AFTER the plugin bootstrap, mirroring the new
+	# core (entrypoint-core.sh): the same skew that strands primary-Claude plugin
+	# convergence on the hook also strands the Codex sync (both live only in the new
+	# core), even though the agent layer here bakes the sync script. So run the same
+	# sequence — plugin bootstrap, then, if the sync script is baked, the local Codex
+	# sync from the just-refreshed clone — completing the convergence guarantee under
+	# skew. No done-marker/bounded wait on this path (the old core has none); the
+	# refresh simply lands next session. $1 = the shared log, expanded by the inner
+	# `bash -c`, not here.
+	# shellcheck disable=SC2016
+	_plugin_boot_seq='
+			POWBOX_PLUGIN_LOG="$1" \
+				bash /usr/local/bin/seed-claude-plugins.sh </dev/null
+			if [ -x /usr/local/bin/sync-codex-skills.sh ]; then
+				POWBOX_CODEX_SYNC_LOG="$1" \
+					bash /usr/local/bin/sync-codex-skills.sh </dev/null
+			fi
+	'
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
-			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
+		setsid bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" \
+			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the hook.
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
-			bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
+		bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" \
+			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
-	unset _claude_plugin_log
+	unset _claude_plugin_log _plugin_boot_seq
 fi

@@ -57,6 +57,8 @@ make_skill() {
 # run_sync <clone_skills_parent> <dest> <sha> — invoke the sync with temp paths.
 # The clone root is the parent of codex/dev-skills/skills; here we pass a prebuilt
 # clone tree. Meta points at a dir with no build-epoch/commit → placeholders.
+# The claude-plugin lock is pinned into WORK_ROOT too, so the test never touches the
+# real ~/.claude default and each case's inner lock is self-contained.
 run_sync() {
 	local clone="$1" dest="$2" sha="$3"
 	POWBOX_SEED_SKILLS_LIB="$SEED_LIB" \
@@ -65,6 +67,7 @@ run_sync() {
 		POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
 		POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
 		POWBOX_CODEX_SYNC_LOCK_FILE="$dest/.sync.lock" \
+		POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$dest/.claude-plugin.lock" \
 		POWBOX_CODEX_SKILL_CLONE_SHA="$sha" \
 		bash "$SYNC"
 }
@@ -195,12 +198,82 @@ POWBOX_SEED_SKILLS_LIB="$SEED_LIB" \
 	POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
 	POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
 	POWBOX_CODEX_SYNC_LOCK_FILE="$R/dest/.sync.lock" \
+	POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$R/dest/.claude-plugin.lock" \
 	bash "$SYNC"
 after="$(stat -c %Y "$R/dest/a/SKILL.md")"
 if [ "$before" = "$after" ] && [ "$(cat "$R/dest/a/SKILL.md")" = "BAKED a" ]; then
 	ok "unresolvable clone HEAD skips; baked copy intact"
 else
 	no "unresolvable clone HEAD skips; baked copy intact"
+fi
+
+# ================================================================================
+# Test 8: clone-read race guard — while a PEER holds the claude-plugin lock (its
+#         marketplace pull is in flight), the sync must NOT read the clone or write
+#         the dest. Simulated by holding the claude-plugin lockfile from another
+#         process with a short LOCK_WAIT so the inner lock times out → skip.
+# ================================================================================
+if command -v flock >/dev/null 2>&1; then
+	R="$(new_case t8)"
+	make_skill "$R/dest/a" "BAKED a"
+	printf 'epoch=1\ncommit=old\nagent_skills_commit=OLDSHA\nsource=plugin-clone\n' >"$R/dest/a/.powbox-seeded"
+	before="$(stat -c %Y "$R/dest/a/SKILL.md")"
+	CLAUDE_LOCK="$R/dest/.claude-plugin.lock"
+	: >"$CLAUDE_LOCK"
+	# Hold the claude-plugin lock in a background subshell for ~3s.
+	(
+		flock 9
+		sleep 3
+	) 9>"$CLAUDE_LOCK" &
+	holder=$!
+	# Give the holder a moment to acquire before the sync tries.
+	sleep 0.3
+	POWBOX_SEED_SKILLS_LIB="$SEED_LIB" \
+		POWBOX_CODEX_SKILL_CLONE="$R/clone" \
+		POWBOX_CODEX_SKILLS_DEST="$R/dest" \
+		POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
+		POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
+		POWBOX_CODEX_SYNC_LOCK_FILE="$R/dest/.sync.lock" \
+		POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$CLAUDE_LOCK" \
+		POWBOX_CLAUDE_PLUGIN_LOCK_WAIT=1 \
+		POWBOX_CODEX_SKILL_CLONE_SHA="NEWSHA888" \
+		bash "$SYNC"
+	wait "$holder" 2>/dev/null || true
+	after="$(stat -c %Y "$R/dest/a/SKILL.md")"
+	if [ "$before" = "$after" ] && [ "$(cat "$R/dest/a/SKILL.md")" = "BAKED a" ] &&
+		[ "$(marker_sha "$R/dest/a")" = "OLDSHA" ]; then
+		ok "clone-read race: peer holds claude-plugin lock -> sync skips, dest untouched"
+	else
+		no "clone-read race: peer holds claude-plugin lock -> sync skips, dest untouched"
+	fi
+	# Follow-up: once the peer releases the lock, a re-run converges normally.
+	run_sync "$R/clone" "$R/dest" "NEWSHA999"
+	if [ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] && [ "$(marker_sha "$R/dest/a")" = "NEWSHA999" ]; then
+		ok "clone-read race: after the peer releases the lock, a re-run converges"
+	else
+		no "clone-read race: after the peer releases the lock, a re-run converges"
+	fi
+else
+	ok "clone-read race guard skipped (no flock binary)"
+	ok "clone-read race re-run skipped (no flock binary)"
+fi
+
+# ================================================================================
+# Test 9: atomic replace never DESTROYS the prior copy — seed_skill (via the sync)
+#         leaves a valid skill dir at every observable moment. Here we assert the
+#         post-refresh dir is complete (SKILL.md + marker) and no stray temp/backup
+#         siblings (.a.tmp.* / .a.old.*) leak into the skills dir.
+# ================================================================================
+R="$(new_case t9)"
+make_skill "$R/dest/a" "STALE a"
+printf 'epoch=1\ncommit=old\nagent_skills_commit=OLDSHA\nsource=plugin-clone\n' >"$R/dest/a/.powbox-seeded"
+run_sync "$R/clone" "$R/dest" "NEWSHAA10"
+leaked="$(find "$R/dest" -maxdepth 1 -name '.a.tmp.*' -o -maxdepth 1 -name '.a.old.*' 2>/dev/null)"
+if [ -f "$R/dest/a/SKILL.md" ] && [ -f "$R/dest/a/.powbox-seeded" ] &&
+	[ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] && [ -z "$leaked" ]; then
+	ok "atomic replace leaves a complete dir and no stray temp/backup siblings"
+else
+	no "atomic replace leaves a complete dir and no stray temp/backup siblings"
 fi
 
 echo

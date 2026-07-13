@@ -66,23 +66,55 @@ seed_skill_names() {
 # failure, leaving any existing destination untouched.
 seed_skill() {
 	local src="${1%/}" dest="$2" marker="$3"
-	local parent name tmp
+	local parent name tmp backup
 	parent="$(dirname "$dest")"
 	name="$(basename "$dest")"
 	mkdir -p "$parent"
 	tmp="$(mktemp -d "$parent/.${name}.tmp.XXXXXX")" || return 1
-	if cp -a "$src"/. "$tmp"/ && printf '%s' "$marker" >"$tmp/$POWBOX_SEED_MARKER"; then
-		# mv is an atomic rename within the same volume, and an agent re-reads
-		# SKILL.md at invoke time, so it never observes a half-written skill. The
-		# window between rm and mv is tiny but the config volumes are shared, so a
-		# concurrent seed could recreate $dest in it; -T (--no-target-directory)
-		# makes mv replace $dest rather than nest $tmp inside a reappeared
-		# directory, failing loudly into the cleanup below instead of returning a
-		# false success with an orphaned .${name}.tmp.* tree.
-		rm -rf "$dest"
+	if ! { cp -a "$src"/. "$tmp"/ && printf '%s' "$marker" >"$tmp/$POWBOX_SEED_MARKER"; }; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	# Publish by swap, NOT by `rm -rf "$dest"; mv tmp dest`. The old form erased the
+	# live copy UP FRONT: it exposed an absent window as wide as a recursive delete
+	# (a real hazard for Codex, which reads skill files live and warns on churn) and
+	# — worse — DESTROYED the prior copy outright if the rename then failed. Instead,
+	# rename any existing $dest ASIDE into a hidden sibling first, publish the staged
+	# copy, then delete the old one only once the new one is live. A reader now sees
+	# either the old skill or the new one; the window with neither is one rename wide
+	# (not a whole rm -rf), and a failed publish restores the prior copy rather than
+	# losing it. The backup name is hidden (leading dot) so it is never enumerated as
+	# a phantom skill by seed_skill_names.
+	if [ -e "$dest" ] || [ -L "$dest" ]; then
+		backup="$(mktemp -d "$parent/.${name}.old.XXXXXX")" || {
+			rm -rf "$tmp"
+			return 1
+		}
+		# mktemp created an empty dir; -T (--no-target-directory) replaces it with the
+		# live $dest via a single rename rather than nesting $dest inside it.
+		if ! mv -T "$dest" "$backup"; then
+			rm -rf "$tmp" "$backup"
+			return 1
+		fi
+		# Publish. -T makes mv REPLACE $dest rather than nest $tmp inside a $dest that
+		# a concurrent seed may have recreated in the one-rename window, failing loudly
+		# into the restore below instead of returning a false success with an orphaned
+		# temp tree.
 		if mv -T "$tmp" "$dest"; then
+			rm -rf "$backup"
 			return 0
 		fi
+		# Publish failed: move the prior copy back so $dest is never lost. Best-effort
+		# — if a racing seed already refilled $dest, keep its copy rather than clobber.
+		if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+			mv -T "$backup" "$dest" 2>/dev/null || true
+		fi
+		rm -rf "$tmp" "$backup"
+		return 1
+	fi
+	# No existing copy: a single atomic rename installs the skill.
+	if mv -T "$tmp" "$dest"; then
+		return 0
 	fi
 	rm -rf "$tmp"
 	return 1

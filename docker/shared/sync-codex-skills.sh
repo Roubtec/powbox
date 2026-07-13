@@ -88,6 +88,23 @@ SYNC_LOG="${POWBOX_CODEX_SYNC_LOG:-${POWBOX_PLUGIN_LOG:-$CLAUDE_CONFIG_DIR/.powb
 LOCK_FILE="${POWBOX_CODEX_SYNC_LOCK_FILE:-$HOME/.codex/.powbox-codex-skill-sync.lock}"
 LOCK_WAIT="${POWBOX_CODEX_SYNC_LOCK_WAIT:-300}"
 
+# SECOND lock, on the CLAUDE-config volume, held around the CLONE READ. The clone
+# is Claude's plugin state: seed-claude-plugins.sh's `marketplace update` (= git
+# pull) can be rewriting codex/dev-skills/skills/ AND advancing HEAD from a
+# CONCURRENT container at the very moment we read them. Our own container has
+# already released the plugin lock by the time this sync runs (the plugin step
+# exits before us — see entrypoint-core.sh), but a peer's may be pulling now. So
+# we take the SAME lock seed-claude-plugins.sh uses (its default lockfile on the
+# claude-config volume) around the HEAD read + the copy, so a peer pull cannot
+# interleave and hand us mixed content stamped with a since-moved SHA. Its default
+# path must match seed-claude-plugins.sh's LOCK_FILE default (that script is
+# invoked without POWBOX_PLUGIN_LOCK_FILE, so it uses its default), i.e. the same
+# host inode, or the advisory lock would not actually serialize the two. This is
+# an INNER lock nested under the codex-sync lock above; there is no reverse
+# nesting (the plugin bootstrap never takes the codex lock), so no deadlock.
+CLAUDE_LOCK_FILE="${POWBOX_CLAUDE_PLUGIN_LOCK_FILE:-$CLAUDE_CONFIG_DIR/.powbox-plugin-bootstrap.lock}"
+CLAUDE_LOCK_WAIT="${POWBOX_CLAUDE_PLUGIN_LOCK_WAIT:-$LOCK_WAIT}"
+
 # Never hang on an interactive git credential prompt: the only git op here is a
 # read-only `rev-parse HEAD` on the LOCAL clone (no network), but keep this as a
 # fail-fast guard so any unexpected prompt fails immediately.
@@ -113,44 +130,71 @@ codex_recorded_sha() {
 }
 
 run_locked() {
-	# run_locked <wait-secs> <fn> — run <fn> holding an exclusive flock on the SHARED
-	# codex-config volume, so concurrent containers cannot race the check-then-mutate.
+	# run_locked <lockfile> <wait-secs> <fn...> — run <fn> holding an exclusive flock
+	# on <lockfile>, so concurrent containers cannot race the state it guards.
 	# Best-effort, mirroring seed-claude-plugins.sh:
 	#   - no flock binary        -> run unlocked (degrade, never fail),
 	#   - lockfile can't be opened -> run unlocked,
 	#   - lock still held past    -> return 99 WITHOUT running: the holder is a peer
 	#     <wait-secs>                container converging the SAME shared state for us.
-	local lwait="$1"
-	shift
+	# A dynamically-assigned fd (`exec {lock_fd}>>`) — not a hardcoded 9 — so this can
+	# NEST: the codex-sync lock (outer) and the claude-plugin lock (inner) are held at
+	# once without clashing on one fd number. Append (`>>`) not truncate (`>`): the
+	# lockfile is opened only for its advisory lock, and O_TRUNC would bump its mtime
+	# on EVERY pass, so an otherwise byte-for-byte no-op sync would still touch the
+	# volume. `>>` creates-if-absent without truncating, keeping an unchanged run
+	# write-free.
+	local lockfile="$1" lwait="$2"
+	shift 2
 	if ! command -v flock >/dev/null 2>&1; then
 		"$@"
 		return
 	fi
-	mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
-	if ! exec 9>"$LOCK_FILE"; then
-		log "could not open lock file $LOCK_FILE; proceeding without cross-container lock"
+	mkdir -p "$(dirname "$lockfile")" 2>/dev/null || true
+	local lock_fd
+	if ! exec {lock_fd}>>"$lockfile"; then
+		log "could not open lock file $lockfile; proceeding without cross-container lock"
 		"$@"
 		return
 	fi
 	local rc
-	if flock -w "$lwait" 9; then
+	if flock -w "$lwait" "$lock_fd"; then
 		"$@"
 		rc=$?
-		flock -u 9
-		exec 9>&- # release the lockfile fd
+		flock -u "$lock_fd"
+		exec {lock_fd}>&- # release the lockfile fd
 		return "$rc"
 	fi
-	exec 9>&-
-	log "another container holds the codex-skill-sync lock after ${lwait}s; not running this pass (the holder is converging the shared state)"
+	exec {lock_fd}>&-
+	log "another container holds the lock $lockfile after ${lwait}s; not running this pass (the holder is converging the shared state)"
 	return 99
 }
 
-# converge_codex_skills — the check-then-mutate that run_locked serializes across
-# containers sharing the codex-config volume. Reads the clone HEAD once, then for
+# converge_codex_skills — outer body, serialized by the CODEX-volume lock (main).
+# It only adds the INNER claude-plugin lock around the clone read + copy: the clone
+# is Claude's plugin state and a peer container's `marketplace update` (git pull)
+# can rewrite it mid-read, so reading HEAD and copying skill files must be atomic
+# with respect to that pull. A contended inner lock (rc 99 — a peer IS pulling now)
+# is a clean skip: the peer refreshes the clone and the next start re-syncs. Best-
+# effort throughout; never non-zero into the caller.
+converge_codex_skills() {
+	run_locked "$CLAUDE_LOCK_FILE" "$CLAUDE_LOCK_WAIT" sync_from_clone
+	local rc=$?
+	if [ "$rc" -eq 99 ]; then
+		# run_locked already logged the contention; make the skip explicit here.
+		log "skipping this pass: a peer holds the claude-plugin lock (its marketplace pull is in flight); next start re-syncs"
+	fi
+	return 0
+}
+
+# sync_from_clone — the check-then-mutate, run holding BOTH the codex-sync lock
+# (outer) and the claude-plugin lock (inner). Reads the clone HEAD once, then for
 # each of the clone's shared skills: skip user-owned copies (unmarked / non-dir),
 # skip when the recorded SHA already matches (byte-for-byte no-op), else atomically
-# replace + re-stamp with the synced SHA.
-converge_codex_skills() {
+# replace + re-stamp with the synced SHA. Holding the claude-plugin lock across the
+# whole HEAD-read + copy is what keeps content and stamped SHA from disagreeing when
+# a peer container's plugin pull would otherwise interleave.
+sync_from_clone() {
 	if [ ! -d "$CLONE_SKILLS_DIR" ]; then
 		log "clone skills dir absent ($CLONE_SKILLS_DIR); leaving baked Codex copies in place (cold claude-config volume, plugin disabled, or bootstrap not run yet)"
 		return 0
@@ -219,7 +263,7 @@ main() {
 	# shellcheck source=docker/shared/seed-skills.sh
 	# shellcheck disable=SC1090
 	. "$POWBOX_SEED_SKILLS_LIB"
-	run_locked "$LOCK_WAIT" converge_codex_skills
+	run_locked "$LOCK_FILE" "$LOCK_WAIT" converge_codex_skills
 	return 0
 }
 

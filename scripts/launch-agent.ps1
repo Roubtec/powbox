@@ -785,8 +785,9 @@ $podmanVolume = "agent-podman-$containerName"
 if ($Isolated) {
   # The one per-instance workspace volume that REPLACES the host bind mount plus the
   # dir-mounted agent-nm-*/agent-wt-* shadows: the clone, node_modules, .worktrees,
-  # and the pnpm store all live inside it as ordinary subdirs (one mount → pnpm
-  # hardlinks everywhere). Keyed by the full container name, like the podman volume.
+  # and the pnpm store, Go caches, and ccache all live inside it as ordinary subdirs
+  # (one mount → pnpm hardlinks everywhere). Keyed by the full container name, like
+  # the podman volume.
   $workspaceVolume = "agent-ws-$containerName"
 }
 

@@ -6,10 +6,13 @@ tasks
 .worktrees
 # The agent-skills staging clone (build.sh populates it) holds a whole repo —
 # its own .git, docs, and non-Codex flavor dirs — but the Dockerfile COPYs only
-# .agent-skills-src/codex/dev-skills/skills/. Exclude the entire staging tree and
-# re-include just that subpath, so the rest (notably .git) never enters the build
+# two subpaths: .agent-skills-src/codex/dev-skills/skills/ (the Codex skill
+# palette) and .agent-skills-src/plugins/dev-skills/bin/gh-review-threads (the
+# single-source-of-truth review-thread helper). Exclude the entire staging tree
+# and re-include just those, so the rest (notably .git) never enters the build
 # context: smaller context uploads and no unrelated files exposed to a remote
 # builder. Nested re-include under an excluded parent is honored by both BuildKit
 # and buildah/podman.
 .agent-skills-src
 !.agent-skills-src/codex/dev-skills/skills
+!.agent-skills-src/plugins/dev-skills/bin/gh-review-threads

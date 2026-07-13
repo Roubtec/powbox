@@ -65,6 +65,21 @@ if [ -f "$AGENT_TMPL" ]; then
 			fi
 		fi
 
+		# No-clobber default settings: fill only the keys the user has not set.
+		# Reuse the deep-merge helper with the operands SWAPPED (baked defaults
+		# as the base, the existing volume settings as the winning overlay) so a
+		# user override always survives. This is the OPPOSITE precedence from the
+		# statusLine seed above (which the image re-asserts each start); a workflow
+		# preference such as respondToBashCommands must stay user-owned once set.
+		SETTINGS_DEFAULTS_JSON="$AGENT_SEED_DIR/settings-defaults.json"
+		if [ -f "$SETTINGS_DEFAULTS_JSON" ]; then
+			if [ -f "$SETTINGS_FILE" ]; then
+				merge_json_files "$SETTINGS_DEFAULTS_JSON" "$SETTINGS_FILE" "$SETTINGS_FILE"
+			else
+				cp "$SETTINGS_DEFAULTS_JSON" "$SETTINGS_FILE"
+			fi
+		fi
+
 		# Seed image-baked skills (no-clobber at the skill-directory level:
 		# preserves user-modified versions; delete the skill folder to pick up the
 		# latest image version on next container start, or run `agent-update-skills`

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Offline unit test for docker/shared/gh-review-threads — the baked helper that
+# Offline unit test for the gh-review-threads helper — vendored in
+# Roubtec/agent-skills and baked into the powbox agent image — that
 # fetches a PR's review threads safely (manual pagination, never --paginate) and
 # asserts every returned comment url belongs to the requested PR, failing closed
 # with exit 3 on a persistently contaminated response.
@@ -27,12 +28,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# Which helper binary to exercise. Defaults to the in-repo source. Smoke Stage 0b
-# overrides it with GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads so an
-# in-image run actually validates the BAKED artifact on PATH, not the mounted source
-# checkout — otherwise a stale or behaviorally broken installed helper would slip past
-# Stage 1's `command -v` presence probe untested.
-HELPER="${GH_REVIEW_THREADS_HELPER:-${ROOT_DIR}/docker/shared/gh-review-threads}"
+# Which helper binary to exercise. gh-review-threads is no longer kept in-tree: it
+# is vendored in Roubtec/agent-skills and baked into the image from the pinned
+# clone, so the default source here is that staging clone — present only after a
+# `build.sh` fetch has populated .agent-skills-src (smoke Stage 0b guards on it).
+# Smoke Stage 0b overrides it with GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads
+# so an in-image run actually validates the BAKED artifact on PATH, not a source
+# checkout — otherwise a stale or behaviorally broken installed helper would slip
+# past Stage 1's `command -v` presence probe untested.
+HELPER="${GH_REVIEW_THREADS_HELPER:-${ROOT_DIR}/.agent-skills-src/plugins/dev-skills/bin/gh-review-threads}"
 
 [ -x "$HELPER" ] || {
 	echo "test-gh-review-threads: helper not found or not executable: $HELPER" >&2

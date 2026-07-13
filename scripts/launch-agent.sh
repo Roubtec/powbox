@@ -1166,10 +1166,11 @@ PODMAN_VOLUME="agent-podman-${CONTAINER_NAME}"
 if [ "$ISOLATED" = true ]; then
 	# The one per-instance workspace volume that REPLACES the host bind mount plus
 	# the dir-mounted agent-nm-*/agent-wt-* shadows: the clone, node_modules,
-	# .worktrees, and the pnpm store all live inside it as ordinary subdirs (one
-	# mount → pnpm hardlinks everywhere, including the root node_modules). Keyed by
-	# the full container name, like PODMAN_VOLUME, so it is part of the container's
-	# identity. Mounted via compose.selfhosted.yml (merged by target path).
+	# .worktrees, and the pnpm store, Go caches, and ccache all live inside it as
+	# ordinary subdirs (one mount → pnpm hardlinks everywhere, including the root
+	# node_modules). Keyed by the full container name, like PODMAN_VOLUME, so it is
+	# part of the container's identity. Mounted via compose.selfhosted.yml (merged
+	# by target path).
 	WS_VOLUME="agent-ws-${CONTAINER_NAME}"
 fi
 

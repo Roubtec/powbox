@@ -93,6 +93,15 @@ assert_not_blocked() {
 	fi
 }
 
+# file_ident <file> — an identity string that changes on ANY rewrite of the file.
+# The writers rewrite via `mv "$tmp" "$file"`, which allocates a NEW inode, so the
+# inode number (%i) flips on every real rewrite regardless of sub-second timer
+# resolution (unlike a whole-second mtime). We pair it with the nanosecond mtime
+# (%y) as belt-and-suspenders; BSD stat falls back to inode + whole-second mtime.
+file_ident() {
+	stat -c '%i|%y' "$1" 2>/dev/null || stat -f '%i|%m' "$1"
+}
+
 # assert_grep <file> <ERE> <msg>
 assert_grep() {
 	if grep -qE "$2" "$1"; then
@@ -140,6 +149,9 @@ assert_blocked "$ws" "inline features = { multi_agent_v2 = true } blocks"
 echo "Test: guard BLOCKS a quoted multi_agent_v2 key (no-clobber on opt-out)"
 ws="$(printf '[features]\n"multi_agent_v2" = false\n' | new_config v2-quoted)"
 assert_blocked "$ws" 'quoted "multi_agent_v2" = false blocks (no-clobber)'
+# TOML literal (single-quoted) key is identical to the bare key.
+ws="$(printf "[features]\n'multi_agent_v2' = false\n" | new_config v2-squoted)"
+assert_blocked "$ws" "single-quoted 'multi_agent_v2' = false blocks (no-clobber)"
 
 echo "Test: guard BLOCKS when an [agents] block exists (mutual exclusion)"
 ws="$(printf '[agents]\nmax_threads = 9\nmax_depth = 1\n' | new_config agents-table)"
@@ -158,6 +170,24 @@ ws="$(printf 'agents.max_threads = 9\n' | new_config agents-dotted)"
 assert_blocked "$ws" "top-level dotted agents.max_threads = 9 blocks the seed"
 ws="$(printf '"agents" = { max_threads = 9 }\n' | new_config agents-quoted-inline)"
 assert_blocked "$ws" 'inline "agents" = { ... } (quoted) blocks the seed'
+
+echo "Test: guard BLOCKS single-quoted (TOML literal) [agents] spellings"
+ws="$(printf "['agents']\nmax_threads = 9\n" | new_config agents-squoted-header)"
+assert_blocked "$ws" "['agents'] (single-quoted header) blocks the seed"
+ws="$(printf "['agents'.limits]\nmax_threads = 9\n" | new_config agents-squoted-subheader)"
+assert_blocked "$ws" "['agents'.limits] (single-quoted subtable) blocks the seed"
+ws="$(printf "'agents'.max_threads = 9\n" | new_config agents-squoted-dotted)"
+assert_blocked "$ws" "single-quoted dotted 'agents'.max_threads = 9 blocks the seed"
+ws="$(printf "'agents' = { max_threads = 9 }\n" | new_config agents-squoted-inline)"
+assert_blocked "$ws" "inline 'agents' = { ... } (single-quoted) blocks the seed"
+
+echo "Test: guard BLOCKS [[agents]] array-of-tables (defensive)"
+ws="$(printf '[[agents]]\nmax_threads = 9\n' | new_config agents-aot)"
+assert_blocked "$ws" "[[agents]] array-of-tables blocks the seed"
+ws="$(printf '[[agents.limits]]\nmax_threads = 9\n' | new_config agents-aot-sub)"
+assert_blocked "$ws" "[[agents.limits]] array-of-tables blocks the seed"
+ws="$(printf "[[ 'agents' ]]\nmax_threads = 9\n" | new_config agents-aot-squoted)"
+assert_blocked "$ws" "[[ 'agents' ]] (quoted array-of-tables) blocks the seed"
 
 echo "Test: guard BLOCKS an inline features table with no multi_agent_v2 key"
 ws="$(printf 'features = { other = true }\n' | new_config features-inline-other)"
@@ -178,6 +208,8 @@ ws="$(printf 'agentsx = 1\n' | new_config agentsx-key)"
 assert_not_blocked "$ws" "agentsx = 1 does NOT match the [agents] guard"
 ws="$(printf '[features_x]\nfoo = 1\n' | new_config features-x)"
 assert_not_blocked "$ws" "[features_x] does NOT match the inline-features guard"
+ws="$(printf "['agentsx']\nfoo = 1\n" | new_config agentsx-squoted)"
+assert_not_blocked "$ws" "['agentsx'] (single-quoted lookalike) does NOT match the [agents] guard"
 
 echo "Test: seed writes [features] multi_agent_v2 = true onto a statusline config"
 ws="$(printf '%s\n' "$STATUSLINE_CONFIG" | new_config seed-fresh)"
@@ -189,20 +221,29 @@ assert_grep "$ws" '^terminal_title = \[' "existing terminal_title preserved"
 # suppress_unstable_features_warning is intentionally NOT seeded (warning stays on).
 assert_no_grep "$ws" 'suppress_unstable_features_warning' "unstable-feature warning left ON"
 
-echo "Test: re-running the seed is a byte-for-byte no-op with a stable mtime"
-cp "$ws" "$ws.snap"
-before="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+echo "Test: guarded seed extends an existing QUOTED [features] table (no duplicate)"
+# peer #2: a pre-existing ["features"] with no multi_agent_v2 must gain the key
+# UNDER that table, not spawn a second [features] table (which TOML rejects).
+ws="$(printf '["features"]\nsome_other_flag = true\n' | new_config seed-quoted-features)"
 seed_v2 "$ws"
-after="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+assert_count "$ws" '^[[:space:]]*\[' 1 'seed adds no duplicate table beside ["features"]'
+assert_grep "$ws" '^multi_agent_v2 = true$' 'seed inserts multi_agent_v2 under ["features"]'
+assert_grep "$ws" '^some_other_flag = true$' 'seed preserves the sibling key'
+
+echo "Test: re-running the seed is a byte-for-byte no-op with a stable inode/mtime"
+cp "$ws" "$ws.snap"
+before="$(file_ident "$ws")"
+seed_v2 "$ws"
+after="$(file_ident "$ws")"
 if cmp -s "$ws" "$ws.snap"; then
 	ok "second seed leaves bytes unchanged"
 else
 	ko "second seed rewrote the file"
 fi
 if [ "$before" = "$after" ]; then
-	ok "second seed leaves mtime unchanged (no rewrite)"
+	ok "second seed leaves inode/mtime unchanged (no rewrite)"
 else
-	ko "second seed changed mtime (file was rewritten)"
+	ko "second seed changed inode/mtime (file was rewritten)"
 fi
 
 echo "Test: an existing [agents] config is left completely untouched"
@@ -238,21 +279,35 @@ assert_count "$ws" '^[[:space:]]*\[features\]' 1 "no duplicate [features] table 
 assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 inserted under decorated [features]"
 assert_grep "$ws" '^some_other_flag = true$' "sibling key under decorated [features] preserved"
 
+echo "Test: ensure_table_scalar_setting inserts under a QUOTED [features] header"
+# TOML treats [features], ["features"] and ['features'] as the SAME table, so the
+# writer must extend the existing quoted table rather than append a second one.
+ws="$(printf '["features"]\nsome_other_flag = true\n' | new_config features-dquoted-header)"
+ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
+assert_count "$ws" '^[[:space:]]*\[' 1 "no duplicate table appended next to [\"features\"]"
+assert_grep "$ws" '^multi_agent_v2 = true$' 'multi_agent_v2 inserted under ["features"]'
+assert_grep "$ws" '^some_other_flag = true$' 'sibling key under ["features"] preserved'
+ws="$(printf "['features']\nsome_other_flag = true\n" | new_config features-squoted-header)"
+ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
+assert_count "$ws" '^[[:space:]]*\[' 1 "no duplicate table appended next to ['features']"
+assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 inserted under ['features']"
+assert_grep "$ws" '^some_other_flag = true$' "sibling key under ['features'] preserved"
+
 echo "Test: ensure_table_scalar_setting is no-clobber under a DECORATED header"
 ws="$(printf '[features]  # tuning\nmulti_agent_v2 = false\n' | new_config scalar-decorated-noclobber)"
 cp "$ws" "$ws.snap"
-before="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+before="$(file_ident "$ws")"
 ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
-after="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+after="$(file_ident "$ws")"
 if cmp -s "$ws" "$ws.snap"; then
 	ok "existing key under decorated header left byte-for-byte unchanged"
 else
 	ko "decorated-header no-clobber rewrote the file"
 fi
 if [ "$before" = "$after" ]; then
-	ok "decorated-header no-clobber leaves mtime stable"
+	ok "decorated-header no-clobber leaves inode/mtime stable"
 else
-	ko "decorated-header no-clobber changed mtime"
+	ko "decorated-header no-clobber changed inode/mtime"
 fi
 
 echo "Test: ensure_table_array_setting is a mtime-stable no-op when the key exists"
@@ -260,18 +315,18 @@ echo "Test: ensure_table_array_setting is a mtime-stable no-op when the key exis
 # is present it must NOT rewrite config.toml (stable mtime across starts).
 ws="$(printf '%s\n' "$STATUSLINE_CONFIG" | new_config array-noop)"
 cp "$ws" "$ws.snap"
-before="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+before="$(file_ident "$ws")"
 ensure_table_array_setting "$ws" "tui" "status_line" '  "current-dir",'
-after="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+after="$(file_ident "$ws")"
 if cmp -s "$ws" "$ws.snap"; then
 	ok "existing status_line left byte-for-byte unchanged"
 else
 	ko "ensure_table_array_setting rewrote config with status_line already present"
 fi
 if [ "$before" = "$after" ]; then
-	ok "ensure_table_array_setting leaves mtime stable (no rewrite)"
+	ok "ensure_table_array_setting leaves inode/mtime stable (no rewrite)"
 else
-	ko "ensure_table_array_setting changed mtime (file was rewritten)"
+	ko "ensure_table_array_setting changed inode/mtime (file was rewritten)"
 fi
 
 echo "Test: ensure_table_array_setting still inserts under an existing bare [tui]"

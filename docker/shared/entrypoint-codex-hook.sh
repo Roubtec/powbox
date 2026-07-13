@@ -67,15 +67,17 @@ config_table_setting_present() {
 	[ -f "$file" ] || return 1
 
 	# Inline table form: cannot be extended in place, so a later [table] header
-	# would define the table twice. Treat as present (skip the write).
-	if grep -qE "^[[:space:]]*\"?${table}\"?[[:space:]]*=[[:space:]]*\{" "$file"; then
+	# would define the table twice. Treat as present (skip the write). TOML treats
+	# table, "table", and 'table' as the same key, so accept either quote char.
+	if grep -qE "^[[:space:]]*[\"']?${table}[\"']?[[:space:]]*=[[:space:]]*\{" "$file"; then
 		return 0
 	fi
 
-	# key already set under a [table] header.
+	# key already set under a [table] header. The header and the key both tolerate
+	# the TOML-equivalent bare / "double" / 'single' quoted spellings.
 	awk -v table="$table" -v key="$key" '
 		BEGIN {
-			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
+			header_re = "^[[:space:]]*\\[[[:space:]]*[\"'\'']?" table "[\"'\'']?[[:space:]]*\\][[:space:]]*(#.*)?$"
 		}
 		$0 ~ header_re {
 			in_table = 1
@@ -84,7 +86,7 @@ config_table_setting_present() {
 		in_table && /^[[:space:]]*\[/ {
 			in_table = 0
 		}
-		in_table && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+		in_table && $0 ~ ("^[[:space:]]*[\"'\'']?" key "[\"'\'']?[[:space:]]*=") {
 			found = 1
 			exit
 		}
@@ -119,7 +121,7 @@ ${values}
 
 	awk -v block="$block" -v table_header="$table_header" -v table="$table" -v key="$key" '
 		BEGIN {
-			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
+			header_re = "^[[:space:]]*\\[[[:space:]]*[\"'\'']?" table "[\"'\'']?[[:space:]]*\\][[:space:]]*(#.*)?$"
 			in_table = 0
 			inserted = 0
 		}
@@ -136,7 +138,7 @@ ${values}
 			}
 			in_table = 0
 		}
-		in_table && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+		in_table && $0 ~ ("^[[:space:]]*[\"'\'']?" key "[\"'\'']?[[:space:]]*=") {
 			inserted = 1
 		}
 		{
@@ -186,7 +188,7 @@ ensure_table_scalar_setting() {
 
 	awk -v block="$block" -v table_header="$table_header" -v table="$table" -v key="$key" '
 		BEGIN {
-			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
+			header_re = "^[[:space:]]*\\[[[:space:]]*[\"'\'']?" table "[\"'\'']?[[:space:]]*\\][[:space:]]*(#.*)?$"
 			in_table = 0
 			inserted = 0
 		}
@@ -203,7 +205,7 @@ ensure_table_scalar_setting() {
 			}
 			in_table = 0
 		}
-		in_table && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+		in_table && $0 ~ ("^[[:space:]]*[\"'\'']?" key "[\"'\'']?[[:space:]]*=") {
 			inserted = 1
 		}
 		{
@@ -231,13 +233,15 @@ ensure_table_scalar_setting() {
 # Returns success (0 = "blocked, skip the seed") when any of:
 #   1. The config already carries a multi_agent_v2 assignment in any form —
 #      the [features] table or an inline `features = { multi_agent_v2 = ... }`,
-#      set to true OR false, with a bare or quoted key. No-clobber: never
+#      set to true OR false, with a bare, "double"-quoted or 'single'-quoted key
+#      (TOML treats all three spellings as the same key). No-clobber: never
 #      overwrite the user's choice.
 #   2. The config already defines an [agents] block in ANY valid-TOML form: a
-#      table header ([agents] / [agents.sub], with optional inner whitespace or
-#      quotes such as [ agents ] / ["agents"]), a top-level dotted assignment
-#      (agents.max_threads = ...), or an inline table (agents = { ... }), with a
-#      bare or quoted key. Codex refuses to launch when both an [agents] block
+#      table header ([agents] / [agents.sub] / [[agents]] array-of-tables, with
+#      optional inner whitespace or quotes such as [ agents ] / ["agents"] /
+#      ['agents']), a top-level dotted assignment (agents.max_threads = ...), or
+#      an inline table (agents = { ... }), with a bare, "double"- or 'single'-
+#      quoted key. Codex refuses to launch when both an [agents] block
 #      and features.multi_agent_v2 are set (they are mutually exclusive), so we
 #      must never author that conflict. The seed is no-clobber, so it will not
 #      remove the [agents] block either — a user opting into v2 must delete it
@@ -262,21 +266,24 @@ config_v2_seed_blocked() {
 
 	# Any multi_agent_v2 assignment, whether under [features] or inline; the key
 	# is not line-anchored so an inline `features = { multi_agent_v2 = ... }` is
-	# caught too, and an optional closing quote catches a quoted `"multi_agent_v2"`.
-	if grep -qE 'multi_agent_v2"?[[:space:]]*=' "$file"; then
+	# caught too, and an optional closing quote (either " or ', which TOML treats
+	# identically) catches a quoted `"multi_agent_v2"` / `'multi_agent_v2'`.
+	if grep -qE 'multi_agent_v2["'\'']?[[:space:]]*=' "$file"; then
 		return 0
 	fi
 
-	# An existing [agents] table header ([agents] / [agents.sub], with optional
-	# inner whitespace or quotes), a top-level dotted key (agents.<key> = ...), or
-	# an inline table (agents = { ... }), with an optionally-quoted "agents".
-	if grep -qE '^[[:space:]]*(\[[[:space:]]*"?agents"?[[:space:]]*[].]|"?agents"?[[:space:]]*[.=])' "$file"; then
+	# An existing [agents] table header ([agents] / [agents.sub] / [[agents]]
+	# array-of-tables, with optional inner whitespace or quotes), a top-level
+	# dotted key (agents.<key> = ...), or an inline table (agents = { ... }), with
+	# an optionally " or ' quoted "agents" (TOML-equivalent spellings).
+	if grep -qE '^[[:space:]]*(\[\[?[[:space:]]*["'\'']?agents["'\'']?[[:space:]]*[].]|["'\'']?agents["'\'']?[[:space:]]*[.=])' "$file"; then
 		return 0
 	fi
 
 	# An inline features table with no multi_agent_v2 key (that case is caught
-	# above): appending a [features] table would define `features` twice.
-	if grep -qE '^[[:space:]]*"?features"?[[:space:]]*=[[:space:]]*\{' "$file"; then
+	# above): appending a [features] table would define `features` twice. Accept a
+	# bare or " / ' quoted "features".
+	if grep -qE '^[[:space:]]*["'\'']?features["'\'']?[[:space:]]*=[[:space:]]*\{' "$file"; then
 		return 0
 	fi
 

@@ -697,6 +697,7 @@ else {
   }
   catch {
     # ResolveLinkTarget requires .NET 6+ / pwsh 7.1+; fall back to Resolve-Path result.
+    Write-Verbose "ResolveLinkTarget unavailable ($($_.Exception.Message)); using Resolve-Path result."
   }
   # Strip trailing directory separator so that "C:\project" and "C:\project\" hash identically.
   # Guard against trimming filesystem root paths (e.g. "C:\" → "C:" or "/" → ""), which would
@@ -1475,6 +1476,7 @@ if (",$podmanDevices," -like "*,fuse,*") {
   }
   catch {
     # Best-effort cache seeding must never abort the agent launch.
+    Write-Verbose "Image-store cache seeding skipped ($($_.Exception.Message))."
   }
   $global:LASTEXITCODE = 0
 }

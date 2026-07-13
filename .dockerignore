@@ -15,4 +15,4 @@ tasks
 # and buildah/podman.
 .agent-skills-src
 !.agent-skills-src/codex/dev-skills/skills
-!.agent-skills-src/plugins/dev-skills/bin
+!.agent-skills-src/plugins/dev-skills/bin/gh-review-threads

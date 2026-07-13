@@ -114,7 +114,7 @@ $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
     # Dockerfile COPYs exactly this path; a missing file would otherwise fail the
     # build with a cryptic BuildKit cache-key error, so check it here loudly.
     $helper = Join-Path $script:AgentSkillsStaging "plugins/dev-skills/bin/gh-review-threads"
-    if (-not (Test-Path $helper)) {
+    if (-not (Test-Path $helper -PathType Leaf)) {
       Write-Error "agent-skills at $($script:AgentSkillsCommit) is missing plugins/dev-skills/bin/gh-review-threads; refusing to build without the baked helper."
       exit 1
     }

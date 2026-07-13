@@ -178,7 +178,7 @@ ${AGENT_SKILLS_REPO_URL} (${AGENT_SKILLS_REF}). No image was built."
 	# single source of truth — powbox no longer keeps an in-tree copy). The
 	# Dockerfile COPYs exactly this path; a missing file would otherwise fail the
 	# build with a cryptic BuildKit cache-key error, so check it here loudly.
-	if [ ! -x "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/gh-review-threads" ]; then
+	if [ ! -f "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/gh-review-threads" ] || [ ! -x "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/gh-review-threads" ]; then
 		echo "agent-skills at ${AGENT_SKILLS_COMMIT} is missing an executable" >&2
 		echo "plugins/dev-skills/bin/gh-review-threads; refusing to build without the baked helper." >&2
 		exit 1

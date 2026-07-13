@@ -68,7 +68,12 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	# _plugin_done — so the bootstrap still detaches and merely skips the marker-based wait.
 	# startup must not abort.
 	_plugin_done="$(mktemp /tmp/.powbox-plugin-bootstrap.XXXXXXXX.done 2>/dev/null || true)"
-	rm -f "$_plugin_done" 2>/dev/null || true
+	# Only touch the filesystem when mktemp actually reserved a name — an empty
+	# marker (mktemp unavailable) must never reach `rm`, matching the emptiness
+	# guards on the other two consumers (the seeder EXIT trap and the wait-poll).
+	if [ -n "$_plugin_done" ]; then
+		rm -f "$_plugin_done" 2>/dev/null || true
+	fi
 	# stderr first: a failed open of the log itself must stay silent too
 	# (redirections apply left-to-right).
 	{

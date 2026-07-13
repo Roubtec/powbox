@@ -85,8 +85,8 @@ elif [ -x "$STAGED_HELPER" ] && command -v jq >/dev/null 2>&1; then
 	echo "Running gh-review-threads helper unit test (host source from agent-skills clone — image '$IMAGE' absent) ..."
 	"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
 else
-	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent and no staged agent-skills helper + host 'jq'."
-	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent; no staged helper or host jq)")
+	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent and the host fallback is unavailable (it needs both the staged agent-skills helper and host 'jq')."
+	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent; host fallback needs the staged helper and jq)")
 fi
 
 # Stage 0c — worktree orphan-safety unit test. Hermetic (a throwaway git repo in a

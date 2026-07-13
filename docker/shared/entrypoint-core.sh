@@ -48,6 +48,17 @@ fi
 # claude/seed-script preconditions, so "core owns it" is true whether or not the gate
 # fires.
 export POWBOX_PLUGIN_BOOTSTRAP=core
+# Second, INDEPENDENT handshake for the Codex shared-skill sync chained into the
+# detached bootstrap below (task 021). It needs its OWN marker rather than reusing
+# POWBOX_PLUGIN_BOOTSTRAP: a base predating task 021 already exports the PLUGIN
+# marker (it runs seed-claude-plugins.sh) but never chained the Codex sync, so a
+# newer agent layer's hook reusing the plugin marker would wrongly conclude "core
+# owns the sync" and skip it — stranding Codex convergence on the common agent-only
+# `cc --build` over such a base. This distinct marker means "THIS core chains the
+# Codex sync", so the hook's sync-fallback gates on ITS absence, separately from the
+# plugin fallback. Exported unconditionally alongside the plugin marker (same
+# reasoning: the hook re-checks the sync-script precondition itself).
+export POWBOX_CODEX_SYNC_BOOTSTRAP=core
 if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"

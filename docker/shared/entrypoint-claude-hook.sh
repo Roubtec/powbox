@@ -8,6 +8,12 @@ AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
 # per-agent subdirectory /home/node/.agent-container/<agent>.
 AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
 
+# Directory holding the detached bootstrap scripts the build-skew shim launches
+# (seed-claude-plugins.sh, sync-codex-skills.sh). Production leaves it at the baked
+# /usr/local/bin; overridable ONLY so scripts/test-claude-hook-skew.sh can point it
+# at a stub dir and exercise the marker-gating without root-writable paths.
+POWBOX_BOOT_BIN="${POWBOX_BOOT_BIN:-/usr/local/bin}"
+
 # Merge two JSON files (jq deep merge: base * overlay) into dst.
 # Best-effort: logs a warning and leaves dst untouched on any failure.
 merge_json_files() {
@@ -113,30 +119,62 @@ fi
 # ordering) and fully DETACHED, because the claude CLI hangs (SIGTERM-immune)
 # when invoked with the container TTY as stdin, so no `claude plugin …` call may
 # ever run on the entrypoint's critical path (see seed-claude-plugins.sh for the
-# full rationale). A core that owns the bootstrap announces it by exporting
-# POWBOX_PLUGIN_BOOTSTRAP=core before invoking this hook.
+# full rationale). A core that owns a bootstrap announces it by exporting the
+# matching handshake before invoking this hook.
 #
 # BUILD-SKEW SHIM. entrypoint-core.sh is baked into the BASE image; this hook is
-# baked into the AGENT layer. The common `cc --build` path rebuilds only the
-# agent layer over an existing base, so this hook can run under an OLDER core
-# that converges the plugin only for NON-primary Claude — primary Claude was
-# this hook's job in that generation. Without a fallback, that combination
-# silently stops converging the plugin on primary-Claude launches (the common
-# case). So: when the handshake is absent and Claude is primary, launch the same
-# detached, best-effort bootstrap the new core would have. Ordering holds — as
-# primary Claude's setup hook we are invoked BY core AFTER init-firewall.sh.
-# (Non-primary Claude's hook run happens pre-firewall from entrypoint-agent.sh,
-# but there PRIMARY_AGENT != claude, so the gate below skips it and the old core
-# still converges non-primary Claude itself, post-firewall.) The writer guard is
-# defense-in-depth: the launcher clears AGENT_SETUP_HOOK for that role, so this
-# hook should never run there at all. No done-marker/bounded wait here: the old
-# core has no waiter, so a refresh simply lands next session — the shim restores
-# convergence, not the same-session wait. Harmless if ever run redundantly or
-# standalone: the seeder is detached, bounded, flock-serialized, idempotent, and
-# self-defends its stdin against a TTY.
-if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = claude ] &&
+# baked into the AGENT layer. The common `cc --build` path rebuilds only the agent
+# layer over an existing base, so this hook can run under an OLDER core that failed
+# to perform one — OR BOTH — of two independent detached convergence duties this
+# hook must then cover for primary Claude:
+#   1. the dev-skills@roubtec plugin bootstrap, and
+#   2. the Codex shared-skill sync (task 021).
+# Each duty has its OWN handshake marker from a core that owns it —
+# POWBOX_PLUGIN_BOOTSTRAP=core and POWBOX_CODEX_SYNC_BOOTSTRAP=core — and is gated
+# INDEPENDENTLY on its marker being absent. Separate markers are ESSENTIAL: the
+# current-main base core already sets the PLUGIN marker (it runs
+# seed-claude-plugins.sh) but does NOT chain the Codex sync (that landed with task
+# 021), so a single reused marker would make an agent-only rebuild over that base
+# read "core owns it" and skip the sync entirely — silently stopping Codex
+# convergence for the common `cc --build` / agent-version-bump case. With split
+# markers: a NEW core sets both, so this hook skips both (no double-run); the
+# CURRENT base sets only the plugin marker, so this hook still runs the sync; an
+# ANCIENT base sets neither, so this hook runs both (plugin first, so the sync then
+# reads the just-refreshed clone).
+#
+# Ordering holds — as primary Claude's setup hook we are invoked BY core AFTER
+# init-firewall.sh. (Non-primary Claude's hook run happens pre-firewall from
+# entrypoint-agent.sh, but there PRIMARY_AGENT != claude, so the gate below skips
+# it and the old core still converges non-primary Claude itself, post-firewall.)
+# The writer guard is defense-in-depth: the launcher clears AGENT_SETUP_HOOK for
+# that role, so this hook should never run there at all. No done-marker/bounded
+# wait here: the old core has no waiter, so a refresh simply lands next session —
+# the shim restores convergence, not the same-session wait. Harmless if ever run
+# redundantly or standalone: both scripts are detached, bounded, flock-serialized,
+# idempotent, and self-defend their stdin against a TTY.
+#
+# RESIDUAL GAP (Codex-PRIMARY, agent-only rebuild over the current base): this hook
+# only fires for PRIMARY_AGENT=claude. On a Codex-primary launch it runs pre-firewall
+# as non-primary Claude's seeding (PRIMARY_AGENT != claude), so the sync-fallback is
+# skipped — and the old base core does not chain the sync either — so the Codex sync
+# runs nowhere until a full base rebuild picks up the new core (which chains it for
+# every launch, primary-agnostic). This mirrors the plugin's own non-primary handling
+# and is bounded by the same best-effort contract: it self-heals on the next base
+# rebuild or any Claude-primary start on this base. It is not cleanly closable from the
+# Claude hook (wrong PRIMARY_AGENT, wrong firewall phase), so it is documented here
+# rather than papered over.
+_do_plugin_bootstrap=false
+if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ]; then
+	_do_plugin_bootstrap=true
+fi
+_do_codex_sync=false
+if [ "${POWBOX_CODEX_SYNC_BOOTSTRAP:-}" != core ] && [ -x "$POWBOX_BOOT_BIN/sync-codex-skills.sh" ]; then
+	_do_codex_sync=true
+fi
+if { [ "$_do_plugin_bootstrap" = true ] || [ "$_do_codex_sync" = true ]; } &&
+	[ "${PRIMARY_AGENT:-claude}" = claude ] &&
 	[ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
-	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+	command -v claude >/dev/null 2>&1 && [ -x "$POWBOX_BOOT_BIN/seed-claude-plugins.sh" ]; then
 	# For primary Claude, AGENT_CONFIG_DIR IS Claude's config dir, so this is the
 	# same shared-volume log the core path appends to. APPEND, never truncate
 	# (see the core block: the claude-config volume is shared by every powbox
@@ -145,42 +183,45 @@ if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = 
 	# stderr first: a failed open of the log itself must stay silent too
 	# (redirections apply left-to-right).
 	{
-		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook build-skew plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-		echo "[claude-hook] dev-skills@roubtec plugin: no core handshake (older base image?); converging post-firewall, detached (log: $_claude_plugin_log)"
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook build-skew convergence (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[claude-hook] no core handshake for one or more duties (older base image?); converging post-firewall, detached (plugin=$_do_plugin_bootstrap codex-sync=$_do_codex_sync; log: $_claude_plugin_log)"
 	} 2>/dev/null >>"$_claude_plugin_log" || true
 	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the
-	# script only appends to it (never reads), so there is no read/write conflict.
+	# scripts only append to it (never read), so there is no read/write conflict.
 	# stderr first on the launch too: a failed open of the log must stay silent (the
-	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
+	# spawn is then skipped); on success the trailing 2>&1 re-points the sequence's
 	# stderr back into the log.
 	#
-	# Chain the Codex shared-skill sync AFTER the plugin bootstrap, mirroring the new
-	# core (entrypoint-core.sh): the same skew that strands primary-Claude plugin
-	# convergence on the hook also strands the Codex sync (both live only in the new
-	# core), even though the agent layer here bakes the sync script. So run the same
-	# sequence — plugin bootstrap, then, if the sync script is baked, the local Codex
-	# sync from the just-refreshed clone — completing the convergence guarantee under
-	# skew. No done-marker/bounded wait on this path (the old core has none); the
-	# refresh simply lands next session. $1 = the shared log, expanded by the inner
-	# `bash -c`, not here.
+	# The detached sequence runs whichever duties this hook must cover, in order:
+	# the plugin bootstrap (refreshes the marketplace clone) FIRST, then the Codex
+	# sync reads that freshest clone. Each step is gated by a flag passed positionally
+	# to the inner `bash -c` ($2 = do-plugin, $3 = do-sync) so the single-quoted body
+	# stays static; $1 is the shared log and $4 the boot-script dir, both expanded by
+	# the inner shell, not here. The Codex step re-checks the script's presence for
+	# defense in depth.
 	# shellcheck disable=SC2016
 	_plugin_boot_seq='
-			POWBOX_PLUGIN_LOG="$1" \
-				bash /usr/local/bin/seed-claude-plugins.sh </dev/null
-			if [ -x /usr/local/bin/sync-codex-skills.sh ]; then
+			if [ "$2" = true ]; then
+				POWBOX_PLUGIN_LOG="$1" \
+					bash "$4/seed-claude-plugins.sh" </dev/null
+			fi
+			if [ "$3" = true ] && [ -x "$4/sync-codex-skills.sh" ]; then
 				POWBOX_CODEX_SYNC_LOG="$1" \
-					bash /usr/local/bin/sync-codex-skills.sh </dev/null
+					bash "$4/sync-codex-skills.sh" </dev/null
 			fi
 	'
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
 		setsid bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" \
+			"$_do_plugin_bootstrap" "$_do_codex_sync" "$POWBOX_BOOT_BIN" \
 			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the hook.
 		# shellcheck disable=SC2094
 		bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" \
+			"$_do_plugin_bootstrap" "$_do_codex_sync" "$POWBOX_BOOT_BIN" \
 			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
 	unset _claude_plugin_log _plugin_boot_seq
 fi
+unset _do_plugin_bootstrap _do_codex_sync

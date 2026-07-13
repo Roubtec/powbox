@@ -67,7 +67,7 @@ run_sync() {
 		POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
 		POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
 		POWBOX_CODEX_SYNC_LOCK_FILE="$dest/.sync.lock" \
-		POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$dest/.claude-plugin.lock" \
+		POWBOX_PLUGIN_LOCK_FILE="$dest/.claude-plugin.lock" \
 		POWBOX_CODEX_SKILL_CLONE_SHA="$sha" \
 		bash "$SYNC"
 }
@@ -198,7 +198,7 @@ POWBOX_SEED_SKILLS_LIB="$SEED_LIB" \
 	POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
 	POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
 	POWBOX_CODEX_SYNC_LOCK_FILE="$R/dest/.sync.lock" \
-	POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$R/dest/.claude-plugin.lock" \
+	POWBOX_PLUGIN_LOCK_FILE="$R/dest/.claude-plugin.lock" \
 	bash "$SYNC"
 after="$(stat -c %Y "$R/dest/a/SKILL.md")"
 if [ "$before" = "$after" ] && [ "$(cat "$R/dest/a/SKILL.md")" = "BAKED a" ]; then
@@ -234,8 +234,8 @@ if command -v flock >/dev/null 2>&1; then
 		POWBOX_CODEX_SEED_META="$WORK_ROOT/nometa" \
 		POWBOX_CODEX_SYNC_LOG="$WORK_ROOT/sync.log" \
 		POWBOX_CODEX_SYNC_LOCK_FILE="$R/dest/.sync.lock" \
-		POWBOX_CLAUDE_PLUGIN_LOCK_FILE="$CLAUDE_LOCK" \
-		POWBOX_CLAUDE_PLUGIN_LOCK_WAIT=1 \
+		POWBOX_PLUGIN_LOCK_FILE="$CLAUDE_LOCK" \
+		POWBOX_PLUGIN_LOCK_WAIT=1 \
 		POWBOX_CODEX_SKILL_CLONE_SHA="NEWSHA888" \
 		bash "$SYNC"
 	wait "$holder" 2>/dev/null || true

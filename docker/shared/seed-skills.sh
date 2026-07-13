@@ -140,9 +140,10 @@ seed_skills() {
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$dest/$name"
-		# Any existing entry blocks a blind overwrite — seed_skill rm -rf's the
-		# destination before installing, so we must only reach it for an absent
-		# target or a marked directory. -e misses dangling symlinks, so test -L too.
+		# Any existing entry blocks a blind overwrite — seed_skill replaces the
+		# destination (renaming any existing copy aside, then publishing the staged
+		# one), so we must only reach it for an absent target or a marked directory.
+		# -e misses dangling symlinks, so test -L too.
 		if [ -e "$target" ] || [ -L "$target" ]; then
 			case "$mode" in
 			noclobber) continue ;;
@@ -211,10 +212,12 @@ seed_workflow() {
 	# Publish the workflow first, THEN stamp its sidecar marker, so a marker can
 	# never outlive its `.js`. An orphan marker (marker, no file) is the dangerous
 	# direction: a later user-created <name>.js would be misread as powbox-owned
-	# and refreshed/pruned. Mirror seed_skill: rm any existing $dest before the
-	# rename, so an --adopt-all run recovers EVERY collision type — including a
-	# wrong-type directory, which `mv -fT` alone refuses to replace with a file
-	# (it would fail loudly instead of adopting). -T still guards the tiny rm->mv
+	# and refreshed/pruned. Unlike seed_skill (which renames a directory aside
+	# because rename() cannot replace a non-empty dir), a workflow is a single file,
+	# so a plain rm-then-rename is enough and simplest here: rm any existing $dest
+	# before the rename, so an --adopt-all run recovers EVERY collision type —
+	# including a wrong-type directory, which `mv -fT` alone refuses to replace with
+	# a file (it would fail loudly instead of adopting). -T still guards the tiny rm->mv
 	# window on the shared volume: if a concurrent seed recreated $dest as a
 	# directory, mv fails into the cleanup below rather than nesting the temp
 	# inside it. If the file lands but its marker rename fails, the workflow is

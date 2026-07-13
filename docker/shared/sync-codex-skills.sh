@@ -94,16 +94,20 @@ LOCK_WAIT="${POWBOX_CODEX_SYNC_LOCK_WAIT:-300}"
 # CONCURRENT container at the very moment we read them. Our own container has
 # already released the plugin lock by the time this sync runs (the plugin step
 # exits before us — see entrypoint-core.sh), but a peer's may be pulling now. So
-# we take the SAME lock seed-claude-plugins.sh uses (its default lockfile on the
-# claude-config volume) around the HEAD read + the copy, so a peer pull cannot
-# interleave and hand us mixed content stamped with a since-moved SHA. Its default
-# path must match seed-claude-plugins.sh's LOCK_FILE default (that script is
-# invoked without POWBOX_PLUGIN_LOCK_FILE, so it uses its default), i.e. the same
-# host inode, or the advisory lock would not actually serialize the two. This is
-# an INNER lock nested under the codex-sync lock above; there is no reverse
-# nesting (the plugin bootstrap never takes the codex lock), so no deadlock.
-CLAUDE_LOCK_FILE="${POWBOX_CLAUDE_PLUGIN_LOCK_FILE:-$CLAUDE_CONFIG_DIR/.powbox-plugin-bootstrap.lock}"
-CLAUDE_LOCK_WAIT="${POWBOX_CLAUDE_PLUGIN_LOCK_WAIT:-$LOCK_WAIT}"
+# we take the SAME lock seed-claude-plugins.sh uses around the HEAD read + the
+# copy, so a peer pull cannot interleave and hand us mixed content stamped with a
+# since-moved SHA. To stay on the SAME host inode as that script we honor the
+# IDENTICAL override variable it reads — POWBOX_PLUGIN_LOCK_FILE (seed-claude-
+# plugins.sh's LOCK_FILE), NOT a private alias — with the same on-claude-volume
+# default when it is unset. That matters: a deployment that repoints the plugin
+# bootstrap's lock (setting POWBOX_PLUGIN_LOCK_FILE) must move BOTH ends together,
+# or the advisory lock would guard two different inodes and stop serializing the
+# two. This is an INNER lock nested under the codex-sync lock above; there is no
+# reverse nesting (the plugin bootstrap never takes the codex lock), so no
+# deadlock. The wait defaults to the codex-sync wait but can be tuned in lockstep
+# with the plugin bootstrap via POWBOX_PLUGIN_LOCK_WAIT.
+CLAUDE_LOCK_FILE="${POWBOX_PLUGIN_LOCK_FILE:-$CLAUDE_CONFIG_DIR/.powbox-plugin-bootstrap.lock}"
+CLAUDE_LOCK_WAIT="${POWBOX_PLUGIN_LOCK_WAIT:-$LOCK_WAIT}"
 
 # Never hang on an interactive git credential prompt: the only git op here is a
 # read-only `rev-parse HEAD` on the LOCAL clone (no network), but keep this as a

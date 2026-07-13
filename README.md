@@ -130,7 +130,7 @@ Skills reach the agents through **two custody channels**, split by who owns the 
 
 | Channel | Delivers | Source of truth | How it updates |
 |---|---|---|---|
-| **Plugin** | the 8 shared Claude skills | `Roubtec/agent-skills` | `dev-skills@roubtec` marketplace plugin — installed/refreshed by a detached post-firewall bootstrap at every agent-container start (only the short-lived image-store writer skips it); a short bounded wait before the agent launches means a warm refresh usually applies **this** session (cold volume: first session needs `/reload-plugins` or a restart) |
+| **Plugin** | the 8 shared Claude skills | `Roubtec/agent-skills` | `dev-skills@roubtec` marketplace plugin — installed/refreshed by a detached post-firewall bootstrap at every agent-container start (only the short-lived image-store writer skips it); on primary-Claude launches a short bounded wait before the agent launches means a warm refresh usually applies **this** session (a Codex prompt never uses the plugin, so it does not wait — the refresh lands next session; cold volume: first session needs `/reload-plugins` or a restart) |
 | **Bake + seed** | the full Codex palette (8 shared + 2 powbox-specific) **and** the 2 powbox-specific Claude skills | `Roubtec/agent-skills` (the 8 shared, fetched at build time) + this repo (the powbox-specific ones) | baked into the image, seeded onto the config volumes, refreshed by `agent-update-skills` |
 
 The 8 shared skills are: `address-review`, `address-tasks`, `address-tasks-serialized`, `address-reviews`, `rebase-stack`, `resolve-open-questions`, `review-tasks`, `write-tasks`. The 2 powbox-specific skills are `enable-worktrees` and `session-learnings`.

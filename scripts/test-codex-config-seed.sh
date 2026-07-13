@@ -137,6 +137,10 @@ assert_blocked "$ws" "existing multi_agent_v2 = false blocks (respects opt-out)"
 ws="$(printf 'features = { multi_agent_v2 = true }\n' | new_config v2-inline)"
 assert_blocked "$ws" "inline features = { multi_agent_v2 = true } blocks"
 
+echo "Test: guard BLOCKS a quoted multi_agent_v2 key (no-clobber on opt-out)"
+ws="$(printf '[features]\n"multi_agent_v2" = false\n' | new_config v2-quoted)"
+assert_blocked "$ws" 'quoted "multi_agent_v2" = false blocks (no-clobber)'
+
 echo "Test: guard BLOCKS when an [agents] block exists (mutual exclusion)"
 ws="$(printf '[agents]\nmax_threads = 9\nmax_depth = 1\n' | new_config agents-table)"
 assert_blocked "$ws" "[agents] table blocks the seed"
@@ -145,13 +149,35 @@ assert_blocked "$ws" "[agents.limits] subtable blocks the seed"
 ws="$(printf 'agents = { max_threads = 9 }\n' | new_config agents-inline)"
 assert_blocked "$ws" "inline agents = { ... } blocks the seed"
 
-echo "Test: [features] not confused with a [features_other] table"
+echo "Test: guard BLOCKS valid-TOML [agents] spellings that once evaded it"
+ws="$(printf '[ agents ]\nmax_threads = 9\n' | new_config agents-ws-header)"
+assert_blocked "$ws" "[ agents ] (whitespace in header) blocks the seed"
+ws="$(printf '["agents"]\nmax_threads = 9\n' | new_config agents-quoted-header)"
+assert_blocked "$ws" '["agents"] (quoted header) blocks the seed'
+ws="$(printf 'agents.max_threads = 9\n' | new_config agents-dotted)"
+assert_blocked "$ws" "top-level dotted agents.max_threads = 9 blocks the seed"
+ws="$(printf '"agents" = { max_threads = 9 }\n' | new_config agents-quoted-inline)"
+assert_blocked "$ws" 'inline "agents" = { ... } (quoted) blocks the seed'
+
+echo "Test: guard BLOCKS an inline features table with no multi_agent_v2 key"
+ws="$(printf 'features = { other = true }\n' | new_config features-inline-other)"
+# Appending a [features] table here would define `features` twice (Codex
+# rejects). Fail safe: skip the seed rather than author the duplicate table.
+assert_blocked "$ws" "inline features = { other = true } blocks (no safe extend)"
+
+echo "Test: [features]/[agents] not confused with lookalike tables"
 ws="$(printf '[features_other]\nmulti_agent_v2 = 0\n' | new_config not-agents)"
 # multi_agent_v2 appears verbatim, so the no-clobber grep legitimately blocks;
 # this asserts the guard keys off the literal name, not a false table match.
+# Intentionally conservative (peer #4): an unrelated table carrying the literal
+# key still blocks. This only ever SKIPS the seed, never corrupts a config.
 assert_blocked "$ws" "verbatim multi_agent_v2 anywhere blocks (no-clobber)"
 ws="$(printf '[agentsx]\nfoo = 1\n' | new_config agentsx)"
 assert_not_blocked "$ws" "[agentsx] does NOT match the [agents] guard"
+ws="$(printf 'agentsx = 1\n' | new_config agentsx-key)"
+assert_not_blocked "$ws" "agentsx = 1 does NOT match the [agents] guard"
+ws="$(printf '[features_x]\nfoo = 1\n' | new_config features-x)"
+assert_not_blocked "$ws" "[features_x] does NOT match the inline-features guard"
 
 echo "Test: seed writes [features] multi_agent_v2 = true onto a statusline config"
 ws="$(printf '%s\n' "$STATUSLINE_CONFIG" | new_config seed-fresh)"
@@ -202,6 +228,69 @@ ws="$(printf '[features]\nmulti_agent_v2 = false\n' | new_config scalar-noclobbe
 ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
 assert_grep "$ws" '^multi_agent_v2 = false$' "existing scalar value not overwritten"
 assert_no_grep "$ws" '^multi_agent_v2 = true$' "no second multi_agent_v2 appended"
+
+echo "Test: ensure_table_scalar_setting inserts under a DECORATED [features] header"
+# A trailing comment and surrounding whitespace on the header must still be
+# recognised, otherwise a second [features] table is appended (TOML rejects it).
+ws="$(printf '  [features]   # tuning\nsome_other_flag = true\n' | new_config features-decorated)"
+ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
+assert_count "$ws" '^[[:space:]]*\[features\]' 1 "no duplicate [features] table (decorated header)"
+assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 inserted under decorated [features]"
+assert_grep "$ws" '^some_other_flag = true$' "sibling key under decorated [features] preserved"
+
+echo "Test: ensure_table_scalar_setting is no-clobber under a DECORATED header"
+ws="$(printf '[features]  # tuning\nmulti_agent_v2 = false\n' | new_config scalar-decorated-noclobber)"
+cp "$ws" "$ws.snap"
+before="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
+after="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+if cmp -s "$ws" "$ws.snap"; then
+	ok "existing key under decorated header left byte-for-byte unchanged"
+else
+	ko "decorated-header no-clobber rewrote the file"
+fi
+if [ "$before" = "$after" ]; then
+	ok "decorated-header no-clobber leaves mtime stable"
+else
+	ko "decorated-header no-clobber changed mtime"
+fi
+
+echo "Test: ensure_table_array_setting is a mtime-stable no-op when the key exists"
+# Regression for peer #5: the status_line seeder runs every start; once the key
+# is present it must NOT rewrite config.toml (stable mtime across starts).
+ws="$(printf '%s\n' "$STATUSLINE_CONFIG" | new_config array-noop)"
+cp "$ws" "$ws.snap"
+before="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+ensure_table_array_setting "$ws" "tui" "status_line" '  "current-dir",'
+after="$(stat -c '%Y.%N' "$ws" 2>/dev/null || stat -f '%m' "$ws")"
+if cmp -s "$ws" "$ws.snap"; then
+	ok "existing status_line left byte-for-byte unchanged"
+else
+	ko "ensure_table_array_setting rewrote config with status_line already present"
+fi
+if [ "$before" = "$after" ]; then
+	ok "ensure_table_array_setting leaves mtime stable (no rewrite)"
+else
+	ko "ensure_table_array_setting changed mtime (file was rewritten)"
+fi
+
+echo "Test: ensure_table_array_setting still inserts under an existing bare [tui]"
+ws="$(printf '[tui]\nsome_flag = true\n' | new_config array-insert)"
+ensure_table_array_setting "$ws" "tui" "status_line" '  "current-dir",'
+assert_count "$ws" '^\[tui\]$' 1 "no duplicate [tui] table created"
+assert_grep "$ws" '^status_line = \[' "status_line inserted under existing [tui]"
+assert_grep "$ws" '^some_flag = true$' "sibling key under [tui] preserved"
+
+echo "Test: ensure_table_scalar_setting skips an inline table it cannot extend"
+ws="$(printf 'features = { other = true }\n' | new_config scalar-inline-skip)"
+cp "$ws" "$ws.snap"
+ensure_table_scalar_setting "$ws" "features" "multi_agent_v2" "true"
+if cmp -s "$ws" "$ws.snap"; then
+	ok "inline features table left untouched (no duplicate [features] authored)"
+else
+	ko "ensure_table_scalar_setting modified an inline features table"
+fi
+assert_no_grep "$ws" '^\[features\]' "no [features] header appended next to inline table"
 
 echo
 echo "Passed: $pass  Failed: $fail"

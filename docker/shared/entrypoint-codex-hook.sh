@@ -53,11 +53,61 @@ ${values}
 	mv "$tmp" "$file"
 }
 
+# Return success (0) when a table setting is already present in a form the
+# ensure_table_* writers must not touch: either `key` is set under a real
+# [table] header (tolerating a decorated header with surrounding whitespace or a
+# trailing comment), OR `table` exists only as an inline table (table = { ... }).
+# The writers call this as a no-clobber early return so an already-seeded key
+# leaves the file byte- and mtime-stable, and an inline table is never shadowed
+# by a duplicate [table] header (a config Codex rejects). `table`/`key` are
+# controlled literals (no regex metacharacters).
+config_table_setting_present() {
+	local file="$1" table="$2" key="$3"
+
+	[ -f "$file" ] || return 1
+
+	# Inline table form: cannot be extended in place, so a later [table] header
+	# would define the table twice. Treat as present (skip the write).
+	if grep -qE "^[[:space:]]*\"?${table}\"?[[:space:]]*=[[:space:]]*\{" "$file"; then
+		return 0
+	fi
+
+	# key already set under a [table] header.
+	awk -v table="$table" -v key="$key" '
+		BEGIN {
+			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
+		}
+		$0 ~ header_re {
+			in_table = 1
+			next
+		}
+		in_table && /^[[:space:]]*\[/ {
+			in_table = 0
+		}
+		in_table && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+			found = 1
+			exit
+		}
+		END {
+			exit (!found)
+		}
+	' "$file"
+}
+
 ensure_table_array_setting() {
 	local file="$1" table="$2" key="$3" values="$4"
 
 	if [ ! -f "$file" ]; then
 		: >"$file"
+	fi
+
+	# No-clobber early return: leave the file byte- and mtime-stable (no rewrite)
+	# when the key is already set under [table], or when [table] exists only as an
+	# inline table (table = { ... }) we cannot safely extend in place. This makes
+	# every-start re-runs a true no-op. See config_v2_seed_blocked for the header
+	# forms recognised; `table` is a controlled literal (no regex metacharacters).
+	if config_table_setting_present "$file" "$table" "$key"; then
+		return
 	fi
 
 	local block table_header tmp
@@ -67,17 +117,18 @@ ${values}
 	table_header="[${table}]"
 	tmp="$(mktemp)"
 
-	awk -v block="$block" -v table_header="$table_header" -v key="$key" '
+	awk -v block="$block" -v table_header="$table_header" -v table="$table" -v key="$key" '
 		BEGIN {
+			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
 			in_table = 0
 			inserted = 0
 		}
-		$0 == table_header {
+		$0 ~ header_re {
 			in_table = 1
 			print
 			next
 		}
-		in_table && /^\[/ {
+		in_table && /^[[:space:]]*\[/ {
 			if (!inserted) {
 				print block
 				print ""
@@ -121,22 +172,30 @@ ensure_table_scalar_setting() {
 		: >"$file"
 	fi
 
+	# No-clobber early return, mirroring ensure_table_array_setting: skip the
+	# rewrite when the key is already set under [table] (byte- and mtime-stable
+	# re-run) or when [table] exists only as an inline table we must not shadow.
+	if config_table_setting_present "$file" "$table" "$key"; then
+		return
+	fi
+
 	local block table_header tmp
 	block="${key} = ${value}"
 	table_header="[${table}]"
 	tmp="$(mktemp)"
 
-	awk -v block="$block" -v table_header="$table_header" -v key="$key" '
+	awk -v block="$block" -v table_header="$table_header" -v table="$table" -v key="$key" '
 		BEGIN {
+			header_re = "^[[:space:]]*\\[[[:space:]]*" table "[[:space:]]*\\][[:space:]]*(#.*)?$"
 			in_table = 0
 			inserted = 0
 		}
-		$0 == table_header {
+		$0 ~ header_re {
 			in_table = 1
 			print
 			next
 		}
-		in_table && /^\[/ {
+		in_table && /^[[:space:]]*\[/ {
 			if (!inserted) {
 				print block
 				print ""
@@ -169,18 +228,33 @@ ensure_table_scalar_setting() {
 }
 
 # Decide whether the multi_agent_v2 concurrency default must NOT be seeded.
-# Returns success (0 = "blocked, skip the seed") when either:
+# Returns success (0 = "blocked, skip the seed") when any of:
 #   1. The config already carries a multi_agent_v2 assignment in any form —
 #      the [features] table or an inline `features = { multi_agent_v2 = ... }`,
-#      set to true OR false. No-clobber: never overwrite the user's choice.
-#   2. The config already defines an [agents] block (table, subtable, or inline
-#      `agents = { ... }`). Codex refuses to launch when both an [agents] block
+#      set to true OR false, with a bare or quoted key. No-clobber: never
+#      overwrite the user's choice.
+#   2. The config already defines an [agents] block in ANY valid-TOML form: a
+#      table header ([agents] / [agents.sub], with optional inner whitespace or
+#      quotes such as [ agents ] / ["agents"]), a top-level dotted assignment
+#      (agents.max_threads = ...), or an inline table (agents = { ... }), with a
+#      bare or quoted key. Codex refuses to launch when both an [agents] block
 #      and features.multi_agent_v2 are set (they are mutually exclusive), so we
 #      must never author that conflict. The seed is no-clobber, so it will not
 #      remove the [agents] block either — a user opting into v2 must delete it
 #      themselves (documented in README as the migration caveat).
+#   3. The config already defines the features table as an INLINE table
+#      (features = { ... }) that carries no multi_agent_v2 key. We cannot extend
+#      an inline table in place without a TOML parser, and appending a separate
+#      [features] table would define `features` twice — a config Codex rejects.
+#      Fail safe: skip the seed rather than author a duplicate-table conflict.
 # Returns failure (1 = "not blocked, seed it") otherwise, including a cold
 # config file that does not exist yet.
+#
+# The guard is deliberately conservative: when in doubt it errs toward NOT
+# seeding rather than authoring a config Codex would reject. It keys off the
+# literal `multi_agent_v2` name, so the (unrealistic) case of that key living
+# under an unrelated table also blocks — this only ever skips the seed, never
+# corrupts a config, so the conservative over-match is acceptable.
 config_v2_seed_blocked() {
 	local file="$1"
 
@@ -188,14 +262,21 @@ config_v2_seed_blocked() {
 
 	# Any multi_agent_v2 assignment, whether under [features] or inline; the key
 	# is not line-anchored so an inline `features = { multi_agent_v2 = ... }` is
-	# caught too.
-	if grep -qE 'multi_agent_v2[[:space:]]*=' "$file"; then
+	# caught too, and an optional closing quote catches a quoted `"multi_agent_v2"`.
+	if grep -qE 'multi_agent_v2"?[[:space:]]*=' "$file"; then
 		return 0
 	fi
 
-	# An existing [agents] table header, an [agents.sub] subtable, or a top-level
-	# inline `agents = { ... }`.
-	if grep -qE '^[[:space:]]*(\[agents(\]|\.)|agents[[:space:]]*=)' "$file"; then
+	# An existing [agents] table header ([agents] / [agents.sub], with optional
+	# inner whitespace or quotes), a top-level dotted key (agents.<key> = ...), or
+	# an inline table (agents = { ... }), with an optionally-quoted "agents".
+	if grep -qE '^[[:space:]]*(\[[[:space:]]*"?agents"?[[:space:]]*[].]|"?agents"?[[:space:]]*[.=])' "$file"; then
+		return 0
+	fi
+
+	# An inline features table with no multi_agent_v2 key (that case is caught
+	# above): appending a [features] table would define `features` twice.
+	if grep -qE '^[[:space:]]*"?features"?[[:space:]]*=[[:space:]]*\{' "$file"; then
 		return 0
 	fi
 

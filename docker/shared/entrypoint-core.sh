@@ -80,22 +80,44 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
 		echo "[core] dev-skills@roubtec plugin: converging post-firewall, detached (log: $_claude_plugin_log)"
 	} 2>/dev/null >>"$_claude_plugin_log" || true
-	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the script
-	# only appends to it (never reads), so there is no read/write conflict.
+	# The detached bootstrap is a SEQUENCE, run in one `bash -c` so ordering holds:
+	#   1. seed-claude-plugins.sh converges the Claude plugin AND refreshes the
+	#      marketplace clone (its `marketplace update` = git pull). Its EXIT trap
+	#      touches POWBOX_PLUGIN_DONE_FILE when THIS step exits, releasing the
+	#      entrypoint's bounded Claude wait — BEFORE step 2 runs, so that wait never
+	#      gates on the Codex sync.
+	#   2. sync-codex-skills.sh syncs the Codex copies of the same 8 shared skills
+	#      from the just-refreshed clone (a LOCAL sync, no network). Ordered strictly
+	#      AFTER step 1 so it reads the freshest clone; a SEPARATE process so Codex —
+	#      which observes skill-file changes live and needs no wait — is never folded
+	#      into the plugin done-marker. Skipped when its script is not baked (an older
+	#      agent layer over a newer base). Log + done-marker paths pass as positional
+	#      args ($1/$2) so both the setsid and no-setsid branches share the body.
+	# shellcheck disable=SC2016  # $1/$2 are expanded by the inner `bash -c`, not here.
+	_plugin_boot_seq='
+			POWBOX_PLUGIN_LOG="$1" POWBOX_PLUGIN_DONE_FILE="$2" \
+				bash /usr/local/bin/seed-claude-plugins.sh </dev/null
+			if [ -x /usr/local/bin/sync-codex-skills.sh ]; then
+				POWBOX_CODEX_SYNC_LOG="$1" \
+					bash /usr/local/bin/sync-codex-skills.sh </dev/null
+			fi
+	'
 	# stderr first on the launch too: a failed open of the log must stay silent (the
-	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
-	# stderr back into the log.
+	# spawn is then skipped); on success the trailing 2>&1 re-points the sequence's
+	# stderr back into the log. The inner env assignments and the outer redirect name
+	# the same log path, but every writer only appends (never reads), so there is no
+	# read/write conflict.
 	if command -v setsid >/dev/null 2>&1; then
-		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
-			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
+		# shellcheck disable=SC2094  # the log arg and the >> redirect name one file, both append-only.
+		setsid bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" "$_plugin_done" \
+			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
-		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
-			bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
+		# shellcheck disable=SC2094  # the log arg and the >> redirect name one file, both append-only.
+		bash -c "$_plugin_boot_seq" _ "$_claude_plugin_log" "$_plugin_done" \
+			</dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
-	unset _claude_cfg _claude_plugin_log
+	unset _claude_cfg _claude_plugin_log _plugin_boot_seq
 fi
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"

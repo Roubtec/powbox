@@ -59,7 +59,8 @@ fi
 
 # Stage 0b — gh-review-threads helper unit test. Hermetic (stubs `gh` with a PATH
 # shim serving canned fixtures — no live GitHub or root needed), so like Stage 0 it
-# runs up front. It guards the baked docker/shared/gh-review-threads helper: manual
+# runs up front. It guards the baked gh-review-threads helper (vendored in
+# Roubtec/agent-skills, baked from the pinned clone): manual
 # pagination (never `gh api graphql --paginate`, which under concurrent runs has
 # returned another PR's threads) and the boundary-safe, repo-qualified PR-scope
 # assertion that fails closed (exit 3) on a contaminated response.
@@ -68,21 +69,24 @@ fi
 # /usr/local/bin/gh-review-threads on PATH — the artifact agents actually use — so a
 # stale or behaviorally broken baked helper is caught here rather than waved through
 # by Stage 1's `command -v` presence probe. Fall back to a host run against the source
-# checkout only when the image is absent; that host path needs `jq` (the helper and
-# its test parse JSON), which a stock host may lack — the README prerequisites only
-# require Docker/buildx, and a default macOS install has no jq. If neither the image
-# nor host `jq` is available, record a skip.
+# only when the image is absent. Since the helper is no longer kept in-tree — it is
+# vendored in Roubtec/agent-skills and materialized into .agent-skills-src only by a
+# `build.sh` fetch — that host path needs both the staged clone present AND `jq` (the
+# helper and its test parse JSON), which a stock host may lack — the README
+# prerequisites only require Docker/buildx, and a default macOS install has no jq. If
+# neither the image nor a testable host source is available, record a skip.
+STAGED_HELPER="${ROOT_DIR}/.agent-skills-src/plugins/dev-skills/bin/gh-review-threads"
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running gh-review-threads helper unit test (baked helper in $IMAGE) ..."
 	# Point HELPER at the baked artifact so the in-image run validates the installed
 	# /usr/local/bin/gh-review-threads on PATH, not the mounted /repo source checkout.
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" -e GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-gh-review-threads.sh
-elif command -v jq >/dev/null 2>&1; then
-	echo "Running gh-review-threads helper unit test (host source — image '$IMAGE' absent) ..."
+elif [ -x "$STAGED_HELPER" ] && command -v jq >/dev/null 2>&1; then
+	echo "Running gh-review-threads helper unit test (host source from agent-skills clone — image '$IMAGE' absent) ..."
 	"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
 else
-	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent and host 'jq' not found."
-	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent, no host jq)")
+	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent and no staged agent-skills helper + host 'jq'."
+	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent; no staged helper or host jq)")
 fi
 
 # Stage 0c — worktree orphan-safety unit test. Hermetic (a throwaway git repo in a

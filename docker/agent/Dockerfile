@@ -103,14 +103,14 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
 # --- Entrypoint, setup hooks, and worktree helpers ---------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
 # Each agent's hook is baked here so editing a hook rebuilds only this layer.
-# The wt-* worktree helpers (plus the gitcat cross-branch reader and the
-# gh-review-threads safe review-thread fetcher) are baked here too — not in the
-# base image — because they evolve in lockstep with the agent-layer assets that
-# reference them (the worktree-running skills, the address-review skills, and the
-# Claude workflows). Keeping them in this layer means the documented
-# `agent-update` / `build.sh agent` path (which reuses an existing base image
-# unless --pull) refreshes the helpers along with the skills/workflows, instead
-# of leaving stale /usr/local/bin copies behind a base that was not rebuilt.
+# The wt-* worktree helpers (plus the gitcat cross-branch reader) are baked here
+# too — not in the base image — because they evolve in lockstep with the
+# agent-layer assets that reference them (the worktree-running skills, the
+# address-review skills, and the Claude workflows). Keeping them in this layer
+# means the documented `agent-update` / `build.sh agent` path (which reuses an
+# existing base image unless --pull) refreshes the helpers along with the
+# skills/workflows, instead of leaving stale /usr/local/bin copies behind a base
+# that was not rebuilt.
 COPY --chmod=755 \
     docker/shared/entrypoint-agent.sh \
     docker/shared/entrypoint-claude-hook.sh \
@@ -119,12 +119,21 @@ COPY --chmod=755 \
     docker/shared/seed-claude-plugins.sh \
     docker/shared/powbox-provenance \
     docker/shared/gitcat \
-    docker/shared/gh-review-threads \
     docker/shared/wt-common.sh \
     docker/shared/wt-bootstrap \
     docker/shared/wt-enter \
     docker/shared/wt-remove \
     /usr/local/bin/
+
+# gh-review-threads (the safe PR review-thread fetcher used by both agents'
+# address-review skills and the wf-address-review workflow) is NOT kept in-tree:
+# it is vendored in Roubtec/agent-skills (plugins/dev-skills/bin/) as the single
+# source of truth — the very file the dev-skills plugin ships to non-powbox users
+# — and baked here from the same pinned agent-skills clone that feeds the Codex
+# skill palette above (AGENT_SKILLS_COMMIT). Powbox therefore carries exactly one
+# copy, refreshed in lockstep with the skills whenever the pin moves. The
+# .dockerignore re-includes just this path from the otherwise-excluded staging tree.
+COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads /usr/local/bin/
 
 # --- Provenance labels -------------------------------------------------------
 # Host-side introspection surface (docker image inspect / docker inspect). The

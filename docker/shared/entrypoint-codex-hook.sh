@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
-# Directory holding this agent's image-baked seed assets (instruction template,
-# skills, build epoch). Defaults to the legacy shared path so the hook still
-# works standalone; the unified entrypoint points it at the per-agent
-# subdirectory /home/node/.agent-container/<agent>.
-AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
+# This script is normally executed by the unified entrypoint, but the seed
+# helper functions below are also unit-tested in isolation (see
+# scripts/test-codex-config-seed.sh). Everything above the "sourced?" guard near
+# the end is pure function definitions with no side effects, so a test can
+# `source` this file to get the helpers without running the seeding body.
 
 ensure_top_level_array_setting() {
 	local file="$1" key="$2" values="$3"
@@ -110,6 +109,99 @@ ${values}
 	mv "$tmp" "$file"
 }
 
+# Insert a scalar `key = value` under [table], no-clobber. The scalar sibling of
+# ensure_table_array_setting: same placement logic (into an existing [table], or
+# append the table at EOF), but the value is written verbatim as a single line
+# rather than a multi-line array. Skips when the key is already set under the
+# table so a user/host value is never overwritten.
+ensure_table_scalar_setting() {
+	local file="$1" table="$2" key="$3" value="$4"
+
+	if [ ! -f "$file" ]; then
+		: >"$file"
+	fi
+
+	local block table_header tmp
+	block="${key} = ${value}"
+	table_header="[${table}]"
+	tmp="$(mktemp)"
+
+	awk -v block="$block" -v table_header="$table_header" -v key="$key" '
+		BEGIN {
+			in_table = 0
+			inserted = 0
+		}
+		$0 == table_header {
+			in_table = 1
+			print
+			next
+		}
+		in_table && /^\[/ {
+			if (!inserted) {
+				print block
+				print ""
+				inserted = 1
+			}
+			in_table = 0
+		}
+		in_table && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+			inserted = 1
+		}
+		{
+			print
+		}
+		END {
+			if (!inserted) {
+				if (in_table) {
+					print block
+				} else {
+					if (NR > 0) {
+						print ""
+					}
+					print table_header
+					print block
+				}
+			}
+		}
+	' "$file" >"$tmp"
+
+	mv "$tmp" "$file"
+}
+
+# Decide whether the multi_agent_v2 concurrency default must NOT be seeded.
+# Returns success (0 = "blocked, skip the seed") when either:
+#   1. The config already carries a multi_agent_v2 assignment in any form —
+#      the [features] table or an inline `features = { multi_agent_v2 = ... }`,
+#      set to true OR false. No-clobber: never overwrite the user's choice.
+#   2. The config already defines an [agents] block (table, subtable, or inline
+#      `agents = { ... }`). Codex refuses to launch when both an [agents] block
+#      and features.multi_agent_v2 are set (they are mutually exclusive), so we
+#      must never author that conflict. The seed is no-clobber, so it will not
+#      remove the [agents] block either — a user opting into v2 must delete it
+#      themselves (documented in README as the migration caveat).
+# Returns failure (1 = "not blocked, seed it") otherwise, including a cold
+# config file that does not exist yet.
+config_v2_seed_blocked() {
+	local file="$1"
+
+	[ -f "$file" ] || return 1
+
+	# Any multi_agent_v2 assignment, whether under [features] or inline; the key
+	# is not line-anchored so an inline `features = { multi_agent_v2 = ... }` is
+	# caught too.
+	if grep -qE 'multi_agent_v2[[:space:]]*=' "$file"; then
+		return 0
+	fi
+
+	# An existing [agents] table header, an [agents.sub] subtable, or a top-level
+	# inline `agents = { ... }`.
+	if grep -qE '^[[:space:]]*(\[agents(\]|\.)|agents[[:space:]]*=)' "$file"; then
+		return 0
+	fi
+
+	return 1
+}
+
 replace_config_string() {
 	local file="$1" old="$2" new="$3"
 
@@ -140,6 +232,19 @@ replace_config_string() {
 	' "$file" >"$tmp"
 	mv "$tmp" "$file"
 }
+
+# When sourced (e.g. by scripts/test-codex-config-seed.sh), stop here so only the
+# helper functions above are defined — none of the seeding side effects below run.
+if (return 0 2>/dev/null); then
+	return 0
+fi
+
+AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
+# Directory holding this agent's image-baked seed assets (instruction template,
+# skills, build epoch). Defaults to the legacy shared path so the hook still
+# works standalone; the unified entrypoint points it at the per-agent
+# subdirectory /home/node/.agent-container/<agent>.
+AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
 
 # Host config is intentionally not seeded; the container grows its own Codex ecosystem
 # (config.toml, sessions, history) independent of the host. The ensure_* helpers below
@@ -185,6 +290,20 @@ EOF
 ensure_table_array_setting "$CONFIG_FILE" "tui" "status_line" "$STATUS_LINE_DEFAULTS"
 # terminal_title is a separate top-level setting for the terminal/tab title.
 ensure_top_level_array_setting "$CONFIG_FILE" "terminal_title" "$TERMINAL_TITLE_DEFAULTS"
+
+# Raise Codex's multi-agent concurrency default by enabling multi_agent_v2, whose
+# built-in concurrency (>=8 threads) roughly doubles the legacy [agents] ceiling
+# (~4, one reserved for root) with no tuning keys required. This powers powbox's
+# parallel fan-outs (address-tasks / address-reviews and Codex-side delegation).
+# No-clobber and guarded: config_v2_seed_blocked skips the seed when the user
+# already set multi_agent_v2 (true or false) or defines an [agents] block, so we
+# never overwrite a choice nor author the mutually-exclusive [agents] +
+# multi_agent_v2 config Codex rejects at load. The unstable-feature warning is
+# left ON (suppress_unstable_features_warning is intentionally not seeded) so the
+# pre-release opt-in stays visible until v2 graduates. See README "Codex config".
+if ! config_v2_seed_blocked "$CONFIG_FILE"; then
+	ensure_table_scalar_setting "$CONFIG_FILE" "features" "multi_agent_v2" "true"
+fi
 chmod 600 "$CONFIG_FILE" || true
 
 AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"

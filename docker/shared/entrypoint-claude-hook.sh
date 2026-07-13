@@ -92,77 +92,61 @@ if [ -f "$AGENT_TMPL" ]; then
 	fi
 fi
 
-# Bring the shared Claude skills in through the SAME channel colleagues use — the
-# `dev-skills@roubtec` plugin (Roubtec/agent-skills marketplace) — rather than the
-# image bake (task 015b stopped baking them). Skills arrive NAMESPACED as
-# `/dev-skills:<name>` (e.g. `/dev-skills:address-review`); model-side Skill-tool
-# matching by description is unaffected, only the slash-command muscle memory.
+# The dev-skills@roubtec plugin (the 8 shared Claude skills; task 015b stopped
+# baking them) is deliberately NOT converged here on current images.
+# entrypoint-core.sh does it for EVERY launch — after init-firewall.sh (network
+# ordering) and fully DETACHED, because the claude CLI hangs (SIGTERM-immune)
+# when invoked with the container TTY as stdin, so no `claude plugin …` call may
+# ever run on the entrypoint's critical path (see seed-claude-plugins.sh for the
+# full rationale). A core that owns the bootstrap announces it by exporting
+# POWBOX_PLUGIN_BOOTSTRAP=core before invoking this hook.
 #
-# Run OUTSIDE the epoch gate above: keep-current must run on EVERY start, not just
-# when the image is newer than the volume.
-#
-# SYNCHRONOUS, but bounded — and only the COLD case actually runs work in the
-# foreground (see seed-claude-plugins.sh for the full rationale). The agent-skills
-# repo is PUBLIC, so `claude plugin marketplace add` clones it anonymously with no
-# git credential helper — there is no dependency on `gh auth setup-git` and hence no
-# auth-ordering race, which is what previously forced this whole job to detach and
-# wait for that helper.
-#
-# We invoke the bootstrap inline HERE only when Claude is the PRIMARY agent: this hook
-# then runs from entrypoint-core.sh — AFTER init-firewall.sh — so the plugin's network
-# ops are correctly ordered after the firewall, and the launching session is the Claude
-# one whose first prompt wants the skills live. On a COLD (fresh) claude-config volume
-# the script installs in the FOREGROUND — bounded by ~COLD_INSTALL_BOUND + COLD_LOCK_WAIT
-# plus two LIST_TIMEOUT-bounded `claude plugin list` state queries — before we return and
-# the entrypoint `exec`s claude, so the /dev-skills:* skills are live in the FIRST session;
-# on timeout/lock-miss it detaches the remainder to a background self-heal and returns, so
-# start is never wedged. On a WARM volume it self-backgrounds the cheap keep-current and
-# returns immediately.
-#
-# When Claude is NON-PRIMARY (PRIMARY_AGENT=codex) this hook runs during
-# entrypoint-agent.sh's non-primary seeding — BEFORE init-firewall.sh. We deliberately do
-# NOT touch the plugin here: running network ops ahead of the firewall would violate the
-# ordering invariant, and a foreground install would block the Codex prompt. Instead
-# entrypoint-core.sh converges the non-primary Claude plugin AFTER the firewall, detached
-# (see its post-firewall block), so the skills self-heal onto the shared claude-config
-# volume for the next Claude session without ever racing the firewall.
-#
-# stdout is left attached to the terminal so the script's few concise status lines
-# are visible before Claude grabs the alternate screen buffer (the cold foreground path
-# prints an "installing…" line then a terminal "ready…"/"still installing…" line);
-# stderr and all debug go to the LOG FILE. Read it to see what happened: cat the log
-# path below.
-if command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
-	PLUGIN_BOOTSTRAP_LOG="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
-	if [ "${PRIMARY_AGENT:-claude}" = claude ]; then
-		# PRIMARY Claude: this hook runs from entrypoint-core.sh, AFTER init-firewall.sh, so
-		# the (possibly synchronous cold) install is correctly ordered after the firewall.
-		# APPEND, never truncate. This log lives on the claude-config volume, a SINGLE named
-		# volume shared by EVERY powbox container (see seed-claude-plugins.sh's cross-container
-		# note). A `: >` truncation on each start would wipe a PEER container's in-progress
-		# bootstrap log; prepend a dated, container-tagged separator so each boot's block
-		# stays easy to find in the appended file instead.
-		{
-			echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-			echo "[claude-hook] dev-skills@roubtec plugin: converging (primary Claude, post-firewall; cold install synchronous, warm keep-current backgrounded; log: $PLUGIN_BOOTSTRAP_LOG)"
-		} >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
-		# Best-effort: this hook runs under `set -e`, so guard the call with a trailing
-		# `|| true`. Plugin work is strictly off the critical path — a failure here must
-		# NEVER abort container startup, and the script itself is bounded so a synchronous
-		# call cannot wedge the prompt. POWBOX_PLUGIN_LOG points the script's debug log at
-		# the same shared file; stderr is folded into it while stdout stays on the terminal.
-		# SC2094: the env var and the stderr redirect name the same path, but the script
-		# does not read that file — it only appends — so there is no read/write conflict.
+# BUILD-SKEW SHIM. entrypoint-core.sh is baked into the BASE image; this hook is
+# baked into the AGENT layer. The common `cc --build` path rebuilds only the
+# agent layer over an existing base, so this hook can run under an OLDER core
+# that converges the plugin only for NON-primary Claude — primary Claude was
+# this hook's job in that generation. Without a fallback, that combination
+# silently stops converging the plugin on primary-Claude launches (the common
+# case). So: when the handshake is absent and Claude is primary, launch the same
+# detached, best-effort bootstrap the new core would have. Ordering holds — as
+# primary Claude's setup hook we are invoked BY core AFTER init-firewall.sh.
+# (Non-primary Claude's hook run happens pre-firewall from entrypoint-agent.sh,
+# but there PRIMARY_AGENT != claude, so the gate below skips it and the old core
+# still converges non-primary Claude itself, post-firewall.) The writer guard is
+# defense-in-depth: the launcher clears AGENT_SETUP_HOOK for that role, so this
+# hook should never run there at all. No done-marker/bounded wait here: the old
+# core has no waiter, so a refresh simply lands next session — the shim restores
+# convergence, not the same-session wait. Harmless if ever run redundantly or
+# standalone: the seeder is detached, bounded, flock-serialized, idempotent, and
+# self-defends its stdin against a TTY.
+if [ "${POWBOX_PLUGIN_BOOTSTRAP:-}" != core ] && [ "${PRIMARY_AGENT:-claude}" = claude ] &&
+	[ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
+	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
+	# For primary Claude, AGENT_CONFIG_DIR IS Claude's config dir, so this is the
+	# same shared-volume log the core path appends to. APPEND, never truncate
+	# (see the core block: the claude-config volume is shared by every powbox
+	# container, so truncation would wipe a peer's in-progress bootstrap log).
+	_claude_plugin_log="$AGENT_CONFIG_DIR/.powbox-plugin-bootstrap.log"
+	# stderr first: a failed open of the log itself must stay silent too
+	# (redirections apply left-to-right).
+	{
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook build-skew plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[claude-hook] dev-skills@roubtec plugin: no core handshake (older base image?); converging post-firewall, detached (log: $_claude_plugin_log)"
+	} 2>/dev/null >>"$_claude_plugin_log" || true
+	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the
+	# script only appends to it (never reads), so there is no read/write conflict.
+	# stderr first on the launch too: a failed open of the log must stay silent (the
+	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
+	# stderr back into the log.
+	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$PLUGIN_BOOTSTRAP_LOG" \
-			bash /usr/local/bin/seed-claude-plugins.sh 2>>"$PLUGIN_BOOTSTRAP_LOG" || true
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
-		# NON-PRIMARY Claude (PRIMARY_AGENT=codex): we run BEFORE init-firewall.sh here, so we
-		# do NOT touch the plugin network. entrypoint-core.sh converges it post-firewall,
-		# detached. Just record the hand-off in the shared log so the trail is complete.
-		{
-			echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') claude-hook plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-			echo "[claude-hook] dev-skills@roubtec plugin: non-primary Claude (pre-firewall); deferring convergence to entrypoint-core.sh post-firewall"
-		} >>"$PLUGIN_BOOTSTRAP_LOG" 2>/dev/null || true
+		# Fallback if setsid is somehow unavailable: still detach from the hook.
+		# shellcheck disable=SC2094
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" \
+			bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
+	unset _claude_plugin_log
 fi

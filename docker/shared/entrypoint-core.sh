@@ -7,36 +7,93 @@ else
 	/usr/local/bin/init-firewall.sh
 fi
 
-# Non-primary Claude dev-skills plugin — converge it HERE, AFTER init-firewall.sh, so its
-# network ops (marketplace add/install/update, all to the PUBLIC Roubtec/agent-skills over
-# HTTPS) are ordered after the firewall, and DETACHED so they never delay the primary
-# agent's prompt. When Claude IS the primary agent its own setup hook (below) does this
-# inline, also post-firewall; the non-primary Claude hook already ran in entrypoint-agent.sh
-# (pre-firewall) and deliberately skipped the plugin, leaving it to us.
-# POWBOX_PLUGIN_BACKGROUND=1 takes the script's patient background branch (full bounds,
-# log-only, no status line, no re-spawn); we point its log at Claude's config dir
-# (CLAUDE_CONFIG_DIR is a Dockerfile ENV), not the primary agent's. `setsid` reparents the
-# detached run past the entrypoint's final `exec`. Best-effort: it must never affect startup.
-if [ "${PRIMARY_AGENT:-claude}" != claude ] &&
+# Claude dev-skills plugin (dev-skills@roubtec, the 8 shared skills) — converge it HERE,
+# AFTER init-firewall.sh, so its network ops (marketplace add/install/update, all to the
+# PUBLIC Roubtec/agent-skills over HTTPS) are ordered after the firewall — and fully
+# DETACHED, for EVERY launch, whether Claude is the primary agent or not (the Claude hook
+# never touches the plugin).
+#
+# Detached is a CORRECTNESS requirement, not just latency hygiene: the claude CLI HANGS
+# (SIGTERM-immune; only SIGKILL ends it) when invoked with the container TTY as stdin, so
+# even a read-only `claude plugin list` on the entrypoint's foreground burned its full
+# 30s+5s bound on every start — task 015g's synchronous cold install never survived a TTY
+# launch either. So everything plugin-related runs with stdin </dev/null and stdio on the
+# log. The bounded, marker-based wait at the END of this script (before the final exec)
+# gives the refresh a chance to land before Claude enumerates plugins, so a warm update
+# usually applies THIS session; past that cap, on a COLD claude-config volume the FIRST
+# session starts without the /dev-skills:* skills until a /reload-plugins or restart, and
+# a slow warm update lands one session late (plugins load once at session start).
+#
+# The log is pointed at Claude's config dir (CLAUDE_CONFIG_DIR is a Dockerfile ENV), which
+# for a primary-Claude launch is also the primary's AGENT_CONFIG_DIR. `setsid` reparents
+# the detached run past the entrypoint's final `exec`. Best-effort: it must never affect
+# startup. APPEND to the log, never truncate: it lives on the claude-config volume, a
+# SINGLE named volume shared by EVERY powbox container, so truncation would wipe a PEER
+# container's in-progress bootstrap log; the dated, container-tagged separator keeps each
+# boot's block easy to find instead.
+#
+# SKIPPED for the image-store WRITER role: that container is short-lived by design —
+# Docker reaps it the moment seed-image-store.sh exits, which would SIGKILL a detached
+# plugin install/update MID-MUTATION against the shared claude-config volume (SIGKILL
+# also skips the seeder's EXIT trap), racing every peer container's bootstrap and
+# risking partial plugin state. The writer needs no skills anyway — it only pulls
+# images.
+#
+# Handshake for entrypoint-claude-hook.sh's build-skew shim: exporting this BEFORE the
+# setup-hook call below tells the hook that THIS core owns the plugin bootstrap for
+# every launch, so the hook must not. An OLDER base's core (which converged only
+# NON-primary Claude, leaving primary Claude to the hook) never sets it — that absence
+# is what tells a newer agent layer's hook to cover primary Claude itself. Exported
+# unconditionally (not inside the gate below): the hook re-checks the same
+# claude/seed-script preconditions, so "core owns it" is true whether or not the gate
+# fires.
+export POWBOX_PLUGIN_BOOTSTRAP=core
+if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	command -v claude >/dev/null 2>&1 && [ -x /usr/local/bin/seed-claude-plugins.sh ]; then
 	_claude_cfg="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
 	_claude_plugin_log="$_claude_cfg/.powbox-plugin-bootstrap.log"
 	mkdir -p "$_claude_cfg" 2>/dev/null || true
+	# Container-LOCAL done-marker (never the shared volume — a peer's bootstrap must not
+	# release our wait). Use an UNPREDICTABLE mktemp name, NOT $$: this script is exec'd
+	# as PID 1 (entrypoint-agent.sh execs it), so $$ is always 1 and the path collapses to
+	# a fixed, guessable /tmp/.powbox-plugin-bootstrap.1.done — inviting a symlink/TOCTOU
+	# clobber when the seeder later does `: >"$POWBOX_PLUGIN_DONE_FILE"`. mktemp reserves an
+	# unguessable name; we only need the NAME (the wait below polls for the marker and the
+	# seeder's EXIT trap creates it), so remove the placeholder mktemp leaves behind. If
+	# mktemp is somehow unavailable we DISABLE the marker (leave _plugin_done empty) rather
+	# than fall back to a predictable /tmp/.powbox-plugin-bootstrap.$$.done: at PID 1 that
+	# collapses to the same fixed, guessable path and reintroduces the symlink/TOCTOU clobber
+	# this hardening removes. An empty marker degrades safely — the seeder skips its EXIT
+	# trap on an empty POWBOX_PLUGIN_DONE_FILE and the wait below is guarded on a non-empty
+	# _plugin_done — so the bootstrap still detaches and merely skips the marker-based wait.
+	# startup must not abort.
+	_plugin_done="$(mktemp /tmp/.powbox-plugin-bootstrap.XXXXXXXX.done 2>/dev/null || true)"
+	# Only touch the filesystem when mktemp actually reserved a name — an empty
+	# marker (mktemp unavailable) must never reach `rm`, matching the emptiness
+	# guards on the other two consumers (the seeder EXIT trap and the wait-poll).
+	if [ -n "$_plugin_done" ]; then
+		rm -f "$_plugin_done" 2>/dev/null || true
+	fi
+	# stderr first: a failed open of the log itself must stay silent too
+	# (redirections apply left-to-right).
 	{
-		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall non-primary Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
-		echo "[core] dev-skills@roubtec plugin: converging non-primary Claude post-firewall, detached (log: $_claude_plugin_log)"
-	} >>"$_claude_plugin_log" 2>/dev/null || true
-	# SC2094: POWBOX_PLUGIN_LOG and the stderr redirect name the same path, but the script
+		echo "===== $(date -u +%FT%TZ 2>/dev/null || echo '-') core post-firewall Claude plugin bootstrap (${CONTAINER_NAME:-${HOSTNAME:-?}}) ====="
+		echo "[core] dev-skills@roubtec plugin: converging post-firewall, detached (log: $_claude_plugin_log)"
+	} 2>/dev/null >>"$_claude_plugin_log" || true
+	# SC2094: POWBOX_PLUGIN_LOG and the stdio redirect name the same path, but the script
 	# only appends to it (never reads), so there is no read/write conflict.
+	# stderr first on the launch too: a failed open of the log must stay silent (the
+	# spawn is then skipped); on success the trailing 2>&1 re-points the seeder's
+	# stderr back into the log.
 	if command -v setsid >/dev/null 2>&1; then
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
-			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
+			setsid bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	else
 		# Fallback if setsid is somehow unavailable: still detach from the entrypoint.
 		# shellcheck disable=SC2094
-		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_BACKGROUND=1 \
-			bash /usr/local/bin/seed-claude-plugins.sh </dev/null >>"$_claude_plugin_log" 2>&1 &
+		POWBOX_PLUGIN_LOG="$_claude_plugin_log" POWBOX_PLUGIN_DONE_FILE="$_plugin_done" \
+			bash /usr/local/bin/seed-claude-plugins.sh </dev/null 2>/dev/null >>"$_claude_plugin_log" 2>&1 &
 	fi
 	unset _claude_cfg _claude_plugin_log
 fi
@@ -427,6 +484,32 @@ if command -v podman >/dev/null 2>&1; then
 		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
 	fi
 	unset _xdg _containers_root _driver_marker _desired_driver _chosen_driver _imgstore
+fi
+
+# Bounded best-effort wait for the detached plugin bootstrap (primary Claude only —
+# a Codex prompt never uses the Claude plugin, so it should not wait for it). Claude
+# enumerates plugins ONCE at session start, so letting the (typically ~2-3s) refresh
+# finish BEFORE the exec means updated skills usually apply THIS session instead of one
+# session late. The wait sits HERE, at the end of startup, so the refresh overlaps all
+# the setup above and the typical added latency is well under the cap. Strictly bounded
+# and marker-based: we never wait ON the claude CLI (it can hang SIGTERM-immune on a
+# TTY — see the plugin block at the top), only poll for the done-marker the detached
+# run's EXIT trap touches; past the cap we proceed on the volume's current plugin state
+# (the refresh still lands for the next session). A cold-volume install usually
+# outlives the cap — that first session needs /reload-plugins, as documented.
+# POWBOX_PLUGIN_WAIT tunes the cap in whole seconds; 0 disables the wait.
+if [ -n "${_plugin_done:-}" ] && [ "${PRIMARY_AGENT:-claude}" = claude ]; then
+	_plugin_wait="${POWBOX_PLUGIN_WAIT:-4}"
+	case "$_plugin_wait" in
+	*[!0-9]* | '') _plugin_wait_ticks=40 ;;             # non-numeric override: fall back to the 4s default
+	*) _plugin_wait_ticks=$((10#$_plugin_wait * 10)) ;; # 10# so a leading zero can't trip octal parsing
+	esac
+	while [ "$_plugin_wait_ticks" -gt 0 ] && [ ! -e "$_plugin_done" ]; do
+		sleep 0.1
+		_plugin_wait_ticks=$((_plugin_wait_ticks - 1))
+	done
+	rm -f "$_plugin_done" 2>/dev/null || true
+	unset _plugin_done _plugin_wait _plugin_wait_ticks
 fi
 
 if [ "$#" -eq 0 ]; then

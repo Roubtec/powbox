@@ -269,13 +269,20 @@ ensure_table_scalar_setting() {
 # literal `multi_agent_v2` name pinned to a TOML key boundary (so a different
 # BARE key that merely ends with the substring, e.g. `foo_multi_agent_v2`, does
 # NOT trip it) and ignores full-line comments (so a documented or commented-out
-# `# multi_agent_v2 = true` does NOT trip it either). Two conservative
-# over-matches remain, both harmless because they only ever SKIP the seed and
-# never corrupt a config: a REAL multi_agent_v2 assignment placed under an
-# unrelated table still blocks, and a quoted key literally containing
-# `.multi_agent_v2` (e.g. `"foo.multi_agent_v2"`) also blocks — grep cannot tell
-# that quoted single key apart from a dotted `features.multi_agent_v2` without
-# tracking quote context, and over-blocking it is the safe direction.
+# `# multi_agent_v2 = true` does NOT trip it either). Three conservative
+# over-matches remain, all harmless because they only ever SKIP the seed and
+# never corrupt a config:
+#   - a REAL multi_agent_v2 assignment placed under an unrelated table still
+#     blocks;
+#   - a quoted key literally containing `.multi_agent_v2` (e.g.
+#     `"foo.multi_agent_v2"`) also blocks — grep cannot tell that quoted single
+#     key apart from a dotted `features.multi_agent_v2` without tracking quote
+#     context;
+#   - a TRAILING comment that literally spells `... = ...` after `multi_agent_v2`
+#     (e.g. `other = true # multi_agent_v2 = true`) still blocks, because only
+#     whole-line comments are dropped (see the sed note below — narrowing this
+#     further would reintroduce the mid-line `#`-in-string hazard).
+# In every case over-blocking is the safe direction.
 config_v2_seed_blocked() {
 	local file="$1"
 

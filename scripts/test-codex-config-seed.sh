@@ -148,6 +148,8 @@ ws="$(printf '[features]\nmulti_agent_v2 = false\n' | new_config v2-false)"
 assert_blocked "$ws" "existing multi_agent_v2 = false blocks (respects opt-out)"
 ws="$(printf 'features = { multi_agent_v2 = true }\n' | new_config v2-inline)"
 assert_blocked "$ws" "inline features = { multi_agent_v2 = true } blocks"
+ws="$(printf 'features.multi_agent_v2 = true\n' | new_config v2-dotted)"
+assert_blocked "$ws" "top-level dotted features.multi_agent_v2 = true blocks"
 
 echo "Test: guard BLOCKS a quoted multi_agent_v2 key (no-clobber on opt-out)"
 ws="$(printf '[features]\n"multi_agent_v2" = false\n' | new_config v2-quoted)"
@@ -278,6 +280,11 @@ assert_blocked "$ws" "real multi_agent_v2 = true with a trailing comment still b
 # this line, so the conservative no-clobber still fires (guards peer finding 1).
 ws="$(printf 'other = { note = "#", multi_agent_v2 = true }\n' | new_config v2-hash-in-string)"
 assert_blocked "$ws" 'a # inside a string does not hide a same-line multi_agent_v2 (blocks)'
+# Documented conservative over-match: a trailing comment that literally spells a
+# multi_agent_v2 assignment still blocks. This is the safe direction (only skips
+# the seed) and the deliberate cost of dropping whole-line comments only.
+ws="$(printf 'other = true # multi_agent_v2 = true\n' | new_config v2-trailing-mention)"
+assert_blocked "$ws" 'a trailing # multi_agent_v2 = true comment conservatively blocks (safe over-match)'
 
 echo "Test: guard does NOT match a different key that merely ends with the substring"
 # `foo_multi_agent_v2` is a distinct key; the boundary anchor must keep it from

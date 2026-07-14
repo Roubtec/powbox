@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # This script is normally executed by the unified entrypoint, but the seed
 # helper functions below are also unit-tested in isolation (see
 # scripts/test-codex-config-seed.sh). Everything above the "sourced?" guard near
-# the end is pure function definitions with no side effects, so a test can
+# the end is pure function definitions with no side effects (strict mode is set
+# below the guard, so it runs only on direct execution), so a test can
 # `source` this file to get the helpers without running the seeding body.
 
 ensure_top_level_array_setting() {
@@ -376,6 +376,11 @@ replace_config_string() {
 if (return 0 2>/dev/null); then
 	return 0
 fi
+
+# Executed directly (not sourced) from here on: enable strict mode for the
+# seeding body. Kept below the guard so sourcing the helpers leaves the caller's
+# shell options untouched.
+set -euo pipefail
 
 AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
 # Directory holding this agent's image-baked seed assets (instruction template,

@@ -286,7 +286,7 @@ ensure_table_scalar_setting() {
 #
 # Known non-goal (like every ensure_* seeder here, this is literal-text matching,
 # not a TOML parser): an escaped/encoded key spelling — e.g. a basic-string key
-# `"multi_agent_v2"` whose `\uXXXX` decodes to the real key — is NOT recognized,
+# `"multi_agent_v\u0032"` whose `\uXXXX` decodes to the real key — is NOT recognized,
 # so it could evade this guard and the writer's no-clobber check and let a
 # duplicate key be authored. Unrealistic for an ASCII-seeded config.toml and
 # tracked for future TOML-aware hardening in tasks/deferred/023a.

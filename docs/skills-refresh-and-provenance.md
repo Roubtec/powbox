@@ -378,6 +378,37 @@ rejected as disproportionate: no runtime logic flows off these markers, and the
 re-sync-forward already gives the desired end state (Codex shared skills on `agent-skills`
 main) at the next start.
 
+### Accepted best-effort limitations
+
+Two transient, self-healing divergences are accepted rather than engineered away, on the
+same last-writer-wins / re-sync-forward reasoning as D7 above — each converges on the next
+container start, and closing it would risk the startup critical path for a self-healing
+edge case.
+
+**1. Codex-primary cold-start interleave with the bake-seed.** `entrypoint-core.sh` spawns
+the detached Codex sync *before* it runs the primary setup hook, so on a Codex-**primary**
+cold start the sync and the codex hook's baked-skill seeding
+(`entrypoint-codex-hook.sh` → `seed_skills … noclobber`) can run concurrently against the
+same codex-config skill dir. This is bounded because the bake-seed is **no-clobber**: it
+only ever fills an **absent** skill and never overwrites one already present from a prior
+sync. So the only contention is the *initial placement* of an absent shared skill on a cold
+volume — whichever process writes last wins that start, and the SHA-gate re-syncs the fresh
+copy forward on the next start (recorded ≠ clone HEAD → one write, then a stable no-op). We
+deliberately do **not** add a flock to the hook's seeding path to force the sync to win:
+that path is not otherwise serialized, and adding cross-process locking to a bake-seed on
+the entrypoint's critical path is disproportionate to a one-start, cold-only, self-healing
+window. (Warm starts do not hit this at all — the skill is already present, so the
+no-clobber seed is a no-op and only the SHA-gated sync can write.)
+
+**2. Partial plugin-bootstrap divergence.** The Codex sync reads the same marketplace clone
+that `seed-claude-plugins.sh` maintains. If a bootstrap **partially** fails — the
+`marketplace update` (git pull) advances the clone HEAD but the follow-up
+`plugin update dev-skills@roubtec` (which pulls the new SHA into Claude's installed plugin
+cache) fails — then Codex, syncing off the advanced clone HEAD, can briefly track a commit
+**ahead** of the Claude plugin until the next start re-runs both and re-converges them. This
+is the plugin channel's own best-effort behavior surfacing through the piggybacked sync, not
+a new failure mode; it self-heals on the next online start.
+
 ## Open / deferred
 
 - Commit-provenance display + `zsh` helper → stacked branch (above).

@@ -104,6 +104,19 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	#      into the plugin done-marker. Skipped when its script is not baked (an older
 	#      agent layer over a newer base). Log + done-marker paths pass as positional
 	#      args ($1/$2) so both the setsid and no-setsid branches share the body.
+	# Accepted best-effort eventual consistency (self-healing on the next start;
+	# see docs/skills-refresh-and-provenance.md "Accepted best-effort limitations"):
+	#   - This detached sync is spawned BEFORE the primary setup hook (line ~142). On a
+	#     Codex-PRIMARY cold start it can therefore interleave with the codex hook's
+	#     bake-skill seeding, but that seeding is NO-CLOBBER (fills only ABSENT skills,
+	#     never overwrites a present one), so the only contention is the initial
+	#     placement of an absent skill: whichever writes last wins that start, and the
+	#     SHA-gate re-syncs the fresh copy forward on the next start. We do NOT add a
+	#     lock to the hook's seeding path to force ordering — that would put the
+	#     startup critical path at risk for a self-healing edge case.
+	#   - If seed-claude-plugins.sh partially fails (its marketplace clone advances but
+	#     the plugin serve step fails), Codex may briefly track a commit AHEAD of
+	#     Claude until the next start re-converges both.
 	# shellcheck disable=SC2016  # $1/$2 are expanded by the inner `bash -c`, not here.
 	_plugin_boot_seq='
 			POWBOX_PLUGIN_LOG="$1" POWBOX_PLUGIN_DONE_FILE="$2" \

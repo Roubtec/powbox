@@ -86,12 +86,25 @@ seed_skill() {
 	# losing it. The backup name is hidden (leading dot) so it is never enumerated as
 	# a phantom skill by seed_skill_names.
 	if [ -e "$dest" ] || [ -L "$dest" ]; then
+		# Reserve a unique hidden backup PATH, then leave NOTHING at it: `mktemp -d`
+		# claims a random, collision-free name, and `rmdir` removes the empty dir so
+		# the target is ABSENT before the rename. That matters for wrong-type
+		# destinations: `mv -T "$dest" "$backup"` renames $dest of ANY type — dir,
+		# file, or symlink — onto an absent path uniformly. A pre-created backup
+		# DIRECTORY instead makes that rename fail with EISDIR whenever $dest is a
+		# file/symlink (rename() cannot replace a directory with a non-directory),
+		# which would silently skip the swap and regress an --adopt-all refresh of a
+		# wrong-type collision. The leading-dot name is never enumerated as a phantom
+		# skill by seed_skill_names.
 		backup="$(mktemp -d "$parent/.${name}.old.XXXXXX")" || {
 			rm -rf "$tmp"
 			return 1
 		}
-		# mktemp created an empty dir; -T (--no-target-directory) replaces it with the
-		# live $dest via a single rename rather than nesting $dest inside it.
+		rmdir "$backup" || {
+			rm -rf "$tmp" "$backup"
+			return 1
+		}
+		# -T (--no-target-directory) renames $dest to the now-absent $backup path.
 		if ! mv -T "$dest" "$backup"; then
 			rm -rf "$tmp" "$backup"
 			return 1

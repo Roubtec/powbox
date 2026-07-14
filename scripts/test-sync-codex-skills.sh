@@ -307,6 +307,48 @@ else
 	no "sibling shared skill still refreshed alongside a denylisted collision"
 fi
 
+# ================================================================================
+# Test 11: seed_skill wrong-type collision — the shared primitive must replace a
+#          destination of ANY type (dir, file, or symlink) uniformly. This is the
+#          path exercised by `update-skills-incontainer.sh --adopt-all` when a skill
+#          dest is a file/symlink, not the sync's own path (which only reaches
+#          seed_skill for an absent or a marked-DIRECTORY target). Regression guard
+#          for the backup-target fix: a pre-created backup DIRECTORY made
+#          `mv -T <file> <backup-dir>` fail with EISDIR, silently skipping the swap.
+# ================================================================================
+seed_skill_wrongtype_case() (
+	# Subshell: source the seed lib and exercise seed_skill directly, isolated from
+	# the parent's state. shellcheck can't follow the runtime-resolved lib path.
+	# shellcheck disable=SC1090
+	. "$SEED_LIB"
+	R="$WORK_ROOT/t11"
+	mkdir -p "$R/src" "$R/dest"
+	printf 'NEW\n' >"$R/src/SKILL.md"
+
+	# (a) dest is a SYMLINK (dangling) — the classic wrong-type collision.
+	ln -s /nonexistent/target "$R/dest/symlinked"
+	seed_skill "$R/src" "$R/dest/symlinked" "epoch=1
+commit=x" || return 1
+	[ -d "$R/dest/symlinked" ] && [ ! -L "$R/dest/symlinked" ] || return 1
+	[ "$(cat "$R/dest/symlinked/SKILL.md")" = "NEW" ] || return 1
+	[ -f "$R/dest/symlinked/.powbox-seeded" ] || return 1
+
+	# (b) dest is a plain FILE — also a non-directory collision.
+	printf 'stale file\n' >"$R/dest/filed"
+	seed_skill "$R/src" "$R/dest/filed" "epoch=1
+commit=x" || return 1
+	[ -d "$R/dest/filed" ] && [ "$(cat "$R/dest/filed/SKILL.md")" = "NEW" ] || return 1
+
+	# No stray temp/backup siblings leak into the dest dir.
+	leaked="$(find "$R/dest" -maxdepth 1 \( -name '.*.tmp.*' -o -name '.*.old.*' \) 2>/dev/null)"
+	[ -z "$leaked" ] || return 1
+)
+if seed_skill_wrongtype_case; then
+	ok "seed_skill replaces a wrong-type dest (symlink, file) with the staged skill dir"
+else
+	no "seed_skill replaces a wrong-type dest (symlink, file) with the staged skill dir"
+fi
+
 echo
 echo "sync-codex-skills tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

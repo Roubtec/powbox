@@ -313,6 +313,102 @@ command. Kept off the skills branch to keep that diff reviewable.
 - **`--adopt-all` / `--prune` in CI/non-interactive:** explicit opt-in only; defaults
   never destroy user data.
 
+## Codex plugin-clone sync (task 021) — channel precedence
+
+Task 021 gives Codex a **start-time** refresh of the 8 *shared* skills so both agents
+converge on `Roubtec/agent-skills` main at the same (container-recycle) cadence,
+instead of Codex tracking the slower image-rebuild cadence.
+
+The Claude plugin bootstrap (`seed-claude-plugins.sh`, task 015c) keeps a full clone
+of the marketplace on the shared `claude-config` volume
+(`~/.claude/plugins/marketplaces/roubtec/`) and refreshes it every start; that clone
+carries `codex/dev-skills/skills/`. So `sync-codex-skills.sh`
+(`docker/shared/sync-codex-skills.sh`, baked to `/usr/local/bin/`) is a **local** sync
+from that clone into the codex-config volume's skill dir — no network op of its own.
+`entrypoint-core.sh` chains it directly after the detached plugin run, as a separate
+process ordered after the clone refresh; see
+[entrypoint-and-runtime.md](entrypoint-and-runtime.md) for the detach / done-marker /
+flock details.
+
+It reuses this document's ownership model: it iterates the *clone's* skill names (so it
+can only touch the 8 shared skills — the 2 powbox-specific Codex skills, `enable-worktrees`
+and `session-learnings`, are absent from the clone and remain exclusively bake-owned), and
+as defense in depth it additionally carries an explicit bake-owned **denylist** of those two
+names, so even a future *upstream* name collision (a clone dir of the same name) could never
+overwrite the bake-owned copy. It overwrites only a `.powbox-seeded`-marked (powbox-owned)
+copy via an atomic stage+rename, and never touches a marker-less user-adopted copy. It is **SHA-gated** to a byte-for-byte no-op when unchanged, and
+stamps each refreshed marker with two extra provenance lines beyond the D2 baseline:
+
+```
+epoch=<image build-epoch>
+commit=<powbox commit that built the image>
+agent_skills_commit=<synced agent-skills HEAD SHA>
+source=plugin-clone
+```
+
+The `epoch`/`commit` lines are still written (via `seed_marker_content`, unchanged) so
+the marker stays coherent with what the bake+seed refresher writes; the two added lines
+record *which channel last wrote the copy* and *which agent-skills commit it carries*.
+
+### Precedence decision (D7): last-writer-wins, re-sync-forward
+
+After task 021 a Codex skill on the volume may be **newer** than the image bake (the
+plugin-clone sync wrote it from a fresher `agent-skills` HEAD). The bake+seed refresher
+(`update-skills-incontainer.sh`, run by `agent-update-skills`) force-refreshes every
+*marked* skill from the image, and a marked skill is exactly what the sync produces — so
+running the updater rewrites those copies back to the image bake (and back to the plain
+2-line D2 marker).
+
+**Decision: accept last-writer-wins.** We deliberately do **not** teach the updater to
+inspect `source=plugin-clone` / `agent_skills_commit` and skip a marker whose recorded
+channel is newer. Rationale:
+
+- The rollback is self-healing and cheap. The very next container start re-runs
+  `sync-codex-skills.sh`, which sees the updater's plain marker (no
+  `agent_skills_commit`, so recorded ≠ clone HEAD) and re-syncs the copy forward to the
+  clone HEAD — a single write, then a stable no-op thereafter. So an `agent-update-skills`
+  run causes at most a one-start staleness window for the Codex shared skills, closed
+  automatically without any user action.
+- Special-casing the updater would couple it to the plugin channel's marker schema and
+  add a precedence branch to a path that today has one simple rule ("powbox owns marked
+  copies → refresh"). The convergence guarantee above makes that complexity unnecessary.
+
+The alternative (updater skips a plugin-clone marker with a newer SHA) was considered and
+rejected as disproportionate: no runtime logic flows off these markers, and the
+re-sync-forward already gives the desired end state (Codex shared skills on `agent-skills`
+main) at the next start.
+
+### Accepted best-effort limitations
+
+Two transient, self-healing divergences are accepted rather than engineered away, on the
+same last-writer-wins / re-sync-forward reasoning as D7 above — each converges on the next
+container start, and closing it would risk the startup critical path for a self-healing
+edge case.
+
+**1. Codex-primary cold-start interleave with the bake-seed.** `entrypoint-core.sh` spawns
+the detached Codex sync *before* it runs the primary setup hook, so on a Codex-**primary**
+cold start the sync and the codex hook's baked-skill seeding
+(`entrypoint-codex-hook.sh` → `seed_skills … noclobber`) can run concurrently against the
+same codex-config skill dir. This is bounded because the bake-seed is **no-clobber**: it
+only ever fills an **absent** skill and never overwrites one already present from a prior
+sync. So the only contention is the *initial placement* of an absent shared skill on a cold
+volume — whichever process writes last wins that start, and the SHA-gate re-syncs the fresh
+copy forward on the next start (recorded ≠ clone HEAD → one write, then a stable no-op). We
+deliberately do **not** add a flock to the hook's seeding path to force the sync to win:
+that path is not otherwise serialized, and adding cross-process locking to a bake-seed on
+the entrypoint's critical path is disproportionate to a one-start, cold-only, self-healing
+window. (Warm starts do not hit this at all — the skill is already present, so the
+no-clobber seed is a no-op and only the SHA-gated sync can write.)
+
+**2. Partial plugin-bootstrap divergence.** The Codex sync reads the same marketplace clone
+that `seed-claude-plugins.sh` maintains. If a bootstrap **partially** fails — the
+`marketplace update` (git pull) advances the clone HEAD but the follow-up
+`plugin update dev-skills@roubtec` (which pulls the new SHA into Claude's installed plugin
+cache) fails — then Codex, syncing off the advanced clone HEAD, can briefly track a commit
+**ahead** of the Claude plugin until the next start re-runs both and re-converges them. This
+is the plugin channel's own best-effort behavior surfacing through the piggybacked sync, not
+a new failure mode; it self-heals on the next online start.
+
 ## Open / deferred
 
 - Commit-provenance display + `zsh` helper → stacked branch (above).

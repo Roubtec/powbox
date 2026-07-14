@@ -63,26 +63,83 @@ seed_skill_names() {
 # Copy one skill (cp -a) into a sibling temp dir, stamp the ownership marker, then
 # atomically swap it into place so a concurrently-invoking agent never observes a
 # half-written skill. Overwrites <dest_skill_dir> if it exists. Returns nonzero on
-# failure, leaving any existing destination untouched.
+# failure; an existing destination is normally preserved — the prior copy is renamed
+# aside before the staged copy is published and moved back if the publish fails —
+# EXCEPT in the narrow double-failure case where both the publish and the restoring
+# rename fail: <dest_skill_dir> is then left absent and the prior copy survives as a
+# hidden `.old.*` sibling backup (kept for recovery / the next start's re-sync).
 seed_skill() {
 	local src="${1%/}" dest="$2" marker="$3"
-	local parent name tmp
+	local parent name tmp backup
 	parent="$(dirname "$dest")"
 	name="$(basename "$dest")"
 	mkdir -p "$parent"
 	tmp="$(mktemp -d "$parent/.${name}.tmp.XXXXXX")" || return 1
-	if cp -a "$src"/. "$tmp"/ && printf '%s' "$marker" >"$tmp/$POWBOX_SEED_MARKER"; then
-		# mv is an atomic rename within the same volume, and an agent re-reads
-		# SKILL.md at invoke time, so it never observes a half-written skill. The
-		# window between rm and mv is tiny but the config volumes are shared, so a
-		# concurrent seed could recreate $dest in it; -T (--no-target-directory)
-		# makes mv replace $dest rather than nest $tmp inside a reappeared
-		# directory, failing loudly into the cleanup below instead of returning a
-		# false success with an orphaned .${name}.tmp.* tree.
-		rm -rf "$dest"
+	if ! { cp -a "$src"/. "$tmp"/ && printf '%s' "$marker" >"$tmp/$POWBOX_SEED_MARKER"; }; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	# Publish by swap, NOT by `rm -rf "$dest"; mv tmp dest`. The old form erased the
+	# live copy UP FRONT: it exposed an absent window as wide as a recursive delete
+	# (a real hazard for Codex, which reads skill files live and warns on churn) and
+	# — worse — DESTROYED the prior copy outright if the rename then failed. Instead,
+	# rename any existing $dest ASIDE into a hidden sibling first, publish the staged
+	# copy, then delete the old one only once the new one is live. A reader now sees
+	# either the old skill or the new one; the window with neither is one rename wide
+	# (not a whole rm -rf), and a failed publish restores the prior copy rather than
+	# losing it. The backup name is hidden (leading dot) so it is never enumerated as
+	# a phantom skill by seed_skill_names.
+	if [ -e "$dest" ] || [ -L "$dest" ]; then
+		# Reserve a unique hidden backup PATH, then leave NOTHING at it: `mktemp -d`
+		# claims a random, collision-free name, and `rmdir` removes the empty dir so
+		# the target is ABSENT before the rename. That matters for wrong-type
+		# destinations: `mv -T "$dest" "$backup"` renames $dest of ANY type — dir,
+		# file, or symlink — onto an absent path uniformly. A pre-created backup
+		# DIRECTORY instead makes that rename fail with EISDIR whenever $dest is a
+		# file/symlink (rename() cannot replace a directory with a non-directory),
+		# which would silently skip the swap and regress an --adopt-all refresh of a
+		# wrong-type collision. The leading-dot name is never enumerated as a phantom
+		# skill by seed_skill_names.
+		backup="$(mktemp -d "$parent/.${name}.old.XXXXXX")" || {
+			rm -rf "$tmp"
+			return 1
+		}
+		rmdir "$backup" || {
+			rm -rf "$tmp" "$backup"
+			return 1
+		}
+		# -T (--no-target-directory) renames $dest to the now-absent $backup path.
+		if ! mv -T "$dest" "$backup"; then
+			rm -rf "$tmp" "$backup"
+			return 1
+		fi
+		# Publish. -T makes mv REPLACE $dest rather than nest $tmp inside a $dest that
+		# a concurrent seed may have recreated in the one-rename window, failing loudly
+		# into the restore below instead of returning a false success with an orphaned
+		# temp tree.
 		if mv -T "$tmp" "$dest"; then
+			rm -rf "$backup"
 			return 0
 		fi
+		# Publish failed: move the prior copy back so $dest is never lost. Best-effort
+		# — if a racing seed already refilled $dest, keep its copy rather than clobber.
+		if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+			mv -T "$backup" "$dest" 2>/dev/null || true
+		fi
+		rm -rf "$tmp"
+		# Reclaim the backup ONLY once $dest is confirmed live again (restore
+		# succeeded, or a racing seed already refilled it). If BOTH the publish and
+		# the restore failed — the narrow double-rename window — $dest is still
+		# absent, so KEEP the .old backup as the sole surviving copy for recovery /
+		# the next start's re-sync rather than deleting it here.
+		if [ -e "$dest" ] || [ -L "$dest" ]; then
+			rm -rf "$backup"
+		fi
+		return 1
+	fi
+	# No existing copy: a single atomic rename installs the skill.
+	if mv -T "$tmp" "$dest"; then
+		return 0
 	fi
 	rm -rf "$tmp"
 	return 1
@@ -108,9 +165,10 @@ seed_skills() {
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$dest/$name"
-		# Any existing entry blocks a blind overwrite — seed_skill rm -rf's the
-		# destination before installing, so we must only reach it for an absent
-		# target or a marked directory. -e misses dangling symlinks, so test -L too.
+		# Any existing entry blocks a blind overwrite — seed_skill replaces the
+		# destination (renaming any existing copy aside, then publishing the staged
+		# one), so we must only reach it for an absent target or a marked directory.
+		# -e misses dangling symlinks, so test -L too.
 		if [ -e "$target" ] || [ -L "$target" ]; then
 			case "$mode" in
 			noclobber) continue ;;
@@ -179,10 +237,12 @@ seed_workflow() {
 	# Publish the workflow first, THEN stamp its sidecar marker, so a marker can
 	# never outlive its `.js`. An orphan marker (marker, no file) is the dangerous
 	# direction: a later user-created <name>.js would be misread as powbox-owned
-	# and refreshed/pruned. Mirror seed_skill: rm any existing $dest before the
-	# rename, so an --adopt-all run recovers EVERY collision type — including a
-	# wrong-type directory, which `mv -fT` alone refuses to replace with a file
-	# (it would fail loudly instead of adopting). -T still guards the tiny rm->mv
+	# and refreshed/pruned. Unlike seed_skill (which renames a directory aside
+	# because rename() cannot replace a non-empty dir), a workflow is a single file,
+	# so a plain rm-then-rename is enough and simplest here: rm any existing $dest
+	# before the rename, so an --adopt-all run recovers EVERY collision type —
+	# including a wrong-type directory, which `mv -fT` alone refuses to replace with
+	# a file (it would fail loudly instead of adopting). -T still guards the tiny rm->mv
 	# window on the shared volume: if a concurrent seed recreated $dest as a
 	# directory, mv fails into the cleanup below rather than nesting the temp
 	# inside it. If the file lands but its marker rename fails, the workflow is

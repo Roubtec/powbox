@@ -117,6 +117,7 @@ COPY --chmod=755 \
     docker/shared/entrypoint-codex-hook.sh \
     docker/shared/seed-skills.sh \
     docker/shared/seed-claude-plugins.sh \
+    docker/shared/sync-codex-skills.sh \
     docker/shared/powbox-provenance \
     docker/shared/gitcat \
     docker/shared/wt-common.sh \

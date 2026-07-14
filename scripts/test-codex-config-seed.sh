@@ -63,16 +63,19 @@ seed_v2() {
 }
 
 # A realistic already-seeded statusline/title config, the state config.toml is in
-# by the time the v2 seed runs in the hook.
-STATUSLINE_CONFIG='[tui]
+# by the time the v2 seed runs in the hook. terminal_title is a TOP-LEVEL setting
+# (the hook seeds it via ensure_top_level_array_setting, which inserts it before
+# the first table header), so it must precede the [tui] table here — placing it
+# after [tui] would scope it as tui.terminal_title, which is not the real shape.
+STATUSLINE_CONFIG='terminal_title = [
+  "current-dir",
+  "git-branch",
+]
+
+[tui]
 status_line = [
   "model-with-reasoning",
   "current-dir",
-]
-
-terminal_title = [
-  "current-dir",
-  "git-branch",
 ]'
 
 # assert_blocked <file> <msg> — config_v2_seed_blocked returns success (skip).
@@ -195,6 +198,15 @@ ws="$(printf 'features = { other = true }\n' | new_config features-inline-other)
 # rejects). Fail safe: skip the seed rather than author the duplicate table.
 assert_blocked "$ws" "inline features = { other = true } blocks (no safe extend)"
 
+echo "Test: guard BLOCKS a top-level dotted features.<key> with no multi_agent_v2"
+# A top-level dotted key (features.some_other_flag = ...) already defines the
+# `features` table, so appending a separate [features] table would define it
+# twice (Codex rejects the load). Fail safe: skip the seed.
+ws="$(printf 'features.some_other_flag = true\n' | new_config features-dotted-other)"
+assert_blocked "$ws" "top-level dotted features.some_other_flag = true blocks (no safe extend)"
+ws="$(printf '"features".some_other_flag = true\n' | new_config features-dotted-quoted)"
+assert_blocked "$ws" 'quoted "features".some_other_flag = true blocks (no safe extend)'
+
 echo "Test: [features]/[agents] not confused with lookalike tables"
 ws="$(printf '[features_other]\nmulti_agent_v2 = 0\n' | new_config not-agents)"
 # multi_agent_v2 appears verbatim, so the no-clobber grep legitimately blocks;
@@ -208,6 +220,10 @@ ws="$(printf 'agentsx = 1\n' | new_config agentsx-key)"
 assert_not_blocked "$ws" "agentsx = 1 does NOT match the [agents] guard"
 ws="$(printf '[features_x]\nfoo = 1\n' | new_config features-x)"
 assert_not_blocked "$ws" "[features_x] does NOT match the inline-features guard"
+ws="$(printf 'features_x = 1\n' | new_config features-x-key)"
+assert_not_blocked "$ws" "features_x = 1 does NOT match the dotted/inline-features guard"
+ws="$(printf 'features_x.foo = 1\n' | new_config features-x-dotted)"
+assert_not_blocked "$ws" "features_x.foo = 1 does NOT match the dotted-features guard"
 ws="$(printf "['agentsx']\nfoo = 1\n" | new_config agentsx-squoted)"
 assert_not_blocked "$ws" "['agentsx'] (single-quoted lookalike) does NOT match the [agents] guard"
 

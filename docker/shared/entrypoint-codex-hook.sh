@@ -246,11 +246,14 @@ ensure_table_scalar_setting() {
 #      must never author that conflict. The seed is no-clobber, so it will not
 #      remove the [agents] block either — a user opting into v2 must delete it
 #      themselves (documented in README as the migration caveat).
-#   3. The config already defines the features table as an INLINE table
-#      (features = { ... }) that carries no multi_agent_v2 key. We cannot extend
-#      an inline table in place without a TOML parser, and appending a separate
-#      [features] table would define `features` twice — a config Codex rejects.
-#      Fail safe: skip the seed rather than author a duplicate-table conflict.
+#   3. The config already defines the features table at top level without a
+#      [features] header — either as an INLINE table (features = { ... }) or via
+#      a top-level dotted key (features.some_flag = ...) — carrying no
+#      multi_agent_v2 key. In both forms `features` is already defined, so
+#      appending a separate [features] table would define `features` twice — a
+#      config Codex rejects. (A real [features] header is fine: the writer
+#      extends it in place, so it is intentionally NOT matched here.) Fail safe:
+#      skip the seed rather than author a duplicate-table conflict.
 # Returns failure (1 = "not blocked, seed it") otherwise, including a cold
 # config file that does not exist yet.
 #
@@ -280,10 +283,14 @@ config_v2_seed_blocked() {
 		return 0
 	fi
 
-	# An inline features table with no multi_agent_v2 key (that case is caught
-	# above): appending a [features] table would define `features` twice. Accept a
-	# bare or " / ' quoted "features".
-	if grep -qE '^[[:space:]]*["'\'']?features["'\'']?[[:space:]]*=[[:space:]]*\{' "$file"; then
+	# A top-level features definition with no multi_agent_v2 key (that case is
+	# caught above): an inline table (features = { ... }) OR a top-level dotted key
+	# (features.some_flag = ...). In either form `features` is already defined, so
+	# appending a [features] table would define it twice. The trailing [.=] accepts
+	# a dotted key (features.x) or an assignment (features = ...); a real [features]
+	# table header starts with `[` and is intentionally not matched, so the writer
+	# can extend it in place. Accept a bare or " / ' quoted "features".
+	if grep -qE '^[[:space:]]*["'\'']?features["'\'']?[[:space:]]*[.=]' "$file"; then
 		return 0
 	fi
 

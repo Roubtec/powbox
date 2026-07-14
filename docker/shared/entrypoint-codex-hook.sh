@@ -249,11 +249,18 @@ ensure_table_scalar_setting() {
 #   3. The config already defines the features table at top level without a
 #      [features] header — either as an INLINE table (features = { ... }) or via
 #      a top-level dotted key (features.some_flag = ...) — carrying no
-#      multi_agent_v2 key. In both forms `features` is already defined, so
+#      multi_agent_v2 key. In both forms `features` is CONCRETELY defined, so
 #      appending a separate [features] table would define `features` twice — a
-#      config Codex rejects. (A real [features] header is fine: the writer
-#      extends it in place, so it is intentionally NOT matched here.) Fail safe:
-#      skip the seed rather than author a duplicate-table conflict.
+#      config Codex rejects (a "duplicate key" TOML error). (A real [features]
+#      header is fine: the writer extends it in place, so it is intentionally NOT
+#      matched here. A [features.<sub>] / ["features".<sub>] subtable header is
+#      likewise, and deliberately, NOT matched: it only *implicitly* creates the
+#      `features` super-table, and TOML 1.0.0 explicitly permits defining a plain
+#      [features] table afterward — the writer appends exactly that, landing
+#      multi_agent_v2 on the same `features` table as valid TOML Codex loads.
+#      Verified against the Rust `toml` crate and Python tomllib; see PR #108
+#      review thread r3577981715.) Fail safe: skip the seed rather than author a
+#      duplicate-table conflict for the inline/dotted forms.
 # Returns failure (1 = "not blocked, seed it") otherwise, including a cold
 # config file that does not exist yet.
 #

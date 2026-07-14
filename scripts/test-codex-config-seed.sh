@@ -207,6 +207,38 @@ assert_blocked "$ws" "top-level dotted features.some_other_flag = true blocks (n
 ws="$(printf '"features".some_other_flag = true\n' | new_config features-dotted-quoted)"
 assert_blocked "$ws" 'quoted "features".some_other_flag = true blocks (no safe extend)'
 
+echo "Test: guard ALLOWS the seed when features is defined ONLY via a subtable header"
+# A subtable header ([features.flags] / ["features".flags]) implicitly creates the
+# `features` super-table WITHOUT concretely defining it, so TOML 1.0.0 permits a
+# later plain [features] header ("defining a super-table afterward is ok"). This is
+# the OPPOSITE of the inline `features = { ... }` and dotted `features.x = ...` forms
+# above, which define `features` as a concrete value that a trailing [features] table
+# would redefine (a genuine "duplicate key: features" TOML error). So the guard MUST
+# NOT block here: appending [features] multi_agent_v2 = true is valid TOML that Codex
+# loads, and it lands the key on the same `features` table — the desired seed outcome.
+# Verified against the Rust `toml` crate (Codex's parser family) and Python tomllib.
+# See PR #108 review thread r3577981715 (push-back on the "add a guard" suggestion).
+ws="$(printf '[features.flags]\nsome_flag = true\n' | new_config features-subtable-bare)"
+assert_not_blocked "$ws" "[features.flags] subtable header does NOT block (safe to seed)"
+ws="$(printf '["features".flags]\nsome_flag = true\n' | new_config features-subtable-quoted)"
+assert_not_blocked "$ws" '["features".flags] quoted subtable header does NOT block (safe to seed)'
+
+echo "Test: seed appends a valid plain [features] table beside a [features.flags] subtable"
+# Pins the actual, correct behavior: exactly ONE plain [features] header is appended
+# (no duplicate), the subtable header and its body are preserved, and multi_agent_v2
+# ends up on the features table. The result is valid TOML (super-table-afterward).
+ws="$(printf '[features.flags]\nsome_flag = true\n' | new_config seed-features-subtable-bare)"
+seed_v2 "$ws"
+assert_count "$ws" '^\[features\]$' 1 "exactly one plain [features] header (no duplicate) beside subtable"
+assert_grep "$ws" '^\[features\.flags\]$' "[features.flags] subtable header preserved"
+assert_grep "$ws" '^some_flag = true$' "subtable body preserved"
+assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 = true seeded onto the features table"
+ws="$(printf '["features".flags]\nsome_flag = true\n' | new_config seed-features-subtable-quoted)"
+seed_v2 "$ws"
+assert_count "$ws" '^\[features\]$' 1 'exactly one plain [features] header beside ["features".flags] subtable'
+assert_grep "$ws" '^\["features"\.flags\]$' '["features".flags] quoted subtable header preserved'
+assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 = true seeded onto the features table (quoted subtable)"
+
 echo "Test: [features]/[agents] not confused with lookalike tables"
 ws="$(printf '[features_other]\nmulti_agent_v2 = 0\n' | new_config not-agents)"
 # multi_agent_v2 appears verbatim, so the no-clobber grep legitimately blocks;

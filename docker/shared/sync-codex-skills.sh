@@ -73,6 +73,16 @@ CODEX_SKILLS_DEST="${POWBOX_CODEX_SKILLS_DEST:-$HOME/.codex/agents/skills}"
 # epoch/commit baseline. Missing metadata degrades to placeholders in seed-skills.sh.
 CODEX_SEED_META="${POWBOX_CODEX_SEED_META:-/home/node/.agent-container/codex}"
 
+# BAKE-OWNED DENYLIST — Codex's two powbox-specific skills. They ship EXCLUSIVELY via
+# the image bake and must never be written by this plugin-clone sync. Today the
+# marketplace clone simply does not carry them, so iterating its names already cannot
+# touch them; this explicit denylist is DEFENSE IN DEPTH so that if a shared skill dir
+# of the same name ever appeared upstream in the clone, the marker-gated overwrite
+# below still could not clobber the bake-owned copy via that name collision. Fixed on
+# purpose (not env-overridable): it encodes a safety invariant, not a tunable. Whitespace-
+# separated; each clone entry name is matched exactly against this set in sync_from_clone.
+POWBOX_CODEX_BAKE_ONLY_SKILLS="enable-worktrees session-learnings"
+
 # Log to the SAME bootstrap log the Claude plugin run uses (entrypoint-core.sh
 # passes it), so one boot's skill convergence — plugin + Codex sync — reads as one
 # block. APPEND only; the log lives on the shared claude-config volume.
@@ -228,6 +238,17 @@ sync_from_clone() {
 	local name target synced=0 skipped=0 rc=0
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
+		# Bake-owned denylist (defense in depth): a plugin-clone entry whose name
+		# collides with a Codex-specific bake-only skill must NEVER overwrite the
+		# bake-owned copy, even if it carries our marker. The clone does not ship
+		# these today, so this can only fire on a future upstream name collision.
+		case " $POWBOX_CODEX_BAKE_ONLY_SKILLS " in
+		*" $name "*)
+			log "skip '$name': bake-only Codex skill; the plugin-clone sync never writes it"
+			skipped=$((skipped + 1))
+			continue
+			;;
+		esac
 		target="$CODEX_SKILLS_DEST/$name"
 		# An existing entry may only be refreshed when it is a directory WE placed
 		# (carries the marker). An unmarked dir, or any non-directory collision

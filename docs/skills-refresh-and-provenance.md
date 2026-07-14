@@ -331,10 +331,12 @@ process ordered after the clone refresh; see
 flock details.
 
 It reuses this document's ownership model: it iterates the *clone's* skill names (so it
-can only touch the 8 shared skills — the 2 powbox-specific Codex skills are absent from
-the clone and remain exclusively bake-owned), overwrites only a `.powbox-seeded`-marked
-(powbox-owned) copy via an atomic stage+rename, and never touches a marker-less
-user-adopted copy. It is **SHA-gated** to a byte-for-byte no-op when unchanged, and
+can only touch the 8 shared skills — the 2 powbox-specific Codex skills, `enable-worktrees`
+and `session-learnings`, are absent from the clone and remain exclusively bake-owned), and
+as defense in depth it additionally carries an explicit bake-owned **denylist** of those two
+names, so even a future *upstream* name collision (a clone dir of the same name) could never
+overwrite the bake-owned copy. It overwrites only a `.powbox-seeded`-marked (powbox-owned)
+copy via an atomic stage+rename, and never touches a marker-less user-adopted copy. It is **SHA-gated** to a byte-for-byte no-op when unchanged, and
 stamps each refreshed marker with two extra provenance lines beyond the D2 baseline:
 
 ```

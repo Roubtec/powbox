@@ -276,6 +276,37 @@ else
 	no "atomic replace leaves a complete dir and no stray temp/backup siblings"
 fi
 
+# ================================================================================
+# Test 10: bake-owned denylist — a clone that carries a COLLIDING dir named after a
+#          Codex-specific bake-only skill (enable-worktrees) must NOT overwrite the
+#          bake-owned copy, even though that copy carries our marker at a stale sha.
+#          Defense in depth against a future upstream name collision. The sibling
+#          shared skill in the same clone still refreshes, proving the denylist is
+#          name-scoped, not a whole-pass abort.
+# ================================================================================
+R="$(new_case t10)"
+# Inject an upstream collision into the clone.
+make_skill "$R/clone/codex/dev-skills/skills/enable-worktrees" "UPSTREAM COLLISION"
+# Bake-owned dest copy: marked (powbox-owned) and at a stale sha, so absent the
+# denylist it WOULD be refreshed.
+make_skill "$R/dest/enable-worktrees" "BAKE-OWNED enable-worktrees"
+printf 'epoch=1\ncommit=baked\nagent_skills_commit=OLDSHA\nsource=bake\n' >"$R/dest/enable-worktrees/.powbox-seeded"
+# A normal shared skill, also marked+stale, to confirm the pass still converges it.
+make_skill "$R/dest/a" "STALE a"
+printf 'epoch=1\ncommit=old\nagent_skills_commit=OLDSHA\nsource=plugin-clone\n' >"$R/dest/a/.powbox-seeded"
+run_sync "$R/clone" "$R/dest" "NEWSHAB11"
+if [ "$(cat "$R/dest/enable-worktrees/SKILL.md")" = "BAKE-OWNED enable-worktrees" ] &&
+	[ "$(marker_sha "$R/dest/enable-worktrees")" = "OLDSHA" ]; then
+	ok "bake-only skill (upstream name collision in clone) never overwritten"
+else
+	no "bake-only skill (upstream name collision in clone) never overwritten"
+fi
+if [ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] && [ "$(marker_sha "$R/dest/a")" = "NEWSHAB11" ]; then
+	ok "sibling shared skill still refreshed alongside a denylisted collision"
+else
+	no "sibling shared skill still refreshed alongside a denylisted collision"
+fi
+
 echo
 echo "sync-codex-skills tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

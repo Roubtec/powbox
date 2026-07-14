@@ -109,7 +109,15 @@ seed_skill() {
 		if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
 			mv -T "$backup" "$dest" 2>/dev/null || true
 		fi
-		rm -rf "$tmp" "$backup"
+		rm -rf "$tmp"
+		# Reclaim the backup ONLY once $dest is confirmed live again (restore
+		# succeeded, or a racing seed already refilled it). If BOTH the publish and
+		# the restore failed — the narrow double-rename window — $dest is still
+		# absent, so KEEP the .old backup as the sole surviving copy for recovery /
+		# the next start's re-sync rather than deleting it here.
+		if [ -e "$dest" ] || [ -L "$dest" ]; then
+			rm -rf "$backup"
+		fi
 		return 1
 	fi
 	# No existing copy: a single atomic rename installs the skill.

@@ -268,7 +268,7 @@ R="$(new_case t9)"
 make_skill "$R/dest/a" "STALE a"
 printf 'epoch=1\ncommit=old\nagent_skills_commit=OLDSHA\nsource=plugin-clone\n' >"$R/dest/a/.powbox-seeded"
 run_sync "$R/clone" "$R/dest" "NEWSHAA10"
-leaked="$(find "$R/dest" -maxdepth 1 -name '.a.tmp.*' -o -maxdepth 1 -name '.a.old.*' 2>/dev/null)"
+leaked="$(find "$R/dest" -maxdepth 1 \( -name '.a.tmp.*' -o -name '.a.old.*' \) 2>/dev/null)"
 if [ -f "$R/dest/a/SKILL.md" ] && [ -f "$R/dest/a/.powbox-seeded" ] &&
 	[ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] && [ -z "$leaked" ]; then
 	ok "atomic replace leaves a complete dir and no stray temp/backup siblings"

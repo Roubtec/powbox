@@ -86,7 +86,7 @@ POWBOX_CODEX_BAKE_ONLY_SKILLS="enable-worktrees session-learnings"
 # Log to the SAME bootstrap log the Claude plugin run uses (entrypoint-core.sh
 # passes it), so one boot's skill convergence — plugin + Codex sync — reads as one
 # block. APPEND only; the log lives on the shared claude-config volume.
-SYNC_LOG="${POWBOX_CODEX_SYNC_LOG:-${POWBOX_PLUGIN_LOG:-$CLAUDE_CONFIG_DIR/.powbox-plugin-bootstrap.log}}"
+SYNC_LOG="${POWBOX_CODEX_SYNC_LOG:-${POWBOX_PLUGIN_LOG:-$HOME/.claude/.powbox-plugin-bootstrap.log}}"
 
 # Cross-container serialization on the SHARED codex-config volume. Like the
 # claude-config volume, ~/.codex is a single global named volume mounted into
@@ -116,7 +116,7 @@ LOCK_WAIT="${POWBOX_CODEX_SYNC_LOCK_WAIT:-300}"
 # reverse nesting (the plugin bootstrap never takes the codex lock), so no
 # deadlock. The wait defaults to the codex-sync wait but can be tuned in lockstep
 # with the plugin bootstrap via POWBOX_PLUGIN_LOCK_WAIT.
-CLAUDE_LOCK_FILE="${POWBOX_PLUGIN_LOCK_FILE:-$CLAUDE_CONFIG_DIR/.powbox-plugin-bootstrap.lock}"
+CLAUDE_LOCK_FILE="${POWBOX_PLUGIN_LOCK_FILE:-$HOME/.claude/.powbox-plugin-bootstrap.lock}"
 CLAUDE_LOCK_WAIT="${POWBOX_PLUGIN_LOCK_WAIT:-$LOCK_WAIT}"
 
 # Never hang on an interactive git credential prompt: the only git op here is a

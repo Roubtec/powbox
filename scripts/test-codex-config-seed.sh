@@ -260,6 +260,26 @@ assert_not_blocked "$ws" "features_x.foo = 1 does NOT match the dotted-features 
 ws="$(printf "['agentsx']\nfoo = 1\n" | new_config agentsx-squoted)"
 assert_not_blocked "$ws" "['agentsx'] (single-quoted lookalike) does NOT match the [agents] guard"
 
+echo "Test: guard ignores a commented-out / documented multi_agent_v2 (not a real assignment)"
+# A `# multi_agent_v2 = true` line is a TOML comment, so the key is NOT set; the
+# guard strips comments before matching and must therefore ALLOW the seed.
+ws="$(printf '# multi_agent_v2 = true\n' | new_config v2-commented)"
+assert_not_blocked "$ws" "commented-out # multi_agent_v2 = true does NOT block (seed)"
+ws="$(printf '%s\n# multi_agent_v2 = false\n' "$STATUSLINE_CONFIG" | new_config v2-commented-note)"
+assert_not_blocked "$ws" "a documentation comment mentioning multi_agent_v2 does NOT block"
+# But a REAL assignment carrying a trailing comment must still block (comment
+# stripping must not swallow the assignment itself).
+ws="$(printf '[features]\nmulti_agent_v2 = true # opt in\n' | new_config v2-trailing-comment)"
+assert_blocked "$ws" "real multi_agent_v2 = true with a trailing comment still blocks"
+
+echo "Test: guard does NOT match a different key that merely ends with the substring"
+# `foo_multi_agent_v2` is a distinct key; the boundary anchor must keep it from
+# being mistaken for the literal `multi_agent_v2` key, so the seed is allowed.
+ws="$(printf '[features]\nfoo_multi_agent_v2 = true\n' | new_config v2-suffix-key)"
+assert_not_blocked "$ws" "foo_multi_agent_v2 = true does NOT match the multi_agent_v2 guard"
+ws="$(printf 'features = { foo_multi_agent_v2 = true }\n' | new_config v2-suffix-key-inline)"
+assert_blocked "$ws" "inline features = { foo_multi_agent_v2 = ... } blocks (features already defined)"
+
 echo "Test: seed writes [features] multi_agent_v2 = true onto a statusline config"
 ws="$(printf '%s\n' "$STATUSLINE_CONFIG" | new_config seed-fresh)"
 seed_v2 "$ws"

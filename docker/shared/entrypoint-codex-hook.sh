@@ -266,19 +266,36 @@ ensure_table_scalar_setting() {
 #
 # The guard is deliberately conservative: when in doubt it errs toward NOT
 # seeding rather than authoring a config Codex would reject. It keys off the
-# literal `multi_agent_v2` name, so the (unrealistic) case of that key living
-# under an unrelated table also blocks — this only ever skips the seed, never
-# corrupts a config, so the conservative over-match is acceptable.
+# literal `multi_agent_v2` name pinned to a TOML key boundary (so a different key
+# that merely ends with the substring, e.g. `foo_multi_agent_v2`, does NOT trip
+# it) and matches against a comment-stripped view of the file (so a documented or
+# commented-out `# multi_agent_v2 = true` does NOT trip it either). The one
+# remaining conservative over-match is a REAL multi_agent_v2 assignment placed
+# under an unrelated table: it still blocks. That only ever skips the seed, never
+# corrupts a config, so the residual over-match is acceptable.
 config_v2_seed_blocked() {
 	local file="$1"
 
 	[ -f "$file" ] || return 1
 
+	# Match against a comment-stripped view of the file so a documented or
+	# commented-out occurrence (e.g. `# multi_agent_v2 = true`, `# [agents]`)
+	# never trips a guard. Stripping from the first `#` to end-of-line is safe
+	# here: a `#` inside a quoted string only truncates an unrelated line tail (it
+	# cannot forge a key match), and a real assignment can never live entirely
+	# after a `#` — that would make it a comment, not an assignment.
+	local body
+	body="$(sed 's/#.*//' "$file")"
+
 	# Any multi_agent_v2 assignment, whether under [features] or inline; the key
 	# is not line-anchored so an inline `features = { multi_agent_v2 = ... }` is
 	# caught too, and an optional closing quote (either " or ', which TOML treats
-	# identically) catches a quoted `"multi_agent_v2"` / `'multi_agent_v2'`.
-	if grep -qE 'multi_agent_v2["'\'']?[[:space:]]*=' "$file"; then
+	# identically) catches a quoted `"multi_agent_v2"` / `'multi_agent_v2'`. The
+	# leading `(^|[^A-Za-z0-9_-])` pins the name to a TOML key boundary so a
+	# longer key ending in the substring (e.g. `foo_multi_agent_v2`) is not
+	# mistaken for it; the boundary char (line start, whitespace, `{`, `.`, or a
+	# quote) is not part of a bare key, so every real spelling still matches.
+	if grep -qE '(^|[^A-Za-z0-9_-])multi_agent_v2["'\'']?[[:space:]]*=' <<<"$body"; then
 		return 0
 	fi
 
@@ -286,7 +303,7 @@ config_v2_seed_blocked() {
 	# array-of-tables, with optional inner whitespace or quotes), a top-level
 	# dotted key (agents.<key> = ...), or an inline table (agents = { ... }), with
 	# an optionally " or ' quoted "agents" (TOML-equivalent spellings).
-	if grep -qE '^[[:space:]]*(\[\[?[[:space:]]*["'\'']?agents["'\'']?[[:space:]]*[].]|["'\'']?agents["'\'']?[[:space:]]*[.=])' "$file"; then
+	if grep -qE '^[[:space:]]*(\[\[?[[:space:]]*["'\'']?agents["'\'']?[[:space:]]*[].]|["'\'']?agents["'\'']?[[:space:]]*[.=])' <<<"$body"; then
 		return 0
 	fi
 
@@ -297,7 +314,7 @@ config_v2_seed_blocked() {
 	# a dotted key (features.x) or an assignment (features = ...); a real [features]
 	# table header starts with `[` and is intentionally not matched, so the writer
 	# can extend it in place. Accept a bare or " / ' quoted "features".
-	if grep -qE '^[[:space:]]*["'\'']?features["'\'']?[[:space:]]*[.=]' "$file"; then
+	if grep -qE '^[[:space:]]*["'\'']?features["'\'']?[[:space:]]*[.=]' <<<"$body"; then
 		return 0
 	fi
 

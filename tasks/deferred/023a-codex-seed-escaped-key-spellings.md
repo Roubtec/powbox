@@ -1,6 +1,6 @@
 # Task 023a — Codex config seeding is blind to escaped/encoded TOML key spellings
 
-Follow-up to **Task 023** (seed `features.multi_agent_v2 = true`, PR #108). Parked in `tasks/deferred/` because the branch is defendable as-is (it builds, `scripts/test-codex-config-seed.sh` is 85/85 green, and it covers every realistic config shape), the triggering input essentially never occurs in a hand-written `config.toml`, and the proper fix is a costly design change — TOML-aware parsing — that touches the whole grep/awk seeding path, not a review-fix commit.
+Follow-up to **Task 023** (seed `features.multi_agent_v2 = true`, PR #108). Parked in `tasks/deferred/` because the branch is defendable as-is (it builds, `scripts/test-codex-config-seed.sh` is green, and it covers every realistic config shape), the triggering input essentially never occurs in a hand-written `config.toml`, and the proper fix is a costly design change — TOML-aware parsing — that touches the whole grep/awk seeding path, not a review-fix commit.
 
 ## The gap
 

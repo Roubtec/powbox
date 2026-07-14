@@ -267,10 +267,17 @@ ws="$(printf '# multi_agent_v2 = true\n' | new_config v2-commented)"
 assert_not_blocked "$ws" "commented-out # multi_agent_v2 = true does NOT block (seed)"
 ws="$(printf '%s\n# multi_agent_v2 = false\n' "$STATUSLINE_CONFIG" | new_config v2-commented-note)"
 assert_not_blocked "$ws" "a documentation comment mentioning multi_agent_v2 does NOT block"
-# But a REAL assignment carrying a trailing comment must still block (comment
-# stripping must not swallow the assignment itself).
+ws="$(printf '  # multi_agent_v2 = true\n' | new_config v2-commented-indented)"
+assert_not_blocked "$ws" "an indented full-line # multi_agent_v2 comment does NOT block"
+# But a REAL assignment carrying a trailing comment must still block: only WHOLE
+# comment lines are dropped, never a trailing `# ...`, so the assignment survives.
 ws="$(printf '[features]\nmulti_agent_v2 = true # opt in\n' | new_config v2-trailing-comment)"
 assert_blocked "$ws" "real multi_agent_v2 = true with a trailing comment still blocks"
+# A `#` inside a quoted string on an inline-table line must NOT hide a real
+# same-line multi_agent_v2 key: whole-line-only comment removal never touches
+# this line, so the conservative no-clobber still fires (guards peer finding 1).
+ws="$(printf 'other = { note = "#", multi_agent_v2 = true }\n' | new_config v2-hash-in-string)"
+assert_blocked "$ws" 'a # inside a string does not hide a same-line multi_agent_v2 (blocks)'
 
 echo "Test: guard does NOT match a different key that merely ends with the substring"
 # `foo_multi_agent_v2` is a distinct key; the boundary anchor must keep it from

@@ -266,33 +266,38 @@ ensure_table_scalar_setting() {
 #
 # The guard is deliberately conservative: when in doubt it errs toward NOT
 # seeding rather than authoring a config Codex would reject. It keys off the
-# literal `multi_agent_v2` name pinned to a TOML key boundary (so a different key
-# that merely ends with the substring, e.g. `foo_multi_agent_v2`, does NOT trip
-# it) and matches against a comment-stripped view of the file (so a documented or
-# commented-out `# multi_agent_v2 = true` does NOT trip it either). The one
-# remaining conservative over-match is a REAL multi_agent_v2 assignment placed
-# under an unrelated table: it still blocks. That only ever skips the seed, never
-# corrupts a config, so the residual over-match is acceptable.
+# literal `multi_agent_v2` name pinned to a TOML key boundary (so a different
+# BARE key that merely ends with the substring, e.g. `foo_multi_agent_v2`, does
+# NOT trip it) and ignores full-line comments (so a documented or commented-out
+# `# multi_agent_v2 = true` does NOT trip it either). Two conservative
+# over-matches remain, both harmless because they only ever SKIP the seed and
+# never corrupt a config: a REAL multi_agent_v2 assignment placed under an
+# unrelated table still blocks, and a quoted key literally containing
+# `.multi_agent_v2` (e.g. `"foo.multi_agent_v2"`) also blocks — grep cannot tell
+# that quoted single key apart from a dotted `features.multi_agent_v2` without
+# tracking quote context, and over-blocking it is the safe direction.
 config_v2_seed_blocked() {
 	local file="$1"
 
 	[ -f "$file" ] || return 1
 
-	# Match against a comment-stripped view of the file so a documented or
+	# Match against a view with whole-line comments removed, so a documented or
 	# commented-out occurrence (e.g. `# multi_agent_v2 = true`, `# [agents]`)
-	# never trips a guard. Stripping from the first `#` to end-of-line is safe
-	# here: a `#` inside a quoted string only truncates an unrelated line tail (it
-	# cannot forge a key match), and a real assignment can never live entirely
-	# after a `#` — that would make it a comment, not an assignment.
+	# never trips a guard. Only lines that are ENTIRELY a comment (optional
+	# leading whitespace then `#`) are dropped — deliberately not trailing `#…`
+	# comments. Stripping from a mid-line `#` would corrupt an inline table such
+	# as `x = { note = "#", multi_agent_v2 = true }`, hiding the real same-line
+	# key from the guard; a line-only drop can never do that, and a real
+	# assignment is never a whole-line comment, so nothing legitimate is lost.
 	local body
-	body="$(sed 's/#.*//' "$file")"
+	body="$(sed '/^[[:space:]]*#/d' "$file")"
 
 	# Any multi_agent_v2 assignment, whether under [features] or inline; the key
 	# is not line-anchored so an inline `features = { multi_agent_v2 = ... }` is
 	# caught too, and an optional closing quote (either " or ', which TOML treats
 	# identically) catches a quoted `"multi_agent_v2"` / `'multi_agent_v2'`. The
 	# leading `(^|[^A-Za-z0-9_-])` pins the name to a TOML key boundary so a
-	# longer key ending in the substring (e.g. `foo_multi_agent_v2`) is not
+	# longer BARE key ending in the substring (e.g. `foo_multi_agent_v2`) is not
 	# mistaken for it; the boundary char (line start, whitespace, `{`, `.`, or a
 	# quote) is not part of a bare key, so every real spelling still matches.
 	if grep -qE '(^|[^A-Za-z0-9_-])multi_agent_v2["'\'']?[[:space:]]*=' <<<"$body"; then

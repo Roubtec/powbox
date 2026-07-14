@@ -283,6 +283,13 @@ ensure_table_scalar_setting() {
 #     whole-line comments are dropped (see the sed note below — narrowing this
 #     further would reintroduce the mid-line `#`-in-string hazard).
 # In every case over-blocking is the safe direction.
+#
+# Known non-goal (like every ensure_* seeder here, this is literal-text matching,
+# not a TOML parser): an escaped/encoded key spelling — e.g. a basic-string key
+# `"multi_agent_v2"` whose `\uXXXX` decodes to the real key — is NOT recognized,
+# so it could evade this guard and the writer's no-clobber check and let a
+# duplicate key be authored. Unrealistic for an ASCII-seeded config.toml and
+# tracked for future TOML-aware hardening in tasks/deferred/023a.
 config_v2_seed_blocked() {
 	local file="$1"
 

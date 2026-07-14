@@ -63,7 +63,11 @@ seed_skill_names() {
 # Copy one skill (cp -a) into a sibling temp dir, stamp the ownership marker, then
 # atomically swap it into place so a concurrently-invoking agent never observes a
 # half-written skill. Overwrites <dest_skill_dir> if it exists. Returns nonzero on
-# failure, leaving any existing destination untouched.
+# failure; an existing destination is normally preserved — the prior copy is renamed
+# aside before the staged copy is published and moved back if the publish fails —
+# EXCEPT in the narrow double-failure case where both the publish and the restoring
+# rename fail: <dest_skill_dir> is then left absent and the prior copy survives as a
+# hidden `.old.*` sibling backup (kept for recovery / the next start's re-sync).
 seed_skill() {
 	local src="${1%/}" dest="$2" marker="$3"
 	local parent name tmp backup

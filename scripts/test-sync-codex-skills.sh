@@ -9,7 +9,10 @@
 #
 # Runs directly against the repo copies of sync-codex-skills.sh + seed-skills.sh —
 # no image build needed. The agent-skills SHA is injected via
-# POWBOX_CODEX_SKILL_CLONE_SHA so no git repo is required. Requires only bash.
+# POWBOX_CODEX_SKILL_CLONE_SHA so no git repo is required. Requires bash plus common
+# POSIX userland — mktemp, stat, grep, find, and the cp/mv/rmdir the sourced
+# seed-skills.sh primitives call; flock is optional (the two clone-read race-guard
+# cases are skipped when no flock binary is present).
 #
 # Usage: scripts/test-sync-codex-skills.sh
 set -euo pipefail

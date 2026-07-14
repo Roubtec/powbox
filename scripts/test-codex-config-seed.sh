@@ -237,6 +237,7 @@ ws="$(printf '["features".flags]\nsome_flag = true\n' | new_config seed-features
 seed_v2 "$ws"
 assert_count "$ws" '^\[features\]$' 1 'exactly one plain [features] header beside ["features".flags] subtable'
 assert_grep "$ws" '^\["features"\.flags\]$' '["features".flags] quoted subtable header preserved'
+assert_grep "$ws" '^some_flag = true$' "subtable body preserved (quoted subtable)"
 assert_grep "$ws" '^multi_agent_v2 = true$' "multi_agent_v2 = true seeded onto the features table (quoted subtable)"
 
 echo "Test: [features]/[agents] not confused with lookalike tables"

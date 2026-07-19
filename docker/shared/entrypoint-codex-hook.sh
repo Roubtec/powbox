@@ -413,7 +413,8 @@ CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
 # Codex 0.135 removed context-remaining-percent; keep older persisted volumes
 # warning-free while preserving the user's status line ordering.
 replace_config_string "$CONFIG_FILE" '"context-remaining-percent"' '"context-remaining"'
-STATUS_LINE_DEFAULTS=$(cat <<'EOF'
+STATUS_LINE_DEFAULTS=$(
+	cat <<'EOF'
   "model-with-reasoning",
   "current-dir",
   "context-remaining",
@@ -422,7 +423,8 @@ STATUS_LINE_DEFAULTS=$(cat <<'EOF'
   "used-tokens"
 EOF
 )
-TERMINAL_TITLE_DEFAULTS=$(cat <<'EOF'
+TERMINAL_TITLE_DEFAULTS=$(
+	cat <<'EOF'
   "current-dir",
   "git-branch",
   "model-name",
@@ -459,7 +461,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		# shellcheck disable=SC2016
 		# envsubst needs literal ${VAR} names.
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' \
-			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+			<"$AGENT_TMPL" >"$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 
 		# Seed image-baked skills (no-clobber: preserves user-modified versions;
 		# delete the skill directory to pick up the latest image version on next
@@ -472,7 +474,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/agents/skills" noclobber "$AGENT_SEED_DIR" ||
 			echo "Warning: one or more Codex skills failed to seed; continuing." >&2
 
-		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
+		echo "$IMAGE_EPOCH" >"$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
 

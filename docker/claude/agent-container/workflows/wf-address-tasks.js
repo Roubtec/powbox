@@ -2,7 +2,7 @@
  * wf-address-tasks — dynamic-workflow form of the `address-tasks` skill.
  *
  * Resolve a batch of pre-planned task files into dependency waves, then for each
- * task run an implement -> review -> fix loop (max 6 rounds), scan reviewed
+ * task run an implement -> review -> fix loop (max 12 rounds), scan reviewed
  * sibling branches for add/add collisions before delivery and deconflict them
  * (an orchestrator-deputy agent renames one side, regenerates derived files, and
  * the changed branch is re-reviewed) — or hold a name that must stay identical —
@@ -11,7 +11,7 @@
  *
  * Why a workflow rather than a skill
  * ----------------------------------
- * The control flow the skill spells out in prose — dependency waves, the 6-round
+ * The control flow the skill spells out in prose — dependency waves, the 12-round
  * loop, dependent waves gated on their prerequisites, "the implementer finishes
  * before its reviewer starts" — becomes ordinary JavaScript here, run
  * deterministically instead of relying on the model to follow it. Independent
@@ -61,7 +61,7 @@
 // phase() titles still get their own progress group.
 export const meta = {
   name: "wf-address-tasks",
-  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 6 rounds), pre-PR collision guard that deconflicts add/add clashes (rename one side + re-review) or holds an imperative name, one PR per delivered task.",
+  description: "Implement a batch of pre-planned task files: dependency waves, per-task worktree, implement->review->fix loop (max 12 rounds), pre-PR collision guard that deconflicts add/add clashes (rename one side + re-review) or holds an imperative name, one PR per delivered task.",
   whenToUse: "Execute a folder/glob of pre-planned task files end to end with per-task worktree isolation. Not for one-off coding requests or planning new tasks.",
   phases: [
     { title: "Bootstrap", detail: "wt-bootstrap: root-safety checks, orphan prune, remote probe" },
@@ -72,14 +72,11 @@ export const meta = {
   ],
 };
 
-const MAX_ROUNDS = 6;
+const MAX_ROUNDS = 12;
 
-// Finish over fan-out (inherited from the skills' adaptive-throttling rule): a
-// wave that runs four-wide and dies to ENOSPC delivers nothing; the same wave
-// two-wide delivers everything a little slower. Width is the MINIMUM of the
-// dependency-derived wave size, this hard cap, and a storage-headroom cap
-// computed from wt-bootstrap's availBytes.
-const MAX_WAVE_WIDTH = 4;
+// Use the full dependency-derived wave width unless measured storage headroom
+// requires sub-batching. The workflow runtime/provider owns its own active-agent
+// ceiling and rate limiting; do not impose an arbitrary smaller policy cap here.
 // Conservative per-task estimate. On the volume-backed path pnpm packages are
 // hardlinked, so the real cost is build artifacts + package metadata; 1 GiB
 // keeps a comfortable margin without measuring a representative install (which
@@ -523,11 +520,13 @@ for (const wave of plan.waves) {
   }
 }
 
-// Wave width: dependency-derived size, capped by MAX_WAVE_WIDTH and by storage
-// headroom measured at bootstrap (finish over fan-out — see the constants).
+// Wave width: use every dependency-ready task unless measured storage headroom
+// requires sub-batching. When bootstrap cannot report storage, leave the wave at
+// its dependency-derived width and let the runtime enforce its actual agent cap.
 const availBytes = typeof boot.availBytes === "number" ? boot.availBytes : 0;
-const storageCap = availBytes > 0 ? Math.max(1, Math.floor(availBytes / PER_WORKTREE_BYTES)) : MAX_WAVE_WIDTH;
-const widthCap = Math.min(MAX_WAVE_WIDTH, storageCap);
+const dependencyWidth = Math.max(1, ...plan.waves.map((wave) => (Array.isArray(wave) ? wave.length : 0)));
+const storageCap = availBytes > 0 ? Math.max(1, Math.floor(availBytes / PER_WORKTREE_BYTES)) : dependencyWidth;
+const widthCap = Math.min(dependencyWidth, storageCap);
 
 for (let w = 0; w < plan.waves.length; w++) {
   const wave = plan.waves[w];
@@ -562,7 +561,7 @@ for (let w = 0; w < plan.waves.length; w++) {
 
   phase(`Wave ${w + 1} (${runnable.length} task${runnable.length === 1 ? "" : "s"})`);
   if (runnable.length > widthCap) {
-    log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) (cap ${MAX_WAVE_WIDTH}, storage allows ${storageCap}).`);
+    log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) because measured storage allows ${storageCap}.`);
     throttled.push({ wave: w + 1, tasks: runnable.length, width: widthCap });
   }
   // Sub-batch the wave at the width cap: a wave that exhausts the .worktrees

@@ -112,20 +112,21 @@ sequencing; `address-tasks` exists to claw parallelism back with its
 own worktree-per-task bootstrap. This workflow folds both into one: it runs the
 same explicit `.worktrees/$CONTAINER_NAME/<slug>` worktree-per-task model (see
 "Worktrees" above), but expresses the orchestration — dependency waves gated on
-their prerequisites, the 6-round implement→review→fix loop, "implementer
+their prerequisites, the 12-round implement→review→fix loop, "implementer
 finishes before its reviewer" — as deterministic JavaScript rather than prose.
 Independent tasks run concurrently via `parallel()` over distinct worktrees.
 
-It also ports the skill's **adaptive throttling** ("finish over fan-out") as
-code: wave width is the minimum of the dependency-derived size, a hard cap, and
-a storage cap computed from `wt-bootstrap`'s `availBytes`; an over-wide wave is
-run in sub-batches and the throttling decision is reported in the summary. Because
+It also ports the skill's **adaptive throttling** as code: every dependency-ready
+task is launched unless measured storage headroom requires a narrower wave; the
+workflow adds no arbitrary agent-breadth cap because the runtime/provider already
+enforces its actual available-agent and rate limits. A storage-bound wave is run
+in sub-batches and the throttling decision is reported in the summary. Because
 the collision scan below must compare every reviewed branch before any delivery,
 a sub-batched wave can't deliver-and-reclaim each sub-batch as it finishes, so it
 instead reclaims each finished sub-batch's reviewed worktrees right away — the
 branch refs persist in `.git`, the scan compares by ref, and the deconflict,
 re-review, and delivery steps re-attach on demand via `wt-enter` — keeping the
-live worktree count bounded by the cap rather than growing to the whole wave.
+live worktree count bounded by the storage-derived width rather than growing to the whole wave.
 
 Before delivering each wave's reviewed branches, it runs a **pre-PR collision
 scan**: independent siblings built in parallel can each *add* the same new file

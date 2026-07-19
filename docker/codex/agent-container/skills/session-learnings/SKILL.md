@@ -1,24 +1,24 @@
 ---
 name: session-learnings
-description: "Capture actionable learnings from a substantial Codex agent run as an uncommitted Markdown note: review the visible session transcript/context, identify powbox sandbox deficiencies, orchestration friction, wasted turns, missing tooling, docs gaps, and automation opportunities, then write a concise report under docs/ or the repo root without staging or committing it. Trigger when the user asks to record session learnings, run a post-run retrospective, capture environment issues, document improvement opportunities after an agent session, or improve powbox based on agent-run friction. Do not trigger for ordinary code review or project bug reports unless they affected the agent environment or workflow."
+description: "Capture actionable learnings from a substantial Codex agent run as a concise Markdown report, then ferry it off a remote machine by committing only the report on a dedicated temporary branch, pushing that branch to origin, and opening no PR. Review the visible session transcript/context for powbox sandbox deficiencies, orchestration friction, wasted turns, missing tooling, docs gaps, and automation opportunities. Trigger when the user asks to record session learnings, run a post-run retrospective, capture environment issues, document improvement opportunities after an agent session, or improve powbox based on agent-run friction. Do not trigger for ordinary code review or project bug reports unless they affected the agent environment or workflow."
 ---
 
 # Session Learnings
 
 Record practical improvement opportunities discovered during a Codex run.
 
-This skill is a retrospective capture tool, not a repair workflow.
-The output is a Markdown artifact for humans to triage later.
+This skill is a retrospective capture and transport tool, not a repair workflow. The output is a Markdown artifact for humans to triage later.
 
 ## Rules
 
-- Create a new, untracked Markdown file only when there is at least one concrete learning, unless the user explicitly asks for a no-issue report.
-- Never stage or commit the file.
-- If the broader task also involves committing code, keep this retrospective file out of the commit.
+- Create a report only when there is at least one concrete learning, unless the user explicitly asks for a no-issue report.
+- Never stage or commit the report on the session's current branch or checkout.
+- Publish the report through an isolated temporary worktree on a dedicated throwaway branch based on the remote default branch.
+- Add exactly one report-only commit, push the branch to `origin`, and do not open a pull request.
+- Do not switch, stash, clean, reset, or alter the session's current branch, tracked files, or pre-existing uncommitted changes.
 - Do not paste raw transcripts, long command logs, credentials, tokens, API keys, private URLs, or secret-looking values.
 - Prefer observed facts over speculation; label uncertain inferences as such.
-- Keep the audit efficient.
-  Use the transcript/context already available first, and inspect files or logs only when they materially improve the report.
+- Keep the audit efficient. Use the transcript/context already available first, and inspect files or logs only when they materially improve the report.
 
 ## Scope
 
@@ -35,25 +35,15 @@ Do not use this skill to file ordinary product bugs, code-review findings, or fe
 
 ## Procedure
 
-1. **Review the run.**
-   Use the current conversation transcript/context, your command history, failed commands, interruptions, retries, and any relevant user corrections.
-   If the user provides a transcript path, read it.
-   If no transcript path is provided, do not spend more than a few minutes searching for on-disk session logs; the visible context is sufficient.
+1. **Review the run.** Use the current conversation transcript/context, your command history, failed commands, interruptions, retries, and any relevant user corrections. If the user provides a transcript path, read it. If no transcript path is provided, do not spend more than a few minutes searching for on-disk session logs; the visible context is sufficient.
 
-2. **Filter for actionability.**
-   Keep only items with a plausible improvement path.
-   Merge duplicates.
-   Drop complaints that cannot be reproduced, cannot be acted on, or are purely about task complexity.
+2. **Filter for actionability.** Keep only items with a plausible improvement path. Merge duplicates. Drop complaints that cannot be reproduced, cannot be acted on, or are purely about task complexity.
 
-3. **Choose an output path.**
-   Prefer `docs/agent-session-learnings-YYYYMMDD-HHMM.md` when `docs/` exists.
-   Otherwise use `agent-session-learnings-YYYYMMDD-HHMM.md` at the repo root.
-   Use UTC timestamps from `date -u +%Y%m%d-%H%M`.
-   If the path already exists, append a short numeric suffix instead of overwriting it.
+3. **Choose artifact names.** Use one UTC timestamp from `date -u +%Y%m%d-%H%M%S` for both `docs/agent-session-learnings-YYYYMMDD-HHMMSS.md` (or the repo root when `docs/` does not exist) and `learnings/session-YYYYMMDD-HHMMSS`. If either the path or branch already exists locally or on `origin`, append the same short numeric suffix to both instead of overwriting or force-pushing.
 
-4. **Write the report.**
-   Keep it concise but specific enough that a maintainer can convert entries into tasks.
-   Use this structure:
+4. **Prepare an isolated ferry branch.** Verify that the current directory belongs to a Git repository with an `origin` remote, resolve and fetch `origin`'s default branch, and create a temporary worktree with the ferry branch based on that remote default branch. When the powbox worktree helpers are available, run `wt-bootstrap` first and stop with a clear report if it fails; use a safely allocated temporary directory with `git worktree` only when those helpers are unavailable. Do not create or check out the ferry branch in the session's current worktree. If the repository or remote is unavailable, write the report at the chosen path in the current checkout as an untracked fallback, do not stage it, and clearly report that it could not be ferried.
+
+5. **Write the report in the temporary worktree.** Keep it concise but specific enough that a maintainer can convert entries into tasks. Use this structure:
 
    ```markdown
    # Agent Session Learnings - YYYY-MM-DD HH:MM UTC
@@ -61,7 +51,7 @@ Do not use this skill to file ordinary product bugs, code-review findings, or fe
    Repository: <repo name or path>
    Agent: Codex
    Session focus: <one-line summary of the work>
-   Status: Uncommitted retrospective note
+   Transport: Temporary branch <branch> (no PR)
 
    ## Summary
 
@@ -84,14 +74,10 @@ Do not use this skill to file ordinary product bugs, code-review findings, or fe
    - <small actionable next step>
    ```
 
-   Omit empty sections.
-   Add a short "No concrete issues found" summary only when the user explicitly requested a report even if nothing went wrong.
+   Omit empty sections. Add a short "No concrete issues found" summary only when the user explicitly requested a report even if nothing went wrong.
 
-5. **Verify it remains uncommitted.**
-   Run `git status --short -- <file>` when inside a git repo.
-   The file should appear as `??`.
-   If it was accidentally staged, unstage it with `git restore --staged -- <file>` and re-check.
+6. **Commit and publish only the report.** Check the temporary worktree's status, stage the report path explicitly, and verify that the staged path set contains only that file before committing. Create one commit with a descriptive session-learnings message, then push the ferry branch to `origin` with upstream tracking. Never force-push and never create a pull request.
 
-6. **Report back.**
-   Tell the user the file path, the number of issues captured, and that it was left untracked.
-   If you found no concrete learnings and did not write a file, say that directly.
+7. **Clean up safely.** After a successful push, verify that the temporary worktree is clean and remove it; keep the local and remote ferry branch so the user can retrieve the report. If committing or pushing fails, preserve the report, branch, and temporary worktree for recovery, and report the exact failure instead of deleting the only usable copy. Leave the session's original checkout untouched except for the explicit untracked fallback when publication cannot be attempted.
+
+8. **Report back.** Tell the user the report path, issue count, ferry branch, commit, and push status, and state that no pull request was opened. If no concrete learnings were found and no report was requested for that case, say directly that no file or branch was created.

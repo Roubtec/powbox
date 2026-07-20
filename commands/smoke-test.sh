@@ -117,6 +117,27 @@ else
 	skipped+=("Stage 0d: worktree orphan-safety baked-helper test (image absent)")
 fi
 
+# Stage 0e — Podman Compose exec-form health-check probe invariants (task 025).
+# Hermetic guard for scripts/smoke-test-podman.sh's Compose health-check block: it
+# parses the embedded fixture with yq and asserts the health check stays an EXEC-form
+# CMD array (not CMD-SHELL), that the probe drives the check and requires "healthy",
+# that cleanup tears down the project + only the temp dir, and that the Bash/PowerShell
+# probes stay in parity — the load-bearing bits that a plain edit could silently
+# neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
+# not a baked artifact), so a host run suffices — but it needs `yq`. Prefer the
+# in-image run (yq is guaranteed in the agent image) when the image is present; else
+# fall back to a host run only when `yq` is available, else record a skip.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running Podman Compose health-check probe unit test (in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-podman-compose-healthcheck.sh
+elif command -v yq >/dev/null 2>&1; then
+	echo "Running Podman Compose health-check probe unit test (host source — image '$IMAGE' absent) ..."
+	"${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh"
+else
+	echo "WARNING: skipping Podman Compose health-check probe unit test (Stage 0e) — image '$IMAGE' absent and host 'yq' is unavailable (needed to parse the embedded fixture)."
+	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs yq)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -245,7 +266,8 @@ fi
 # Stage 3 — rootless Podman engine: the agent image bakes podman + a docker shim
 # (docs/rootless-podman.md). This is the automated guard that follow-up asked for —
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in,
-# a Podman without the `compose` subcommand, a nested run that no longer starts) is
+# a Podman without the `compose` subcommand, a nested run that no longer starts, or
+# a Compose exec-form health check that no longer reaches healthy) is
 # caught here. The helper runs the image with the launch-time device + security
 # wiring the launcher normally supplies via the compose overlays. On a host that
 # cannot expose /dev/net/tun it still validates the static engine wiring and skips

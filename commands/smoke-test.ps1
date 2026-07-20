@@ -113,6 +113,25 @@ else {
   }
 }
 
+# Stage 0e - Podman Compose exec-form health-check probe invariants (task 025). The
+# hermetic Bash test parses scripts/smoke-test-podman.sh's embedded Compose fixture with
+# yq and asserts the health check stays an EXEC-form CMD array (not CMD-SHELL), that the
+# probe drives the check and requires "healthy", that cleanup tears down the project +
+# only the temp dir, and that the Bash/PowerShell probes stay in parity. It runs INSIDE
+# the agent image (which ships yq and bash) with the repo mounted read-only. Self-skips
+# (recorded in $skipped) when the image is absent.
+if (-not $imagePresent) {
+  Write-Warning "Skipping Podman Compose health-check probe unit test (Stage 0e) - image '$Image' not found (needs bash + yq to parse the embedded fixture)."
+  $skipped.Add("Stage 0e: Podman Compose health-check probe unit test (image absent)")
+}
+else {
+  Write-Host "Running Podman Compose health-check probe unit test (in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-podman-compose-healthcheck.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "Podman Compose health-check probe unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe

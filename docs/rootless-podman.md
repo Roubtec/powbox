@@ -433,6 +433,54 @@ On trixie (Podman 5.4.2) all four forms work: `podman compose …` (native
 subcommand) and `docker compose …` (via the shim) both delegate to
 `podman-compose` (now v1.3.0), and `podman-compose`/`docker-compose` work directly.
 
+## Compose health-check behavior (exec-form checks; validated scope)
+
+**Validated command/provider (2026-07):** a Compose service defined with an
+**exec-form** health check (`healthcheck.test: ["CMD", "/bin/true"]`, the shape
+distroless images need) is exercised by the Podman smoke via `docker compose`
+(the shim spelling agents are expected to use). `docker compose` and
+`podman compose` are the **same path** here — both route to the `podman-compose`
+1.3 provider — so the smoke tests the one canonical spelling agents use rather
+than advertising two that could diverge. The smoke asserts the exec-form check is
+wired onto the service and that the service reaches **`healthy`**; it fails clearly
+if Compose drops the check, mistranslates the exec array into a non-runnable
+command, or leaves the state stuck at `starting`.
+
+Two behaviors are **deliberately accepted limitations** of this sandbox, recorded
+here so a future reader does not mistake them for regressions:
+
+1. **No automatic health-state transition (no systemd).** Podman schedules the
+   *periodic* health check through a systemd transient timer. This container runs
+   `cgroup_manager=cgroupfs` with no systemd (`/run/systemd/system` is absent), so
+   nothing ever fires the check on its own and a service's health status stays at
+   `starting` indefinitely — this is true even for a plain
+   `podman run --health-cmd …`, not just Compose, and even for a shell-bearing
+   image. The supported trigger in this environment is to run the check explicitly:
+   `podman healthcheck run <container>` executes the wired command once and
+   propagates the result to `healthy`/`unhealthy`. The smoke therefore *drives* the
+   check with `podman healthcheck run` and then asserts propagation to `healthy`,
+   rather than waiting on a timer that will never fire. Projects that rely on a
+   Compose service's own health state (e.g. a `depends_on: { condition:
+   service_healthy }`) should account for this: without systemd the dependency gate
+   will not advance on its own.
+2. **`podman-compose` 1.3 shell-wraps the exec form.** An exec-form test
+   `["CMD", "/bin/true"]` is translated to `["CMD-SHELL", "/bin/sh -c /bin/true"]`,
+   i.e. it is run through `/bin/sh`. A shell-bearing image (Alpine, Debian) runs it
+   fine; a **distroless** image with no `/bin/sh` cannot, so the wrapped command
+   fails and the service never goes `healthy` — exactly the Kalm2 SPIRE-overlay
+   symptom that motivated this check. Until the provider stops wrapping the exec
+   form, give a distroless service a health-check binary reachable through a shell,
+   or ship a minimal shell, or run the check binary as the container command and
+   gate on liveness another way.
+
+The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
+throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project and
+removes only that directory on success or failure. Its scope is Compose exec-array
+translation and health-state propagation on a shell-bearing image (Alpine) — not a
+general Compose conformance suite. `scripts/test-podman-compose-healthcheck.sh` is
+the hermetic, image-free guard that locks the probe's invariants (exec form, the
+`healthy` assertion, cleanup, Bash/PowerShell parity).
+
 Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
 container before committing — all candidates resolve): `FROM node:24-trixie-slim`;
 `php8.2-*` → `php8.4-*`; **Microsoft repo via the official
@@ -519,13 +567,17 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
   validation prompt above: engine sanity (rootless, `cgroupfs`, `netavark`, the
   `firewall_driver=iptables` drop-in, subuid/subgid, the `podman compose`
   subcommand that the trixie bump exists for), a nested run on the default network
-  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), and a bridge
+  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), a bridge
   network with a published port (proves the iptables firewall driver + the
-  `route_localnet` sysctl `systempaths=unconfined` unblocks). It mirrors the
+  `route_localnet` sysctl `systempaths=unconfined` unblocks), and a **Compose
+  exec-form health check** reaching `healthy` through `docker compose` (proves the
+  provider translates the `["CMD", …]` exec array to a runnable check and that
+  health state propagates — see **Compose health-check behavior** above for the
+  no-systemd/exec-wrap limitations the check works around). It mirrors the
   launcher's `POWBOX_PODMAN` gate. The probe has two halves: the device-free
   engine-wiring checks (engine present, the drop-in, `podman info`, the `compose`
-  subcommand) run on **every** host, and the nested-run/published-port checks
-  **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
+  subcommand) run on **every** host, and the nested-run/published-port/Compose-
+  health-check checks **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
   default `auto`, where `POWBOX_PODMAN=on` forces the full run. So an environment
   that simply cannot do nested networking is not failed, but a genuinely broken
   image (missing engine, dropped drop-in) **fails** the stage on any host — a

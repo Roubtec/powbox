@@ -18,7 +18,8 @@ param(
 #
 # The probe has two halves. The engine-wiring checks (podman present, the
 # containers.conf drop-in, `podman info`, the `podman compose` subcommand) need no
-# devices and run on EVERY host. The nested-run + published-port checks need
+# devices and run on EVERY host. The nested-run + published-port + Compose
+# exec-form-health-check checks need
 # /dev/net/tun, so they self-skip when it is absent (e.g. Docker Desktop's VM under
 # `auto`, where the Windows host cannot see the device) - a host that cannot do
 # nested networking still validates the baked engine wiring instead of skipping
@@ -110,12 +111,49 @@ $script = @(
   'printf "%s" "$out" | grep -qx nested_ok || fail "unexpected nested-run output: $out"'
   'podman network create smoke-net >/dev/null || fail "podman network create failed"'
   'cid=""'
-  'cleanup() { [ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1; podman network rm smoke-net >/dev/null 2>&1; return 0; }'
+  'compose_dir=""'
+  'compose_proj=""'
+  'cleanup() { [ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1; podman network rm smoke-net >/dev/null 2>&1; if [ -n "$compose_proj" ]; then [ -n "$compose_dir" ] && docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" down -v >/dev/null 2>&1 || true; for c in $(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" 2>/dev/null); do podman rm -f "$c" >/dev/null 2>&1 || true; done; podman network rm "${compose_proj}_default" >/dev/null 2>&1 || true; fi; [ -n "$compose_dir" ] && rm -rf "$compose_dir"; return 0; }'
   'trap cleanup EXIT'
   'cid=$(podman run --quiet -d --network smoke-net -p 127.0.0.1:8099:8099 docker.io/library/alpine sleep 30) || fail "podman run -d -p on a bridge network failed (netavark firewall_driver / route_localnet regression?)"'
   'sleep 2'
   'podman ps --filter "id=$cid" --filter status=running -q | grep -q . || fail "published-port container did not stay running: $(podman logs "$cid" 2>&1 | tail -3)"'
-  'echo "Podman engine OK: rootless nested run, bridge published port, and the compose subcommand all work."'
+  '# Compose exec-form health check. The sandbox has no systemd, so Podman never runs'
+  '# the PERIODIC health check (state stays "starting"); the smoke drives it explicitly'
+  '# with "podman healthcheck run" and asserts propagation to "healthy". podman-compose'
+  '# 1.3 shell-wraps the exec form, so alpine (has /bin/sh) reaches healthy while a'
+  '# distroless image would time out below. Exercised via "docker compose" (the shim).'
+  'compose_dir=$(mktemp -d) || fail "mktemp -d for the compose health-check fixture failed"'
+  'chmod 700 "$compose_dir"'
+  'compose_proj="smokehc$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d " \n")"'
+  '[ "$compose_proj" = smokehc ] && compose_proj="smokehc$$"'
+  'cat >"$compose_dir/docker-compose.yml" <<"SMOKE_COMPOSE_YAML"'
+  'services:'
+  '  hc:'
+  '    image: docker.io/library/alpine'
+  '    command: ["sleep", "60"]'
+  '    healthcheck:'
+  '      test: ["CMD", "/bin/true"]'
+  '      interval: 2s'
+  '      timeout: 2s'
+  '      retries: 3'
+  '      start_period: 1s'
+  'SMOKE_COMPOSE_YAML'
+  'up_out=$(docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" up -d 2>&1) || fail "docker compose up on the exec-form health-check fixture failed: $up_out"'
+  'hc_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=hc" 2>/dev/null | head -n1)'
+  '[ -n "$hc_cid" ] || fail "compose service container not found for project $compose_proj (compose up did not create it)"'
+  'podman inspect --format "{{if .Config.Healthcheck}}{{len .Config.Healthcheck.Test}}{{else}}0{{end}}" "$hc_cid" 2>/dev/null | grep -q "^[1-9]" || fail "compose dropped the exec-form health check (service Healthcheck is empty)"'
+  'health=""'
+  'hc_i=0'
+  'while [ "$hc_i" -lt 15 ]; do'
+  '  podman healthcheck run "$hc_cid" >/dev/null 2>&1 || true'
+  '  health=$(podman inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$hc_cid" 2>/dev/null)'
+  '  [ "$health" = healthy ] && break'
+  '  hc_i=$((hc_i + 1))'
+  '  sleep 1'
+  'done'
+  '[ "$health" = healthy ] || fail "compose exec-form health check never reached healthy (last state: ${health:-unknown}); see docs/rootless-podman.md Compose health-check behavior"'
+  'echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy all work."'
 ) -join "`n"
 
 $runArgs += @(

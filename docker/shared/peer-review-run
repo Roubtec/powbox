@@ -374,6 +374,11 @@ run_attempt() {
 	if [ "$timed_out" = 1 ]; then
 		if wait "$pgid" 2>/dev/null; then :; else :; fi
 	else
+		# The leader has already exited (that is why the poll loop ended). Sweep
+		# the group BEFORE reaping the leader zombie — while its pgid is still
+		# valid — so a stray grandchild a completed OR failed provider left behind
+		# never outlives the run. TERM to the dead leader is a harmless no-op.
+		kill -TERM "-${pgid}" 2>/dev/null || true
 		if wait "$pgid"; then rc=0; else rc=$?; fi
 	fi
 	CURRENT_PGID=""

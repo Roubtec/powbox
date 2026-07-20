@@ -234,7 +234,7 @@ Run \`df -B1 --output=avail ${JSON.stringify(wtBase)}\` (POSIX fallback: \`df -k
 const MAIN_CHECKOUT_SCHEMA = {
   type: "object",
   properties: {
-    dirty: { type: "array", items: { type: "string" }, description: "One `git status --porcelain` record per changed path in the shared MAIN checkout (never a worktree): the 2-char `XY` status field, a space, then the repo-relative path (current path for a rename/copy). The `XY` prefix is preserved verbatim so the summary can tell a status-code change apart from a brand-new path. Empty when clean; ignored paths like `.worktrees/` never appear." },
+    dirty: { type: "array", items: { type: "string" }, description: "One `git status --porcelain -z --untracked-files=all` record per changed path in the shared MAIN checkout (never a worktree): the 2-char `XY` status field, a space, then the repo-relative path (current path for a rename/copy). `--untracked-files=all` means each untracked FILE is listed on its own rather than collapsed to its directory, so files under a pre-existing untracked directory stay attributable. The `XY` prefix is preserved verbatim so the summary can tell a status-code change apart from a brand-new path. Empty when clean; ignored paths like `.worktrees/` never appear." },
     measured: { type: "boolean", description: "True only if `git status` ran in the main checkout and produced a definitive list. False when it could not be measured — then `dirty` is best-effort and must not be read as authoritative." },
   },
   required: ["dirty", "measured"],
@@ -245,13 +245,16 @@ function mainCheckoutStatusPrompt(when) {
 
 Why: each task runs in its own \`.worktrees/$CONTAINER_NAME/<slug>\` worktree, but the repository's MAIN checkout is shared — a peer harness invoked in this container and the user both see it. Snapshotting its porcelain status at batch boundaries lets the summary report main-checkout dirt without touching it.
 
-From the MAIN checkout root — your current working directory; confirm with \`git rev-parse --show-toplevel\` and do NOT \`cd\` into any \`.worktrees/...\` worktree — run \`git status --porcelain -z\` (the \`-z\` form leaves paths unquoted, so parsing is unambiguous). Split the output on NUL and return one entry per changed record in \`dirty\`, each the record's 2-character \`XY\` status field, a space, then the repo-relative path — e.g. \` M src/app.ts\`, \`?? notes.txt\`. Keep the \`XY \` prefix verbatim (its first column can be a space) so the summary can distinguish a status-code change from a new path. For a rename/copy record git emits the ORIGINAL path as a second NUL-separated field after the current one — keep only the current-path entry and drop that trailing original. Return an empty array when the checkout is clean, with \`measured: true\`. If git cannot run, the directory is a linked worktree rather than the main checkout, or the status is otherwise indeterminate, return \`measured: false\` with whatever \`dirty\` you have and do not fail.`;
+From the MAIN checkout root — your current working directory; confirm with \`git rev-parse --show-toplevel\` and do NOT \`cd\` into any \`.worktrees/...\` worktree — run \`git status --porcelain -z --untracked-files=all\` (the \`-z\` form leaves paths unquoted, so parsing is unambiguous; \`--untracked-files=all\` lists every untracked FILE individually instead of collapsing them to their directory, so a file added or removed beneath a pre-existing untracked directory stays individually attributable at the next boundary). Split the output on NUL and return one entry per changed record in \`dirty\`, each the record's 2-character \`XY\` status field, a space, then the repo-relative path — e.g. \` M src/app.ts\`, \`?? notes.txt\`. Keep the \`XY \` prefix verbatim (its first column can be a space) so the summary can distinguish a status-code change from a new path. For a rename/copy record git emits the ORIGINAL path as a second NUL-separated field after the current one — keep only the current-path entry and drop that trailing original. Return an empty array when the checkout is clean, with \`measured: true\`. If git cannot run, the directory is a linked worktree rather than the main checkout, or the status is otherwise indeterminate, return \`measured: false\` with whatever \`dirty\` you have and do not fail.`;
 }
 
 // Compare the pre-batch baseline against the post-batch snapshot. Purely
 // descriptive: it classifies each path by whether it was already dirty before
 // the batch (`preexisting`), appeared during it (`newPaths`), or DISAPPEARED
-// during it (`disappeared`). A vanished baseline path is the load-bearing
+// during it (`disappeared`). When NO baseline was measured there is nothing to
+// diff against, so final dirt is neither `new` nor `preexisting` — it goes into
+// the neutral `unattributed` bucket and is never claimed to have appeared during
+// the batch. A vanished baseline path is the load-bearing
 // signal — the feature exists to surface possible destructive loss of user
 // work, so a baseline path that is gone by Summary (a `git reset`/`clean`/
 // `stash`, or an errant commit, could have taken someone's uncommitted work
@@ -311,6 +314,7 @@ function mainCheckoutSummary(baseline, final) {
       preexisting: baselineEntries.map((e) => e.raw),
       newPaths: [],
       disappeared: [],
+      unattributed: [],
       transitions: [],
       flagged: false,
       note: `Post-batch main-checkout status could not be measured; cleanliness comparison skipped. ${OBSERVED} ${OTHER_STAGES}`,
@@ -323,9 +327,14 @@ function mainCheckoutSummary(baseline, final) {
   const preexistingEntries = baselineMeasured
     ? finalEntries.filter((e) => baselineByPath.has(e.path))
     : [];
+  // With a measured baseline, final dirt splits into `new` (absent at baseline)
+  // vs `preexisting`. With NO baseline there is nothing to diff, so it is
+  // neither — it lands in the neutral `unattributed` bucket, never `new` (which
+  // would falsely assert it appeared DURING the batch).
   const newEntries = baselineMeasured
     ? finalEntries.filter((e) => !baselineByPath.has(e.path))
-    : finalEntries.slice();
+    : [];
+  const unattributedEntries = baselineMeasured ? [] : finalEntries.slice();
   const disappearedEntries = baselineMeasured
     ? baselineEntries.filter((e) => !finalByPath.has(e.path))
     : [];
@@ -336,6 +345,7 @@ function mainCheckoutSummary(baseline, final) {
   const preexisting = preexistingEntries.map((e) => e.raw);
   const newPaths = newEntries.map((e) => e.raw);
   const disappeared = disappearedEntries.map((e) => e.raw);
+  const unattributed = unattributedEntries.map((e) => e.raw);
 
   let note;
   let flagged = false;
@@ -344,7 +354,7 @@ function mainCheckoutSummary(baseline, final) {
       note = `Shared main checkout is clean. ${OBSERVED}`;
     } else {
       flagged = true;
-      note = `Shared main checkout has ${finalEntries.length} dirty path(s), but no clean pre-batch baseline was captured, so they are NOT attributed to this batch. ${OBSERVED} ${OTHER_STAGES} Inspect and clean up yourself if unexpected.`;
+      note = `Shared main checkout was dirty at the final boundary (${finalEntries.length} path(s)), but no pre-batch baseline was captured, so there is nothing to attribute them against and they are NOT credited to this batch. ${OBSERVED} ${OTHER_STAGES} Inspect and clean up yourself if unexpected.`;
     }
   } else if (newPaths.length === 0 && disappeared.length === 0) {
     if (finalEntries.length === 0) {
@@ -373,6 +383,7 @@ function mainCheckoutSummary(baseline, final) {
     preexisting,
     newPaths,
     disappeared,
+    unattributed,
     transitions,
     flagged,
     note,
@@ -981,6 +992,7 @@ if (mainCheckout.flagged) {
   const details = [];
   if (mainCheckout.newPaths.length) details.push(`new: ${mainCheckout.newPaths.join(", ")}`);
   if (mainCheckout.disappeared.length) details.push(`disappeared: ${mainCheckout.disappeared.join(", ")}`);
+  if (mainCheckout.unattributed.length) details.push(`unattributed: ${mainCheckout.unattributed.join(", ")}`);
   log(`${mainCheckout.note}${details.length ? ` [${details.join("; ")}]` : ""}`);
 }
 const landed = results.filter((r) => r.status === "done").length;

@@ -133,15 +133,21 @@ const SELF_MUTATION_RE = /\b(?:this report|the report|the workflow|we|it)\s+(?:r
   check("all baseline dirt gone → note does NOT declare clean", !/\bis clean\b/i.test(r.note));
 }
 
-// 5. No measured baseline but dirt at end → flagged, but explicitly NOT attributed to the batch.
+// 5. FINDING 2: no measured baseline but dirt at end → flagged, but the dirt is
+//    placed in the neutral `unattributed` bucket, NEVER `newPaths` (which would
+//    falsely assert it appeared DURING the batch despite baselineKnown:false).
 {
   const r = mainCheckoutSummary(
     { measured: false, dirty: [] },
-    { measured: true, dirty: ["?? x.txt"] }
+    { measured: true, dirty: ["?? x.txt", " M y.ts"] }
   );
   check("no baseline + end dirt → flagged", r.flagged === true);
   check("no baseline → baselineKnown false", r.baselineKnown === false);
-  check("no baseline → note declines attribution", /NOT attributed|not attributed/i.test(r.note));
+  check("no baseline → end dirt NOT classified as new", r.newPaths.length === 0);
+  check("no baseline → end dirt is unattributed", r.unattributed.length === 2 && r.unattributed[0] === "?? x.txt" && r.unattributed[1] === " M y.ts");
+  check("no baseline → nothing pre-existing or disappeared", r.preexisting.length === 0 && r.disappeared.length === 0);
+  check("no baseline → note does not claim dirt appeared during the batch", !/appeared during|new dirty path|no one in particular/i.test(r.note));
+  check("no baseline → note says nothing to attribute against", /no pre-batch baseline|nothing to attribute|NOT (?:attributed|claimed)/i.test(r.note));
 }
 
 // 6. No measured baseline + clean end → not flagged (nothing to report).
@@ -196,6 +202,16 @@ const SELF_MUTATION_RE = /\b(?:this report|the report|the workflow|we|it)\s+(?:r
   check("every note carries the observation-only assurance", allObserved);
   const selfMutation = cases.some(([b, f]) => SELF_MUTATION_RE.test(mainCheckoutSummary(b, f).note));
   check("no note asserts the report/workflow itself mutated the tree", !selfMutation);
+}
+
+// 10. FINDING 1: the porcelain capture must request `--untracked-files=all` so
+//     individual files under a pre-existing untracked directory are listed
+//     (and thus attributable) rather than collapsed to the directory. Asserted
+//     against the workflow SOURCE, since the command lives in the status prompt
+//     (not the pure `mainCheckoutSummary` function extracted above).
+{
+  check("porcelain command requests --untracked-files=all", /git status --porcelain -z --untracked-files=all/.test(src));
+  check("no bare `git status --porcelain -z` capture without --untracked-files", !/git status --porcelain -z(?![ ]--untracked-files=all)/.test(src));
 }
 
 if (failures) {

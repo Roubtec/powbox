@@ -34,8 +34,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 HELPER="${PEER_REVIEW_RUN:-${ROOT_DIR}/docker/shared/peer-review-run}"
 
-[ -x "$HELPER" ] || {
-	echo "test-peer-review-run: helper not found or not executable: $HELPER" >&2
+# Invoked via `bash "$HELPER"` below, so readability (not the exec bit) is what
+# matters — the in-tree copies of these baked helpers are committed 0644 and rely
+# on the Dockerfile's COPY --chmod=755 for the installed artifact.
+[ -r "$HELPER" ] || {
+	echo "test-peer-review-run: helper not found or not readable: $HELPER" >&2
 	exit 1
 }
 command -v jq >/dev/null || {
@@ -102,7 +105,7 @@ run() {
 	local d="$1"
 	shift
 	set +e
-	RUN_OUT="$(PATH="$d/bin:/usr/bin:/bin" "$HELPER" "$@" 2>"$d/err")"
+	RUN_OUT="$(PATH="$d/bin:/usr/bin:/bin" bash "$HELPER" "$@" 2>"$d/err")"
 	RUN_RC=$?
 	set -e 2>/dev/null || true
 	RUN_ERR="$(cat "$d/err" 2>/dev/null || true)"

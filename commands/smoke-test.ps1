@@ -116,8 +116,10 @@ else {
 # Stage 0e - Podman Compose exec-form health-check probe invariants (task 025). The
 # hermetic Bash test parses scripts/smoke-test-podman.sh's embedded Compose fixture with
 # yq and asserts the health check stays an EXEC-form CMD array (not CMD-SHELL), that the
-# probe drives the check and requires "healthy", that cleanup tears down the project +
-# only the temp dir, and that the Bash/PowerShell probes stay in parity. It runs INSIDE
+# probe inspects+classifies the wired translation (CMD->CMD-SHELL is a detected
+# KNOWN-XFAIL, not a silent pass), that it drives the check and requires "healthy" while
+# a never-succeeding negative control must NOT reach healthy, that cleanup tears down the
+# project + only the temp dir, and that the Bash/PowerShell probes stay in parity. It runs INSIDE
 # the agent image (which ships yq and bash) with the repo mounted read-only. Self-skips
 # (recorded in $skipped) when the image is absent.
 if (-not $imagePresent) {

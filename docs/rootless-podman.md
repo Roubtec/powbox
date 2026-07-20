@@ -441,13 +441,18 @@ distroless images need) is exercised by the Podman smoke via `docker compose`
 (the shim spelling agents are expected to use). `docker compose` and
 `podman compose` are the **same path** here — both route to the `podman-compose`
 1.3 provider — so the smoke tests the one canonical spelling agents use rather
-than advertising two that could diverge. The smoke asserts the exec-form check is
-wired onto the service and that the service reaches **`healthy`**; it fails clearly
-if Compose drops the check, mistranslates the exec array into a non-runnable
-command, or leaves the state stuck at `starting`.
+than advertising two that could diverge. The smoke does four things that each
+**fail clearly**: it asserts the exec-form check is wired onto the service; it
+**inspects and classifies the translation** Compose applied
+(`.Config.Healthcheck.Test[0]`); it drives the check and asserts the service reaches
+**`healthy`**; and it runs a never-succeeding **negative-control** service that must
+*not* reach healthy. So it fails if Compose drops the check, mangles the exec array
+beyond the known wrap, or leaves the service stuck at `starting`/`unhealthy`.
 
-Two behaviors are **deliberately accepted limitations** of this sandbox, recorded
-here so a future reader does not mistake them for regressions:
+Two behaviors are limitations of this sandbox. They are not silently accepted: the
+smoke actively **detects and reports** each one, so a future reader (and CI log)
+sees the exact condition rather than trusting prose — and a change that makes either
+one *worse* than described fails the smoke.
 
 1. **No automatic health-state transition (no systemd).** Podman schedules the
    *periodic* health check through a systemd transient timer. This container runs
@@ -458,9 +463,13 @@ here so a future reader does not mistake them for regressions:
    image. The supported trigger in this environment is to run the check explicitly:
    `podman healthcheck run <container>` executes the wired command once and
    propagates the result to `healthy`/`unhealthy`. The smoke therefore *drives* the
-   check with `podman healthcheck run` and then asserts propagation to `healthy`,
-   rather than waiting on a timer that will never fire. Projects that rely on a
-   Compose service's own health state (e.g. a `depends_on: { condition:
+   check with `podman healthcheck run` and then asserts propagation to `healthy`.
+   Because driving the check could otherwise *mask* a service that would sit at
+   `starting`, the smoke pairs the positive service with a **negative control**: a
+   second service whose exec-form check runs `/bin/false`, driven the exact same way,
+   which must **never** reach `healthy`. That proves the `healthy` assertion is not
+   vacuous — a genuinely never-healthy service fails the bounded poll. Projects that
+   rely on a Compose service's own health state (e.g. a `depends_on: { condition:
    service_healthy }`) should account for this: without systemd the dependency gate
    will not advance on its own.
 2. **`podman-compose` 1.3 shell-wraps the exec form.** An exec-form test
@@ -468,10 +477,16 @@ here so a future reader does not mistake them for regressions:
    i.e. it is run through `/bin/sh`. A shell-bearing image (Alpine, Debian) runs it
    fine; a **distroless** image with no `/bin/sh` cannot, so the wrapped command
    fails and the service never goes `healthy` — exactly the Kalm2 SPIRE-overlay
-   symptom that motivated this check. Until the provider stops wrapping the exec
-   form, give a distroless service a health-check binary reachable through a shell,
-   or ship a minimal shell, or run the check binary as the container command and
-   gate on liveness another way.
+   symptom that motivated this check. The smoke does not paper over this: it inspects
+   the wired check and, when it finds the rewrite, emits a loud **`KNOWN-XFAIL`**
+   diagnostic naming the exact translated array (so the regression is visible in the
+   run, not just in this doc). It only **fails** if the exec form is dropped or
+   mangled *beyond* that known wrap (the intended binary did not survive), and it
+   emits a **`NOTE`** instead if a future `podman-compose` stops wrapping (at which
+   point this limitation, and the workarounds below, can be revisited). Until the
+   provider stops wrapping the exec form, give a distroless service a health-check
+   binary reachable through a shell, or ship a minimal shell, or run the check binary
+   as the container command and gate on liveness another way.
 
 The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
 throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project and
@@ -479,7 +494,8 @@ removes only that directory on success or failure. Its scope is Compose exec-arr
 translation and health-state propagation on a shell-bearing image (Alpine) — not a
 general Compose conformance suite. `scripts/test-podman-compose-healthcheck.sh` is
 the hermetic, image-free guard that locks the probe's invariants (exec form, the
-`healthy` assertion, cleanup, Bash/PowerShell parity).
+translation-detection classifier, the `healthy` assertion plus the never-healthy
+negative control, cleanup, and Bash/PowerShell parity).
 
 Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
 container before committing — all candidates resolve): `FROM node:24-trixie-slim`;

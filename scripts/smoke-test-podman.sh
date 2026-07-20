@@ -135,7 +135,7 @@ podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missin
 # not attached (the host could not expose it), skip just these — the engine wiring
 # above is already validated — rather than fail on an environment limitation.
 if [ "${SMOKE_HAVE_TUN:-false}" != true ]; then
-	echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port checks: /dev/net/tun was not attached on this host."
+	echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port + Compose exec-form health-check checks: /dev/net/tun was not attached on this host."
 	exit 0
 fi
 
@@ -159,8 +159,8 @@ cid=""
 compose_dir=""
 compose_proj=""
 cleanup() {
-	[ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1
-	podman network rm smoke-net >/dev/null 2>&1
+	[ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1 || true
+	podman network rm smoke-net >/dev/null 2>&1 || true
 	if [ -n "$compose_proj" ]; then
 		[ -n "$compose_dir" ] && docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" down -v >/dev/null 2>&1 || true
 		for c in $(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" 2>/dev/null); do
@@ -177,19 +177,9 @@ sleep 2
 podman ps --filter "id=$cid" --filter status=running -q | grep -q . || fail "published-port container did not stay running: $(podman logs "$cid" 2>&1 | tail -3)"
 
 # 4. Compose exec-form health check. Motivating regression (Kalm2 SPIRE overlay):
-# podman-compose left a distroless exec-form health check stuck at "starting". Two
-# independent sandbox facts shape what this check can prove:
-#   (a) Podman schedules the PERIODIC health check via a systemd transient timer.
-#       This container is cgroupfs with no systemd, so the state never advances on
-#       its own and STAYS at "starting" (true even for a plain podman run
-#       --health-cmd, and even for a shell-bearing image). So the smoke drives the
-#       check explicitly with "podman healthcheck run" — the supported trigger
-#       here — and then asserts the state PROPAGATES to "healthy".
-#   (b) podman-compose 1.3 shell-wraps an exec-form test (["CMD","/bin/true"] ->
-#       ["CMD-SHELL","/bin/sh -c /bin/true"]), so the wired command needs a shell in
-#       the image; alpine has one and reaches healthy. A distroless image (no
-#       /bin/sh) would keep failing the run and never flip — exactly the reported
-#       symptom, which this check would catch as a timeout below.
+# podman-compose left a distroless exec-form health check stuck at "starting". The
+# fixture has TWO services so the check has real teeth: "hc" (test /bin/true) MUST
+# reach healthy, and a negative-control "bad" (test /bin/false) MUST NOT — see 4b.
 # Exercised through "docker compose" (the shim spelling agents use); it routes to
 # "podman compose" -> the podman-compose provider, so both spellings share one path.
 # See docs/rootless-podman.md "Compose health-check behavior" for the full contract.
@@ -201,9 +191,18 @@ cat >"$compose_dir/docker-compose.yml" <<"SMOKE_COMPOSE_YAML"
 services:
   hc:
     image: docker.io/library/alpine
-    command: ["sleep", "60"]
+    command: ["sleep", "120"]
     healthcheck:
       test: ["CMD", "/bin/true"]
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 1s
+  bad:
+    image: docker.io/library/alpine
+    command: ["sleep", "120"]
+    healthcheck:
+      test: ["CMD", "/bin/false"]
       interval: 2s
       timeout: 2s
       retries: 3
@@ -212,19 +211,67 @@ SMOKE_COMPOSE_YAML
 up_out=$(docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" up -d 2>&1) || fail "docker compose up on the exec-form health-check fixture failed: $up_out"
 hc_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=hc" 2>/dev/null | head -n1)
 [ -n "$hc_cid" ] || fail "compose service container not found for project $compose_proj (compose up did not create it)"
-podman inspect --format "{{if .Config.Healthcheck}}{{len .Config.Healthcheck.Test}}{{else}}0{{end}}" "$hc_cid" 2>/dev/null | grep -q "^[1-9]" || fail "compose dropped the exec-form health check (service Healthcheck is empty)"
-health=""
-hc_i=0
-while [ "$hc_i" -lt 15 ]; do
-	podman healthcheck run "$hc_cid" >/dev/null 2>&1 || true
-	health=$(podman inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$hc_cid" 2>/dev/null)
-	[ "$health" = healthy ] && break
-	hc_i=$((hc_i + 1))
-	sleep 1
-done
-[ "$health" = healthy ] || fail "compose exec-form health check never reached healthy (last state: ${health:-unknown}); see docs/rootless-podman.md Compose health-check behavior"
+bad_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=bad" 2>/dev/null | head -n1)
+[ -n "$bad_cid" ] || fail "compose negative-control container not found for project $compose_proj (compose up did not create it)"
 
-echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy all work."
+# 4a. Exec-form TRANSLATION check. Inspect the health check Compose actually wired
+# onto the container and CLASSIFY it, rather than only checking it is non-empty
+# (which silently passes the CMD->CMD-SHELL rewrite that breaks distroless).
+# .Config.Healthcheck.Test[0] is "CMD" for a preserved exec array, "CMD-SHELL" for a
+# shell-wrapped one. On this sandbox podman-compose 1.3 ALWAYS rewrites the exec form
+# ["CMD","/bin/true"] -> ["CMD-SHELL","/bin/sh -c /bin/true"], so we surface that as a
+# loud KNOWN-XFAIL (a detected+reported condition, not a silent pass hidden in prose):
+# a distroless image with no /bin/sh WOULD be stuck at starting — the reported Kalm2
+# symptom. We only FAIL if the check was dropped or mangled BEYOND that known wrap
+# (the intended binary did not survive), and NOTE it if a future provider stops
+# wrapping (the docs workaround could then be revisited).
+hc_kind=$(podman inspect --format "{{if and .Config.Healthcheck .Config.Healthcheck.Test}}{{index .Config.Healthcheck.Test 0}}{{end}}" "$hc_cid" 2>/dev/null || echo "")
+hc_test=$(podman inspect --format "{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}null{{end}}" "$hc_cid" 2>/dev/null || echo "")
+case "$hc_kind" in
+CMD-SHELL)
+	case "$hc_test" in
+	*/bin/true*) echo "KNOWN-XFAIL: podman-compose 1.3 rewrote the exec-form health check [CMD /bin/true] to ${hc_test} — a distroless image with no /bin/sh WOULD be stuck at starting (the Kalm2 SPIRE symptom); alpine has a shell so it still reaches healthy. See docs/rootless-podman.md Compose health-check behavior." ;;
+	*) fail "compose mistranslated the exec-form health check beyond the known CMD-SHELL wrap: ${hc_test} (the intended /bin/true did not survive the conversion)" ;;
+	esac
+	;;
+CMD)
+	echo "NOTE: podman-compose preserved the exec-form health check as ${hc_test} (no shell wrap) — the CMD-SHELL rewrite documented in docs/rootless-podman.md may no longer apply; revisit accepted limitation #2." ;;
+"") fail "compose dropped the exec-form health check entirely (Config.Healthcheck.Test is empty: ${hc_test})" ;;
+*) fail "compose produced an unrecognized health-check form (kind=[${hc_kind}], test=${hc_test})" ;;
+esac
+
+# 4b. Health-state PROPAGATION + negative control. There is NO systemd in this
+# container (cgroupfs, /run/systemd/system absent), so Podman never fires the
+# PERIODIC health-check timer and a service state would sit at "starting" forever on
+# its own — true for a plain "podman run --health-cmd" too, not only Compose. The
+# only supported trigger here is to run the check explicitly with
+# "podman healthcheck run", which executes the wired command once and propagates the
+# result. drive_health does exactly that in a bounded loop and echoes the final
+# state. This is deliberately proven to be non-vacuous: the "hc" service (/bin/true)
+# MUST reach healthy, while the negative-control "bad" service (/bin/false), driven
+# the SAME way, MUST NOT — driving only reports the command real result, so a
+# never-succeeding check that ever reported healthy would mean the healthy assertion
+# could not catch a service Compose leaves perpetually at starting. That negative
+# control is the bounded proof that a never-healthy service fails clearly.
+drive_health() { # $1=container $2=max-iterations; echoes final health, always rc 0
+	_n=0
+	_h=""
+	while [ "$_n" -lt "$2" ]; do
+		podman healthcheck run "$1" >/dev/null 2>&1 || true
+		_h=$(podman inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$1" 2>/dev/null || true)
+		[ "$_h" = healthy ] && break
+		_n=$((_n + 1))
+		sleep 1
+	done
+	printf "%s" "${_h:-unknown}"
+}
+hc_health=$(drive_health "$hc_cid" 15)
+[ "$hc_health" = healthy ] || fail "compose exec-form health check never reached healthy (last state: ${hc_health}); a service stuck at starting/unhealthy fails here — see docs/rootless-podman.md Compose health-check behavior"
+bad_health=$(drive_health "$bad_cid" 6)
+[ "$bad_health" = healthy ] && fail "negative control broke: a never-succeeding health command (/bin/false) reported healthy (state: ${bad_health}) — the healthy assertion is vacuous and would not catch a stuck-at-starting service"
+echo "Negative control OK: the never-succeeding /bin/false service correctly never reached healthy (last state: ${bad_health})."
+
+echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy (with a never-healthy negative control failing as expected) all work."
 '
 rc=$?
 set -e

@@ -120,10 +120,12 @@ fi
 # Stage 0e — Podman Compose exec-form health-check probe invariants (task 025).
 # Hermetic guard for scripts/smoke-test-podman.sh's Compose health-check block: it
 # parses the embedded fixture with yq and asserts the health check stays an EXEC-form
-# CMD array (not CMD-SHELL), that the probe drives the check and requires "healthy",
-# that cleanup tears down the project + only the temp dir, and that the Bash/PowerShell
-# probes stay in parity — the load-bearing bits that a plain edit could silently
-# neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
+# CMD array (not CMD-SHELL), that the probe INSPECTS+classifies the wired translation
+# (so a CMD->CMD-SHELL rewrite is a detected KNOWN-XFAIL, not a silent pass), that it
+# drives the check and requires "healthy" while a never-succeeding negative control
+# must NOT reach healthy, that cleanup tears down the project + only the temp dir, and
+# that the Bash/PowerShell probes stay in parity — the load-bearing bits that a plain
+# edit could silently neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
 # not a baked artifact), so a host run suffices — but it needs `yq`. Prefer the
 # in-image run (yq is guaranteed in the agent image) when the image is present; else
 # fall back to a host run only when `yq` is available, else record a skip.

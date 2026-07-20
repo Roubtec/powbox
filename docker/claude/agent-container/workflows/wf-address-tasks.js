@@ -12,7 +12,7 @@
  * Why a workflow rather than a skill
  * ----------------------------------
  * The control flow the skill spells out in prose — dependency waves, the bounded
- * implement -> review -> fix loop (raised to 12 rounds here, vs. the skill's 6),
+ * implement -> review -> fix loop (12 rounds, matching the prose skill's cap),
  * dependent waves gated on their prerequisites, "the implementer finishes
  * before its reviewer starts" — becomes ordinary JavaScript here, run
  * deterministically instead of relying on the model to follow it. Independent

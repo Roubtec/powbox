@@ -11,8 +11,9 @@
  *
  * Why a workflow rather than a skill
  * ----------------------------------
- * The control flow the skill spells out in prose — dependency waves, the 12-round
- * loop, dependent waves gated on their prerequisites, "the implementer finishes
+ * The control flow the skill spells out in prose — dependency waves, the bounded
+ * implement -> review -> fix loop (raised to 12 rounds here, vs. the skill's 6),
+ * dependent waves gated on their prerequisites, "the implementer finishes
  * before its reviewer starts" — becomes ordinary JavaScript here, run
  * deterministically instead of relying on the model to follow it. Independent
  * tasks fan out via `parallel()`.
@@ -74,9 +75,6 @@ export const meta = {
 
 const MAX_ROUNDS = 12;
 
-// Use the full dependency-derived wave width unless measured storage headroom
-// requires sub-batching. The workflow runtime/provider owns its own active-agent
-// ceiling and rate limiting; do not impose an arbitrary smaller policy cap here.
 // Conservative per-task estimate. On the volume-backed path pnpm packages are
 // hardlinked, so the real cost is build artifacts + package metadata; 1 GiB
 // keeps a comfortable margin without measuring a representative install (which
@@ -210,6 +208,20 @@ function bootstrapPrompt() {
 2. Map that JSON onto the structured result verbatim — \`ok\`, \`blocker\`, \`wtBase\`, \`remote\`, \`availBytes\` — with no reinterpretation. \`remote: false\` is NOT a blocker (the batch falls back to local branches and skips PRs).
 3. If \`wt-bootstrap\` is not on PATH, the image predates it: return \`ok: false\` with blocker \`"image predates the wt-* helpers; rebuild the powbox image and relaunch"\`. Do not re-derive the checks by hand.
 4. On \`ok: false\` from the script, return its \`blocker\` verbatim (typical remedies it names: set CONTAINER_NAME, run \`enable-worktrees\`, rebuild/relaunch).`;
+}
+
+const STORAGE_PROBE_SCHEMA = {
+  type: "object",
+  properties: {
+    availBytes: { type: "number", description: "Free bytes on the .worktrees mount right now, from `df`; 0 when the probe could not measure." },
+  },
+  required: ["availBytes"],
+};
+
+function storageProbePrompt(wtBase) {
+  return `Measure free storage for wave-width throttling. This is measurement only — edit nothing, create nothing.
+
+Run \`df -B1 --output=avail ${JSON.stringify(wtBase)}\` (POSIX fallback: \`df -kP\`, avail column, times 1024) and return the mount's free bytes as \`availBytes\`. If the path is missing or \`df\` fails, return \`availBytes: 0\`.`;
 }
 
 function resolvePrompt(input) {
@@ -520,13 +532,18 @@ for (const wave of plan.waves) {
   }
 }
 
-// Wave width: use every dependency-ready task unless measured storage headroom
-// requires sub-batching. When bootstrap cannot report storage, leave the wave at
-// its dependency-derived width and let the runtime enforce its actual agent cap.
-const availBytes = typeof boot.availBytes === "number" ? boot.availBytes : 0;
-const dependencyWidth = Math.max(1, ...plan.waves.map((wave) => (Array.isArray(wave) ? wave.length : 0)));
-const storageCap = availBytes > 0 ? Math.max(1, Math.floor(availBytes / PER_WORKTREE_BYTES)) : dependencyWidth;
-const widthCap = Math.min(dependencyWidth, storageCap);
+// Wave width: run every dependency-ready task unless measured storage headroom
+// requires sub-batching. The workflow runtime/provider owns its own active-agent
+// ceiling and rate limiting; do not impose an arbitrary smaller policy cap here.
+// An unmeasured reading (0) yields `Infinity` — no storage cap — which behaves
+// correctly at both use sites (`slice(i, i + Infinity)` takes the rest of the
+// wave; `runnable.length > widthCap` never fires). Bootstrap's reading serves
+// only the first wave: later waves run against headroom already consumed by
+// earlier waves' pnpm-store growth, ccache, and build artifacts that worktree
+// reclaim does not return, so each subsequent wave boundary re-probes `df`
+// through a cheap agent and recomputes the cap from the fresh reading.
+let availBytes = typeof boot.availBytes === "number" ? boot.availBytes : 0;
+const widthCapFor = (bytes) => (bytes > 0 ? Math.max(1, Math.floor(bytes / PER_WORKTREE_BYTES)) : Infinity);
 
 for (let w = 0; w < plan.waves.length; w++) {
   const wave = plan.waves[w];
@@ -560,8 +577,17 @@ for (let w = 0; w < plan.waves.length; w++) {
   if (runnable.length === 0) continue;
 
   phase(`Wave ${w + 1} (${runnable.length} task${runnable.length === 1 ? "" : "s"})`);
+  // Re-probe free space at each wave boundary after the first (see the wave-width
+  // comment above). A failed or unmeasurable probe keeps the previous reading —
+  // stale-but-conservative beats silently dropping the throttle mid-batch. A
+  // 1-task wave skips the probe: its cap can never throttle (widthCap >= 1).
+  if (w > 0 && runnable.length > 1) {
+    const probe = await agent(storageProbePrompt(boot.wtBase || ".worktrees"), { label: `storage-probe:w${w + 1}`, schema: STORAGE_PROBE_SCHEMA, effort: "low" });
+    if (probe && typeof probe.availBytes === "number" && probe.availBytes > 0) availBytes = probe.availBytes;
+  }
+  const widthCap = widthCapFor(availBytes);
   if (runnable.length > widthCap) {
-    log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) because measured storage allows ${storageCap}.`);
+    log(`Throttling wave ${w + 1} to ${widthCap} concurrent task(s) to fit measured storage headroom (~1 GiB per worktree).`);
     throttled.push({ wave: w + 1, tasks: runnable.length, width: widthCap });
   }
   // Sub-batch the wave at the width cap: a wave that exhausts the .worktrees

@@ -391,17 +391,18 @@ run_attempt() {
 
 	ATT_EXIT="$rc"
 
-	# Unavailable (auth/usage) trumps the exit code: retrying will not help.
-	if looks_unavailable "$out" "$err"; then
-		ATT_OUTCOME=unavailable
-		ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
-		write_meta "$dir" "$attempt_no" "unavailable"
-		return 0
-	fi
-
 	if [ "$rc" -ne 0 ]; then
-		# A non-auth, non-timeout non-zero exit is treated as a transient
-		# execution failure and retried once (with a fresh attempt dir).
+		# A failing provider that reports an auth/login or usage/quota problem is
+		# UNAVAILABLE (non-transient — retrying wastes quota); scan only on a
+		# non-zero exit so a successful review that merely discusses rate limits
+		# is not misread. Any other non-zero exit is a transient execution
+		# failure, retried once with a fresh attempt dir.
+		if looks_unavailable "$out" "$err"; then
+			ATT_OUTCOME=unavailable
+			ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
+			write_meta "$dir" "$attempt_no" "unavailable"
+			return 0
+		fi
 		ATT_OUTCOME=failed
 		ATT_TRANSIENT=1
 		ATT_REASON="provider exited non-zero ($rc)"

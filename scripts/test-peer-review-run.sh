@@ -246,6 +246,22 @@ assert_eq "4b: usage exhaustion → unavailable" "$(jqf "$RUN_RESULT" .outcome)"
 assert_eq "4b: NOT retried (auth is non-transient)" "$(jqf "$RUN_RESULT" .attempts)" 1
 assert_eq "4b: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 
+# 4c: a SUCCESSFUL review (exit 0, pass verdict) that merely DISCUSSES rate
+# limits must stay passed — the auth/usage scan only applies on a non-zero exit.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'The new rate limit / 429 backoff handling looks correct.\nVERDICT: PASS\n' >"$last"
+exit 0
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "4c: exit-0 review discussing rate limits stays passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+
 # ============================================================================
 # (5) timeout — deadline enforced, process TREE reaped
 # ============================================================================

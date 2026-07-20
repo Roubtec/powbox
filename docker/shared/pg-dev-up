@@ -17,27 +17,68 @@
 #   pg-dev-up check     verify the server binaries are present (no daemon needed)
 #   pg-dev-up help
 #
+# Scoped mode (opt-in) — isolate the cluster per Git worktree so parallel
+# worktrees can run database tests concurrently without sharing one cluster,
+# data directory, or port. The flag goes BEFORE the command and applies to
+# up / status / url / down:
+#   pg-dev-up --worktree [up|status|url|down]   scope to the current Git worktree
+#   pg-dev-up --profile <id> [up|status|...]    scope to an explicit identifier
+# e.g.
+#   pg-dev-up --worktree up
+#   eval "$(pg-dev-up --worktree url --export)"
+#   pg-dev-up --worktree down
+# Scoped mode derives an isolated data directory under a private temp root and
+# allocates its own free loopback port (recorded next to the data dir so later
+# status/url/down resolve the SAME server that up started). `--worktree` requires
+# being inside a Git repository; outside one, pass `--profile <id>` with a stable
+# identifier rather than guessing. Two different worktrees (or profiles) receive
+# distinct data dirs and ports and stop independently. Ordinary `pg-dev-up up`
+# (no flag) is UNCHANGED: /tmp/pgdata on port 5432.
+#
 # Environment overrides (defaults in parentheses):
-#   PGDATA            cluster data directory    (/tmp/pgdata)
-#   PGPORT            listen port               (5432)
-#   POSTGRES_USER     app role to ensure        (postgres)
-#   POSTGRES_PASSWORD app role password         (postgres)
-#   POSTGRES_DB       app database to ensure    (postgres)
+#   PGDATA            cluster data directory  (/tmp/pgdata; scoped: <root>/<key>/pgdata)
+#   PGPORT            listen port             (5432; scoped: an allocated free port)
+#   POSTGRES_USER     app role to ensure      (postgres)
+#   POSTGRES_PASSWORD app role password       (postgres)
+#   POSTGRES_DB       app database to ensure  (postgres)
+# An explicit PGDATA or PGPORT is authoritative and REPLACES only that one scoped
+# default (the other scoped defaults still apply); POSTGRES_USER/PASSWORD/DB
+# behave the same scoped or not. POWBOX_PG_SCOPED_ROOT overrides the scoped temp
+# root (default ${TMPDIR:-/tmp}/pg-dev-up-scoped).
 #
 # To match a project's expected credentials, set the env vars before calling,
 # e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
 #
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
+#   eval "$(pg-dev-up --worktree url --export)"   # scoped
 set -euo pipefail
 
-PGDATA="${PGDATA:-/tmp/pgdata}"
-PGPORT="${PGPORT:-5432}"
+# Capture whether the caller set PGDATA/PGPORT EXPLICITLY before we apply any
+# defaults, so scoped mode can honor an explicit override while still deriving
+# every other scoped value.
+PGDATA_EXPLICIT="${PGDATA+set}"
+PGPORT_EXPLICIT="${PGPORT+set}"
+
 PG_HOST="127.0.0.1"
-PG_SOCKDIR="/tmp"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-postgres}"
+
+# Scoped-mode state (populated by the flag parse + resolve_scope below).
+SCOPED=""
+SCOPE_MODE=""       # worktree | profile
+SCOPE_PROFILE_ID="" # for --profile <id>
+SCOPED_ROOT="${POWBOX_PG_SCOPED_ROOT:-${TMPDIR:-/tmp}/pg-dev-up-scoped}"
+INSTANCE_DIR=""
+PORT_FILE=""
+
+# These get their final values in configure_paths(), after the command and any
+# scope flag are known: scoped mode replaces the data dir / socket dir / port,
+# unscoped mode keeps the historical /tmp defaults.
+PGDATA="${PGDATA:-}"
+PGPORT="${PGPORT:-}"
+PG_SOCKDIR="/tmp"
 
 log() { printf 'pg-dev-up: %s\n' "$*" >&2; }
 
@@ -62,6 +103,139 @@ require_bindir() {
 		log "PostgreSQL server binaries not found (expected /usr/lib/postgresql/*/bin)."
 		exit 1
 	fi
+}
+
+# --- scoped-mode identity + port bookkeeping -------------------------------
+#
+# The scoped instance KEY is a hash — not a human-readable slug — of the Powbox
+# container identity, the repository's common Git dir, and the current worktree
+# toplevel (or, for --profile, the explicit id). A basename alone can collide
+# across repositories; hashing the common Git dir + toplevel makes two worktrees
+# of one repo, and same-named worktrees of different repos, land in distinct
+# instances. Truncated SHA-256 is plenty for a per-container temp namespace.
+scope_key() {
+	local input common top
+	if [ "$SCOPE_MODE" = profile ]; then
+		input="profile|${CONTAINER_NAME:-}|${SCOPE_PROFILE_ID}"
+	else
+		common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+		top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+		input="worktree|${CONTAINER_NAME:-}|${common}|${top}"
+	fi
+	printf '%s' "$input" | sha256sum | cut -c1-16
+}
+
+# Populate INSTANCE_DIR / PORT_FILE / PGDATA / PG_SOCKDIR for scoped mode. An
+# explicit PGDATA still wins; the socket dir is always scoped so two clusters
+# never share a /tmp socket file (clients connect over TCP on PG_HOST anyway).
+resolve_scope() {
+	local key
+	if ! key="$(scope_key)"; then
+		log "scoped --worktree mode requires being inside a Git repository."
+		log "Run it from a repo/worktree, or pass an explicit id: pg-dev-up --profile <id> <command>"
+		exit 1
+	fi
+	INSTANCE_DIR="$SCOPED_ROOT/$key"
+	PORT_FILE="$INSTANCE_DIR/port"
+	# Owner-only from the top down: the temp root and the instance dir hold the
+	# cluster's data + unix socket, which PostgreSQL requires be private.
+	(umask 077 && mkdir -p "$INSTANCE_DIR")
+	chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
+	if [ -z "$PGDATA_EXPLICIT" ]; then
+		PGDATA="$INSTANCE_DIR/pgdata"
+	fi
+	PG_SOCKDIR="$INSTANCE_DIR"
+}
+
+# 0 if something is already accepting connections on 127.0.0.1:$1.
+port_listening() {
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && {
+		exec 3>&- 3<&-
+		return 0
+	}
+	return 1
+}
+
+# 0 if a DIFFERENT scoped instance has recorded $1 as its port (even if its
+# server is momentarily stopped) — so we never hand the same port to two of them.
+port_reserved() {
+	local pf p want="$1"
+	for pf in "$SCOPED_ROOT"/*/port; do
+		[ -f "$pf" ] || continue
+		[ "$pf" = "$PORT_FILE" ] && continue
+		p="$(cat "$pf" 2>/dev/null || true)"
+		[ "$p" = "$want" ] && return 0
+	done
+	return 1
+}
+
+# Pick (or reuse) this scoped instance's port, serialized against other scoped
+# instances by a lock on the shared root so two concurrent `up`s never race onto
+# the same port. Sets PGPORT and records it in PORT_FILE.
+allocate_port() {
+	local p start=5433 end=5632
+	exec 9>"$SCOPED_ROOT/.portlock"
+	if ! flock -w 30 9; then
+		log "timed out waiting for the scoped port lock ($SCOPED_ROOT/.portlock)."
+		exit 1
+	fi
+	if [ -s "$PORT_FILE" ]; then
+		PGPORT="$(cat "$PORT_FILE")"
+		flock -u 9
+		return 0
+	fi
+	for ((p = start; p <= end; p++)); do
+		port_reserved "$p" && continue
+		port_listening "$p" && continue
+		PGPORT="$p"
+		printf '%s\n' "$p" >"$PORT_FILE"
+		flock -u 9
+		return 0
+	done
+	flock -u 9
+	log "no free loopback port in ${start}-${end} for this scoped instance."
+	exit 1
+}
+
+# `up` path: resolve the port to start on. Explicit PGPORT wins but is still
+# recorded so later url/status/down resolve it without re-passing the env var.
+scoped_port_for_up() {
+	if [ -n "$PGPORT_EXPLICIT" ]; then
+		printf '%s\n' "$PGPORT" >"$PORT_FILE"
+	else
+		allocate_port
+	fi
+}
+
+# read path (url/status/down): resolve the port `up` already chose.
+scoped_port_for_read() {
+	if [ -n "$PGPORT_EXPLICIT" ]; then
+		return 0
+	fi
+	if [ -s "$PORT_FILE" ]; then
+		PGPORT="$(cat "$PORT_FILE")"
+	else
+		log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
+		exit 1
+	fi
+}
+
+# Resolve PGDATA / PGPORT / PG_SOCKDIR for the requested command. `portmode` is
+# how this command needs the port: `up` allocates, `read` reads a recorded one,
+# `none` (check/help) needs neither a port nor a scoped instance.
+configure_paths() {
+	local portmode="$1"
+	if [ -n "$SCOPED" ] && [ "$portmode" != none ]; then
+		resolve_scope
+		if [ "$portmode" = up ]; then
+			scoped_port_for_up
+		else
+			scoped_port_for_read
+		fi
+	fi
+	# Fill in any value scoped mode did not set (also the entire unscoped path).
+	PGDATA="${PGDATA:-/tmp/pgdata}"
+	PGPORT="${PGPORT:-5432}"
 }
 
 pg_running() {
@@ -173,18 +347,75 @@ cmd_check() {
 	"$BINDIR/postgres" --version
 }
 
-usage() { sed -n '2,31p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+usage() { sed -n '2,54p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+
+# Consume a leading scope flag (--worktree / --profile <id>) BEFORE the command;
+# everything after the flag is the command and its own arguments (e.g. the
+# `--export` that `url` takes), so we stop at the first non-scope token.
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--worktree)
+			SCOPED=1
+			SCOPE_MODE=worktree
+			shift
+			;;
+		--profile)
+			SCOPED=1
+			SCOPE_MODE=profile
+			shift
+			[ $# -gt 0 ] || {
+				log "--profile requires an identifier"
+				exit 2
+			}
+			SCOPE_PROFILE_ID="$1"
+			shift
+			;;
+		--profile=*)
+			SCOPED=1
+			SCOPE_MODE=profile
+			SCOPE_PROFILE_ID="${1#--profile=}"
+			shift
+			;;
+		--)
+			shift
+			break
+			;;
+		*) break ;;
+	esac
+done
+
+if [ "$SCOPE_MODE" = profile ]; then
+	case "$SCOPE_PROFILE_ID" in
+		'') log "--profile requires a non-empty identifier"; exit 2 ;;
+		*[!A-Za-z0-9._-]*) log "invalid --profile id (allowed: A-Za-z0-9._-)"; exit 2 ;;
+	esac
+fi
 
 case "${1:-up}" in
-	up | "") cmd_up ;;
-	down | stop) cmd_down ;;
-	status) cmd_status ;;
+	up | "")
+		configure_paths up
+		cmd_up
+		;;
+	down | stop)
+		configure_paths read
+		cmd_down
+		;;
+	status)
+		configure_paths read
+		cmd_status
+		;;
 	url)
+		configure_paths read
 		shift
 		print_url "${1:-}"
 		;;
-	check) cmd_check ;;
-	help | -h | --help) usage ;;
+	check)
+		configure_paths none
+		cmd_check
+		;;
+	help | -h | --help)
+		usage
+		;;
 	*)
 		log "unknown command '$1' (try: up, down, status, url, check, help)"
 		exit 2

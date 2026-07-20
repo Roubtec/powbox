@@ -88,6 +88,18 @@ PG_SOCKDIR="/tmp"
 
 log() { printf 'pg-dev-up: %s\n' "$*" >&2; }
 
+# Publish a scoped marker file ATOMICALLY: write to a sibling temp file, then
+# rename it into place. A concurrent reader (a `down`/`status` in another
+# worktree) therefore sees either the previous complete value or the new
+# complete one — never an empty/partial file caught mid-write, which could
+# otherwise resolve to the wrong (or the unscoped) cluster.
+atomic_write() {
+	local dest="$1" content="$2" tmp
+	tmp="$(mktemp "${dest}.XXXXXX")"
+	printf '%s\n' "$content" >"$tmp"
+	mv -f "$tmp" "$dest"
+}
+
 # Debian keeps the server binaries (initdb, pg_ctl, postgres) off PATH under
 # /usr/lib/postgresql/<major>/bin; pick the highest installed major version.
 find_bindir() {
@@ -153,15 +165,28 @@ resolve_scope() {
 	INSTANCE_DIR="$SCOPED_ROOT/$key"
 	PORT_FILE="$INSTANCE_DIR/port"
 	DATADIR_FILE="$INSTANCE_DIR/datadir"
+	# Only `up` may CREATE the instance dir; a read command (down/status/url)
+	# must not materialize an empty instance for a scope that was never `up`ed
+	# (it would leave a stray dir behind and mask "no instance yet" errors).
 	# Owner-only from the top down: the temp root and the instance dir hold the
 	# cluster's data + unix socket, which PostgreSQL requires be private.
-	(umask 077 && mkdir -p "$INSTANCE_DIR")
-	chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
+	if [ "$portmode" = up ]; then
+		(umask 077 && mkdir -p "$INSTANCE_DIR")
+		chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
+	fi
+	# Resolve PGDATA. An explicit PGDATA is authoritative and untouched. Scoped
+	# mode NEVER falls back to the unscoped /tmp/pgdata default: on `up` it is the
+	# scoped default; on a read command it MUST come from the marker `up` recorded
+	# — if that marker is missing/empty, fail loudly rather than guess (which
+	# could otherwise let a scoped `down`/`status` act on an unrelated cluster).
 	if [ -z "$PGDATA_EXPLICIT" ]; then
-		if [ "$portmode" != up ] && [ -s "$DATADIR_FILE" ]; then
+		if [ "$portmode" = up ]; then
+			PGDATA="$INSTANCE_DIR/pgdata"
+		elif [ -s "$DATADIR_FILE" ]; then
 			PGDATA="$(cat "$DATADIR_FILE")"
 		else
-			PGDATA="$INSTANCE_DIR/pgdata"
+			log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
+			exit 1
 		fi
 	fi
 	PG_SOCKDIR="$INSTANCE_DIR"
@@ -218,7 +243,7 @@ allocate_port() {
 		port_reserved "$p" && continue
 		port_listening "$p" && continue
 		PGPORT="$p"
-		printf '%s\n' "$p" >"$PORT_FILE"
+		atomic_write "$PORT_FILE" "$p"
 		flock -u 9
 		return 0
 	done
@@ -234,7 +259,25 @@ allocate_port() {
 scoped_port_for_up() {
 	if [ -z "$PGPORT_EXPLICIT" ]; then
 		allocate_port
+		return 0
 	fi
+	# Explicit PGPORT still goes through the shared reservation lock, so a
+	# concurrent auto-allocating scoped `up` cannot race onto the same port: we
+	# take the lock, refuse if ANOTHER scoped instance already reserved this port,
+	# then record our reservation before releasing. (The auto-allocator skips any
+	# port that appears in another instance's PORT_FILE.)
+	exec 9>"$SCOPED_ROOT/.portlock"
+	if ! flock -w 30 9; then
+		log "timed out waiting for the scoped port lock ($SCOPED_ROOT/.portlock)."
+		exit 1
+	fi
+	if port_reserved "$PGPORT"; then
+		flock -u 9
+		log "explicit PGPORT $PGPORT is already reserved by another scoped instance; refusing to collide (pick a different PGPORT)."
+		exit 1
+	fi
+	atomic_write "$PORT_FILE" "$PGPORT"
+	flock -u 9
 }
 
 # read path (url/status/down): resolve the port `up` already chose.
@@ -262,8 +305,14 @@ configure_paths() {
 		else
 			scoped_port_for_read
 		fi
+		# resolve_scope + the port helpers set PGDATA and PGPORT to fully scoped
+		# values (or already exited on a missing marker). Return BEFORE the unscoped
+		# defaults below so a scoped command can NEVER fall back to /tmp/pgdata:5432
+		# and act on the unrelated unscoped cluster.
+		return 0
 	fi
-	# Fill in any value scoped mode did not set (also the entire unscoped path).
+	# Unscoped path (and scoped check/help, which touch no cluster): historical
+	# /tmp defaults, byte-for-byte as before scoped mode existed.
 	PGDATA="${PGDATA:-/tmp/pgdata}"
 	PGPORT="${PGPORT:-5432}"
 }
@@ -345,7 +394,7 @@ cmd_up() {
 			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
 			exit 1
 		fi
-		printf '%s\n' "$PGDATA" >"$DATADIR_FILE"
+		atomic_write "$DATADIR_FILE" "$PGDATA"
 	fi
 	if [ ! -s "$PGDATA/PG_VERSION" ]; then
 		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
@@ -353,13 +402,17 @@ cmd_up() {
 		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null
 	fi
 	if pg_running; then
-		# The cluster is already up. Talk to the port it ACTUALLY listens on (not a
-		# possibly-mismatched requested $PGPORT), so we never create roles/db on an
-		# unrelated server that happens to sit on the requested port.
-		actual="$(running_port || true)"
-		if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then
-			log "Cluster at $PGDATA is already running on port $actual (ignoring requested $PGPORT; run 'down' first to change it)."
-			PGPORT="$actual"
+		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
+		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
+		# unrelated server that happens to sit on the requested port. Unscoped mode
+		# keeps its historical behavior byte-for-byte (it just reports the requested
+		# port), so existing callers see the same URL as before scoped mode existed.
+		if [ -n "$SCOPED" ]; then
+			actual="$(running_port || true)"
+			if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then
+				log "Cluster at $PGDATA is already running on port $actual (ignoring requested $PGPORT; run 'down' first to change it)."
+				PGPORT="$actual"
+			fi
 		fi
 		log "Already running on $PG_HOST:$PGPORT."
 	else
@@ -379,7 +432,7 @@ cmd_up() {
 			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null 8>&- 9>&-
 	fi
 	# Record the effective port so url/status/down resolve the exact server.
-	[ -n "$SCOPED" ] && printf '%s\n' "$PGPORT" >"$PORT_FILE"
+	[ -n "$SCOPED" ] && atomic_write "$PORT_FILE" "$PGPORT"
 	ensure_role_db
 	log "Ready. DATABASE_URL printed below; export it with: eval \"\$(pg-dev-up url --export)\""
 	print_url

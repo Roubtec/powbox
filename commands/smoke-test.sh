@@ -265,11 +265,13 @@ out=$(psql "$DATABASE_URL" -tAc "SELECT current_user, current_database()")
 echo "psql SELECT -> $out"
 printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }
 pg-dev-up down >/dev/null
-# Scoped worktree isolation: two git repos each get an isolated cluster on a
-# distinct allocated port, connect to their own db, and stop independently.
-mkdir -p /tmp/smk-sa /tmp/smk-sb
-git -C /tmp/smk-sa init -q && git -C /tmp/smk-sa -c user.email=s@s -c user.name=s commit -q --allow-empty -m i
-git -C /tmp/smk-sb init -q && git -C /tmp/smk-sb -c user.email=s@s -c user.name=s commit -q --allow-empty -m i
+# Scoped worktree isolation: two LINKED worktrees of ONE repo (they share a
+# common Git dir but have distinct toplevels — the real identity case) each get
+# an isolated cluster on a distinct allocated port, connect to their own db, and
+# stop independently.
+rm -rf /tmp/smk-sa /tmp/smk-sb
+git -C /tmp init -q smk-sa && git -C /tmp/smk-sa -c user.email=s@s -c user.name=s commit -q --allow-empty -m i
+git -C /tmp/smk-sa -c user.email=s@s -c user.name=s worktree add -q -b smk-wt /tmp/smk-sb >/dev/null
 ua=$(cd /tmp/smk-sa && POSTGRES_DB=sa pg-dev-up --worktree up | tail -1)
 ub=$(cd /tmp/smk-sb && POSTGRES_DB=sb pg-dev-up --worktree up | tail -1)
 pa=${ua##*:}; pa=${pa%%/*}; pb=${ub##*:}; pb=${pb%%/*}

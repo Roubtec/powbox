@@ -85,7 +85,11 @@ try_not() {
 	if "$@"; then ko "$desc"; else ok "$desc"; fi
 }
 
-# Run pg-dev-up from inside a given directory with a clean, explicit env.
+# Run pg-dev-up from inside a given directory with a HERMETIC, explicit env.
+# We strip any PGDATA/PGPORT/POSTGRES_* the caller's shell might have exported
+# (e.g. from an `eval "$(pg-dev-up url --export)"`) so the test can never touch
+# or stop a caller-configured cluster; each case that needs an override sets it
+# explicitly AFTER the -u strips, and env's later assignment wins.
 # Usage: pg <cwd> [ENV=VAL ...] -- <pg-dev-up args...>
 pg() {
 	local cwd="$1"
@@ -96,7 +100,7 @@ pg() {
 		shift
 	done
 	shift # drop --
-	(cd "$cwd" && env "${envs[@]}" bash "$PG" "$@")
+	(cd "$cwd" && env -u PGDATA -u PGPORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB "${envs[@]}" bash "$PG" "$@")
 }
 
 # Create a throwaway git repo with one commit.
@@ -107,12 +111,35 @@ make_repo() {
 	git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 }
 
-REPO_A="$WORK/repo-a"
-REPO_B="$WORK/repo-b"
-make_repo "$REPO_A"
-make_repo "$REPO_B"
+# Add a LINKED worktree of an existing repo. This is the identity case the task
+# actually requires: two checkouts that SHARE one common Git dir but have
+# distinct toplevels, so the scope key must be derived from the (common git dir,
+# toplevel) pair — a plain path basename would be ambiguous, and two separate
+# repos would not exercise the shared-common-dir derivation at all.
+add_worktree() {
+	local repo="$1" path="$2" branch="$3"
+	git -C "$repo" -c user.email=t@t -c user.name=t worktree add -q -b "$branch" "$path" >/dev/null
+}
 
-echo "== two concurrent worktree-scoped instances =="
+# ONE repository (REPO_A is its main checkout); REPO_B is a LINKED worktree of it.
+# They share REPO_A/.git as their common Git dir yet have different toplevels,
+# so scoped mode must still hand them distinct data dirs and ports.
+MAIN_REPO="$WORK/repo-main"
+REPO_A="$MAIN_REPO"
+REPO_B="$WORK/wt-b"
+make_repo "$MAIN_REPO"
+add_worktree "$MAIN_REPO" "$REPO_B" wt-b
+
+# Sanity: the two checkouts genuinely share one common Git dir but differ in
+# toplevel — otherwise the isolation below would be testing the wrong thing.
+common_a="$(git -C "$REPO_A" rev-parse --path-format=absolute --git-common-dir)"
+common_b="$(git -C "$REPO_B" rev-parse --path-format=absolute --git-common-dir)"
+top_a="$(git -C "$REPO_A" rev-parse --show-toplevel)"
+top_b="$(git -C "$REPO_B" rev-parse --show-toplevel)"
+try "linked worktrees share one common Git dir" test "$common_a" = "$common_b"
+try "linked worktrees have distinct toplevels" test "$top_a" != "$top_b"
+
+echo "== two concurrent worktree-scoped instances (linked worktrees of one repo) =="
 
 # Bring both up with distinct configured databases (exercise createdb per side).
 url_a="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree up | tail -1)"
@@ -223,10 +250,12 @@ try_not "--profile rejects an invalid identifier" pg "$NONGIT" -- --profile 'bad
 echo "== genuinely parallel up: the port lock prevents a collision =="
 # Launch two fresh scoped instances at the SAME time so their port allocations
 # race; the flock on the shared root must still hand out two DISTINCT ports.
-REPO_C="$WORK/repo-c"
-REPO_D="$WORK/repo-d"
-make_repo "$REPO_C"
-make_repo "$REPO_D"
+# Use two more LINKED worktrees of the one repo so four distinct worktrees of a
+# SINGLE repository each land in their own instance.
+REPO_C="$WORK/wt-c"
+REPO_D="$WORK/wt-d"
+add_worktree "$MAIN_REPO" "$REPO_C" wt-c
+add_worktree "$MAIN_REPO" "$REPO_D" wt-d
 pg "$REPO_C" POSTGRES_DB=app_c -- --worktree up >"$WORK/c.out" 2>/dev/null &
 pid_c=$!
 pg "$REPO_D" POSTGRES_DB=app_d -- --worktree up >"$WORK/d.out" 2>/dev/null &

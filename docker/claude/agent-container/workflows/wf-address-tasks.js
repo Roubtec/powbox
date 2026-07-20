@@ -224,6 +224,70 @@ function storageProbePrompt(wtBase) {
 Run \`df -B1 --output=avail ${JSON.stringify(wtBase)}\` (POSIX fallback: \`df -kP\`, avail column, times 1024) and return the mount's free bytes as \`availBytes\`. If the path is missing or \`df\` fails, return \`availBytes: 0\`.`;
 }
 
+// Non-destructive cleanliness report for the SHARED main checkout. Every task
+// runs in its own `.worktrees/$CONTAINER_NAME/<slug>` worktree, but the
+// repository's MAIN checkout is shared with any peer harness invoked in this
+// same container (Codex ↔ Claude) and with the user. Capturing porcelain status
+// at the Bootstrap and Summary boundaries lets the batch flag main-checkout dirt
+// WITHOUT ever modifying it — no stage/reset/clean/stash, and never a failure
+// merely because the user deliberately started dirty.
+const MAIN_CHECKOUT_SCHEMA = {
+  type: "object",
+  properties: {
+    dirty: { type: "array", items: { type: "string" }, description: "Repo-relative paths `git status --porcelain` reports as modified/untracked in the shared MAIN checkout (never a worktree). Empty when clean; ignored paths like `.worktrees/` never appear." },
+    measured: { type: "boolean", description: "True only if `git status` ran in the main checkout and produced a definitive list. False when it could not be measured — then `dirty` is best-effort and must not be read as authoritative." },
+  },
+  required: ["dirty", "measured"],
+};
+
+function mainCheckoutStatusPrompt(when) {
+  return `Non-destructive cleanliness snapshot of the SHARED main checkout (${when}). OBSERVE ONLY — do NOT stage, commit, reset, clean, stash, or edit anything. This step must never modify the tree; a checkout that is already dirty (e.g. the user's own work-in-progress) is fine and must not be "fixed".
+
+Why: each task runs in its own \`.worktrees/$CONTAINER_NAME/<slug>\` worktree, but the repository's MAIN checkout is shared — a peer harness invoked in this container and the user both see it. Snapshotting its porcelain status at batch boundaries lets the summary report main-checkout dirt without touching it.
+
+From the MAIN checkout root — your current working directory; confirm with \`git rev-parse --show-toplevel\` and do NOT \`cd\` into any \`.worktrees/...\` worktree — run \`git status --porcelain\` and return every reported path in \`dirty\` (repo-relative, verbatim; empty array when the checkout is clean) with \`measured: true\`. If git cannot run, the directory is a linked worktree rather than the main checkout, or the status is otherwise indeterminate, return \`measured: false\` with whatever \`dirty\` you have and do not fail.`;
+}
+
+// Compare the pre-batch baseline against the post-batch snapshot. Purely
+// descriptive: it distinguishes paths already dirty before the batch from paths
+// that appeared during it, and — crucially — never claims the new paths were
+// agent-created (a concurrent peer harness or the user could equally be the
+// source). With no measured baseline it declines to attribute anything.
+function mainCheckoutSummary(baseline, final) {
+  const baselineMeasured = !!(baseline && baseline.measured);
+  const baselineSet = baselineMeasured
+    ? new Set(Array.isArray(baseline.dirty) ? baseline.dirty : [])
+    : null;
+  if (!final || !final.measured) {
+    return {
+      measured: false,
+      baselineKnown: baselineMeasured,
+      preexisting: baselineSet ? [...baselineSet] : [],
+      newPaths: [],
+      flagged: false,
+      note: "Post-batch main-checkout status could not be measured; cleanliness report skipped. The workflow modified nothing in the main checkout.",
+    };
+  }
+  const finalDirty = Array.isArray(final.dirty) ? final.dirty : [];
+  const preexisting = baselineSet ? finalDirty.filter((p) => baselineSet.has(p)) : [];
+  const newPaths = baselineSet ? finalDirty.filter((p) => !baselineSet.has(p)) : finalDirty.slice();
+  let note;
+  let flagged = false;
+  if (finalDirty.length === 0) {
+    note = "Shared main checkout is clean; the workflow modified nothing there.";
+  } else if (!baselineMeasured) {
+    // No clean baseline to diff against — surface the dirt but attribute nothing.
+    flagged = true;
+    note = `Shared main checkout has ${finalDirty.length} dirty path(s), but no clean pre-batch baseline was captured, so they are NOT attributed to this batch. The workflow modified nothing in the main checkout — inspect and clean up yourself if unexpected.`;
+  } else if (newPaths.length === 0) {
+    note = `Shared main checkout dirt is unchanged from the pre-batch baseline (${preexisting.length} pre-existing path(s)); nothing new appeared during the batch. The workflow modified nothing there.`;
+  } else {
+    flagged = true;
+    note = `Shared main checkout gained ${newPaths.length} dirty path(s) during the batch (source not attributed — a concurrent peer harness, the user, or a run that strayed from its worktree could each be responsible), alongside ${preexisting.length} pre-existing path(s). The workflow modified nothing in the main checkout; review before any cleanup.`;
+  }
+  return { measured: true, baselineKnown: baselineMeasured, preexisting, newPaths, flagged, note };
+}
+
 function resolvePrompt(input) {
   return `You are scoping a batch of pre-planned task files for implementation. Do NOT implement anything.
 
@@ -273,7 +337,8 @@ Resolve your worktree with the image-baked helper and \`cd\` into it:
 \`wt-enter\` is rerun-safe: it reuses this task's existing worktree (prior commits intact)${mayCreate ? `, attaches the existing branch \`${task.branch}\` if its worktree is gone, or creates the branch off \`${task.base}\` if neither exists yet` : ` or re-attaches the existing branch \`${task.branch}\`; it deliberately CANNOT create the branch for this stage — if it errors that the branch does not exist, the implementation is missing`}. If the command fails, STOP and report its error verbatim — never improvise your own \`git worktree add\` or \`git switch\`.
 
 Then verify: \`git rev-parse --show-toplevel\` prints exactly \`$WT\` and \`git branch --show-current\` prints \`${task.branch}\`. If either is wrong, STOP and report.
-Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.`;
+Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.
+Scope every cleanup to WT (\`git -C "$WT" …\`) and commit checkpoints often. The container's main checkout and its \`.worktrees\` volume are SHARED — a peer harness or a sibling task may hold uncommitted work there — so never run \`git reset --hard\`, and especially not \`git clean -fdx\` (it ignores \`.gitignore\`, so it would also wipe the \`.worktrees\` scaffolding), against the shared main checkout to reclaim space.`;
 }
 
 function implementPrompt(task, round, findings, remote) {
@@ -502,6 +567,16 @@ if (!boot || !boot.ok) {
 // missing/undefined probe result must fall back to local-branch-only rather
 // than silently attempt a publish.
 const remote = boot.remote === true;
+
+// Pre-batch baseline of the SHARED main checkout (see MAIN_CHECKOUT_SCHEMA).
+// Observation only — a dirty start is the user's prerogative and never blocks
+// the batch; a null/unmeasured result just means the Summary report cannot
+// attribute post-batch dirt to this run.
+const mainCheckoutBaseline = await agent(mainCheckoutStatusPrompt("pre-batch baseline"), {
+  label: "main-checkout-baseline",
+  schema: MAIN_CHECKOUT_SCHEMA,
+  effort: "low",
+});
 
 phase("Resolve batch");
 const plan = await agent(resolvePrompt(args), { label: "resolve", schema: PLAN_SCHEMA });
@@ -800,6 +875,19 @@ for (let w = 0; w < plan.waves.length; w++) {
 }
 
 phase("Summary");
+// Post-batch snapshot of the shared main checkout, compared against the baseline.
+// Non-destructive: it only reports dirt (distinguishing pre-existing from new
+// paths) and never modifies, resets, or fails on it.
+const mainCheckoutFinal = await agent(mainCheckoutStatusPrompt("post-batch"), {
+  label: "main-checkout-final",
+  schema: MAIN_CHECKOUT_SCHEMA,
+  effort: "low",
+});
+const mainCheckout = mainCheckoutSummary(mainCheckoutBaseline, mainCheckoutFinal);
+if (mainCheckout.flagged) {
+  const paths = mainCheckout.newPaths.length ? ` Paths: ${mainCheckout.newPaths.join(", ")}.` : "";
+  log(`${mainCheckout.note}${paths}`);
+}
 const landed = results.filter((r) => r.status === "done").length;
 log(`Batch complete: ${landed}/${results.length} tasks landed a PR.`);
-return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, results };
+return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, mainCheckout, results };

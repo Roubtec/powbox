@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+# peer-review-run — bidirectional, provider-neutral peer-review runner.
+#
+# A Claude-led workflow reviews with Codex, and a Codex-led workflow reviews
+# with Claude, through ONE command interface and ONE machine-readable result
+# contract. The helper owns the mechanics that peer reviews previously required
+# by hand: a private owner-only artifact directory, literal (never shell-eval'd)
+# prompt handling, read-only provider execution, process-group supervision with
+# a timeout, a retry-once policy for transient failures, result parsing, and
+# process reaping on every exit path.
+#
+# Usage:
+#   peer-review-run --provider <claude|codex> \
+#                   --worktree <ABS_DIR> \
+#                   --prompt-file <FILE> \
+#                   --artifact-root <ABS_DIR> \
+#                   [--base <REF>] [--timeout <SECONDS>]
+#
+#   --provider       claude | codex — the PEER that reviews (the opposite agent).
+#   --worktree       absolute path to the checkout the peer reviews (read-only).
+#   --prompt-file    file whose CONTENTS are the literal review prompt; fed to
+#                    the provider on stdin, never interpolated through a shell.
+#   --artifact-root  absolute directory OUTSIDE the worktree under which a fresh
+#                    owner-only (0700) attempt dir is created per attempt.
+#   --base           optional base/reference metadata (recorded, not injected).
+#   --timeout        wall-clock seconds before the provider tree is reaped
+#                    (default 900).
+#
+# Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
+# is a single JSON object:
+#   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
+#     retried, liveProgress, artifactDir, reason }
+#   outcome  ∈ passed | issues | unavailable | timeout | forfeited | failed
+#   verdict  ∈ pass | issues | none   (normalized from the peer's final message)
+#   exitStatus  the provider exit code, or null when unknown (missing binary /
+#               killed on timeout).
+# The helper NEVER reports success because an output file is absent or empty.
+# It exits 0 for ANY produced outcome (the outcome is a non-blocking signal for
+# the caller to weigh) and non-zero ONLY for its own usage/operational errors.
+#
+# Progress: while running, `liveProgress:true` providers (Codex, when the
+# installed CLI supports `--json`) stream normalized progress events to STDERR;
+# a buffered provider (Claude) is represented honestly with liveProgress:false
+# and a single up-front note rather than a simulated heartbeat. stdout stays a
+# single parseable JSON object regardless.
+#
+# This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
+# and no peer outcome is required for publication.
+set -uo pipefail
+
+readonly SCHEMA="powbox.peer-review-run/v1"
+readonly DEFAULT_TIMEOUT=900
+
+# EX_USAGE-style exit for the helper's OWN errors (never a peer outcome).
+EX_USAGE=64
+
+usage() {
+	sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die_usage() {
+	echo "peer-review-run: $*" >&2
+	echo "Try: peer-review-run --provider <claude|codex> --worktree <dir> --prompt-file <file> --artifact-root <dir>" >&2
+	exit "$EX_USAGE"
+}
+
+# --- process-group supervision ----------------------------------------------
+# The currently supervised job's process-group id (== the background subshell
+# pid, since `set -m` gives each job its own group). The EXIT/INT/TERM trap
+# reaps it so a helper interrupted mid-review never leaves a live peer process.
+CURRENT_PGID=""
+
+reap_group() {
+	# reap_group <pgid> — TERM the whole group, escalate to KILL, never pkill -f.
+	local pgid="$1"
+	[ -n "$pgid" ] || return 0
+	kill -TERM "-${pgid}" 2>/dev/null || true
+	local i
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "-${pgid}" 2>/dev/null || return 0
+		sleep 0.1
+	done
+	kill -KILL "-${pgid}" 2>/dev/null || true
+}
+
+on_exit() {
+	# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap
+	[ -n "$CURRENT_PGID" ] && reap_group "$CURRENT_PGID"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- argument parsing --------------------------------------------------------
+PROVIDER=""
+WORKTREE=""
+PROMPT_FILE=""
+ARTIFACT_ROOT=""
+BASE=""
+TIMEOUT="$DEFAULT_TIMEOUT"
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	--provider)
+		PROVIDER="${2:-}"
+		shift 2 || die_usage "--provider needs a value"
+		;;
+	--worktree)
+		WORKTREE="${2:-}"
+		shift 2 || die_usage "--worktree needs a value"
+		;;
+	--prompt-file)
+		PROMPT_FILE="${2:-}"
+		shift 2 || die_usage "--prompt-file needs a value"
+		;;
+	--artifact-root)
+		ARTIFACT_ROOT="${2:-}"
+		shift 2 || die_usage "--artifact-root needs a value"
+		;;
+	--base)
+		BASE="${2:-}"
+		shift 2 || die_usage "--base needs a value"
+		;;
+	--timeout)
+		TIMEOUT="${2:-}"
+		shift 2 || die_usage "--timeout needs a value"
+		;;
+	--)
+		shift
+		break
+		;;
+	-*) die_usage "unknown flag '$1'" ;;
+	*) die_usage "unexpected argument '$1'" ;;
+	esac
+done
+
+# --- validation --------------------------------------------------------------
+command -v jq >/dev/null 2>&1 || die_usage "jq is required but not on PATH"
+
+case "$PROVIDER" in
+claude | codex) ;;
+"") die_usage "--provider is required (claude|codex)" ;;
+*) die_usage "unsupported --provider '$PROVIDER' (claude|codex)" ;;
+esac
+
+[ -n "$WORKTREE" ] || die_usage "--worktree is required"
+case "$WORKTREE" in
+/*) ;;
+*) die_usage "--worktree must be an absolute path (got '$WORKTREE')" ;;
+esac
+[ -d "$WORKTREE" ] || die_usage "--worktree '$WORKTREE' is not a directory"
+WORKTREE="$(realpath -- "$WORKTREE")" || die_usage "cannot resolve --worktree"
+
+[ -n "$PROMPT_FILE" ] || die_usage "--prompt-file is required"
+[ -f "$PROMPT_FILE" ] || die_usage "--prompt-file '$PROMPT_FILE' is not a regular file"
+[ -r "$PROMPT_FILE" ] || die_usage "--prompt-file '$PROMPT_FILE' is not readable"
+PROMPT_FILE="$(realpath -- "$PROMPT_FILE")" || die_usage "cannot resolve --prompt-file"
+
+[ -n "$ARTIFACT_ROOT" ] || die_usage "--artifact-root is required"
+case "$ARTIFACT_ROOT" in
+/*) ;;
+*) die_usage "--artifact-root must be an absolute path (got '$ARTIFACT_ROOT')" ;;
+esac
+mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-root '$ARTIFACT_ROOT'"
+ARTIFACT_ROOT="$(realpath -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
+# The artifact root must live OUTSIDE the worktree: a read-only provider rooted
+# at the worktree must not be able to see attempt artifacts, and sibling
+# attempts stay isolated (0700). Rooting artifacts under the worktree would
+# leak them into the review surface.
+case "$ARTIFACT_ROOT/" in
+"$WORKTREE/"*) die_usage "--artifact-root must be OUTSIDE --worktree (got '$ARTIFACT_ROOT' under '$WORKTREE')" ;;
+esac
+
+case "$TIMEOUT" in
+'' | *[!0-9.]* | '.' | *.*.*) die_usage "--timeout must be a positive number of seconds (got '$TIMEOUT')" ;;
+esac
+awk -v t="$TIMEOUT" 'BEGIN{exit !(t>0)}' || die_usage "--timeout must be > 0 (got '$TIMEOUT')"
+
+# The peer binary is the OPPOSITE agent's CLI, resolved by provider name.
+PEER_BIN="$PROVIDER"
+
+# --- provider capability probe ----------------------------------------------
+# Codex can stream structured events with `codex exec --json`, but only when the
+# installed CLI supports it. Probe once; represent the result honestly in
+# liveProgress rather than assuming. Claude's `-p --output-format json` buffers
+# its single final result — no live events — so it is always liveProgress:false.
+CODEX_JSON_SUPPORTED=""
+codex_supports_json() {
+	if [ -z "$CODEX_JSON_SUPPORTED" ]; then
+		if codex exec --help 2>&1 | grep -q -- '--json'; then
+			CODEX_JSON_SUPPORTED=yes
+		else
+			CODEX_JSON_SUPPORTED=no
+		fi
+	fi
+	[ "$CODEX_JSON_SUPPORTED" = yes ]
+}
+
+# LIVE=1 when the provider streams progress this run; drives forward_tick and
+# the liveProgress result field.
+LIVE=0
+
+# --- provider command builders ----------------------------------------------
+# Each builder populates the CMD array. The prompt is NEVER placed on argv or
+# expanded by a shell — it is fed on stdin from the attempt's prompt.txt.
+CMD=()
+
+build_cmd_claude() {
+	# Read-only headless review. Omitting --dangerously-skip-permissions is what
+	# keeps it read-only: in non-interactive `-p` mode a tool outside the
+	# allowlist cannot prompt, so it is denied and the model continues. The
+	# allowlist grants read/inspect tools and safe git reads; the explicit
+	# disallow list is defense-in-depth against any edit/write/push tool.
+	local allow="Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git status:*) Bash(git blame:*) Bash(cat:*) Bash(ls:*) Bash(rg:*) Bash(sed:*) Bash(head:*) Bash(tail:*)"
+	local deny="Write Edit MultiEdit NotebookEdit Bash(git push:*) Bash(git commit:*) Bash(git reset:*) Bash(rm:*)"
+	CMD=(claude -p
+		--output-format json
+		--allowedTools "$allow"
+		--disallowedTools "$deny"
+		--add-dir "$WORKTREE")
+	LIVE=0
+}
+
+build_cmd_codex() {
+	# Read-only sandbox rooted at the worktree. `-c mcp_servers={}` stops any
+	# configured MCP/server state from leaking into an untrusted review run.
+	# --output-last-message captures the peer's final message for verdict
+	# parsing. `-` reads the prompt from stdin. --json (when supported) adds the
+	# live event stream we forward.
+	local dir="$1"
+	CMD=(codex exec
+		--sandbox read-only
+		--cd "$WORKTREE"
+		-c "mcp_servers={}"
+		--output-last-message "$dir/codex-last-message.txt")
+	if codex_supports_json; then
+		CMD+=(--json)
+		LIVE=1
+	else
+		LIVE=0
+	fi
+	CMD+=(-)
+}
+
+# --- progress forwarding -----------------------------------------------------
+# Forward newly-appended provider stdout lines to STDERR as normalized progress
+# events, without a second supervised process: the poll loop calls this each
+# tick. Only active when LIVE=1 (Codex --json).
+FWD_LINES=0
+forward_tick() {
+	[ "$LIVE" = 1 ] || return 0
+	local f="$1" total i line
+	total=$(wc -l <"$f" 2>/dev/null || echo 0)
+	i="$FWD_LINES"
+	while [ "$i" -lt "$total" ]; do
+		i=$((i + 1))
+		line=$(sed -n "${i}p" "$f")
+		printf '{"event":"progress","provider":"%s","line":%s}\n' \
+			"$PROVIDER" "$(printf '%s' "$line" | jq -Rs .)" >&2
+	done
+	FWD_LINES="$total"
+}
+
+# --- classification helpers --------------------------------------------------
+# An unavailable peer: missing binary, no/expired login, or exhausted usage.
+# These are NON-transient — retrying wastes quota — so they short-circuit retry.
+looks_unavailable() {
+	grep -Eiq \
+		'not (logged|signed) ?in|please (run )?[^ ]*login|log ?in (again|required)|re-?authenticate|unauthorized|(^|[^0-9])401([^0-9]|$)|(^|[^0-9])429([^0-9]|$)|usage limit|rate.?limit|too many requests|quota (exceeded|exhausted|reached)|(credits?|usage|balance) (exhausted|exceeded|depleted)|insufficient (quota|credit)' \
+		"$@"
+}
+
+# Extract the peer's final message text for the given provider from the captured
+# output. Prints the text; returns 1 when a structured response is malformed.
+extract_final_message() {
+	local provider="$1" out="$2" dir="$3"
+	case "$provider" in
+	claude)
+		# `--output-format json` emits ONE JSON object; .result is the final text.
+		jq -e . "$out" >/dev/null 2>&1 || return 1
+		jq -r '.result // ""' "$out"
+		;;
+	codex)
+		# The final assistant message is captured verbatim in the -o file.
+		cat "$dir/codex-last-message.txt" 2>/dev/null || true
+		;;
+	esac
+}
+
+# Normalize a peer's final message to pass | issues | none. The runner parses a
+# documented VERDICT token the reviewer emits; it does NOT judge review content
+# (that is the caller's/prompt's policy). A missing token is never a pass.
+detect_verdict() {
+	local text="$1"
+	if printf '%s' "$text" | grep -Eiq 'VERDICT[[:space:]]*[:=][[:space:]]*(pass|passed|approve|approved|lgtm|no[[:space:]_-]*issues?)'; then
+		echo pass
+		return
+	fi
+	if printf '%s' "$text" | grep -Eiq 'VERDICT[[:space:]]*[:=][[:space:]]*(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)'; then
+		echo issues
+		return
+	fi
+	echo none
+}
+
+# --- a single attempt --------------------------------------------------------
+# Sets: ATTEMPT_DIR ATT_OUTCOME ATT_VERDICT ATT_EXIT ATT_ELAPSED ATT_REASON
+#       ATT_TRANSIENT (1 when the failure is retryable)
+run_attempt() {
+	local attempt_no="$1"
+	ATT_VERDICT=none
+	ATT_EXIT=null
+	ATT_TRANSIENT=0
+
+	ATTEMPT_DIR="$(mktemp -d "${ARTIFACT_ROOT}/peer-review-${PROVIDER}-XXXXXX")" ||
+		die_usage "cannot create an attempt directory under '$ARTIFACT_ROOT'"
+	chmod 700 "$ATTEMPT_DIR"
+	local dir="$ATTEMPT_DIR"
+	local out="$dir/provider.stdout" err="$dir/provider.stderr"
+	: >"$out"
+	: >"$err"
+
+	# Literal prompt: copied in, then fed on stdin. Never on argv, never eval'd.
+	cp -- "$PROMPT_FILE" "$dir/prompt.txt"
+
+	# Preflight: a missing peer binary is an unavailable outcome, not a crash.
+	if ! command -v "$PEER_BIN" >/dev/null 2>&1; then
+		ATT_OUTCOME=unavailable
+		ATT_ELAPSED=0
+		ATT_REASON="provider binary '$PEER_BIN' is not installed on PATH"
+		write_meta "$dir" "$attempt_no" "unavailable-preflight"
+		return 0
+	fi
+
+	case "$PROVIDER" in
+	claude) build_cmd_claude ;;
+	codex) build_cmd_codex "$dir" ;;
+	esac
+	write_meta "$dir" "$attempt_no" "launched"
+
+	if [ "$LIVE" = 1 ]; then
+		printf '{"event":"note","provider":"%s","liveProgress":true,"message":"streaming provider events"}\n' "$PROVIDER" >&2
+	else
+		printf '{"event":"note","provider":"%s","liveProgress":false,"message":"buffered final result; no live progress"}\n' "$PROVIDER" >&2
+	fi
+
+	# Launch the provider as its OWN process group (set -m) so the whole tree can
+	# be reaped by group id. The subshell is the group leader; $! is its pgid.
+	FWD_LINES=0
+	local start end pgid rc timed_out=0
+	start=$(date +%s.%N)
+	set -m
+	(cd "$WORKTREE" && exec "${CMD[@]}" <"$dir/prompt.txt" >"$out" 2>"$err") &
+	pgid=$!
+	set +m
+	CURRENT_PGID="$pgid"
+
+	# Poll: forward progress, enforce the deadline, reap the group on timeout.
+	while kill -0 "$pgid" 2>/dev/null; do
+		forward_tick "$out"
+		end=$(date +%s.%N)
+		if awk -v a="$end" -v b="$start" -v t="$TIMEOUT" 'BEGIN{exit !((a-b)>t)}'; then
+			timed_out=1
+			reap_group "$pgid"
+			break
+		fi
+		sleep 0.1
+	done
+
+	if [ "$timed_out" = 1 ]; then
+		if wait "$pgid" 2>/dev/null; then :; else :; fi
+	else
+		if wait "$pgid"; then rc=0; else rc=$?; fi
+	fi
+	CURRENT_PGID=""
+	forward_tick "$out" # flush any trailing lines
+	end=$(date +%s.%N)
+	ATT_ELAPSED=$(awk -v a="$end" -v b="$start" 'BEGIN{printf "%.3f", (a-b)}')
+
+	if [ "$timed_out" = 1 ]; then
+		ATT_OUTCOME=timeout
+		ATT_EXIT=null
+		ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group was reaped"
+		write_meta "$dir" "$attempt_no" "timeout"
+		return 0
+	fi
+
+	ATT_EXIT="$rc"
+
+	# Unavailable (auth/usage) trumps the exit code: retrying will not help.
+	if looks_unavailable "$out" "$err"; then
+		ATT_OUTCOME=unavailable
+		ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
+		write_meta "$dir" "$attempt_no" "unavailable"
+		return 0
+	fi
+
+	if [ "$rc" -ne 0 ]; then
+		# A non-auth, non-timeout non-zero exit is treated as a transient
+		# execution failure and retried once (with a fresh attempt dir).
+		ATT_OUTCOME=failed
+		ATT_TRANSIENT=1
+		ATT_REASON="provider exited non-zero ($rc)"
+		write_meta "$dir" "$attempt_no" "failed-exit"
+		return 0
+	fi
+
+	# Exit 0: parse the final message.
+	local text
+	if ! text="$(extract_final_message "$PROVIDER" "$out" "$dir")"; then
+		ATT_OUTCOME=failed
+		ATT_TRANSIENT=0
+		ATT_REASON="provider exited 0 but produced a malformed/unparseable response"
+		write_meta "$dir" "$attempt_no" "malformed"
+		return 0
+	fi
+
+	if [ -z "${text//[[:space:]]/}" ]; then
+		# Ran, exited 0, but delivered no usable message: the peer forfeited a
+		# verdict. NEVER a pass on empty output.
+		ATT_OUTCOME=forfeited
+		ATT_REASON="provider exited 0 with an empty final message"
+		write_meta "$dir" "$attempt_no" "forfeited-empty"
+		return 0
+	fi
+
+	ATT_VERDICT="$(detect_verdict "$text")"
+	case "$ATT_VERDICT" in
+	pass)
+		ATT_OUTCOME=passed
+		ATT_REASON="provider exited 0 with an explicit pass verdict"
+		;;
+	issues)
+		ATT_OUTCOME=issues
+		ATT_REASON="provider exited 0 and reported an issues verdict"
+		;;
+	none)
+		ATT_OUTCOME=forfeited
+		ATT_REASON="provider exited 0 but emitted no recognizable VERDICT token"
+		;;
+	esac
+	write_meta "$dir" "$attempt_no" "$ATT_OUTCOME"
+	return 0
+}
+
+# Record per-attempt metadata for the retained artifact (the invocation record).
+write_meta() {
+	local dir="$1" attempt_no="$2" phase="$3"
+	jq -n \
+		--arg provider "$PROVIDER" \
+		--arg worktree "$WORKTREE" \
+		--arg base "$BASE" \
+		--arg timeout "$TIMEOUT" \
+		--arg attempt "$attempt_no" \
+		--arg phase "$phase" \
+		'{provider:$provider,worktree:$worktree,base:$base,timeoutSeconds:($timeout|tonumber),attempt:($attempt|tonumber),phase:$phase}' \
+		>"$dir/meta.json" 2>/dev/null || true
+}
+
+# --- run with retry-once for transient failures ------------------------------
+ATTEMPTS=0
+RETRIED=false
+
+run_attempt 1
+ATTEMPTS=1
+
+if [ "$ATT_TRANSIENT" = 1 ]; then
+	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
+	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
+	run_attempt 2
+	ATTEMPTS=2
+	RETRIED=true
+	if [ "$ATT_TRANSIENT" = 1 ]; then
+		# Both attempts failed transiently → exhausted.
+		ATT_OUTCOME=failed
+		ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
+	fi
+fi
+
+# --- emit the versioned result ----------------------------------------------
+exit_json="$ATT_EXIT"
+case "$exit_json" in
+'' | null) exit_json=null ;;
+*[!0-9]*) exit_json=null ;;
+esac
+live_json=false
+[ "$LIVE" = 1 ] && live_json=true
+
+jq -nc \
+	--arg schema "$SCHEMA" \
+	--arg provider "$PROVIDER" \
+	--arg outcome "$ATT_OUTCOME" \
+	--arg verdict "$ATT_VERDICT" \
+	--argjson elapsed "$ATT_ELAPSED" \
+	--argjson exitStatus "$exit_json" \
+	--argjson attempts "$ATTEMPTS" \
+	--argjson retried "$RETRIED" \
+	--argjson liveProgress "$live_json" \
+	--arg artifactDir "$ATTEMPT_DIR" \
+	--arg reason "$ATT_REASON" \
+	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,artifactDir:$artifactDir,reason:$reason}'
+
+exit 0

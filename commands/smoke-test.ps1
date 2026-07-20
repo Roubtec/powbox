@@ -135,6 +135,26 @@ else {
   }
 }
 
+# Stage 0e - peer-review-run unit test. The hermetic Bash test (fake `claude`/`codex`
+# binaries on a per-case PATH - no real providers, image, or network) has no host bash
+# on Windows, so run it INSIDE the agent image against the BAKED
+# /usr/local/bin/peer-review-run (via PEER_REVIEW_RUN) with the repo mounted read-only.
+# It guards the bidirectional peer-review runner: the versioned result schema, both
+# provider directions, read-only permission flags, literal stdin-fed prompts, Codex
+# progress forwarding, the six normalized outcomes, timeout with process-tree reaping,
+# and retry-once. Self-skips (recorded in $skipped) when the image is absent.
+if (-not $imagePresent) {
+  Write-Warning "Skipping peer-review-run unit test (Stage 0e) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0e: peer-review-run unit test (image absent)")
+}
+else {
+  Write-Host "Running peer-review-run unit test (baked helper in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" -e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run --entrypoint /bin/bash $Image /repo/scripts/test-peer-review-run.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "peer-review-run unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -182,6 +202,7 @@ else {
     'command -v powbox-provenance >/dev/null'
     'command -v gitcat >/dev/null'
     'command -v gh-review-threads >/dev/null'
+    'command -v peer-review-run >/dev/null'
     'shellcheck --version >/dev/null'
     'ping -V >/dev/null'
     'nc -h >/dev/null 2>&1'

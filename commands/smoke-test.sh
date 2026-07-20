@@ -144,6 +144,32 @@ else
 	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
 fi
 
+# Stage 0e — peer-review-run unit test. Hermetic (fake `claude`/`codex` binaries on
+# a per-case PATH — no real providers, image, or network), so it runs up front like
+# the others. It guards the bidirectional peer-review runner's contract: the versioned
+# result schema, both provider directions, read-only permission flags, literal
+# stdin-fed prompts, Codex progress forwarding, the six normalized outcomes, timeout
+# with process-tree reaping, and retry-once. It runs directly on the host /repo source
+# (needs only bash + jq), then — when the image is present — again against the BAKED
+# /usr/local/bin/peer-review-run so a stale installed helper is caught here rather than
+# waved through by Stage 1's `command -v` presence probe.
+if command -v jq >/dev/null 2>&1; then
+	echo "Running peer-review-run unit test (host /repo source) ..."
+	"${ROOT_DIR}/scripts/test-peer-review-run.sh"
+else
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0e) — host 'jq' unavailable."
+	skipped+=("Stage 0e: peer-review-run host unit test (host jq unavailable)")
+fi
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running peer-review-run unit test (baked helper in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-peer-review-run.sh
+else
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0e) — image '$IMAGE' absent; the host run already covered the /repo source."
+	skipped+=("Stage 0e: peer-review-run baked-helper test (image absent)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -190,6 +216,7 @@ fi
 	"command -v powbox-provenance >/dev/null" \
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \
+	"command -v peer-review-run >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	"ping -V >/dev/null" \
 	"nc -h >/dev/null 2>&1" \

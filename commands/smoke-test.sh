@@ -265,6 +265,21 @@ out=$(psql "$DATABASE_URL" -tAc "SELECT current_user, current_database()")
 echo "psql SELECT -> $out"
 printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }
 pg-dev-up down >/dev/null
+# Scoped worktree isolation: two git repos each get an isolated cluster on a
+# distinct allocated port, connect to their own db, and stop independently.
+mkdir -p /tmp/smk-sa /tmp/smk-sb
+git -C /tmp/smk-sa init -q && git -C /tmp/smk-sa -c user.email=s@s -c user.name=s commit -q --allow-empty -m i
+git -C /tmp/smk-sb init -q && git -C /tmp/smk-sb -c user.email=s@s -c user.name=s commit -q --allow-empty -m i
+ua=$(cd /tmp/smk-sa && POSTGRES_DB=sa pg-dev-up --worktree up | tail -1)
+ub=$(cd /tmp/smk-sb && POSTGRES_DB=sb pg-dev-up --worktree up | tail -1)
+pa=${ua##*:}; pa=${pa%%/*}; pb=${ub##*:}; pb=${pb%%/*}
+{ [ -n "$pa" ] && [ "$pa" != "$pb" ]; } || { echo "FAIL: scoped ports collided ($pa vs $pb)" >&2; exit 1; }
+[ "$(psql "$ua" -tAc "SELECT current_database()")" = sa ] || { echo "FAIL: scoped A wrong db" >&2; exit 1; }
+[ "$(psql "$ub" -tAc "SELECT current_database()")" = sb ] || { echo "FAIL: scoped B wrong db" >&2; exit 1; }
+(cd /tmp/smk-sa && pg-dev-up --worktree down >/dev/null)
+(cd /tmp/smk-sb && pg-dev-up --worktree status >/dev/null 2>&1) || { echo "FAIL: scoped B stopped by A down" >&2; exit 1; }
+(cd /tmp/smk-sb && pg-dev-up --worktree down >/dev/null)
+echo "scoped isolation OK ($pa vs $pb)"
 '
 	echo "pg-dev-up functional test passed."
 fi

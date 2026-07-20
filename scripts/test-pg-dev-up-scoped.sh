@@ -172,7 +172,18 @@ url_pr="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree url)"
 try "recorded explicit port resolved on read" test "$url_pr" = "$url_p"
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 
-# Explicit PGDATA replaces the scoped data dir but keeps scoped port allocation.
+# A running scoped cluster must NOT be retargeted by a later mismatched PGPORT:
+# up while running on $free_port but asked for a different port stays on the real
+# one (never talks to whatever sits on the requested port).
+url_pm="$(pg "$REPO_A" PGPORT="$free_port" POSTGRES_DB=app_a -- --worktree up | tail -1)"
+STARTED_DATADIRS+=("$data_a")
+try "still on real port after up" test "${url_pm##*:}" = "${free_port}/app_a"
+url_mis="$(pg "$REPO_A" PGPORT=6544 POSTGRES_DB=app_a -- --worktree up 2>/dev/null | tail -1)"
+try "mismatched PGPORT does not retarget a running cluster" test "${url_mis##*:}" = "${free_port}/app_a"
+pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
+
+# Explicit PGDATA replaces the scoped data dir but keeps scoped port allocation,
+# and is RECORDED so a later `down` (without repeating PGDATA) stops that cluster.
 alt_data="$WORK/alt-pgdata"
 url_d="$(pg "$REPO_B" PGDATA="$alt_data" POSTGRES_DB=app_b -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$alt_data")
@@ -180,7 +191,22 @@ try "explicit PGDATA used as data dir" test -s "$alt_data/PG_VERSION"
 port_d="${url_d##*:}"
 port_d="${port_d%%/*}"
 try "scoped port still allocated with explicit PGDATA ($port_d)" test "$port_d" != "5432"
-pg "$REPO_B" PGDATA="$alt_data" -- --worktree down >/dev/null 2>&1 || true
+# down WITHOUT repeating PGDATA must resolve the recorded data dir and stop it.
+rec_data="$(pg "$REPO_B" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+try "read path resolves the recorded explicit data dir" test "$rec_data" = "$alt_data"
+pg "$REPO_B" -- --worktree down >/dev/null 2>&1 || true
+try_not "down without PGDATA stopped the recorded explicit cluster" test -f "$alt_data/postmaster.pid"
+
+# An empty PGDATA/PGPORT in the environment must NOT count as an explicit override
+# (else scoped resolution would silently fall back to /tmp/pgdata:5432).
+url_e="$(pg "$REPO_A" PGDATA= PGPORT= POSTGRES_DB=app_a -- --worktree up | tail -1)"
+STARTED_DATADIRS+=("$data_a")
+try "empty PGDATA/PGPORT still resolves the scoped instance" test "${url_e%/*}" != "postgresql://postgres:postgres@127.0.0.1:5432"
+case "$(pg "$REPO_A" PGDATA= -- --worktree status 2>&1)" in
+*"PGDATA=$SCOPED_ROOT/"*) ok "empty PGDATA reads the scoped data dir, not /tmp/pgdata" ;;
+*) ko "empty PGDATA leaked to a non-scoped data dir" ;;
+esac
+pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 
 echo "== --profile works outside Git; --worktree outside Git fails =="
 NONGIT="$WORK/nongit"

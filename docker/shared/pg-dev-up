@@ -54,11 +54,16 @@
 #   eval "$(pg-dev-up --worktree url --export)"   # scoped
 set -euo pipefail
 
-# Capture whether the caller set PGDATA/PGPORT EXPLICITLY before we apply any
-# defaults, so scoped mode can honor an explicit override while still deriving
-# every other scoped value.
-PGDATA_EXPLICIT="${PGDATA+set}"
-PGPORT_EXPLICIT="${PGPORT+set}"
+# Capture whether the caller set PGDATA/PGPORT EXPLICITLY (to a NON-empty value)
+# before we apply any defaults, so scoped mode can honor an explicit override
+# while still deriving every other scoped value. An empty value is meaningless
+# and must NOT count as explicit — otherwise a stray `PGDATA=` in the environment
+# would silently fall back to /tmp/pgdata and let a scoped `down` stop the
+# unscoped cluster.
+PGDATA_EXPLICIT=""
+[ -n "${PGDATA:-}" ] && PGDATA_EXPLICIT="yes"
+PGPORT_EXPLICIT=""
+[ -n "${PGPORT:-}" ] && PGPORT_EXPLICIT="yes"
 
 PG_HOST="127.0.0.1"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
@@ -72,6 +77,7 @@ SCOPE_PROFILE_ID="" # for --profile <id>
 SCOPED_ROOT="${POWBOX_PG_SCOPED_ROOT:-${TMPDIR:-/tmp}/pg-dev-up-scoped}"
 INSTANCE_DIR=""
 PORT_FILE=""
+DATADIR_FILE=""
 
 # These get their final values in configure_paths(), after the command and any
 # scope flag are known: scoped mode replaces the data dir / socket dir / port,
@@ -114,22 +120,31 @@ require_bindir() {
 # of one repo, and same-named worktrees of different repos, land in distinct
 # instances. Truncated SHA-256 is plenty for a per-container temp namespace.
 scope_key() {
-	local input common top
+	local common top
+	# NUL-separate the fields so no field value can bleed into the next: a path or
+	# id containing the separator can't forge a different tuple that hashes the
+	# same. NUL can appear in neither a filesystem path nor an env value, so it is
+	# an unambiguous frame. Pipe straight into sha256sum — never store NULs in a
+	# shell variable (bash command substitution would strip them).
 	if [ "$SCOPE_MODE" = profile ]; then
-		input="profile|${CONTAINER_NAME:-}|${SCOPE_PROFILE_ID}"
+		printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$SCOPE_PROFILE_ID" |
+			sha256sum | cut -c1-16
 	else
 		common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
 		top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
-		input="worktree|${CONTAINER_NAME:-}|${common}|${top}"
+		printf 'worktree\0%s\0%s\0%s\0' "${CONTAINER_NAME:-}" "$common" "$top" |
+			sha256sum | cut -c1-16
 	fi
-	printf '%s' "$input" | sha256sum | cut -c1-16
 }
 
-# Populate INSTANCE_DIR / PORT_FILE / PGDATA / PG_SOCKDIR for scoped mode. An
-# explicit PGDATA still wins; the socket dir is always scoped so two clusters
-# never share a /tmp socket file (clients connect over TCP on PG_HOST anyway).
+# Populate INSTANCE_DIR / PORT_FILE / DATADIR_FILE / PGDATA / PG_SOCKDIR for
+# scoped mode. An explicit PGDATA still wins; the socket dir is always scoped so
+# two clusters never share a /tmp socket file (clients connect over TCP anyway).
+# `portmode` is up|read|none: on a read command (down/status/url) we resolve the
+# data dir `up` recorded, so a `down` finds the SAME cluster `up` started even if
+# that `up` used an explicit PGDATA that this call did not repeat.
 resolve_scope() {
-	local key
+	local portmode="$1" key
 	if ! key="$(scope_key)"; then
 		log "scoped --worktree mode requires being inside a Git repository."
 		log "Run it from a repo/worktree, or pass an explicit id: pg-dev-up --profile <id> <command>"
@@ -137,23 +152,35 @@ resolve_scope() {
 	fi
 	INSTANCE_DIR="$SCOPED_ROOT/$key"
 	PORT_FILE="$INSTANCE_DIR/port"
+	DATADIR_FILE="$INSTANCE_DIR/datadir"
 	# Owner-only from the top down: the temp root and the instance dir hold the
 	# cluster's data + unix socket, which PostgreSQL requires be private.
 	(umask 077 && mkdir -p "$INSTANCE_DIR")
 	chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
 	if [ -z "$PGDATA_EXPLICIT" ]; then
-		PGDATA="$INSTANCE_DIR/pgdata"
+		if [ "$portmode" != up ] && [ -s "$DATADIR_FILE" ]; then
+			PGDATA="$(cat "$DATADIR_FILE")"
+		else
+			PGDATA="$INSTANCE_DIR/pgdata"
+		fi
 	fi
 	PG_SOCKDIR="$INSTANCE_DIR"
 }
 
-# 0 if something is already accepting connections on 127.0.0.1:$1.
+# 0 if something is already accepting connections on 127.0.0.1:$1. The subshell
+# owns fd 3, so it closes automatically when the subshell exits; the subshell's
+# status IS the connect result.
 port_listening() {
-	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && {
-		exec 3>&- 3<&-
-		return 0
-	}
-	return 1
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# The port a running cluster is ACTUALLY listening on (line 4 of postmaster.pid).
+# Anchored to PGDATA, so it reports the real port even if $PGPORT was overridden
+# to something else — keeping us from ever talking to a different server.
+running_port() {
+	local pid_file="$PGDATA/postmaster.pid"
+	[ -s "$pid_file" ] || return 1
+	sed -n '4p' "$pid_file" | tr -cd '0-9'
 }
 
 # 0 if a DIFFERENT scoped instance has recorded $1 as its port (even if its
@@ -173,7 +200,10 @@ port_reserved() {
 # instances by a lock on the shared root so two concurrent `up`s never race onto
 # the same port. Sets PGPORT and records it in PORT_FILE.
 allocate_port() {
-	local p start=5433 end=5632
+	# A wide range so distinct scopes rarely exhaust it — a stopped instance keeps
+	# its reservation (so a restart is deterministic), and the scoped root lives on
+	# the ephemeral temp fs, so reservations are reclaimed on container recreate.
+	local p start=5433 end=6432
 	exec 9>"$SCOPED_ROOT/.portlock"
 	if ! flock -w 30 9; then
 		log "timed out waiting for the scoped port lock ($SCOPED_ROOT/.portlock)."
@@ -197,12 +227,12 @@ allocate_port() {
 	exit 1
 }
 
-# `up` path: resolve the port to start on. Explicit PGPORT wins but is still
-# recorded so later url/status/down resolve it without re-passing the env var.
+# `up` path: resolve the port to start on. Explicit PGPORT wins (used as-is);
+# otherwise allocate/reuse under the lock. cmd_up records the EFFECTIVE port in
+# PORT_FILE once it knows the real running port, so later url/status/down resolve
+# it without re-passing the env var.
 scoped_port_for_up() {
-	if [ -n "$PGPORT_EXPLICIT" ]; then
-		printf '%s\n' "$PGPORT" >"$PORT_FILE"
-	else
+	if [ -z "$PGPORT_EXPLICIT" ]; then
 		allocate_port
 	fi
 }
@@ -226,7 +256,7 @@ scoped_port_for_read() {
 configure_paths() {
 	local portmode="$1"
 	if [ -n "$SCOPED" ] && [ "$portmode" != none ]; then
-		resolve_scope
+		resolve_scope "$portmode"
 		if [ "$portmode" = up ]; then
 			scoped_port_for_up
 		else
@@ -303,19 +333,53 @@ print_url() {
 }
 
 cmd_up() {
+	local actual
 	require_bindir
+	if [ -n "$SCOPED" ]; then
+		# Serialize concurrent `up` for the SAME scope so two callers never race
+		# through initdb / pg_ctl start against one data directory. Held (via fd 8)
+		# until this process exits. Record the effective data dir so later
+		# read-path commands resolve THIS cluster even without repeating PGDATA.
+		exec 8>"$INSTANCE_DIR/.uplock"
+		if ! flock -w 60 8; then
+			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
+			exit 1
+		fi
+		printf '%s\n' "$PGDATA" >"$DATADIR_FILE"
+	fi
 	if [ ! -s "$PGDATA/PG_VERSION" ]; then
 		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
 		mkdir -p "$PGDATA"
 		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null
 	fi
 	if pg_running; then
+		# The cluster is already up. Talk to the port it ACTUALLY listens on (not a
+		# possibly-mismatched requested $PGPORT), so we never create roles/db on an
+		# unrelated server that happens to sit on the requested port.
+		actual="$(running_port || true)"
+		if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then
+			log "Cluster at $PGDATA is already running on port $actual (ignoring requested $PGPORT; run 'down' first to change it)."
+			PGPORT="$actual"
+		fi
 		log "Already running on $PG_HOST:$PGPORT."
 	else
+		# Not our cluster running: in scoped mode, refuse to start onto a port
+		# another process already holds (e.g. a stale recorded port now taken),
+		# rather than colliding with an unrelated server. Unscoped keeps its
+		# historical behavior (pg_ctl surfaces the bind failure).
+		if [ -n "$SCOPED" ] && port_listening "$PGPORT"; then
+			log "scoped port $PGPORT is already in use by another process; refusing to start (free it or set a different PGPORT)."
+			exit 1
+		fi
 		log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
+		# Close the scoped lock fds (8 = instance uplock, 9 = port lock) for the
+		# postmaster: it daemonizes and would otherwise inherit fd 8 and hold that
+		# advisory flock for its whole lifetime, deadlocking the next `up`.
 		"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
-			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null
+			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null 8>&- 9>&-
 	fi
+	# Record the effective port so url/status/down resolve the exact server.
+	[ -n "$SCOPED" ] && printf '%s\n' "$PGPORT" >"$PORT_FILE"
 	ensure_role_db
 	log "Ready. DATABASE_URL printed below; export it with: eval \"\$(pg-dev-up url --export)\""
 	print_url

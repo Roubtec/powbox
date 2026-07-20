@@ -20,8 +20,10 @@
 #   --worktree       absolute path to the checkout the peer reviews (read-only).
 #   --prompt-file    file whose CONTENTS are the literal review prompt; fed to
 #                    the provider on stdin, never interpolated through a shell.
-#   --artifact-root  absolute directory OUTSIDE the worktree under which a fresh
-#                    owner-only (0700) attempt dir is created per attempt.
+#   --artifact-root  absolute directory OUTSIDE the worktree under which a
+#                    per-invocation owner-only (0700) session dir is created, with
+#                    a fresh owner-only attempt dir per attempt nested inside it
+#                    (so the provider only ever sees this invocation's attempts).
 #   --base           optional base/reference metadata (recorded, not injected).
 #   --timeout        wall-clock seconds before the provider tree is reaped
 #                    (default 900).
@@ -55,7 +57,7 @@ readonly DEFAULT_TIMEOUT=900
 EX_USAGE=64
 
 usage() {
-	sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -65,27 +67,63 @@ die_usage() {
 }
 
 # --- process-group supervision ----------------------------------------------
-# The currently supervised job's process-group id (== the background subshell
-# pid, since `set -m` gives each job its own group). The EXIT/INT/TERM trap
-# reaps it so a helper interrupted mid-review never leaves a live peer process.
+# The currently supervised job's leader pid and validated process-group id. The
+# EXIT/INT/TERM trap reaps the tree so a helper interrupted mid-review never
+# leaves a live peer process. CURRENT_PGID is set ONLY after we confirm the child
+# is the leader of its own group (pgid == leader pid); it stays empty otherwise
+# so we never send a negative-PID (whole-group) signal against an unvalidated —
+# possibly the helper's own — process group.
+CURRENT_LEADER=""
 CURRENT_PGID=""
 
-reap_group() {
-	# reap_group <pgid> — TERM the whole group, escalate to KILL, never pkill -f.
-	local pgid="$1"
-	[ -n "$pgid" ] || return 0
-	kill -TERM "-${pgid}" 2>/dev/null || true
-	local i
-	for i in 1 2 3 4 5 6 7 8 9 10; do
-		kill -0 "-${pgid}" 2>/dev/null || return 0
+# group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
+# alive? Uses the validated group when we have one, else just the leader pid.
+group_alive() {
+	local pid="$1" pgid="$2"
+	if [ -n "$pgid" ]; then
+		kill -0 "-${pgid}" 2>/dev/null
+	else
+		kill -0 "$pid" 2>/dev/null
+	fi
+}
+
+# signal_tree <SIG> <leader_pid> <pgid|""> — deliver a signal to the whole
+# validated group, or (fallback) only the leader pid. NEVER a negative,
+# unvalidated PID; never pkill -f.
+signal_tree() {
+	local sig="$1" pid="$2" pgid="$3"
+	if [ -n "$pgid" ]; then
+		kill "-${sig}" "-${pgid}" 2>/dev/null || true
+	else
+		kill "-${sig}" "$pid" 2>/dev/null || true
+	fi
+}
+
+# reap_tree <leader_pid> <pgid|""> — TERM the tree, WAIT a bounded grace, then
+# escalate to KILL for survivors, and confirm nothing remains. Used on EVERY
+# terminating path (timeout AND normal/failed exit) so no descendant outlives the
+# run. Returns 0 when the tree is gone, 1 if something survived even after KILL.
+reap_tree() {
+	local pid="$1" pgid="$2" i
+	group_alive "$pid" "$pgid" || return 0
+	signal_tree TERM "$pid" "$pgid"
+	# Bounded grace (~3s) for a well-behaved tree to exit on TERM.
+	for ((i = 0; i < 30; i++)); do
+		group_alive "$pid" "$pgid" || return 0
 		sleep 0.1
 	done
-	kill -KILL "-${pgid}" 2>/dev/null || true
+	# Survivors ignored TERM: escalate to KILL and confirm they actually die.
+	signal_tree KILL "$pid" "$pgid"
+	for ((i = 0; i < 20; i++)); do
+		group_alive "$pid" "$pgid" || return 0
+		sleep 0.1
+	done
+	return 1
 }
 
 on_exit() {
 	# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap
-	[ -n "$CURRENT_PGID" ] && reap_group "$CURRENT_PGID"
+	[ -n "$CURRENT_LEADER" ] && reap_tree "$CURRENT_LEADER" "$CURRENT_PGID"
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -175,6 +213,21 @@ case "$ARTIFACT_ROOT/" in
 "$WORKTREE/"*) die_usage "--artifact-root must be OUTSIDE --worktree (got '$ARTIFACT_ROOT' under '$WORKTREE')" ;;
 esac
 
+# Sibling-attempt isolation. All attempt dirs share ONE Unix owner, so 0700 keeps
+# OTHER users out but does NOT stop this owner's read-only provider from reading a
+# concurrent invocation's artifacts if it can locate them. We therefore nest every
+# attempt of THIS invocation under one per-invocation, unpredictably-named session
+# dir (0700) and only ever hand the provider a path INSIDE its own session — the
+# directory it is told about (and whose neighbourhood it can list) contains only
+# this invocation's own attempts, never a sibling invocation's. Residual, honest:
+# a read-only sandbox running as the same UID could still enumerate ARTIFACT_ROOT
+# and read another invocation's session by its random name; filesystem permissions
+# alone cannot prevent a same-UID reader. The provider's read-only sandbox scope is
+# the real trust boundary — this nesting removes trivial "by default" exposure.
+SESSION_DIR="$(mktemp -d "${ARTIFACT_ROOT}/prr-XXXXXXXXXXXX")" ||
+	die_usage "cannot create a session directory under '$ARTIFACT_ROOT'"
+chmod 700 "$SESSION_DIR"
+
 case "$TIMEOUT" in
 '' | *[!0-9.]* | '.' | *.*.*) die_usage "--timeout must be a positive number of seconds (got '$TIMEOUT')" ;;
 esac
@@ -191,7 +244,12 @@ PEER_BIN="$PROVIDER"
 CODEX_JSON_SUPPORTED=""
 codex_supports_json() {
 	if [ -z "$CODEX_JSON_SUPPORTED" ]; then
-		if codex exec --help 2>&1 | grep -q -- '--json'; then
+		# Bound the probe: `codex exec --help` should return instantly, but it must
+		# never be able to hang or leak descendants, so it runs under `timeout`
+		# (which reaps the whole probe tree on expiry). If the probe times out or
+		# fails, grep matches nothing and we fall back to the safe no-live-progress
+		# default rather than assuming --json support.
+		if timeout 10 codex exec --help 2>&1 | grep -q -- '--json'; then
 			CODEX_JSON_SUPPORTED=yes
 		else
 			CODEX_JSON_SUPPORTED=no
@@ -213,11 +271,21 @@ build_cmd_claude() {
 	# Read-only headless review. Omitting --dangerously-skip-permissions is what
 	# keeps it read-only: in non-interactive `-p` mode a tool outside the
 	# allowlist cannot prompt, so it is denied and the model continues. The
-	# allowlist grants read/inspect tools and safe git reads; the explicit
-	# disallow list is defense-in-depth against any edit/write/push tool.
-	local allow="Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git status:*) Bash(git blame:*) Bash(cat:*) Bash(ls:*) Bash(rg:*) Bash(sed:*) Bash(head:*) Bash(tail:*)"
+	# allowlist grants read/inspect tools and safe git reads ONLY — no
+	# write-capable command (note `sed` is intentionally absent: `sed -i` writes;
+	# every reading need is served by cat/head/tail/rg/grep). The explicit disallow
+	# list is defense-in-depth against any edit/write/push tool.
+	#   --safe-mode disables CLAUDE.md, skills, plugins, hooks, MCP servers, custom
+	#     commands/agents and other customizations, so an untrusted review run
+	#     cannot inherit user hooks/MCP state (auth, tools and permissions still
+	#     work normally).
+	#   --no-session-persistence keeps the prompt and result off disk (no resumable
+	#     session), so nothing persists outside this attempt's artifact dir.
+	local allow="Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git status:*) Bash(git blame:*) Bash(cat:*) Bash(ls:*) Bash(rg:*) Bash(head:*) Bash(tail:*)"
 	local deny="Write Edit MultiEdit NotebookEdit Bash(git push:*) Bash(git commit:*) Bash(git reset:*) Bash(rm:*)"
 	CMD=(claude -p
+		--safe-mode
+		--no-session-persistence
 		--output-format json
 		--allowedTools "$allow"
 		--disallowedTools "$deny"
@@ -228,13 +296,17 @@ build_cmd_claude() {
 build_cmd_codex() {
 	# Read-only sandbox rooted at the worktree. `-c mcp_servers={}` stops any
 	# configured MCP/server state from leaking into an untrusted review run.
-	# --output-last-message captures the peer's final message for verdict
-	# parsing. `-` reads the prompt from stdin. --json (when supported) adds the
-	# live event stream we forward.
+	# --ephemeral runs without persisting session files to disk, so the prompt and
+	# transcript do not persist outside this attempt's artifact dir (the explicit
+	# --output-last-message file is still written — it is an output target, not a
+	# session file). --output-last-message captures the peer's final message for
+	# verdict parsing. `-` reads the prompt from stdin. --json (when supported)
+	# adds the live event stream we forward.
 	local dir="$1"
 	CMD=(codex exec
 		--sandbox read-only
 		--cd "$WORKTREE"
+		--ephemeral
 		-c "mcp_servers={}"
 		--output-last-message "$dir/codex-last-message.txt")
 	if codex_supports_json; then
@@ -274,14 +346,42 @@ looks_unavailable() {
 		"$@"
 }
 
+# A DETERMINISTIC (non-transient) execution failure: a bad flag, usage/config
+# error, permission problem, or malformed command. These fail identically on a
+# retry, so retrying only wastes time and quota — they are NOT retried. Detected
+# both by well-known "your invocation is wrong" exit codes (2 bad usage, 64
+# EX_USAGE, 126 not executable, 127 not found) and by canonical CLI error
+# phrasing on stdout/stderr. Everything else that exits non-zero is treated as a
+# transient execution failure and retried once.
+looks_deterministic() {
+	local rc="$1"
+	shift
+	case "$rc" in
+	2 | 64 | 126 | 127) return 0 ;;
+	esac
+	grep -Eiq \
+		'unknown (option|flag|argument|command|subcommand)|unrecognized (option|argument|subcommand)|invalid (option|flag|argument|value|choice)|unexpected argument|arguments? (are|is) required|missing (value|argument)|conflicting arguments|usage:|permission denied|no such file or directory|not a git repository|command not found|bad configuration|invalid config' \
+		"$@"
+}
+
 # Extract the peer's final message text for the given provider from the captured
 # output. Prints the text; returns 1 when a structured response is malformed.
 extract_final_message() {
 	local provider="$1" out="$2" dir="$3"
 	case "$provider" in
 	claude)
-		# `--output-format json` emits ONE JSON object; .result is the final text.
+		# `--output-format json` emits ONE JSON object. Honor the result envelope:
+		# only a `type == "result"`, non-error object carries a trustworthy final
+		# message. A malformed (non-JSON) response, a non-result `type`, or an
+		# `is_error == true` envelope is NOT a usable verdict — return 1 so a pass
+		# token buried inside an error/malformed envelope can never become `passed`.
 		jq -e . "$out" >/dev/null 2>&1 || return 1
+		local etype is_err
+		etype="$(jq -r '.type // ""' "$out" 2>/dev/null)"
+		is_err="$(jq -r 'if (.is_error == true) then "1" else "0" end' "$out" 2>/dev/null)"
+		if [ "$etype" != "result" ] || [ "$is_err" = "1" ]; then
+			return 1
+		fi
 		jq -r '.result // ""' "$out"
 		;;
 	codex)
@@ -296,12 +396,19 @@ extract_final_message() {
 # (that is the caller's/prompt's policy). A missing token is never a pass.
 detect_verdict() {
 	local text="$1"
-	if printf '%s' "$text" | grep -Eiq 'VERDICT[[:space:]]*[:=][[:space:]]*(pass|passed|approve|approved|lgtm|no[[:space:]_-]*issues?)'; then
-		echo pass
+	# Anchor to a VERDICT line: the token must begin the line (after only optional
+	# markdown/quote decoration — spaces, `>`, `*`, `#`, `-`, backticks), NOT sit
+	# mid-sentence, so an inline example like "reviewers end with 'VERDICT: PASS'"
+	# is not mistaken for the real verdict. ISSUES is tested FIRST and takes
+	# precedence over PASS: a body that both quotes an example pass token and
+	# renders a real issues verdict must resolve to issues, never false-pass.
+	local anchor='^[[:space:]>*#`-]*VERDICT[[:space:]]*[:=][[:space:]]*'
+	if printf '%s\n' "$text" | grep -Eiq "${anchor}(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)"; then
+		echo issues
 		return
 	fi
-	if printf '%s' "$text" | grep -Eiq 'VERDICT[[:space:]]*[:=][[:space:]]*(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)'; then
-		echo issues
+	if printf '%s\n' "$text" | grep -Eiq "${anchor}(pass|passed|approve|approved|lgtm|no[[:space:]_-]*issues?)"; then
+		echo pass
 		return
 	fi
 	echo none
@@ -316,8 +423,8 @@ run_attempt() {
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
 
-	ATTEMPT_DIR="$(mktemp -d "${ARTIFACT_ROOT}/peer-review-${PROVIDER}-XXXXXX")" ||
-		die_usage "cannot create an attempt directory under '$ARTIFACT_ROOT'"
+	ATTEMPT_DIR="$(mktemp -d "${SESSION_DIR}/peer-review-${PROVIDER}-XXXXXX")" ||
+		die_usage "cannot create an attempt directory under '$SESSION_DIR'"
 	chmod 700 "$ATTEMPT_DIR"
 	local dir="$ATTEMPT_DIR"
 	local out="$dir/provider.stdout" err="$dir/provider.stderr"
@@ -348,39 +455,66 @@ run_attempt() {
 		printf '{"event":"note","provider":"%s","liveProgress":false,"message":"buffered final result; no live progress"}\n' "$PROVIDER" >&2
 	fi
 
-	# Launch the provider as its OWN process group (set -m) so the whole tree can
-	# be reaped by group id. The subshell is the group leader; $! is its pgid.
+	# Launch the provider as its OWN process group (set -m gives each job its own
+	# group) so the whole tree can be reaped by group id. The subshell exec's into
+	# the provider and is the group leader.
 	FWD_LINES=0
-	local start end pgid rc timed_out=0
+	local start end child pgid rc timed_out=0
 	start=$(date +%s.%N)
 	set -m
 	(cd "$WORKTREE" && exec "${CMD[@]}" <"$dir/prompt.txt" >"$out" 2>"$err") &
-	pgid=$!
+	child=$!
 	set +m
+	# VALIDATE that the child leads its own process group before we ever send a
+	# negative-PID (whole-group) signal: confirm its PGID equals its own PID.
+	#   * probe == child            → validated group; signal it by PGID.
+	#   * probe non-empty && != child → job control did NOT isolate the child (it
+	#     shares another group, possibly the helper's own): leave pgid empty and
+	#     fall back to single-PID signalling — NEVER TERM/KILL an unowned group.
+	#   * probe empty (child already exited before we could read it) → under
+	#     `set -m` the job had its own group whose PGID equalled its PID BY
+	#     CONSTRUCTION, so trust that. Signalling that group only reaches the
+	#     provider's own descendants (an already-empty group is a harmless ESRCH);
+	#     this avoids losing group-reaping when a provider exits faster than the
+	#     probe and leaves a stray grandchild behind.
+	pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
+	if [ -z "$pgid" ]; then
+		pgid="$child"
+	elif [ "$pgid" != "$child" ]; then
+		pgid=""
+	fi
+	CURRENT_LEADER="$child"
 	CURRENT_PGID="$pgid"
 
-	# Poll: forward progress, enforce the deadline, reap the group on timeout.
-	while kill -0 "$pgid" 2>/dev/null; do
+	# Poll: forward progress and enforce the deadline. On the deadline we only flag
+	# the timeout and break; the single reap_tree below handles termination for
+	# BOTH the timeout and the normal/failed-exit paths identically.
+	while kill -0 "$child" 2>/dev/null; do
 		forward_tick "$out"
 		end=$(date +%s.%N)
 		if awk -v a="$end" -v b="$start" -v t="$TIMEOUT" 'BEGIN{exit !((a-b)>t)}'; then
 			timed_out=1
-			reap_group "$pgid"
 			break
 		fi
 		sleep 0.1
 	done
 
 	if [ "$timed_out" = 1 ]; then
-		if wait "$pgid" 2>/dev/null; then :; else :; fi
+		# Deadline hit while the tree was still running: TERM it, wait a bounded
+		# grace, escalate to KILL for survivors, and confirm nothing remains.
+		reap_tree "$child" "$pgid" ||
+			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after timeout"}\n' "$PROVIDER" >&2
+		wait "$child" 2>/dev/null || true
 	else
-		# The leader has already exited (that is why the poll loop ended). Sweep
-		# the group BEFORE reaping the leader zombie — while its pgid is still
-		# valid — so a stray grandchild a completed OR failed provider left behind
-		# never outlives the run. TERM to the dead leader is a harmless no-op.
-		kill -TERM "-${pgid}" 2>/dev/null || true
-		if wait "$pgid"; then rc=0; else rc=$?; fi
+		# The leader exited on its own (that is why the poll loop ended). Collect
+		# its real status first, then sweep any stray descendant a completed OR
+		# failed provider left behind in the group — TERM, grace, KILL, confirm —
+		# so no grandchild outlives the run.
+		if wait "$child"; then rc=0; else rc=$?; fi
+		reap_tree "$child" "$pgid" ||
+			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after exit"}\n' "$PROVIDER" >&2
 	fi
+	CURRENT_LEADER=""
 	CURRENT_PGID=""
 	forward_tick "$out" # flush any trailing lines
 	end=$(date +%s.%N)
@@ -397,20 +531,30 @@ run_attempt() {
 	ATT_EXIT="$rc"
 
 	if [ "$rc" -ne 0 ]; then
-		# A failing provider that reports an auth/login or usage/quota problem is
-		# UNAVAILABLE (non-transient — retrying wastes quota); scan only on a
-		# non-zero exit so a successful review that merely discusses rate limits
-		# is not misread. Any other non-zero exit is a transient execution
-		# failure, retried once with a fresh attempt dir.
+		# Classify the non-zero exit (scan only on failure so a successful review
+		# that merely DISCUSSES rate limits or usage errors is never misread):
+		#   * auth/login or usage/quota problem  → UNAVAILABLE (non-transient;
+		#     retrying wastes quota).
+		#   * deterministic invocation failure (bad flag/config/permission/usage) →
+		#     FAILED, NOT retried (a retry fails identically).
+		#   * anything else                       → transient FAILED, retried once
+		#     with a fresh attempt dir.
 		if looks_unavailable "$out" "$err"; then
 			ATT_OUTCOME=unavailable
 			ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
 			write_meta "$dir" "$attempt_no" "unavailable"
 			return 0
 		fi
+		if looks_deterministic "$rc" "$out" "$err"; then
+			ATT_OUTCOME=failed
+			ATT_TRANSIENT=0
+			ATT_REASON="provider failed deterministically (exit $rc); not retried"
+			write_meta "$dir" "$attempt_no" "failed-deterministic"
+			return 0
+		fi
 		ATT_OUTCOME=failed
 		ATT_TRANSIENT=1
-		ATT_REASON="provider exited non-zero ($rc)"
+		ATT_REASON="provider exited non-zero ($rc); transient, retrying"
 		write_meta "$dir" "$attempt_no" "failed-exit"
 		return 0
 	fi
@@ -418,7 +562,13 @@ run_attempt() {
 	# Exit 0: parse the final message.
 	local text
 	if ! text="$(extract_final_message "$PROVIDER" "$out" "$dir")"; then
-		ATT_OUTCOME=failed
+		# Ran to a clean exit but its final message is malformed / an error
+		# envelope / otherwise unintelligible: the peer FORFEITED a usable verdict.
+		# This is a DISTINCT outcome from a deterministic retry-exhausted `failed`
+		# (an execution failure) — the process succeeded, the verdict did not. Not
+		# retried: a clean exit that produced garbage is deterministic. Never a pass.
+		ATT_OUTCOME=forfeited
+		ATT_VERDICT=none
 		ATT_TRANSIENT=0
 		ATT_REASON="provider exited 0 but produced a malformed/unparseable response"
 		write_meta "$dir" "$attempt_no" "malformed"

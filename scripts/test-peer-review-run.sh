@@ -18,13 +18,20 @@ set -uo pipefail
 #   (3) issues verdict (both providers)
 #   (4) unavailable — missing binary, and an auth/usage message (no retry)
 #   (5) timeout — deadline enforced, process TREE reaped (grandchild sleeper gone)
-#   (6) malformed provider response (exit 0, unparseable) → failed, NOT a pass
+#   (6) malformed/error-envelope response → forfeited (distinct from failed),
+#       NEVER a pass — a pass token in an error/non-result envelope is rejected
 #   (7) forfeited — exit 0 with empty / no-verdict output (never a false pass)
 #   (8) retry — transient failure retried ONCE with a NEW attempt dir; a clean
-#       retry recovers; two failures → failed (retry exhausted)
+#       retry recovers; two failures → failed (retry exhausted); a DETERMINISTIC
+#       (bad-flag/usage) failure is NOT retried
 #   (9) codex without --json support → buffered (liveProgress:false), still runs
 #  (10) containment/usage — artifact-root inside the worktree rejected, bad
 #       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir
+#  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
+#       descendant escalated to KILL and actually dies, per-invocation session
+#       isolation (no sibling attempt dir neighbours the handed path), anchored
+#       verdict + ISSUES-precedence (no example-token false-pass), and the
+#       read-only / no-persistence flag set for both providers
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -295,7 +302,8 @@ fi
 unset SLEEPER_PID
 
 # ============================================================================
-# (6) malformed provider response (exit 0, unparseable) → failed, NOT a pass
+# (6) malformed provider response (exit 0, unparseable) → forfeited, NOT a pass,
+#     and a DISTINCT outcome from retry-exhausted `failed` (see 8b).
 # ============================================================================
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
@@ -307,9 +315,38 @@ EOF
 chmod +x "$d/bin/claude"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
-assert_eq "6: malformed → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "6: malformed → forfeited (distinct from failed)" "$(jqf "$RUN_RESULT" .outcome)" forfeited
 assert_not_contains "6: malformed is never a pass" "$(jqf "$RUN_RESULT" .outcome)" passed
-assert_eq "6: not retried (deterministic)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "6: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "6: not retried (deterministic clean exit)" "$(jqf "$RUN_RESULT" .attempts)" 1
+
+# 6b: an ERROR envelope (is_error:true) or non-result type that CONTAINS a pass
+# token must NOT become passed — the envelope is honored, so this is forfeited.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+jq -n '{type:"result",is_error:true,result:"All good.\nVERDICT: PASS"}'
+exit 0
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "6b: error envelope w/ pass token → forfeited" "$(jqf "$RUN_RESULT" .outcome)" forfeited
+assert_not_contains "6b: error envelope is never a pass" "$(jqf "$RUN_RESULT" .outcome)" passed
+
+# 6c: a non-"result" type envelope carrying a pass token is likewise not a pass.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+jq -n '{type:"error",subtype:"max_turns",result:"VERDICT: PASS"}'
+exit 0
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "6c: non-result type w/ pass token → forfeited" "$(jqf "$RUN_RESULT" .outcome)" forfeited
 
 # ============================================================================
 # (7) forfeited — exit 0 with empty output, and exit 0 with no VERDICT token
@@ -362,10 +399,31 @@ run "$d" $(std_args "$d" codex)
 assert_eq "8a: transient recovers → passed" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_eq "8a: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
 assert_eq "8a: retried true" "$(jqf "$RUN_RESULT" .retried)" true
-# two DISTINCT attempt dirs were created (never reused)
-attempt_dirs="$(find "$d/artifacts" -maxdepth 1 -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
+# two DISTINCT attempt dirs were created (never reused); both nested under the
+# single per-invocation session dir (attempt dirs are not direct children of the
+# artifact-root — see case 11c for the sibling-isolation rationale).
+attempt_dirs="$(find "$d/artifacts" -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
 assert_eq "8a: two separate attempt dirs" "$attempt_dirs" 2
 unset MARK
+
+# 8c: a DETERMINISTIC failure (bad flag / usage error) must NOT be retried —
+# retrying a deterministic failure just wastes time and quota. Distinct from the
+# transient 8a/8b crashes above.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+echo "error: unknown flag '--frobnicate'" >&2
+echo "usage: codex exec [OPTIONS]" >&2
+exit 2
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "8c: deterministic failure → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "8c: NOT retried (deterministic)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "8c: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 
 # 8b: fail twice → failed (retry exhausted).
 d="$(new_case)"
@@ -462,6 +520,176 @@ d="$(new_case)"
 run "$d" -h
 assert_eq "10f: -h exit 0" "$RUN_RC" 0
 assert_contains "10f: -h prints usage" "$RUN_OUT" "peer-review-run"
+
+# ============================================================================
+# (11) failure-path & stubborn-descendant reaping, sibling isolation, anchored
+#      verdict, and the read-only / no-persistence flag set
+# ============================================================================
+
+# 11a: FAILURE-path (not timeout) reaping — a provider that EXITS non-zero while
+# leaving a stray grandchild behind in its group must have that grandchild reaped
+# too (the existing case 5 only covers the timeout path).
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+sleep 60 &                 # grandchild in the provider's own group
+echo $! >"$SLEEPER_PID"
+echo "error: unknown flag '--x'" >&2   # deterministic → single attempt
+exit 2
+EOF
+chmod +x "$d/bin/codex"
+SLEEPER_PID="$d/sleeper.pid"
+export SLEEPER_PID
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "11a: deterministic failure → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+sp="$(cat "$SLEEPER_PID" 2>/dev/null || echo)"
+checks=$((checks + 1))
+if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [11a: failure-path sleeper reaped]: pid %s still alive after exit\n' "$sp" >&2
+	kill -9 "$sp" 2>/dev/null || true
+fi
+unset SLEEPER_PID
+
+# 11b: a STUBBORN descendant that ignores TERM must be escalated to KILL and
+# actually die — proves reap_tree's grace→KILL escalation, not just a lone TERM.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+# grandchild traps (ignores) TERM; only KILL can stop it. It records its own pid.
+bash -c 'trap "" TERM; echo $$ >"$STUBBORN_PID"; while :; do sleep 0.2; done' &
+wait
+EOF
+chmod +x "$d/bin/codex"
+STUBBORN_PID="$d/stubborn.pid"
+export STUBBORN_PID
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+assert_eq "11b: outcome timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+# give KILL escalation a beat to complete, then confirm the stubborn child is gone
+stub=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	stub="$(cat "$STUBBORN_PID" 2>/dev/null || echo)"
+	[ -n "$stub" ] && ! kill -0 "$stub" 2>/dev/null && break
+	sleep 0.2
+done
+checks=$((checks + 1))
+if [ -n "$stub" ] && kill -0 "$stub" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [11b: stubborn descendant KILLed]: pid %s survived TERM+KILL\n' "$stub" >&2
+	kill -9 "$stub" 2>/dev/null || true
+fi
+unset STUBBORN_PID
+
+# 11c: sibling-attempt isolation. Attempt dirs are nested under a per-invocation,
+# unpredictably-named session dir — NEVER direct children of the shared
+# artifact-root — so the path a provider is handed (and whose neighbourhood it can
+# list) contains only THIS invocation's attempts, not a concurrent invocation's.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+# two separate invocations sharing ONE artifact-root
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+adir1="$(jqf "$RUN_RESULT" .artifactDir)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+adir2="$(jqf "$RUN_RESULT" .artifactDir)"
+sess1="$(dirname "$adir1")"
+sess2="$(dirname "$adir2")"
+# The attempt dir is two levels below artifact-root: artifact-root / session /
+# attempt. So its parent (the session dir) is itself a direct child of the
+# artifact-root — proving the attempt is nested, never a direct child.
+assert_eq "11c: artifactDir parent is the artifact-root's child (session)" "$(dirname "$sess1")" "$d/artifacts"
+checks=$((checks + 1))
+if [ "$sess1" = "$sess2" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [11c: distinct per-invocation session dirs]: both used %s\n' "$sess1" >&2
+fi
+direct_attempts="$(find "$d/artifacts" -mindepth 1 -maxdepth 1 -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
+assert_eq "11c: no attempt dir directly under artifact-root" "$direct_attempts" 0
+own_only="$(find "$sess1" -maxdepth 1 -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
+assert_eq "11c: session dir holds only its own invocation's attempt" "$own_only" 1
+
+# 11d: anchored verdict + ISSUES precedence. A body that QUOTES an example pass
+# token inline but renders a real ISSUES verdict must resolve to issues; and when
+# both verdict lines appear, ISSUES wins over PASS — never a false pass.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+body=$'For reference, reviewers end with a VERDICT: PASS line when clean.\nVERDICT: ISSUES'
+jq -n --arg r "$body" '{type:"result",is_error:false,result:$r}'
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: inline example pass + real issues line → issues" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "11d: verdict issues (no false pass)" "$(jqf "$RUN_RESULT" .verdict)" issues
+
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+body=$'VERDICT: PASS\nVERDICT: ISSUES'
+jq -n --arg r "$body" '{type:"result",is_error:false,result:$r}'
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: both verdict lines → ISSUES precedence" "$(jqf "$RUN_RESULT" .outcome)" issues
+
+# 11e: read-only / no-persistence flag set is locked in for both providers. (The
+# real write/read enforcement is the provider's own sandbox and is verifiable
+# only in the live smoke; here we assert the enforcing flags are actually passed.)
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$ARGV_LOG"
+cat >/dev/null
+jq -n '{type:"result",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_contains "11e: claude --safe-mode (customizations off)" "$(cat "$d/argv")" "--safe-mode"
+assert_contains "11e: claude --no-session-persistence" "$(cat "$d/argv")" "--no-session-persistence"
+assert_not_contains "11e: claude allowlist drops write-capable sed" "$(cat "$d/argv")" "Bash(sed:*)"
+assert_not_contains "11e: claude NOT skip-permissions" "$(cat "$d/argv")" "--dangerously-skip-permissions"
+unset ARGV_LOG
+
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_contains "11e: codex --sandbox read-only" "$(cat "$d/argv")" "--sandbox
+read-only"
+assert_contains "11e: codex --ephemeral (no session persistence)" "$(cat "$d/argv")" "--ephemeral"
+assert_contains "11e: codex mcp disabled" "$(cat "$d/argv")" "mcp_servers={}"
+unset ARGV_LOG
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

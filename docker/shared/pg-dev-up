@@ -151,11 +151,21 @@ validate_port() {
 # worktree) therefore sees either the previous complete value or the new
 # complete one — never an empty/partial file caught mid-write, which could
 # otherwise resolve to the wrong (or the unscoped) cluster.
+# -T (--no-target-directory) makes a DIRECTORY squatting at the marker path a
+# hard failure: plain `mv -f` would "succeed" by moving the temp file INSIDE
+# that directory, so cmd_up would believe the marker was recorded (and clear
+# its rollback trap) while the marker path stays unreadable as a file — later
+# status/down could then never resolve the running server. Failing here keeps
+# the rollback trap armed, which stops the newly-started server instead of
+# orphaning it.
 atomic_write() {
 	local dest="$1" content="$2" tmp
 	tmp="$(mktemp "${dest}.XXXXXX")"
 	printf '%s\n' "$content" >"$tmp"
-	mv -f "$tmp" "$dest"
+	if ! mv -f -T "$tmp" "$dest"; then
+		rm -f "$tmp"
+		return 1
+	fi
 }
 
 # Debian keeps the server binaries (initdb, pg_ctl, postgres) off PATH under
@@ -301,9 +311,10 @@ snapshot_scoped_markers() {
 # Populate INSTANCE_DIR / PORT_FILE / DATADIR_FILE / PGDATA / PG_SOCKDIR for
 # scoped mode. An explicit PGDATA still wins; the socket dir is always scoped so
 # two clusters never share a /tmp socket file (clients connect over TCP anyway).
-# `portmode` is up|read|none: on a read command (down/status/url) we resolve the
-# data dir `up` recorded, so a `down` finds the SAME cluster `up` started even if
-# that `up` used an explicit PGDATA that this call did not repeat.
+# `portmode` is up|read|stop|none: on a read command (down/status/url — `stop`
+# is `read` minus the port requirement) we resolve the data dir `up` recorded,
+# so a `down` finds the SAME cluster `up` started even if that `up` used an
+# explicit PGDATA that this call did not repeat.
 resolve_scope() {
 	local portmode="$1" key
 	# The scoped root becomes the socket dir interpolated (unquoted) into the pg_ctl
@@ -491,7 +502,9 @@ scoped_port_for_read() {
 
 # Resolve PGDATA / PGPORT / PG_SOCKDIR for the requested command. `portmode` is
 # how this command needs the port: `up` allocates, `read` reads a recorded one,
-# `none` (check/help) needs neither a port nor a scoped instance.
+# `stop` resolves the scoped instance but tolerates a MISSING recorded port
+# (`down` stops via the recorded data dir alone), `none` (check/help) needs
+# neither a port nor a scoped instance.
 configure_paths() {
 	local portmode="$1"
 	# An explicit PGPORT flows into the pg_ctl -o option string (run via a shell) and
@@ -508,10 +521,16 @@ configure_paths() {
 		# `.uplock` — together with the marker snapshot and rollback — so a concurrent
 		# same-scope `up` cannot race on the reservation or clobber the winner's
 		# markers. A read command has no such contention and resolves its recorded
-		# port here.
-		if [ "$portmode" != up ]; then
-			scoped_port_for_read
-		fi
+		# port here. `stop` (down) does NOT require the port marker: stopping needs
+		# only the recorded data dir, and rollback_scoped_markers legitimately drops
+		# the port marker (a prior port now foreign-held) while keeping the datadir
+		# marker — teardown must still work then. url/status DO fail on a missing
+		# port marker: they report the connection endpoint, which without the
+		# recorded port is unknowable.
+		case "$portmode" in
+			up | stop) : ;;
+			*) scoped_port_for_read ;;
+		esac
 		# resolve_scope (+ scoped_port_for_read on a read command) set PGDATA and
 		# PGPORT to fully scoped values (or already exited on a missing marker); the
 		# `up` path sets PGPORT in cmd_up. Return BEFORE the unscoped defaults below so
@@ -885,7 +904,7 @@ case "${1:-up}" in
 		cmd_up
 		;;
 	down | stop)
-		configure_paths read
+		configure_paths stop
 		cmd_down
 		;;
 	status)

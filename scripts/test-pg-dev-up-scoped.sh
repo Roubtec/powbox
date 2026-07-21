@@ -363,13 +363,27 @@ pg "$REPO_C" POSTGRES_DB=app_c -- --worktree up >"$WORK/c.out" 2>/dev/null &
 pid_c=$!
 pg "$REPO_D" POSTGRES_DB=app_d -- --worktree up >"$WORK/d.out" 2>/dev/null &
 pid_d=$!
-wait "$pid_c"
-wait "$pid_d"
+# Reap BOTH jobs errexit-safely before anything else: a bare `wait` under
+# `set -e` would abort on the first failing job, skipping the discovery and
+# registration of the OTHER job's cluster — the EXIT trap would then rm -rf
+# $WORK without stopping that postmaster, orphaning a live server whose data
+# dir was deleted. Collect both statuses, register whatever actually started
+# (the status probes tolerate a side that never came up), and only then assert
+# both ups succeeded.
+status_c=0
+wait "$pid_c" || status_c=$?
+status_d=0
+wait "$pid_d" || status_d=$?
 url_c="$(tail -1 "$WORK/c.out")"
 url_d="$(tail -1 "$WORK/d.out")"
-data_c="$(pg "$REPO_C" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
-data_d="$(pg "$REPO_D" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+data_c="$(pg "$REPO_C" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p' || true)"
+data_d="$(pg "$REPO_D" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p' || true)"
 STARTED_DATADIRS+=("$data_c" "$data_d")
+if [ "$status_c" -eq 0 ] && [ "$status_d" -eq 0 ]; then
+	ok "both parallel ups succeeded"
+else
+	ko "parallel up failed (c=$status_c d=$status_d)"
+fi
 port_c="${url_c##*:}"
 port_c="${port_c%%/*}"
 port_d="${url_d##*:}"
@@ -445,6 +459,29 @@ fi
 # Restore the marker dir's perms so the EXIT cleanup can rm -rf the sandbox.
 chmod 700 "$orphan_inst/datadir" 2>/dev/null || true
 
+echo "== a WRITABLE directory squatting on a marker path fails the write (no orphan) =="
+# Codex review: atomic_write must never "succeed" by moving its temp file INSIDE
+# a directory squatting at the marker path (plain `mv -f` would): cmd_up would
+# then clear the rollback trap believing the datadir marker was recorded, while
+# the marker path stays unreadable as a file — leaving a live server that
+# status/down can no longer resolve. With `mv -T` the rename fails while the
+# rollback trap is still armed, so `up` fails loudly and the newly-started
+# server is stopped. Unlike the 0000-dir case above, this directory is WRITABLE,
+# so only the -T refusal (not a permission error) makes the write fail.
+squat_prof="squat-marker-lane"
+squat_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$squat_prof" | sha256sum | cut -c1-16)"
+squat_inst="$SCOPED_ROOT/$squat_key"
+squat_pgd="$squat_inst/pgdata"
+mkdir -p "$squat_inst/datadir"
+STARTED_DATADIRS+=("$squat_pgd")
+try_not "up fails when a writable directory squats on the datadir marker" pg "$NONGIT" -- --profile "$squat_prof" up
+if [ -f "$squat_pgd/postmaster.pid" ] && "$BINDIR/pg_ctl" -D "$squat_pgd" status >/dev/null 2>&1; then
+	ko "marker-dir squat ORPHANED a live server at $squat_pgd"
+	"$BINDIR/pg_ctl" -D "$squat_pgd" -m immediate -w stop >/dev/null 2>&1 || true
+else
+	ok "no live server left behind (rollback stopped it)"
+fi
+
 echo "== finding #1: rollback must not double-reserve a prior port another scope now holds =="
 # When a scoped `up` uses an override/allocated port DIFFERENT from the one this
 # scope recorded, it FREES the prior port. If that `up` then fails and ANOTHER scope
@@ -477,6 +514,12 @@ try "override port differs from the prior recorded port" test "$claim_busy" != "
 try_not "same-scope up with a busy override PGPORT fails" pg "$NONGIT" PGPORT="$claim_busy" -- --profile "$claim_prof" up
 try "the other scope's reservation for the prior port is left intact" test "$(cat "$foreign_inst/port")" = "$claim_prior"
 try_not "rollback did NOT recreate this scope's reservation for the foreign-held port" test -e "$claim_inst/port"
+# The dropped port marker must NOT block teardown: `down` stops via the recorded
+# data dir alone (the datadir marker survived the rollback), so it still
+# succeeds — reporting "Not running." here, since the cluster was downed above —
+# instead of failing on the missing port marker the rollback message tells the
+# user to recover with ("run the scoped 'down' then 'up'").
+try "scoped down still works after rollback dropped the port marker" pg "$NONGIT" -- --profile "$claim_prof" down
 # Housekeeping: drop the planted foreign reservation so it cannot fence a port off
 # from the remaining tests' auto-allocation.
 rm -rf "$foreign_inst"

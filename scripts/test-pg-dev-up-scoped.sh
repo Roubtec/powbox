@@ -103,6 +103,25 @@ pg() {
 	(cd "$cwd" && env -u PGDATA -u PGPORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB "${envs[@]}" bash "$PG" "$@")
 }
 
+# Pick a free loopback TCP port from a high range OUTSIDE the scoped allocator's
+# 5433-6432 window (so an explicit-port case can never collide with an
+# auto-allocated scoped port), probing each candidate so a pre-existing listener
+# on the host does not make the test flaky. Ports handed out this run are tracked
+# so successive calls return distinct values.
+PICKED_PORTS=()
+pick_free_port() {
+	local p
+	for ((p = 6500; p <= 6999; p++)); do
+		case " ${PICKED_PORTS[*]:-} " in *" $p "*) continue ;; esac
+		(exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && continue
+		PICKED_PORTS+=("$p")
+		printf '%s\n' "$p"
+		return 0
+	done
+	echo "FATAL: no free loopback port in 6500-6999 for the explicit-port test" >&2
+	return 1
+}
+
 # Create a throwaway git repo with one commit.
 make_repo() {
 	local dir="$1"
@@ -142,13 +161,15 @@ try "linked worktrees have distinct toplevels" test "$top_a" != "$top_b"
 echo "== two concurrent worktree-scoped instances (linked worktrees of one repo) =="
 
 # Bring both up with distinct configured databases (exercise createdb per side).
+# Register each cluster for teardown IMMEDIATELY after it starts (before the next
+# `up`), so an early failure never leaves a postmaster running while the EXIT trap
+# deletes its data directory.
 url_a="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree up | tail -1)"
-url_b="$(pg "$REPO_B" POSTGRES_DB=app_b -- --worktree up | tail -1)"
-
-# Record the data dirs for teardown even if later assertions fail.
 data_a="$(pg "$REPO_A" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+STARTED_DATADIRS+=("$data_a")
+url_b="$(pg "$REPO_B" POSTGRES_DB=app_b -- --worktree up | tail -1)"
 data_b="$(pg "$REPO_B" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
-STARTED_DATADIRS=("$data_a" "$data_b")
+STARTED_DATADIRS+=("$data_b")
 
 port_a="${url_a##*:}"
 port_a="${port_a%%/*}"
@@ -188,7 +209,9 @@ try_not "B stopped by its own down" pg "$REPO_B" -- --worktree status
 
 echo "== explicit env overrides stay authoritative =="
 # Explicit PGPORT wins over allocation and is recorded for later resolution.
-free_port=6543
+# Probe for a genuinely free port rather than hard-coding one an unrelated
+# listener might already hold.
+free_port="$(pick_free_port)"
 url_p="$(pg "$REPO_A" PGPORT="$free_port" POSTGRES_DB=app_a -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$data_a")
 port_p="${url_p##*:}"
@@ -205,7 +228,8 @@ pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 url_pm="$(pg "$REPO_A" PGPORT="$free_port" POSTGRES_DB=app_a -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$data_a")
 try "still on real port after up" test "${url_pm##*:}" = "${free_port}/app_a"
-url_mis="$(pg "$REPO_A" PGPORT=6544 POSTGRES_DB=app_a -- --worktree up 2>/dev/null | tail -1)"
+mismatch_port="$(pick_free_port)"
+url_mis="$(pg "$REPO_A" PGPORT="$mismatch_port" POSTGRES_DB=app_a -- --worktree up 2>/dev/null | tail -1)"
 try "mismatched PGPORT does not retarget a running cluster" test "${url_mis##*:}" = "${free_port}/app_a"
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 
@@ -234,6 +258,47 @@ case "$(pg "$REPO_A" PGDATA= -- --worktree status 2>&1)" in
 *) ko "empty PGDATA leaked to a non-scoped data dir" ;;
 esac
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== explicit POSTGRES_USER / POSTGRES_PASSWORD stay authoritative (scoped) =="
+# The acceptance criterion requires ALL POSTGRES_* overrides to remain
+# authoritative in scoped mode. Use a password full of URL metacharacters to also
+# confirm the scoped URL percent-encodes it. REPO_A keeps its scoped default data
+# dir here (no explicit PGDATA), so it reuses data_a and its recorded port.
+up_user="appu"
+up_pass='p@ss:w/rd'
+url_u="$(pg "$REPO_A" POSTGRES_USER="$up_user" POSTGRES_PASSWORD="$up_pass" POSTGRES_DB=app_a -- --worktree up | tail -1)"
+STARTED_DATADIRS+=("$data_a")
+role_present="$(psql "$url_u" -tAc "select rolname from pg_roles where rolname = '$up_user'" 2>/dev/null || true)"
+try "explicit POSTGRES_USER role created ($up_user)" test "$role_present" = "$up_user"
+# The URL must carry the explicit user and the percent-encoded password.
+case "$url_u" in
+	postgresql://appu:p%40ss%3Aw%2Frd@127.0.0.1:*/app_a) ok "scoped URL reflects explicit user + encoded password" ;;
+	*) ko "scoped URL missing explicit user/password: $url_u" ;;
+esac
+# The connection actually authenticates AS the configured role.
+who="$(psql "$url_u" -tAc 'select current_user' 2>/dev/null || true)"
+try "connects as the explicit user ($who)" test "$who" = "$up_user"
+# A later read keeps the explicit user/password authoritative (unchanged URL).
+url_u2="$(pg "$REPO_A" POSTGRES_USER="$up_user" POSTGRES_PASSWORD="$up_pass" POSTGRES_DB=app_a -- --worktree url)"
+try "read path keeps explicit user/password authoritative" test "$url_u2" = "$url_u"
+pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== relative explicit PGDATA is canonicalized so down from another CWD resolves it =="
+# up from a SUBDIR of the repo with a RELATIVE PGDATA; the recorded marker must be
+# ABSOLUTE, so status/down from a DIFFERENT working directory (the repo top)
+# resolve the SAME cluster rather than a relative path re-anchored to the new CWD
+# (which could stop an unrelated cluster). Same worktree => same scope.
+SUBDIR="$REPO_A/sub"
+mkdir -p "$SUBDIR"
+pg "$SUBDIR" PGDATA=rel-pgdata POSTGRES_DB=app_a -- --worktree up >/dev/null
+abs_rel="$SUBDIR/rel-pgdata"
+STARTED_DATADIRS+=("$abs_rel")
+try "relative PGDATA initialized at its absolute location" test -s "$abs_rel/PG_VERSION"
+rec_abs="$(pg "$REPO_A" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+try "recorded explicit data dir is absolute ($rec_abs)" test "$rec_abs" = "$abs_rel"
+# down from the repo top (a different CWD than the up) must stop the SAME cluster.
+pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
+try_not "down from repo top stopped the relative-PGDATA cluster" test -f "$abs_rel/postmaster.pid"
 
 echo "== --profile works outside Git; --worktree outside Git fails =="
 NONGIT="$WORK/nongit"

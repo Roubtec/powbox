@@ -79,6 +79,16 @@ INSTANCE_DIR=""
 PORT_FILE=""
 DATADIR_FILE=""
 
+# Snapshot of the scoped port/datadir markers as they were BEFORE this `up` began
+# to touch them (captured in resolve_scope). cmd_up rolls the markers back to this
+# snapshot if initialization or start fails, so a failed override can never orphan
+# the previously-running scoped instance or leave later down/status resolving a
+# cluster that never came up.
+PRIOR_PORT_EXISTED=""
+PRIOR_PORT_CONTENT=""
+PRIOR_DATADIR_EXISTED=""
+PRIOR_DATADIR_CONTENT=""
+
 # These get their final values in configure_paths(), after the command and any
 # scope flag are known: scoped mode replaces the data dir / socket dir / port,
 # unscoped mode keeps the historical /tmp defaults.
@@ -173,12 +183,28 @@ resolve_scope() {
 	if [ "$portmode" = up ]; then
 		(umask 077 && mkdir -p "$INSTANCE_DIR")
 		chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
+		# Snapshot the existing markers BEFORE port allocation or an override can
+		# rewrite them, so cmd_up can restore them if this `up` fails (see
+		# rollback_scoped_markers). $(cat) strips the trailing newline that
+		# atomic_write adds; the rollback re-adds it, so the round-trip is exact.
+		PRIOR_PORT_EXISTED=""
+		PRIOR_PORT_CONTENT=""
+		if [ -f "$PORT_FILE" ]; then
+			PRIOR_PORT_EXISTED=yes
+			PRIOR_PORT_CONTENT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+		fi
+		PRIOR_DATADIR_EXISTED=""
+		PRIOR_DATADIR_CONTENT=""
+		if [ -f "$DATADIR_FILE" ]; then
+			PRIOR_DATADIR_EXISTED=yes
+			PRIOR_DATADIR_CONTENT="$(cat "$DATADIR_FILE" 2>/dev/null || true)"
+		fi
 	fi
-	# Resolve PGDATA. An explicit PGDATA is authoritative and untouched. Scoped
-	# mode NEVER falls back to the unscoped /tmp/pgdata default: on `up` it is the
-	# scoped default; on a read command it MUST come from the marker `up` recorded
-	# — if that marker is missing/empty, fail loudly rather than guess (which
-	# could otherwise let a scoped `down`/`status` act on an unrelated cluster).
+	# Resolve PGDATA. An explicit PGDATA is authoritative. Scoped mode NEVER falls
+	# back to the unscoped /tmp/pgdata default: on `up` it is the scoped default; on
+	# a read command it MUST come from the marker `up` recorded — if that marker is
+	# missing/empty, fail loudly rather than guess (which could otherwise let a
+	# scoped `down`/`status` act on an unrelated cluster).
 	if [ -z "$PGDATA_EXPLICIT" ]; then
 		if [ "$portmode" = up ]; then
 			PGDATA="$INSTANCE_DIR/pgdata"
@@ -188,6 +214,18 @@ resolve_scope() {
 			log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
 			exit 1
 		fi
+	else
+		# An explicit PGDATA must be made ABSOLUTE before we persist or resolve it:
+		# `up` records this path so a later down/status (possibly from a DIFFERENT
+		# working directory) can find the same cluster. A relative value recorded
+		# verbatim would re-resolve against the other CWD and could target — and
+		# stop — an unrelated cluster. Anchor a relative path to the current dir now
+		# (realpath -m tolerates not-yet-created components); an already-absolute
+		# path is left byte-for-byte so unscoped/default behavior is unchanged.
+		case "$PGDATA" in
+			/*) : ;;
+			*) PGDATA="$(realpath -m -- "$PGDATA")" ;;
+		esac
 	fi
 	PG_SOCKDIR="$INSTANCE_DIR"
 }
@@ -381,20 +419,43 @@ print_url() {
 	fi
 }
 
+# Restore the scoped port/datadir markers to their pre-`up` snapshot (captured in
+# resolve_scope). Runs from cmd_up's EXIT trap when initialization or start fails,
+# so a failed override leaves the previously-running scoped instance's markers
+# intact instead of pointing a later down/status at a cluster that never started.
+rollback_scoped_markers() {
+	[ -n "$SCOPED" ] || return 0
+	if [ "$PRIOR_PORT_EXISTED" = yes ]; then
+		atomic_write "$PORT_FILE" "$PRIOR_PORT_CONTENT"
+	else
+		rm -f "$PORT_FILE"
+	fi
+	if [ "$PRIOR_DATADIR_EXISTED" = yes ]; then
+		atomic_write "$DATADIR_FILE" "$PRIOR_DATADIR_CONTENT"
+	else
+		rm -f "$DATADIR_FILE"
+	fi
+}
+
 cmd_up() {
 	local actual
 	require_bindir
 	if [ -n "$SCOPED" ]; then
 		# Serialize concurrent `up` for the SAME scope so two callers never race
 		# through initdb / pg_ctl start against one data directory. Held (via fd 8)
-		# until this process exits. Record the effective data dir so later
-		# read-path commands resolve THIS cluster even without repeating PGDATA.
+		# until this process exits.
 		exec 8>"$INSTANCE_DIR/.uplock"
 		if ! flock -w 60 8; then
 			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
 			exit 1
 		fi
-		atomic_write "$DATADIR_FILE" "$PGDATA"
+		# If initialization or start fails below, roll the markers back to the
+		# snapshot captured before this `up`. The port reservation had to be written
+		# early (see allocate_port) to fence concurrent allocators, but the recorded
+		# data dir / port describing THIS cluster are (re)written only AFTER start
+		# succeeds — so a failed override never orphans the previously-running scoped
+		# instance or corrupts teardown resolution. Cleared once start succeeds.
+		trap 'rollback_scoped_markers' EXIT
 	fi
 	if [ ! -s "$PGDATA/PG_VERSION" ]; then
 		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
@@ -431,10 +492,27 @@ cmd_up() {
 		"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
 			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null 8>&- 9>&-
 	fi
-	# Record the effective port so url/status/down resolve the exact server.
-	[ -n "$SCOPED" ] && atomic_write "$PORT_FILE" "$PGPORT"
+	# Start (or an already-running detection) succeeded: NOW record the effective
+	# data dir and port so url/status/down resolve the exact server this `up`
+	# settled on, then drop the rollback trap — a later ensure_role_db failure must
+	# not undo markers that correctly describe the now-running cluster.
+	if [ -n "$SCOPED" ]; then
+		atomic_write "$DATADIR_FILE" "$PGDATA"
+		atomic_write "$PORT_FILE" "$PGPORT"
+		trap - EXIT
+	fi
 	ensure_role_db
-	log "Ready. DATABASE_URL printed below; export it with: eval \"\$(pg-dev-up url --export)\""
+	# Recommend the SCOPE-CORRECT export recipe: an unscoped `url --export` would
+	# export the /tmp:5432 cluster's URL, not this scoped instance's.
+	local export_cmd="pg-dev-up url --export"
+	if [ -n "$SCOPED" ]; then
+		if [ "$SCOPE_MODE" = profile ]; then
+			export_cmd="pg-dev-up --profile $SCOPE_PROFILE_ID url --export"
+		else
+			export_cmd="pg-dev-up --worktree url --export"
+		fi
+	fi
+	log "Ready. DATABASE_URL printed below; export it with: eval \"\$($export_cmd)\""
 	print_url
 }
 

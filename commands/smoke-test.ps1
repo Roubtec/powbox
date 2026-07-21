@@ -149,7 +149,11 @@ if (-not $imagePresent) {
 }
 else {
   Write-Host "Running peer-review-run unit test (baked helper in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" -e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run --entrypoint /bin/bash $Image /repo/scripts/test-peer-review-run.sh
+  # --init: the test's reap assertions probe killed descendants with `kill -0`, which
+  # still succeeds on an un-collected zombie; without an init, bash would be PID 1 and
+  # KILLed orphans could linger as zombies and fail the checks. The powbox runtime
+  # always provides a reaping PID 1 (init: true in compose.shared.yml), so match it.
+  docker run --rm --init -v "${rootDir}:/repo:ro" -e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run --entrypoint /bin/bash $Image /repo/scripts/test-peer-review-run.sh
   if ($LASTEXITCODE -ne 0) {
     throw "peer-review-run unit test failed. See container output above."
   }

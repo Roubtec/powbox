@@ -171,7 +171,14 @@ else
 fi
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running peer-review-run unit test (baked helper in $IMAGE) ..."
-	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+	# --init matters here: the test's reap assertions probe killed descendants
+	# with `kill -0`, which still succeeds on an un-collected ZOMBIE. Without an
+	# init, bash would be PID 1 and orphans KILLed after their parent died can
+	# linger as zombies, failing the reap checks even though the helper
+	# terminated them. The powbox runtime always provides a reaping PID 1
+	# (`init: true` in compose.shared.yml → docker-init), so the test container
+	# must match that assumption.
+	docker run --rm --init -v "${ROOT_DIR}:/repo:ro" \
 		-e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-peer-review-run.sh
 elif [ "$stage0e_host_ran" = 1 ]; then

@@ -84,21 +84,27 @@ CURRENT_PGID=""
 # rather than reporting a clean result as if the tree were fully reaped.
 REAP_WARN=0
 
-# Captured descendant set for the unvalidated-PGID fallback. Each entry is
-# "PID:STARTTIME" (STARTTIME = field 22 of /proc/PID/stat, the process's
-# boot-relative start jiffies), space-padded for whole-word membership tests.
-# Recording the start time next to the PID lets the later signal step DETECT PID
-# reuse: if the kernel recycled a captured PID for an unrelated process, that
-# process's start time differs, so we SKIP it rather than TERM/KILL a stranger
-# (addresses the bare-PID reuse hazard on this fallback). A PID whose start time
-# was UNREADABLE at capture (empty baseline) is likewise skipped — see pid_matches'
-# fail-safe: we never signal a PID we cannot positively re-identify. The set is accumulated
-# WHILE THE LEADER IS STILL ALIVE — a live tree-walk rooted at a leader that has
-# ALREADY exited finds nothing, because its children have by then reparented to
-# init. Capturing eagerly (during the poll loop and before we wait on / reap the
-# leader) means we still hold a stray grandchild's PID after the leader dies and
-# can terminate it. Only ever populated on the fallback path; the validated-PGID
-# path reaps by group id and needs no PID snapshot.
+# Captured descendant set. Each entry is "PID:STARTTIME" (STARTTIME = field 22
+# of /proc/PID/stat, the process's boot-relative start jiffies), space-padded
+# for whole-word membership tests. Populated on EVERY supervised run — seeded
+# with the leader (and its launch-time start time) at spawn, then merged from a
+# live walk each poll tick:
+#   * validated-PGID path: the group signal reaps the group itself, and the
+#     captured set ADDITIONALLY reaches a descendant that has LEFT the group —
+#     e.g. a provider tool starting a new session/process group via setsid —
+#     which a group signal alone would miss entirely;
+#   * unvalidated fallback: the captured set is the only reach we have.
+# Recording the start time next to the PID lets the later liveness/signal steps
+# DETECT PID reuse: if the kernel recycled a captured PID for an unrelated
+# process, that process's start time differs, so we SKIP it rather than
+# TERM/KILL a stranger. A PID whose start time was UNREADABLE at capture (empty
+# baseline) is likewise skipped — see pid_matches' fail-safe: we never signal a
+# PID we cannot positively re-identify. The set is accumulated WHILE THE LEADER
+# IS STILL ALIVE — a live tree-walk rooted at a leader that has ALREADY exited
+# finds nothing, because its children have by then reparented to init. Capturing
+# eagerly (during the poll loop and before we wait on / reap the leader) means
+# we still hold a stray grandchild's PID after the leader dies and can terminate
+# it.
 CAPTURED_DESC=" "
 
 # proc_starttime <pid> — the process start time (field 22 of /proc/<pid>/stat), a
@@ -135,11 +141,10 @@ pid_matches() {
 }
 
 # descendant_pids <root_pid> — print <root_pid> and every transitive child pid,
-# walked live at call time from the process table. Used ONLY on the unvalidated-
-# PGID fallback path so that even without a group signal we still reach the
-# leader's known descendant subtree (a stray grandchild) rather than the leader
-# alone. Best-effort: a process re-parented away (e.g. daemonized into a new
-# group) is out of scope for any PID walk, exactly as it is for a group signal.
+# walked live at call time from the process table. Reaches the leader's known
+# descendant subtree (a stray grandchild) rather than the leader alone.
+# Best-effort: a process re-parented away entirely (double-fork daemonization)
+# is out of scope for any PID walk, exactly as it is for a group signal.
 descendant_pids() {
 	local root="$1" kid
 	printf '%s\n' "$root"
@@ -148,13 +153,38 @@ descendant_pids() {
 	done
 }
 
+# captured_start <pid> — print the baseline start time recorded for <pid> in
+# CAPTURED_DESC (possibly empty); returns 1 when the pid was never captured.
+captured_start() {
+	local pid="$1" entry
+	for entry in $CAPTURED_DESC; do
+		if [ "${entry%%:*}" = "$pid" ]; then
+			printf '%s' "${entry#*:}"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # capture_descendants <leader_pid> — merge the leader's CURRENT descendant subtree
 # (leader included), each PID tagged with its start time, into CAPTURED_DESC. Call
 # repeatedly while the leader is alive so a grandchild is recorded BEFORE it can
 # reparent away on the leader's exit; once captured a PID stays in the set even
-# after the leader dies. Fallback-only.
+# after the leader dies.
+#
+# RECAPTURE GUARD: a live walk runs ONLY while the walk root still matches the
+# baseline start time recorded for it at capture (the leader is seeded with its
+# launch-time start time). Once the original leader is gone — or its bare PID
+# has been RECYCLED for an unrelated process — a fresh walk rooted at that PID
+# would enumerate a STRANGER's children with fresh, valid start times, and the
+# later start-time-verified sweep would then TERM/KILL unrelated same-UID
+# processes as if they were captured descendants. Refusing to re-walk a root we
+# cannot positively re-identify (unmatched or empty baseline) closes that
+# hazard; the already-captured set remains fully usable for liveness/signals.
 capture_descendants() {
-	local root="$1" p st
+	local root="$1" p st base
+	base="$(captured_start "$root")" || base=""
+	pid_matches "$root" "$base" || return 0
 	for p in $(descendant_pids "$root"); do
 		case "$CAPTURED_DESC" in
 		*" $p:"*) ;;
@@ -167,49 +197,54 @@ capture_descendants() {
 }
 
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
-# alive? Uses the validated group when we have one, else sweeps the CAPTURED
-# descendant set (accumulated while the leader lived) refreshed with a live walk,
-# so a grandchild that reparented after the leader exited is still checked. A
-# captured PID counts as alive ONLY when it still names the same process
-# (start-time match), so a recycled PID standing in for an unrelated process is
-# never mistaken for a live provider descendant.
+# alive? A live validated group answers immediately; in EVERY case the CAPTURED
+# descendant set (accumulated while the leader lived, refreshed with a live walk
+# only while the leader still matches its baseline — see capture_descendants) is
+# also swept: on the validated-PGID path that catches a descendant that has LEFT
+# the group (setsid), which the group probe alone would report as gone; on the
+# fallback it is the only check there is. A captured PID counts as alive ONLY
+# when it still names the same process (start-time match), so a recycled PID
+# standing in for an unrelated process is never mistaken for a live provider
+# descendant.
 group_alive() {
 	local pid="$1" pgid="$2" entry p st
-	if [ -n "$pgid" ]; then
-		kill -0 "-${pgid}" 2>/dev/null
-	else
-		capture_descendants "$pid"
-		for entry in $CAPTURED_DESC; do
-			p="${entry%%:*}"
-			st="${entry#*:}"
-			pid_matches "$p" "$st" && kill -0 "$p" 2>/dev/null && return 0
-		done
-		return 1
+	if [ -n "$pgid" ] && kill -0 "-${pgid}" 2>/dev/null; then
+		return 0
 	fi
+	capture_descendants "$pid"
+	for entry in $CAPTURED_DESC; do
+		p="${entry%%:*}"
+		st="${entry#*:}"
+		pid_matches "$p" "$st" && kill -0 "$p" 2>/dev/null && return 0
+	done
+	return 1
 }
 
 # signal_tree <SIG> <leader_pid> <pgid|""> — deliver a signal to the whole
-# validated group, or (fallback) to every CAPTURED descendant PID (leader
-# included) that STILL names the same process. NEVER a negative, unvalidated PID
-# (which could hit the helper's own group); never pkill -f. The start-time check
+# validated group (when we have one) AND to every CAPTURED descendant PID
+# (leader included) that STILL names the same process. NEVER a negative,
+# unvalidated PID (which could hit the helper's own group); never pkill -f. The
+# per-PID sweep runs on BOTH paths: with a validated group it reaches a
+# descendant that moved itself into a NEW session/process group (setsid) and so
+# escaped the group signal (a still-grouped member is merely signalled twice —
+# harmless); on the fallback it is the only delivery. The start-time check
 # before each kill means a captured PID the kernel has since recycled for an
-# unrelated process is skipped, not signalled. Signalling the captured set — not a
-# fresh walk rooted at the possibly-dead leader — keeps the fallback a real tree
-# reap: a grandchild recorded while the leader was alive is still terminated after
-# the leader exits and the grandchild reparents to init.
+# unrelated process is skipped, not signalled. Signalling the captured set — not
+# a fresh walk rooted at the possibly-dead leader — keeps this a real tree reap:
+# a grandchild recorded while the leader was alive is still terminated after the
+# leader exits and the grandchild reparents to init.
 signal_tree() {
 	local sig="$1" pid="$2" pgid="$3" entry p st
 	if [ -n "$pgid" ]; then
 		kill "-${sig}" "-${pgid}" 2>/dev/null || true
-	else
-		capture_descendants "$pid"
-		for entry in $CAPTURED_DESC; do
-			p="${entry%%:*}"
-			st="${entry#*:}"
-			pid_matches "$p" "$st" || continue
-			kill "-${sig}" "$p" 2>/dev/null || true
-		done
 	fi
+	capture_descendants "$pid"
+	for entry in $CAPTURED_DESC; do
+		p="${entry%%:*}"
+		st="${entry#*:}"
+		pid_matches "$p" "$st" || continue
+		kill "-${sig}" "$p" 2>/dev/null || true
+	done
 }
 
 # reap_tree <leader_pid> <pgid|""> — TERM the tree, WAIT a bounded grace, then
@@ -249,7 +284,16 @@ reap_tree() {
 
 on_exit() {
 	# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap
-	[ -n "$CURRENT_LEADER" ] && reap_tree "$CURRENT_LEADER" "$CURRENT_PGID"
+	if [ -n "$CURRENT_LEADER" ] && ! reap_tree "$CURRENT_LEADER" "$CURRENT_PGID"; then
+		# This trap-path reap runs only when the helper is torn down MID-ATTEMPT
+		# (INT/TERM or an unexpected exit) — the paths that emit the result JSON
+		# all clear CURRENT_LEADER after their own reap first. A KILL-surviving
+		# descendant therefore cannot be reflected in the result's `reason` the
+		# way the timeout/normal-exit reaps do it (no result is emitted here);
+		# the stderr warn event is the one honest channel left, so a reap_tree
+		# failure must not be silently discarded.
+		printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL during exit cleanup"}\n' "$PROVIDER" >&2
+	fi
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -408,7 +452,20 @@ codex_supports() {
 		# fails, the capture stays empty, no flag matches, and every probed feature
 		# falls back to its safe default (no --json live progress, no extra flags)
 		# rather than assuming support.
-		CODEX_EXEC_HELP="$(timeout -k 5 10 codex exec --help 2>&1 || true)"
+		#
+		# The capture goes through a FILE, never a command substitution over a
+		# pipe: GNU timeout only supervises its direct child, so a background
+		# descendant the help path leaves behind (an updater, a wrapper's helper)
+		# that INHERITED stdout would hold a pipe's write end open, and a $(...)
+		# read would then block on EOF long after `timeout` killed the probe —
+		# hanging the helper before any attempt timeout applies. With a file
+		# there is no pipe reader: the shell waits only for `timeout` itself, and
+		# a stray inheritor of the file descriptor delays nothing. stdin comes
+		# from /dev/null so a misbehaving probe cannot sit reading the helper's
+		# own stdin either. The capture lands in the session dir as a retained
+		# diagnostic artifact.
+		timeout -k 5 10 codex exec --help >"$SESSION_DIR/codex-exec-help.txt" 2>&1 </dev/null || true
+		CODEX_EXEC_HELP="$(cat "$SESSION_DIR/codex-exec-help.txt" 2>/dev/null || true)"
 		CODEX_HELP_PROBED=1
 	fi
 	printf '%s' "$CODEX_EXEC_HELP" | grep -Eq -- "$1"
@@ -700,13 +757,21 @@ run_attempt() {
 	# group) so the whole tree can be reaped by group id. The subshell exec's into
 	# the provider and is the group leader.
 	FWD_LINES=0
-	CAPTURED_DESC=" " # fresh per attempt; only populated on the fallback path
-	local start end child pgid rc timed_out=0
+	local start end child pgid rc timed_out=0 leader_start
 	start=$(date +%s.%N)
 	set -m
 	(cd "$WORKTREE" && exec "${CMD[@]}" <"$dir/prompt.txt" >"$out" 2>"$err") &
 	child=$!
 	set +m
+	# Seed the fresh per-attempt captured set with the leader's launch-time
+	# identity IMMEDIATELY: every later live walk (capture_descendants) verifies
+	# the walk root still matches this baseline before trusting the process
+	# table, so once the original leader is gone — or its PID recycled — no walk
+	# can enumerate an unrelated process's children and feed them to the sweep.
+	# If the leader exits before the baseline can be read (empty), no live walk
+	# ever runs — fail-safe: reaping then relies on the group signal alone.
+	leader_start="$(proc_starttime "$child" || true)"
+	CAPTURED_DESC=" ${child}:${leader_start} "
 	# VALIDATE that the child leads its own process group before we ever send a
 	# negative-PID (whole-group) signal: confirm its PGID equals its own PID.
 	#   * probe == child            → validated group; signal it by PGID.
@@ -730,29 +795,32 @@ run_attempt() {
 
 	# Poll: forward progress and enforce the deadline. On the deadline we only flag
 	# the timeout and break; the single reap_tree below handles termination for
-	# BOTH the timeout and the normal/failed-exit paths identically. On the
-	# unvalidated-PGID fallback we ALSO snapshot the leader's descendants each tick
-	# while it is still alive, so a stray grandchild is recorded before the leader
-	# exits and reparents it away — the reap below then still reaches it (the
-	# validated-PGID path needs none of this; the group signal covers the tree).
-	# reap_tree itself re-walks (group_alive/signal_tree call capture_descendants),
-	# so any descendant still reachable from a live walk at reap time is captured
-	# too — not only those seen during the poll.
+	# BOTH the timeout and the normal/failed-exit paths identically. EVERY tick
+	# also snapshots the leader's live descendants while it is still alive: on the
+	# validated-PGID path the snapshot SUPPLEMENTS the group signal — a descendant
+	# that moves itself into a new session/process group (e.g. a provider tool
+	# calling setsid) has left the group, and only the start-time-verified PID
+	# sweep can still reach it after the group kill — and on the unvalidated
+	# fallback it is the only reach at all (a walk rooted at the already-dead
+	# leader finds nothing once children reparent to init). reap_tree itself
+	# re-walks (group_alive/signal_tree call capture_descendants), but a live walk
+	# runs ONLY while the original leader still matches its launch-time baseline —
+	# see capture_descendants' recapture guard.
 	#
-	# ACCEPTED RESIDUAL (unvalidated-PGID fallback only): a descendant the leader
-	# forks AND orphans within the final <100ms poll interval, right before the
-	# leader exits on its own, can reparent to init uncaptured — a PID walk rooted
-	# at the now-dead leader can no longer see it. This mirrors the same-UID
-	# traversal residual: it is bounded because (1) `set -m` normally isolates the
-	# child into its OWN group, so the validated-PGID group-signal path — which
-	# reaches reparented members with no PID snapshot — is the norm and has no such
-	# gap, and (2) even when the fallback is reached, the start-time-verified
-	# signalling above guarantees we never mis-signal a recycled PID. A fully
-	# race-free fallback would need the kernel's own process-tree reaping (a private
-	# PID namespace), which is out of scope for this helper.
+	# ACCEPTED RESIDUAL: a descendant the leader forks AND orphans within the
+	# final <100ms poll interval, right before the leader exits on its own, can
+	# escape the snapshot — and if it ALSO left the process group (setsid), then
+	# neither the group signal (validated path) nor the captured-set sweep can
+	# reach it. This mirrors the same-UID traversal residual: it is bounded — a
+	# sub-100ms window requiring the provider to deliberately daemonize at the
+	# last instant; a group-escaping descendant seen by ANY earlier tick IS swept —
+	# and the start-time-verified signalling guarantees we never mis-signal a
+	# recycled PID while closing it as far as a PID walk can. A fully race-free
+	# reap would need the kernel's own process-tree accounting (a private PID
+	# namespace), which is out of scope for this helper.
 	while kill -0 "$child" 2>/dev/null; do
 		forward_tick "$out"
-		[ -z "$pgid" ] && capture_descendants "$child"
+		capture_descendants "$child"
 		end=$(date +%s.%N)
 		if awk -v a="$end" -v b="$start" -v t="$TIMEOUT" 'BEGIN{exit !((a-b)>t)}'; then
 			timed_out=1

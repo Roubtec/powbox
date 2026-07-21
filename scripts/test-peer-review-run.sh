@@ -52,10 +52,19 @@ set -uo pipefail
 #       present when the CLI advertises them, omitted when not (see case 9),
 #       with the version-independent -c approval_policy=never and
 #       -c project_doc_max_bytes=0 overrides passed unconditionally)
+#  (11f) a descendant that LEAVES the validated process group (setsid) is still
+#       reaped: the group signal cannot reach it, so the poll-tick descendant
+#       snapshot plus the start-time-verified per-PID sweep must
 #  (12) FAIL-SAFE unvalidated-PGID fallback: a captured descendant PID whose
 #       baseline /proc start time was empty/unreadable at capture is treated as
 #       NON-matching — never counted alive, never signalled — so a recycled PID
-#       cannot be TERM/KILL'd (driving the real supervision functions directly)
+#       cannot be TERM/KILL'd; and a LIVE WALK is refused once the walk root no
+#       longer matches its captured baseline, so a recycled LEADER PID can never
+#       have an unrelated process's children captured for the sweep (driving the
+#       real supervision functions directly)
+#  (13) the codex help probe cannot hang: a background child of `--help` that
+#       inherits stdout must not hold the capture open past the probe timeout
+#       (file-based capture, no pipe)
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -961,6 +970,46 @@ emit_verdict_case "$d" "VERDICT: NO ISSUES - no changes needed"
 run "$d" $(std_args "$d" claude)
 assert_eq "11d: 'NO ISSUES - no changes needed' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 
+# 11f: a descendant that LEAVES the validated process group must still be
+# reaped. `set -m` isolates the provider into its own group and the group signal
+# reaps that group — but a provider tool that starts a NEW session/process group
+# (setsid) has left the group, so only the poll-tick descendant snapshot plus
+# the start-time-verified per-PID sweep can reach it. The fake provider setsids
+# a sleeper (still its child, so the live walk sees it), stays alive long enough
+# for a poll tick to snapshot it, then exits cleanly — a clean pass must NOT
+# leave the escapee running.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+# a descendant in a NEW session/process group — outside the validated group
+setsid sleep 60 >/dev/null 2>&1 &
+echo $! >"$ESCAPEE_PID"
+sleep 1   # stay alive so the poll loop (100ms ticks) snapshots the escapee
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+ESCAPEE_PID="$d/escapee.pid"
+export ESCAPEE_PID
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "11f: outcome passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+esc="$(cat "$ESCAPEE_PID" 2>/dev/null || echo)"
+# give the post-exit sweep a beat, then the escapee must be gone
+for _ in 1 2 3 4 5; do
+	[ -n "$esc" ] && ! kill -0 "$esc" 2>/dev/null && break
+	sleep 0.2
+done
+checks=$((checks + 1))
+if [ -z "$esc" ] || kill -0 "$esc" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [11f: setsid group-escapee reaped]: pid %s still alive (or unrecorded) after a clean exit\n' "${esc:-<none>}" >&2
+	[ -n "$esc" ] && kill -9 "$esc" 2>/dev/null
+fi
+unset ESCAPEE_PID
+
 # 11e: read-only / no-persistence flag set is locked in for both providers. (The
 # real write/read enforcement is the provider's own sandbox and is verifiable
 # only in the live smoke; here we assert the enforcing flags are actually passed.)
@@ -1040,7 +1089,7 @@ extract_fn() {
 	awk -v fn="$1" 'index($0, fn"() {")==1{g=1} g{print} g && /^}/{exit}' "$HELPER"
 }
 eval "$(
-	for f in proc_starttime pid_matches descendant_pids capture_descendants group_alive signal_tree; do
+	for f in proc_starttime pid_matches descendant_pids captured_start capture_descendants group_alive signal_tree; do
 		extract_fn "$f"
 	done
 )"
@@ -1096,7 +1145,75 @@ if kill -0 "$victim" 2>/dev/null; then
 	printf 'FAIL [12d: matched-baseline captured PID must BE signalled]\n' >&2
 	kill -9 "$victim" 2>/dev/null || true
 fi
+# (e) RECAPTURE GUARD: a live walk is refused once the walk root no longer
+# matches its captured baseline. A stale/wrong baseline for the root simulates a
+# leader whose PID the kernel recycled for an unrelated process — walking it
+# would capture a STRANGER's children with fresh, valid start times and hand
+# them to the sweep. The root's live child must NOT be captured then; with the
+# CORRECT baseline the same walk DOES capture it (control).
+sleep 30 &
+kid=$!
+CAPTURED_DESC=" $$:1 " # wrong baseline for the walk root (this shell)
+capture_descendants $$
+checks=$((checks + 1))
+case "$CAPTURED_DESC" in
+*" ${kid}:"*)
+	fails=$((fails + 1))
+	printf 'FAIL [12e: stale-root live walk must NOT capture (recycled-leader hazard)]\n' >&2
+	;;
+esac
+CAPTURED_DESC=" $$:$(proc_starttime $$) " # control: correct baseline
+capture_descendants $$
+checks=$((checks + 1))
+case "$CAPTURED_DESC" in
+*" ${kid}:"*) ;;
+*)
+	fails=$((fails + 1))
+	printf 'FAIL [12e: matched-root live walk must still capture the child]\n' >&2
+	;;
+esac
+kill "$kid" 2>/dev/null || true
+wait "$kid" 2>/dev/null || true
 unset CAPTURED_DESC
+
+# ============================================================================
+# (13) the codex help probe must not hang when `--help` leaves a background
+#      child that INHERITED stdout: with a pipe-based $(...) capture the read
+#      would block on EOF until that child exits (~60s here), long after
+#      `timeout` killed the probe itself; the file-based capture has no pipe
+#      reader, so the run completes promptly.
+# ============================================================================
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then
+	# background child inheriting stdout/stderr — the write end a pipe capture
+	# would wait on; setsid keeps it clear of the probe's own process group
+	setsid sleep 60 &
+	echo $! >"$PROBE_STRAY"
+	echo "--json"
+	exit 0
+fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+PROBE_STRAY="$d/probe-stray.pid"
+export PROBE_STRAY
+t0=$(date +%s)
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+t1=$(date +%s)
+assert_eq "13: run still passes with a stray probe child" "$(jqf "$RUN_RESULT" .outcome)" passed
+checks=$((checks + 1))
+if [ $((t1 - t0)) -ge 30 ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [13: probe capture must not hang on the stray child]: run took %ss\n' "$((t1 - t0))" >&2
+fi
+stray="$(cat "$PROBE_STRAY" 2>/dev/null || echo)"
+[ -n "$stray" ] && kill -9 "$stray" 2>/dev/null
+unset PROBE_STRAY
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

@@ -88,7 +88,9 @@ REAP_WARN=0
 # Recording the start time next to the PID lets the later signal step DETECT PID
 # reuse: if the kernel recycled a captured PID for an unrelated process, that
 # process's start time differs, so we SKIP it rather than TERM/KILL a stranger
-# (addresses the bare-PID reuse hazard on this fallback). The set is accumulated
+# (addresses the bare-PID reuse hazard on this fallback). A PID whose start time
+# was UNREADABLE at capture (empty baseline) is likewise skipped — see pid_matches'
+# fail-safe: we never signal a PID we cannot positively re-identify. The set is accumulated
 # WHILE THE LEADER IS STILL ALIVE — a live tree-walk rooted at a leader that has
 # ALREADY exited finds nothing, because its children have by then reparented to
 # init. Capturing eagerly (during the poll loop and before we wait on / reap the
@@ -114,13 +116,18 @@ proc_starttime() {
 }
 
 # pid_matches <pid> <starttime> — does <pid> STILL name the same process we
-# captured? True when the recorded start time is empty (no baseline was readable
-# at capture time — fall back to the prior best-effort behavior and do not block
-# the signal) OR the process's current start time equals the recorded one. False
-# when the PID is gone or has been recycled by a different process.
+# captured? True ONLY when a NON-EMPTY baseline start time was recorded at capture
+# AND the process's current start time equals it. FAIL SAFE: if the baseline is
+# empty (its /proc start time was unreadable at capture) OR the current
+# /proc/<pid>/stat cannot be read now, treat the PID as NON-matching — do NOT count
+# it alive and do NOT signal it. Rationale: this is the near-unreachable,
+# unvalidated-PGID fallback, where the harm to avoid is SIGTERM/SIGKILL hitting an
+# unrelated same-UID process after PID reuse; leaving a possibly-orphaned descendant
+# we cannot even identify is the lesser, bounded risk (and set -m's validated
+# whole-group signal path — which never consults per-PID start times — is the norm).
 pid_matches() {
 	local pid="$1" want="$2" cur
-	[ -n "$want" ] || return 0
+	[ -n "$want" ] || return 1
 	cur="$(proc_starttime "$pid")" || return 1
 	[ "$cur" = "$want" ]
 }

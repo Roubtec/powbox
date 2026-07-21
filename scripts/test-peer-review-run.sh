@@ -39,6 +39,10 @@ set -uo pipefail
 #       nesting is traversal-proof), anchored verdict + ISSUES-precedence (no
 #       example-token false-pass), and the read-only tool-set / no-persistence
 #       flags for both providers (Claude restricted to native read tools, no Bash)
+#  (12) FAIL-SAFE unvalidated-PGID fallback: a captured descendant PID whose
+#       baseline /proc start time was empty/unreadable at capture is treated as
+#       NON-matching — never counted alive, never signalled — so a recycled PID
+#       cannot be TERM/KILL'd (driving the real supervision functions directly)
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -841,6 +845,81 @@ read-only"
 assert_contains "11e: codex --ephemeral (no session persistence)" "$(cat "$d/argv")" "--ephemeral"
 assert_contains "11e: codex mcp disabled" "$(cat "$d/argv")" "mcp_servers={}"
 unset ARGV_LOG
+
+# ============================================================================
+# (12) FAIL-SAFE empty/unreadable baseline start time on the unvalidated-PGID
+#      fallback. A captured descendant PID whose baseline start time could NOT be
+#      read at capture (empty) must be treated as NON-matching: never counted alive,
+#      never TERM/KILL'd — otherwise a PID the kernel recycled after a failed /proc
+#      read could be signalled, hitting an unrelated same-UID process. These drive
+#      the helper's REAL supervision functions directly (extracted verbatim), since
+#      the fallback path is not reachable through the full-helper harness (set -m
+#      normally isolates the child into its own group → the validated-PGID path).
+# ============================================================================
+
+# Extract a shell function's definition verbatim from the helper. Every supervision
+# function opens with `name() {` at column 1 and closes with `}` at column 1.
+extract_fn() {
+	awk -v fn="$1" 'index($0, fn"() {")==1{g=1} g{print} g && /^}/{exit}' "$HELPER"
+}
+eval "$(
+	for f in proc_starttime pid_matches descendant_pids capture_descendants group_alive signal_tree; do
+		extract_fn "$f"
+	done
+)"
+
+# (a) pid_matches: an EMPTY baseline is non-matching (fail safe); a real baseline
+# for a live process still matches (the fix must not break the normal match).
+myst="$(proc_starttime $$)"
+checks=$((checks + 1))
+if pid_matches $$ ""; then
+	fails=$((fails + 1))
+	printf 'FAIL [12a: empty baseline must be NON-matching (fail safe)]\n' >&2
+fi
+checks=$((checks + 1))
+if ! pid_matches $$ "$myst"; then
+	fails=$((fails + 1))
+	printf 'FAIL [12a: a correct non-empty baseline must still match]\n' >&2
+fi
+
+# (b) group_alive on the fallback: a LIVE captured PID with an empty baseline must
+# NOT be counted alive (it cannot be positively re-identified).
+sleep 30 &
+victim=$!
+CAPTURED_DESC=" ${victim}: "
+checks=$((checks + 1))
+if group_alive "$victim" ""; then
+	fails=$((fails + 1))
+	printf 'FAIL [12b: empty-baseline captured PID must NOT count as alive]\n' >&2
+fi
+
+# (c) signal_tree on the fallback: an empty-baseline captured PID must NOT be
+# signalled — the live victim survives a TERM sweep.
+CAPTURED_DESC=" ${victim}: "
+signal_tree TERM "$victim" ""
+checks=$((checks + 1))
+if ! kill -0 "$victim" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [12c: empty-baseline captured PID must NOT be signalled]\n' >&2
+fi
+
+# (d) CONTROL: with the CORRECT baseline the SAME captured PID IS reached and TERM'd
+# — proving the skip in (c) is due to the empty baseline, not a broken sweep.
+# shellcheck disable=SC2034  # read as a global inside the eval'd signal_tree
+CAPTURED_DESC=" ${victim}:$(proc_starttime "$victim") "
+signal_tree TERM "$victim" ""
+w=0
+while kill -0 "$victim" 2>/dev/null && [ "$w" -lt 30 ]; do
+	sleep 0.1
+	w=$((w + 1))
+done
+checks=$((checks + 1))
+if kill -0 "$victim" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [12d: matched-baseline captured PID must BE signalled]\n' >&2
+	kill -9 "$victim" 2>/dev/null || true
+fi
+unset CAPTURED_DESC
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

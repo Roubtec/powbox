@@ -1031,6 +1031,34 @@ emit_verdict_case "$d" "$(printf '```\nVERDICT: PASS\n```\nVERDICT: PASS')"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: real pass after a fenced pass example still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# ...and QUOTED (not just plain-fenced) example verdicts are excluded too — the
+# anchor's own >/backtick decoration would otherwise accept a line-start token
+# inside them. A blockquoted fence (delimiters not whitespace-led), a plain
+# blockquote, and an inline-code span each forfeit.
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf '> ```\n> VERDICT: PASS\n> ```')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: blockquoted fenced example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+emit_verdict_case "$d" "> VERDICT: PASS"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: plain blockquoted example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are inline-code test data, not an expansion
+emit_verdict_case "$d" '`VERDICT: PASS`'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: inline-code-span example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# ...while a blockquoted ISSUES still resolves to issues (safe direction: check (a)
+# stays on the full text), so quoting cannot HIDE a real issues verdict either.
+d="$(new_case)"
+emit_verdict_case "$d" "> VERDICT: ISSUES"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: blockquoted issues still -> issues" "$(jqf "$RUN_RESULT" .verdict)" issues
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

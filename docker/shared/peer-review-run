@@ -858,21 +858,26 @@ detect_verdict() {
 		echo issues
 		return
 	fi
-	# Before the PASS-side checks (b, c), drop fenced code blocks (``` or ~~~
-	# delimited) into a scan copy: a peer that merely QUOTES an example such as a
-	# fenced `VERDICT: PASS` renders that token at line-start with NO decoration,
-	# which the anchor would otherwise accept as a real verdict — the example-token
-	# false pass this parser is meant to prevent. Stripping fences for the PASS
-	# side closes that hole (the anchor already rejects INLINE, mid-sentence
-	# examples). The ISSUES check (a) above deliberately stays on the FULL text:
-	# over-matching issues is the SAFE direction and can never false-pass, so a
-	# fenced `VERDICT: ISSUES` still counts. A peer that needlessly wraps its OWN
-	# real verdict in a fence degrades to `none` (forfeited) — also safe, and the
-	# caller's prompt asks for a bare VERDICT line. Residual, honest: a bare
-	# UNFENCED free-standing example line is still out of scope.
+	# Before the PASS-side checks (b, c), drop QUOTED material into a scan copy so a
+	# peer that merely ECHOES an example verdict is not read as its own. Three quote
+	# forms are excluded, because the anchor's own decoration class (>, backtick,
+	# ...) would otherwise accept a line-start VERDICT token inside any of them as a
+	# real verdict — the example-token false pass this parser is meant to prevent:
+	#   * a fenced code block (``` or ~~~ delimited) — its content lines are dropped;
+	#   * a blockquoted line (starts with >), which also covers a blockquoted fence
+	#     whose delimiters are not whitespace-led;
+	#   * an inline-code / backtick-led line.
+	# The ISSUES check (a) above deliberately stays on the FULL text: over-matching
+	# issues is the SAFE direction and can never false-pass, so a quoted
+	# VERDICT: ISSUES still counts. A peer that needlessly QUOTES its OWN real
+	# verdict degrades to `none` (forfeited) — also safe; the caller's prompt asks
+	# for a bare VERDICT line. Residual, honest and irreducible without semantics: a
+	# bare, UNQUOTED free-standing example line (e.g. `Example output:` then a plain
+	# VERDICT line) is indistinguishable from a real verdict and stays out of scope.
 	local scan_text
 	scan_text="$(printf '%s\n' "$text" | awk '
 		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+		!fence && /^[[:space:]]*[>`]/ { next }
 		!fence { print }
 	')"
 	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an

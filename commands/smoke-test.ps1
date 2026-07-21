@@ -303,14 +303,19 @@ else {
   # cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
   # there and we surface it in the banner so the partial coverage is not hidden.
   $podmanMarker = New-TemporaryFile
+  $podmanSkip = $null
+  # Read the marker AND remove it inside the finally so a child-smoke failure (which
+  # throws with $ErrorActionPreference=Stop) still cleans up the temp file -- a
+  # Remove-Item placed after the try/finally would be skipped when the child throws.
   try {
     $env:POWBOX_SMOKE_SKIP_MARKER = $podmanMarker.FullName
     & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
   }
   finally {
     Remove-Item Env:\POWBOX_SMOKE_SKIP_MARKER -ErrorAction SilentlyContinue
+    $podmanSkip = Get-Content -LiteralPath $podmanMarker.FullName -Raw -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $podmanMarker.FullName -ErrorAction SilentlyContinue
   }
-  $podmanSkip = Get-Content -LiteralPath $podmanMarker.FullName -Raw -ErrorAction SilentlyContinue
   if ($podmanRequest -eq "off") {
     $skipped.Add("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
   }
@@ -320,7 +325,6 @@ else {
   elseif ($podmanSkip) {
     $skipped.Add("Stage 3: $($podmanSkip.Trim())")
   }
-  Remove-Item -LiteralPath $podmanMarker.FullName -ErrorAction SilentlyContinue
 }
 
 # Stage 4 - self-hosted ("-Isolated") launch mode. Validates the launcher's

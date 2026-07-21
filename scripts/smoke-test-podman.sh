@@ -184,8 +184,10 @@ podman ps --filter "id=$cid" --filter status=running -q | grep -q . || fail "pub
 # 4. Compose exec-form health check. Motivating regression (Kalm2 SPIRE overlay):
 # podman-compose left a distroless exec-form health check stuck at "starting". The
 # fixture has up to THREE services so the check has real teeth: "hc" (test /bin/true)
-# MUST reach healthy, a negative-control "bad" (test /bin/false) MUST NOT — see 4b —
-# and a shell-less "distroless" service (see 4c) actively reproduces the Kalm2 break.
+# MUST reach healthy, a negative-control "bad" (test /bin/false) MUST be driven to
+# unhealthy — see 4b — and a shell-less "distroless" service (see 4c) actively
+# reproduces the Kalm2 break (detected by the translated form + failure reason, not a
+# never-healthy outcome).
 # Exercised through "docker compose" (the shim spelling agents use); it routes to
 # "podman compose" -> the podman-compose provider, so both spellings share one path.
 # See docs/rootless-podman.md "Compose health-check behavior" for the full contract.
@@ -289,10 +291,14 @@ esac
 # result. drive_health does exactly that in a bounded loop and echoes the final
 # state. This is deliberately proven to be non-vacuous: the "hc" service (/bin/true)
 # MUST reach healthy, while the negative-control "bad" service (/bin/false), driven
-# the SAME way, MUST NOT — driving only reports the command real result, so a
-# never-succeeding check that ever reported healthy would mean the healthy assertion
-# could not catch a service Compose leaves perpetually at starting. That negative
-# control is the bounded proof that a never-healthy service fails clearly.
+# the SAME way, MUST reach unhealthy — NOT merely "fail to reach healthy". Requiring
+# unhealthy (Podman flips to it only after start_period elapses AND `retries`
+# consecutive failures) proves the check was actually wired and executed: a check
+# left at starting/none/unknown — e.g. never wired at all — would ALSO satisfy a mere
+# "not healthy" assertion, so that weaker form could pass vacuously. The unhealthy
+# requirement is the bounded, non-vacuous proof that a genuinely failing service is
+# driven to a terminal-failure state and that the healthy assertion above can catch a
+# service Compose leaves perpetually at starting.
 drive_health() { # $1=container $2=max-iterations; echoes final health, always rc 0
 	_n=0
 	_h=""
@@ -307,24 +313,35 @@ drive_health() { # $1=container $2=max-iterations; echoes final health, always r
 }
 hc_health=$(drive_health "$hc_cid" 15)
 [ "$hc_health" = healthy ] || fail "compose exec-form health check never reached healthy (last state: ${hc_health}); a service stuck at starting/unhealthy fails here — see docs/rootless-podman.md Compose health-check behavior"
-bad_health=$(drive_health "$bad_cid" 6)
-[ "$bad_health" = healthy ] && fail "negative control broke: a never-succeeding health command (/bin/false) reported healthy (state: ${bad_health}) — the healthy assertion is vacuous and would not catch a stuck-at-starting service"
-echo "Negative control OK: the never-succeeding /bin/false service correctly never reached healthy (last state: ${bad_health})."
+# 8 iterations clears the 1s start_period AND the 3 retries with margin (observed:
+# unhealthy by iteration 4). drive_health never breaks early for a never-succeeding
+# check, so it runs the full count and returns the terminal state.
+bad_health=$(drive_health "$bad_cid" 8)
+[ "$bad_health" = unhealthy ] || fail "negative control did not become unhealthy after driven failures (last state: ${bad_health}); expected unhealthy — a check left at starting/none/unknown would mean /bin/false was never wired and executed, leaving the healthy assertion above vacuous (it could not catch a service stuck at starting)"
+echo "Negative control OK: the never-succeeding /bin/false service was driven to unhealthy as expected (last state: ${bad_health})."
 
 # 4c. Distroless (shell-less) XFAIL reproduction. The alpine "hc" service reaches
 # healthy DESPITE the CMD->CMD-SHELL rewrite precisely because alpine HAS /bin/sh, so
 # 4a/4b never exercise the path that actually broke the Kalm2 distroless SPIRE check.
 # This third service uses a genuinely shell-less image (registry.k8s.io/pause, no
-# /bin/sh) with the SAME exec-form check shape, and proves the break is REAL and
-# CAUSED BY the shell wrap:
-#   (1) the wired check is CMD-SHELL / "/bin/sh -c …" — the wrap that reintroduces the
-#       missing shell. /pause the BINARY exists in the image, so this isolates
-#       shell-wrapping as the cause versus a merely-absent check binary; AND
-#   (2) driven the same way it never reaches healthy (because /bin/sh is absent).
-# (1)+(2) together are the documented KNOWN-XFAIL on podman-compose 1.3 and keep the
-# run GREEN. It SELF-CLEARS loudly — a NOTE, not a silent pass — if the wrap is gone OR
-# the service reaches healthy: the signal a follow-up task will act on to raise this to
-# a hard failure. A pull failure was already handled above as a visible SKIP.
+# /bin/sh) with the SAME exec-form check shape.
+#
+# The discriminator is DELIBERATELY the translated form + failure REASON, NOT a
+# never-healthy outcome. A never-exiting binary like /pause never exits within the
+# healthcheck timeout, so it is "never healthy" whether the check is the broken shell
+# wrap OR a correctly-preserved exec form — the outcome cannot tell broken from fixed.
+# So we key on signals that actually DIFFER between the two:
+#   * PRIMARY (broken-vs-fixed): the wired .Config.Healthcheck.Test. CMD-SHELL /
+#     "/bin/sh -c …" is the mistranslation (XFAIL, keep GREEN); a preserved CMD exec
+#     form is the true "provider fixed" signal and SELF-CLEARS to a loud NOTE —
+#     independent of whether the check binary ever exits.
+#   * CAUSE ISOLATION: prove the break is the missing /bin/sh, not an absent check
+#     binary and not a never-exiting one. The health-check Log Output is empty in
+#     podman 5.x (the crun exec error is not recorded there), so we re-run the wrapped
+#     /bin/sh directly via `podman exec` and capture the crun reason: /bin/sh
+#     is ABSENT (executable file /bin/sh not found). The /pause binary IS present
+#     (it is the image entrypoint), so the shell wrap is what breaks the check.
+# A pull failure was already handled above as a visible SKIP.
 if [ "$distroless_ok" = true ]; then
 	dl_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=distroless" 2>/dev/null | head -n1)
 	[ -n "$dl_cid" ] || fail "distroless (shell-less) compose service container not found for project $compose_proj (compose up did not create it)"
@@ -334,15 +351,30 @@ if [ "$distroless_ok" = true ]; then
 	case "$dl_kind" in
 	CMD-SHELL) case "$dl_test" in */bin/sh*) dl_wrapped=true ;; esac ;;
 	esac
-	dl_health=$(drive_health "$dl_cid" 6)
-	if [ "$dl_wrapped" = true ] && [ "$dl_health" != healthy ]; then
-		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into ${dl_test}; with no /bin/sh in the image it never reached healthy (last state: ${dl_health}). The /pause binary IS present, so the shell wrap — not an absent binary — is the cause. This actively reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
+	# Behavioral cause isolation: run the wrapped /bin/sh directly. If it is absent the
+	# exec fails and crun names /bin/sh; that pins the break on the missing shell — not
+	# an absent check binary (/pause is present) and not a never-exiting one.
+	dl_shellmissing=false
+	if dl_shellerr=$(podman exec "$dl_cid" /bin/sh -c ":" 2>&1); then
+		: # a shell IS present — the wrap would then actually run
 	else
-		echo "NOTE (distroless XFAIL now obsolete): the shell-less service exec-form check translated to ${dl_test} (kind=${dl_kind}) and reached health state ${dl_health}. The CMD->CMD-SHELL wrap and/or the resulting distroless break is GONE — podman-compose may now honor the exec form. A follow-up task can raise this XFAIL to a hard failure; revisit accepted limitation #2 in docs/rootless-podman.md."
+		case "$dl_shellerr" in */bin/sh*) dl_shellmissing=true ;; esac
+	fi
+	# Corroborating only (NOT the discriminator): the wrapped check never reaches
+	# healthy. Driven a few times purely to report the state in the message.
+	dl_health=$(drive_health "$dl_cid" 3)
+	if [ "$dl_kind" = CMD ]; then
+		echo "NOTE (distroless XFAIL now obsolete): podman-compose PRESERVED the shell-less service exec-form check as ${dl_test} (unwrapped CMD exec form) — the CMD->CMD-SHELL rewrite that broke distroless health checks is GONE and the provider now honors the exec form. This is the true provider-fixed signal (independent of whether /pause ever exits). Task 025a can raise this XFAIL to a HARD FAIL keyed on the preserved CMD exec form; revisit accepted limitation #2 in docs/rootless-podman.md. (Driven health state: ${dl_health}.)"
+	elif [ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]; then
+		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into ${dl_test}, reintroducing /bin/sh — which is ABSENT from this image (proven: podman exec /bin/sh -> ${dl_shellerr}). The /pause binary IS present (it is the image entrypoint), so the shell wrap — not an absent check binary and not a never-exiting one — is why the check fails (driven state: ${dl_health}). This actively reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
+	elif [ "$dl_wrapped" = true ]; then
+		fail "distroless XFAIL reproduction is inconclusive: the exec-form check was shell-wrapped to ${dl_test}, but reproducing the wrap with podman exec /bin/sh did NOT report /bin/sh missing (${dl_shellerr}) — cannot confirm the absent shell is the cause"
+	else
+		fail "distroless exec-form health check took an unexpected form (kind=${dl_kind}, test=${dl_test}); expected either the CMD-SHELL /bin/sh wrap (KNOWN-XFAIL) or a preserved CMD exec form (provider fixed)"
 	fi
 fi
 
-echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy (with a never-healthy negative control failing as expected) all work."
+echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy (with a negative control driven to unhealthy as expected) all work."
 ' 2>&1 | tee "$probe_log"
 rc=${PIPESTATUS[0]}
 set -e

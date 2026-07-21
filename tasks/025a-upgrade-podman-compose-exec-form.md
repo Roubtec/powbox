@@ -12,8 +12,8 @@ This follow-up fixes the mistranslation at the root and then raises the passing 
 ## Scope
 
 - Investigate and land a root fix so the provider selected by `podman compose` / the `docker compose` shim preserves exec-form health checks unchanged: upgrade `podman-compose`, patch it, or switch to a compose provider that translates the exec array faithfully (e.g. Podman's Go/compose-go path or Docker Compose v2), whichever is the least invasive compliant option.
-- Verify compliance with task 025's exact distroless reproduction: a shell-less image with an exec-form check must reach `healthy` under the supported Compose command path, and the wired `.Config.Healthcheck.Test` must remain the `CMD` exec form (not `CMD-SHELL` / `/bin/sh -c …`).
-- Once a compliant provider is bundled and verified, flip task 025's distroless `KNOWN-XFAIL` (and its self-clearing NOTE branch) to a HARD FAIL, so an exec→shell rewrite regression turns the smoke red, and update the documentation to state that exec-form health checks are now supported and the bar is hard-fail.
+- Verify compliance with task 025's exact distroless reproduction: under the supported Compose command path, the wired `.Config.Healthcheck.Test` for the shell-less service must be the PRESERVED `CMD` exec form (not `CMD-SHELL` / `/bin/sh -c …`). This preserved-exec-form inspection is the LOAD-BEARING discriminator — NOT "reaches healthy". Task 025's distroless probe deliberately uses `registry.k8s.io/pause`'s never-exiting `/pause` binary, which can never satisfy a health-check timeout even with a correctly preserved `CMD` exec form, so "reaches healthy" cannot distinguish a fixed provider from a broken one; only the translated form can. (If you additionally switch the distroless probe to a genuinely shell-less image that ships a short-lived exit-0 binary, you MAY also require it to reach `healthy` — but the preserved-exec-form inspection must remain the primary hard-fail check.)
+- Once a compliant provider is bundled and verified, flip task 025's distroless `KNOWN-XFAIL` (and its self-clearing NOTE branch) to a HARD FAIL keyed on the translated form: a wired `CMD-SHELL` / `/bin/sh -c …` wrap (the exec→shell rewrite) must turn the smoke red, while the preserved `CMD` exec form passes. Update the documentation to state that exec-form health checks are now supported and the bar is hard-fail.
 
 Out of scope: changing the smoke's fixture/cleanup/gating structure beyond flipping the XFAIL to a hard failure; reworking health-check semantics; the no-systemd manual-drive behavior (a separate sandbox limitation, not this mistranslation).
 
@@ -43,8 +43,8 @@ Out of scope: changing the smoke's fixture/cleanup/gating structure beyond flipp
 
 ## Acceptance criteria
 
-- The bundled provider preserves exec-form health checks: under `docker compose` (and `podman compose`), a shell-less/distroless service with `test: ["CMD", …]` reaches `healthy` when driven, and its wired `.Config.Healthcheck.Test` stays the `CMD` exec form.
-- Task 025's distroless scenario is a HARD FAIL on any exec→shell rewrite (no longer a green XFAIL); the smoke goes red on regression.
+- The bundled provider preserves exec-form health checks: under `docker compose` (and `podman compose`), a shell-less/distroless service with `test: ["CMD", …]` keeps its wired `.Config.Healthcheck.Test` as the `CMD` exec form (not `CMD-SHELL`). This preserved-exec-form inspection is the acceptance discriminator; "reaches healthy" is NOT required because the `/pause` probe never exits (see Scope). If the probe is switched to a short-lived exit-0 binary in a shell-less image, "reaches healthy" MAY additionally be asserted.
+- Task 025's distroless scenario is a HARD FAIL on any exec→shell rewrite — i.e. a wired `CMD-SHELL` / `/bin/sh -c …` form fails the smoke (no longer a green XFAIL); a preserved `CMD` exec form passes.
 - `scripts/test-podman-compose-healthcheck.sh` invariants are updated accordingly and pass; Bash/PowerShell parity retained.
 - `docs/rootless-podman.md` (and `README.md` if the advertised contract changes) state that exec-form health checks are supported and the smoke now enforces it, replacing the documented limitation.
 - If the root fix proves infeasible, the investigation outcome is documented and the XFAIL is retained with an explicit rationale.

@@ -446,7 +446,7 @@ than advertising two that could diverge. The smoke does five things that each
 **inspects and classifies the translation** Compose applied
 (`.Config.Healthcheck.Test[0]`); it drives the check and asserts the alpine service
 reaches **`healthy`**; it runs a never-succeeding **negative-control** service that
-must *not* reach healthy; and it stands up a third, genuinely **shell-less
+must be **driven to `unhealthy`**; and it stands up a third, genuinely **shell-less
 (distroless)** service that actively reproduces the Kalm2 break as a documented
 **XFAIL** (see limitation #2). So it fails if Compose drops the check, mangles the
 exec array beyond the known wrap, or leaves the alpine/negative-control services in
@@ -470,9 +470,13 @@ one *worse* than described fails the smoke.
    Because driving the check could otherwise *mask* a service that would sit at
    `starting`, the smoke pairs the positive service with a **negative control**: a
    second service whose exec-form check runs `/bin/false`, driven the exact same way,
-   which must **never** reach `healthy`. That proves the `healthy` assertion is not
-   vacuous — a genuinely never-healthy service fails the bounded poll. Projects that
-   rely on a Compose service's own health state (e.g. a `depends_on: { condition:
+   which must be **driven to `unhealthy`** — not merely fail to reach `healthy`.
+   Requiring the terminal-failure state (Podman flips to `unhealthy` only after the
+   `start_period` elapses *and* `retries` consecutive failures) proves the check was
+   genuinely wired and executed, so a never-wired check left at `starting` cannot pass
+   the control vacuously. That makes the positive `healthy` assertion non-vacuous — it
+   can catch a service Compose leaves perpetually at `starting`. Projects that rely on
+   a Compose service's own health state (e.g. a `depends_on: { condition:
    service_healthy }`) should account for this: without systemd the dependency gate
    will not advance on its own.
 2. **`podman-compose` 1.3 shell-wraps the exec form.** An exec-form test
@@ -495,18 +499,31 @@ one *worse* than described fails the smoke.
    so the alpine service alone never exercises the path that actually broke. The smoke
    therefore adds a third, genuinely **shell-less** service (a stock
    `registry.k8s.io/pause` image, no `/bin/sh`) with the same exec-form check shape to
-   **actively reproduce** the distroless break: it confirms the wired check is
-   `CMD-SHELL` / `/bin/sh -c …` (the wrap that reintroduces the missing shell — and
-   since the `/pause` binary *is* present, this isolates the shell wrap, not an absent
-   binary, as the cause) **and** that the service never reaches `healthy` when driven.
-   Those two facts together are the documented **XFAIL** and keep the run **green** on
-   `podman-compose` 1.3. It **self-clears loudly** — a `NOTE`, not a silent pass — if
-   the check is no longer shell-wrapped **or** the service does reach `healthy`, the
-   signal that a follow-up can raise this XFAIL to a hard failure and upgrade the
-   provider. If the shell-less image cannot be pulled (registry unreachable) the smoke
-   **skips just that scenario** with a visible reason and surfaces it in the umbrella
-   banner — never a false pass, and never a hard failure on a pull outage; the alpine
-   positive test and the `/bin/false` negative control still run.
+   **actively reproduce** the distroless break. The discriminator is deliberately the
+   **translated form plus the failure reason, not a never-healthy outcome**: the check
+   binary (`/pause`) never exits, so the service is "never healthy" whether the check
+   is the broken shell wrap *or* a correctly preserved exec form — that outcome cannot
+   tell broken from fixed. So the XFAIL keys on signals that actually differ:
+   - **Broken-vs-fixed (primary):** the wired `.Config.Healthcheck.Test`. A
+     `CMD-SHELL` / `/bin/sh -c …` wrap is the mistranslation and keeps the run **green**
+     as the expected XFAIL; a **preserved `CMD` exec form** is the true "provider
+     fixed" signal and **self-clears loudly** to a `NOTE` — independent of whether the
+     check binary ever exits.
+   - **Cause isolation:** the smoke proves the break is the *missing `/bin/sh`*, not an
+     absent check binary and not the never-exiting one. Podman 5.x does not record
+     crun's exec error in `.State.Health.Log[].Output` (it is empty), so the smoke
+     re-runs the wrap's shell directly with `podman exec … /bin/sh` and captures the
+     reason: `executable file /bin/sh not found`. Since the `/pause` binary *is*
+     present (it is the image entrypoint), that pins the shell wrap as the cause.
+
+   Together these keep the run **green** on `podman-compose` 1.3 and let a follow-up
+   (task 025a) raise the XFAIL to a hard failure keyed on the preserved-`CMD`
+   exec-form inspection — *not* on "reaches healthy", which the never-exiting `/pause`
+   probe can never satisfy. If the shell-less image cannot be pulled (registry
+   unreachable) the smoke **skips just that scenario** with a visible reason and
+   surfaces it in the umbrella banner — never a false pass, and never a hard failure on
+   a pull outage; the alpine positive test and the `/bin/false` negative control still
+   run.
 
 The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
 throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project (all
@@ -515,9 +532,10 @@ Compose exec-array translation and health-state propagation on a shell-bearing i
 (Alpine) plus the shell-less distroless reproduction above — not a general Compose
 conformance suite. `scripts/test-podman-compose-healthcheck.sh` is the hermetic,
 image-free guard that locks the probe's invariants (exec form, the
-translation-detection classifier, the `healthy` assertion plus the never-healthy
-negative control, the distroless wrap-detection + never-healthy XFAIL with its
-self-clearing `NOTE` and pull-failure skip, cleanup, and Bash/PowerShell parity).
+translation-detection classifier, the `healthy` assertion plus the driven-to-`unhealthy`
+negative control, the distroless wrap-detection + `/bin/sh`-missing cause isolation
+with its self-clearing `NOTE` on a preserved `CMD` exec form and its pull-failure skip,
+cleanup, and Bash/PowerShell parity).
 
 Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
 container before committing — all candidates resolve): `FROM node:24-trixie-slim`;

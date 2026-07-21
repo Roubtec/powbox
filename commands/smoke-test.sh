@@ -294,6 +294,11 @@ else
 	# cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
 	# there and we surface it in the banner so the partial coverage is not hidden.
 	podman_marker="$(mktemp "${TMPDIR:-/tmp}/powbox-smoke-podman-skip.XXXXXX")"
+	# Remove the marker even if the child smoke FAILS: under `set -e` a non-zero child
+	# exit aborts this script before the rm below, so a plain trailing rm would leak the
+	# temp file on failure. The trap fires on EXIT (success or failure); it is cleared
+	# once the marker is consumed so later stages' EXIT handling is untouched.
+	trap 'rm -f "$podman_marker"' EXIT
 	POWBOX_SMOKE_SKIP_MARKER="$podman_marker" "${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 	if [ "$podman_gate" = "off" ]; then
 		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
@@ -303,6 +308,7 @@ else
 		skipped+=("Stage 3: $(cat "$podman_marker")")
 	fi
 	rm -f "$podman_marker"
+	trap - EXIT
 fi
 
 # Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's

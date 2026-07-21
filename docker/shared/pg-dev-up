@@ -74,16 +74,30 @@ POSTGRES_DB="${POSTGRES_DB:-postgres}"
 SCOPED=""
 SCOPE_MODE=""       # worktree | profile
 SCOPE_PROFILE_ID="" # for --profile <id>
+# Canonicalize the scoped root to an ABSOLUTE path ONCE, up front. A relative
+# POWBOX_PG_SCOPED_ROOT or TMPDIR would otherwise re-resolve against whatever the
+# current directory happens to be, so two invocations (or a `cd` mid-run) could
+# derive different instance/lock/marker paths for the same scope and silently
+# split one cluster in two. realpath -m tolerates the root not existing yet;
+# an already-absolute value is left byte-for-byte (unscoped behavior unchanged).
+# Mirrors the explicit-PGDATA canonicalization in resolve_scope.
 SCOPED_ROOT="${POWBOX_PG_SCOPED_ROOT:-${TMPDIR:-/tmp}/pg-dev-up-scoped}"
+case "$SCOPED_ROOT" in
+	/*) : ;;
+	*) SCOPED_ROOT="$(realpath -m -- "$SCOPED_ROOT")" ;;
+esac
 INSTANCE_DIR=""
 PORT_FILE=""
 DATADIR_FILE=""
 
 # Snapshot of the scoped port/datadir markers as they were BEFORE this `up` began
-# to touch them (captured in resolve_scope). cmd_up rolls the markers back to this
-# snapshot if initialization or start fails, so a failed override can never orphan
-# the previously-running scoped instance or leave later down/status resolving a
-# cluster that never came up.
+# to touch them (captured by snapshot_scoped_markers, under the per-scope
+# `.uplock`, in cmd_up). cmd_up rolls the markers back to this snapshot if
+# initialization or start fails, so a failed override can never orphan the
+# previously-running scoped instance or leave later down/status resolving a
+# cluster that never came up. Taking the snapshot under the lock also means a
+# concurrent same-scope `up` cannot roll back over the markers a successful holder
+# just wrote — the loser snapshots (and can only restore) the winner's state.
 PRIOR_PORT_EXISTED=""
 PRIOR_PORT_CONTENT=""
 PRIOR_DATADIR_EXISTED=""
@@ -159,6 +173,53 @@ scope_key() {
 	fi
 }
 
+# Force each given directory to owner-only (0700) and VERIFY it stuck, FAILING
+# hard otherwise. PostgreSQL refuses to run with a group/world-accessible data or
+# socket dir, and — more importantly — a pre-existing scoped dir with wider perms
+# (or one owned by another user we cannot chmod) would expose the cluster's data
+# and unix socket. We must never let the server start on such a directory, so a
+# chmod failure or lingering group/other bits are a clear error, not a warning.
+enforce_owner_only() {
+	local d perms
+	for d in "$@"; do
+		if ! chmod 700 "$d" 2>/dev/null; then
+			log "cannot secure scoped directory $d (chmod 700 failed — not owner?); refusing to proceed with group/world-accessible cluster data."
+			exit 1
+		fi
+		perms="$(stat -c '%a' "$d" 2>/dev/null || true)"
+		# Any non-zero group/other bit (the last two octal digits) is a leak.
+		case "$perms" in
+			*00) : ;;
+			*)
+				log "scoped directory $d is not owner-only (perms=$perms); refusing to proceed."
+				exit 1
+				;;
+		esac
+	done
+}
+
+# Snapshot the current scoped port/datadir markers so cmd_up can restore them if
+# this `up` fails (see rollback_scoped_markers). MUST run while holding the
+# per-scope `.uplock` and BEFORE port allocation or an override rewrites them, so
+# a concurrent same-scope `up` that loses the lock snapshots the WINNER's markers
+# (and thus can only ever restore them) instead of an empty/stale pre-winner
+# state. $(cat) strips the trailing newline atomic_write adds; the rollback
+# re-adds it, so the round-trip is exact.
+snapshot_scoped_markers() {
+	PRIOR_PORT_EXISTED=""
+	PRIOR_PORT_CONTENT=""
+	if [ -f "$PORT_FILE" ]; then
+		PRIOR_PORT_EXISTED=yes
+		PRIOR_PORT_CONTENT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+	fi
+	PRIOR_DATADIR_EXISTED=""
+	PRIOR_DATADIR_CONTENT=""
+	if [ -f "$DATADIR_FILE" ]; then
+		PRIOR_DATADIR_EXISTED=yes
+		PRIOR_DATADIR_CONTENT="$(cat "$DATADIR_FILE" 2>/dev/null || true)"
+	fi
+}
+
 # Populate INSTANCE_DIR / PORT_FILE / DATADIR_FILE / PGDATA / PG_SOCKDIR for
 # scoped mode. An explicit PGDATA still wins; the socket dir is always scoped so
 # two clusters never share a /tmp socket file (clients connect over TCP anyway).
@@ -178,27 +239,16 @@ resolve_scope() {
 	# Only `up` may CREATE the instance dir; a read command (down/status/url)
 	# must not materialize an empty instance for a scope that was never `up`ed
 	# (it would leave a stray dir behind and mask "no instance yet" errors).
-	# Owner-only from the top down: the temp root and the instance dir hold the
-	# cluster's data + unix socket, which PostgreSQL requires be private.
 	if [ "$portmode" = up ]; then
 		(umask 077 && mkdir -p "$INSTANCE_DIR")
-		chmod 700 "$SCOPED_ROOT" "$INSTANCE_DIR" 2>/dev/null || true
-		# Snapshot the existing markers BEFORE port allocation or an override can
-		# rewrite them, so cmd_up can restore them if this `up` fails (see
-		# rollback_scoped_markers). $(cat) strips the trailing newline that
-		# atomic_write adds; the rollback re-adds it, so the round-trip is exact.
-		PRIOR_PORT_EXISTED=""
-		PRIOR_PORT_CONTENT=""
-		if [ -f "$PORT_FILE" ]; then
-			PRIOR_PORT_EXISTED=yes
-			PRIOR_PORT_CONTENT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-		fi
-		PRIOR_DATADIR_EXISTED=""
-		PRIOR_DATADIR_CONTENT=""
-		if [ -f "$DATADIR_FILE" ]; then
-			PRIOR_DATADIR_EXISTED=yes
-			PRIOR_DATADIR_CONTENT="$(cat "$DATADIR_FILE" 2>/dev/null || true)"
-		fi
+		# The temp root and the instance dir hold the cluster's data + unix socket,
+		# which PostgreSQL requires be private. Enforce owner-only perms and FAIL if
+		# they cannot be locked down, rather than serving from a group/world-readable
+		# directory (a pre-existing wide-open or foreign-owned dir must not slip
+		# through). The markers are snapshotted later, under the `.uplock` in cmd_up,
+		# so a failing concurrent same-scope `up` cannot roll back over the markers a
+		# successful holder just wrote.
+		enforce_owner_only "$SCOPED_ROOT" "$INSTANCE_DIR"
 	fi
 	# Resolve PGDATA. An explicit PGDATA is authoritative. Scoped mode NEVER falls
 	# back to the unscoped /tmp/pgdata default: on `up` it is the scoped default; on
@@ -338,15 +388,19 @@ configure_paths() {
 	local portmode="$1"
 	if [ -n "$SCOPED" ] && [ "$portmode" != none ]; then
 		resolve_scope "$portmode"
-		if [ "$portmode" = up ]; then
-			scoped_port_for_up
-		else
+		# For `up`, the port is allocated LATER, inside cmd_up, under the per-scope
+		# `.uplock` — together with the marker snapshot and rollback — so a concurrent
+		# same-scope `up` cannot race on the reservation or clobber the winner's
+		# markers. A read command has no such contention and resolves its recorded
+		# port here.
+		if [ "$portmode" != up ]; then
 			scoped_port_for_read
 		fi
-		# resolve_scope + the port helpers set PGDATA and PGPORT to fully scoped
-		# values (or already exited on a missing marker). Return BEFORE the unscoped
-		# defaults below so a scoped command can NEVER fall back to /tmp/pgdata:5432
-		# and act on the unrelated unscoped cluster.
+		# resolve_scope (+ scoped_port_for_read on a read command) set PGDATA and
+		# PGPORT to fully scoped values (or already exited on a missing marker); the
+		# `up` path sets PGPORT in cmd_up. Return BEFORE the unscoped defaults below so
+		# a scoped command can NEVER fall back to /tmp/pgdata:5432 and act on the
+		# unrelated unscoped cluster.
 		return 0
 	fi
 	# Unscoped path (and scoped check/help, which touch no cluster): historical
@@ -419,17 +473,31 @@ print_url() {
 	fi
 }
 
-# Restore the scoped port/datadir markers to their pre-`up` snapshot (captured in
-# resolve_scope). Runs from cmd_up's EXIT trap when initialization or start fails,
-# so a failed override leaves the previously-running scoped instance's markers
-# intact instead of pointing a later down/status at a cluster that never started.
+# Restore the scoped port/datadir markers to their pre-`up` snapshot (captured by
+# snapshot_scoped_markers). Runs from cmd_up's EXIT trap when initialization or
+# start fails, so a failed override leaves the previously-running scoped instance's
+# markers intact instead of pointing a later down/status at a cluster that never
+# started.
+#
+# The PORT marker is a cross-scope reservation (other scopes' allocate_port scan
+# every */port under the shared root), so its restore MUST happen under the shared
+# `.portlock`: that keeps the reservation set's mutation atomic w.r.t. a concurrent
+# allocator and prevents another scope from allocating the port we release here and
+# then colliding with the reservation we recreate. The datadir marker carries no
+# cross-scope semantics, so it is restored without the lock.
 rollback_scoped_markers() {
 	[ -n "$SCOPED" ] || return 0
+	# Reopen + lock the shared port lock (best-effort: still restore on a lock
+	# timeout rather than leaking a bogus reservation). fd 9 is closed for the
+	# daemonized postmaster in cmd_up, so reopening here is safe.
+	exec 9>"$SCOPED_ROOT/.portlock"
+	flock -w 30 9 || true
 	if [ "$PRIOR_PORT_EXISTED" = yes ]; then
 		atomic_write "$PORT_FILE" "$PRIOR_PORT_CONTENT"
 	else
 		rm -f "$PORT_FILE"
 	fi
+	flock -u 9 || true
 	if [ "$PRIOR_DATADIR_EXISTED" = yes ]; then
 		atomic_write "$DATADIR_FILE" "$PRIOR_DATADIR_CONTENT"
 	else
@@ -449,12 +517,19 @@ cmd_up() {
 			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
 			exit 1
 		fi
-		# If initialization or start fails below, roll the markers back to the
-		# snapshot captured before this `up`. The port reservation had to be written
-		# early (see allocate_port) to fence concurrent allocators, but the recorded
-		# data dir / port describing THIS cluster are (re)written only AFTER start
-		# succeeds — so a failed override never orphans the previously-running scoped
-		# instance or corrupts teardown resolution. Cleared once start succeeds.
+		# Now that we hold the per-scope lock, snapshot the markers and allocate the
+		# port — BOTH under the lock. Snapshotting here (not earlier, unlocked) means a
+		# concurrent same-scope `up` that lost the lock captures the WINNER's markers
+		# once it acquires the lock, so its rollback can only ever restore the winner's
+		# state — it can never wipe or orphan the running cluster the winner recorded.
+		snapshot_scoped_markers
+		scoped_port_for_up
+		# If initialization or start fails below, roll the markers back to the snapshot
+		# just captured. The port reservation is written early (see allocate_port) to
+		# fence concurrent allocators, but the recorded data dir / port describing THIS
+		# cluster are (re)written only AFTER start succeeds — so a failed override never
+		# orphans the previously-running scoped instance or corrupts teardown
+		# resolution. Cleared once start succeeds.
 		trap 'rollback_scoped_markers' EXIT
 	fi
 	if [ ! -s "$PGDATA/PG_VERSION" ]; then

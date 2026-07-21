@@ -51,8 +51,13 @@ export CONTAINER_NAME="pg-scoped-test-$$"
 
 # Stop any cluster we started and remove the sandbox, whatever happens.
 STARTED_DATADIRS=()
+LISTENER_PIDS=()
 cleanup() {
-	local d
+	local d p
+	for p in "${LISTENER_PIDS[@]:-}"; do
+		[ -n "$p" ] || continue
+		kill "$p" >/dev/null 2>&1 || true
+	done
 	for d in "${STARTED_DATADIRS[@]:-}"; do
 		[ -n "$d" ] || continue
 		[ -f "$d/postmaster.pid" ] || continue
@@ -119,6 +124,27 @@ pick_free_port() {
 		return 0
 	done
 	echo "FATAL: no free loopback port in 6500-6999 for the explicit-port test" >&2
+	return 1
+}
+
+# Start a background LISTENER occupying loopback port $1 until the test exits, so
+# a scoped `up` that targets it hits pg-dev-up's "port in use; refusing to start"
+# path deterministically. Returns once the socket is actually accepting.
+occupy_port() {
+	local port="$1" i
+	python3 -c "
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $port))
+s.listen(1)
+time.sleep(120)
+" &
+	LISTENER_PIDS+=("$!")
+	for ((i = 0; i < 100; i++)); do
+		(exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && return 0
+		sleep 0.05
+	done
 	return 1
 }
 
@@ -345,6 +371,72 @@ try "C reachable after parallel up" test "$(psql "$url_c" -tAc 'select 1' 2>/dev
 try "D reachable after parallel up" test "$(psql "$url_d" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_C" -- --worktree down >/dev/null 2>&1 || true
 pg "$REPO_D" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== same-scope up rollback safety: a failed up restores the prior markers =="
+# Finding #1/#2: the marker snapshot is taken UNDER the per-scope .uplock, and the
+# port-marker rollback runs UNDER the .portlock. So a same-scope `up` that fails
+# after taking the lock must restore the previously-recorded port — never wipe the
+# marker (which would orphan later url/status/down) and never leave the transient
+# port it briefly reserved. Drive it deterministically on a FRESH worktree (no
+# explicit-port history): bring the scope up (auto port, 5433-6432), down it
+# (markers kept), then run a same-scope `up` with an explicit PGPORT pinned to a
+# foreign listener in the disjoint 6500-6999 range so it fails at "port in use;
+# refusing to start" AFTER the snapshot+trap, exercising the rollback.
+REPO_E="$WORK/wt-e"
+add_worktree "$MAIN_REPO" "$REPO_E" wt-e
+url_r="$(pg "$REPO_E" POSTGRES_DB=app_e -- --worktree up | tail -1)"
+data_e="$(pg "$REPO_E" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+STARTED_DATADIRS+=("$data_e")
+prior_port="${url_r##*:}"
+prior_port="${prior_port%%/*}"
+pg "$REPO_E" -- --worktree down >/dev/null 2>&1 || true
+busy_port="$(pick_free_port)"
+try "foreign listener occupies a port ($busy_port)" occupy_port "$busy_port"
+try "busy port differs from the prior recorded port" test "$busy_port" != "$prior_port"
+try_not "same-scope up with a busy explicit PGPORT fails" pg "$REPO_E" PGPORT="$busy_port" POSTGRES_DB=app_e -- --worktree up
+url_rr="$(pg "$REPO_E" POSTGRES_DB=app_e -- --worktree url)"
+rr_port="${url_rr##*:}"
+rr_port="${rr_port%%/*}"
+try "rollback restored the prior recorded port ($prior_port), not wiped" test "$rr_port" = "$prior_port"
+try "rollback did not leave the transient busy port ($busy_port)" test "$rr_port" != "$busy_port"
+# The instance is still fully usable: bring it back up on its restored port.
+url_rb="$(pg "$REPO_E" POSTGRES_DB=app_e -- --worktree up | tail -1)"
+STARTED_DATADIRS+=("$data_e")
+try "instance still startable on its restored port after rollback" test "${url_rb##*:}" = "${prior_port}/app_e"
+try "instance reachable after rollback" test "$(psql "$url_rb" -tAc 'select 1' 2>/dev/null || true)" = "1"
+pg "$REPO_E" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== scoped dirs are forced owner-only; a pre-existing wide-open root is locked down =="
+# Finding #3 (positive): a pre-existing, world-accessible scoped root must be
+# corrected to 0700 before PostgreSQL serves its data/socket from it, and `up`
+# proceeds. REPO_A under a fresh root is a fresh instance.
+WIDE_ROOT="$WORK/wide-root"
+mkdir -p "$WIDE_ROOT"
+chmod 0777 "$WIDE_ROOT"
+url_w="$(pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="$WIDE_ROOT" POSTGRES_DB=app_a -- --worktree up | tail -1)"
+data_w="$(pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="$WIDE_ROOT" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+STARTED_DATADIRS+=("$data_w")
+try "up under a pre-existing 0777 scoped root succeeds" test -n "$url_w"
+try "scoped root locked down to owner-only (got $(stat -c '%a' "$WIDE_ROOT"))" test "$(stat -c '%a' "$WIDE_ROOT")" = 700
+inst_w="$(dirname "$data_w")"
+try "instance dir owner-only (got $(stat -c '%a' "$inst_w"))" test "$(stat -c '%a' "$inst_w")" = 700
+pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="$WIDE_ROOT" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== refuse to start when a scoped dir cannot be secured (chmod fails) =="
+# Finding #3 (refusal): a root-owned scoped root cannot be chmod'ed by this
+# unprivileged user, so `up` must FAIL rather than serve the cluster from a
+# world-accessible directory. /var/tmp is root-owned + world-writable here, so the
+# instance dir mkdir succeeds but the enforce-owner-only chmod on the root fails.
+# --profile lets us predict the single leftover dir and clean it.
+RO_ROOT="/var/tmp"
+if [ "$(stat -c '%U' "$RO_ROOT" 2>/dev/null || true)" != "$(id -un)" ] && ! chmod 700 "$RO_ROOT" 2>/dev/null; then
+	refuse_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "refuse-lane" | sha256sum | cut -c1-16)"
+	try_not "up refuses on a root-owned scoped root it cannot secure" pg "$NONGIT" POWBOX_PG_SCOPED_ROOT="$RO_ROOT" -- --profile refuse-lane up
+	try "refusal left no running cluster" test '!' -f "$RO_ROOT/$refuse_key/pgdata/postmaster.pid"
+	rm -rf "${RO_ROOT:?}/$refuse_key" 2>/dev/null || true
+else
+	echo "  skip refusal case: no un-chmod-able root-owned dir available here"
+fi
 
 echo "== unscoped invocations keep the historical defaults =="
 url_plain="$(pg "$WORK" -- url)"

@@ -330,47 +330,66 @@ echo "Negative control OK: the never-succeeding /bin/false service was driven to
 # never-healthy outcome. A never-exiting binary like /pause never exits within the
 # healthcheck timeout, so it is "never healthy" whether the check is the broken shell
 # wrap OR a correctly-preserved exec form — the outcome cannot tell broken from fixed.
-# So we key on signals that actually DIFFER between the two:
-#   * PRIMARY (broken-vs-fixed): the wired .Config.Healthcheck.Test. CMD-SHELL /
-#     "/bin/sh -c …" is the mistranslation (XFAIL, keep GREEN); a preserved CMD exec
-#     form is the true "provider fixed" signal and SELF-CLEARS to a loud NOTE —
-#     independent of whether the check binary ever exits.
+# So we key on signals that actually DIFFER between the two, and we key on the EXACT
+# translated array — not a generic CMD-SHELL-vs-CMD test — so a mangled / wrong-binary /
+# extra-token array cannot be silently classified as XFAIL or NOTE:
+#   * PRIMARY (broken-vs-fixed): the wired .Config.Healthcheck.Test. The EXACT shell
+#     wrap of the original — CMD-SHELL ["CMD-SHELL","/bin/sh -c /pause"] — is the
+#     mistranslation (XFAIL, keep GREEN); the EXACT preserved exec form ["CMD","/pause"]
+#     is the true "provider fixed" signal and SELF-CLEARS to a loud NOTE — independent of
+#     whether the check binary ever exits. ANY OTHER array HARD-FAILS as inconclusive.
 #   * CAUSE ISOLATION: prove the break is the missing /bin/sh, not an absent check
 #     binary and not a never-exiting one. The health-check Log Output is empty in
 #     podman 5.x (the crun exec error is not recorded there), so we re-run the wrapped
-#     /bin/sh directly via `podman exec` and capture the crun reason: /bin/sh
-#     is ABSENT (executable file /bin/sh not found). The /pause binary IS present
-#     (it is the image entrypoint), so the shell wrap is what breaks the check.
+#     /bin/sh directly via `podman exec` and require the crun reason to name /bin/sh AND
+#     a not-found cause (executable file /bin/sh not found / no such file) — an unrelated
+#     exec error merely mentioning /bin/sh must NOT green the XFAIL. The /pause binary IS
+#     present (it is the image entrypoint), so the shell wrap is what breaks the check.
 # A pull failure was already handled above as a visible SKIP.
 if [ "$distroless_ok" = true ]; then
 	dl_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=distroless" 2>/dev/null | head -n1)
 	[ -n "$dl_cid" ] || fail "distroless (shell-less) compose service container not found for project $compose_proj (compose up did not create it)"
 	dl_kind=$(podman inspect --format "{{if and .Config.Healthcheck .Config.Healthcheck.Test}}{{index .Config.Healthcheck.Test 0}}{{end}}" "$dl_cid" 2>/dev/null || echo "")
 	dl_test=$(podman inspect --format "{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}null{{end}}" "$dl_cid" 2>/dev/null || echo "")
+	# EXACT expected forms (compact JSON, no spaces — Go json encoding of []string). The
+	# XFAIL is green ONLY for the exact shell-wrap of the original /pause exec command;
+	# the self-clear NOTE fires ONLY for the exact preserved CMD exec form. ANY OTHER
+	# translated array (mangled command, wrong binary, extra tokens) matches neither and
+	# HARD-FAILS below as inconclusive — it is never silently greened as XFAIL or NOTE.
+	dl_expected_exec="[\"CMD\",\"/pause\"]"
+	dl_expected_wrap="[\"CMD-SHELL\",\"/bin/sh -c /pause\"]"
+	dl_preserved=false
+	[ "$dl_test" = "$dl_expected_exec" ] && dl_preserved=true
 	dl_wrapped=false
-	case "$dl_kind" in
-	CMD-SHELL) case "$dl_test" in */bin/sh*) dl_wrapped=true ;; esac ;;
-	esac
-	# Behavioral cause isolation: run the wrapped /bin/sh directly. If it is absent the
-	# exec fails and crun names /bin/sh; that pins the break on the missing shell — not
-	# an absent check binary (/pause is present) and not a never-exiting one.
+	[ "$dl_test" = "$dl_expected_wrap" ] && dl_wrapped=true
+	# Behavioral cause isolation: run the wrapped /bin/sh directly. It must fail for the
+	# SPECIFIC shell-absent reason (crun: executable file /bin/sh not found / no such
+	# file) — not merely emit a message that happens to mention /bin/sh — so an unrelated
+	# exec error naming /bin/sh cannot green the XFAIL. That pins the break on the missing
+	# shell, not an absent check binary (/pause is present) and not a never-exiting one.
 	dl_shellmissing=false
 	if dl_shellerr=$(podman exec "$dl_cid" /bin/sh -c ":" 2>&1); then
 		: # a shell IS present — the wrap would then actually run
 	else
-		case "$dl_shellerr" in */bin/sh*) dl_shellmissing=true ;; esac
+		case "$dl_shellerr" in
+		*/bin/sh*)
+			case "$dl_shellerr" in
+			*"no such file"* | *"No such file"* | *"not found"*) dl_shellmissing=true ;;
+			esac
+			;;
+		esac
 	fi
 	# Corroborating only (NOT the discriminator): the wrapped check never reaches
 	# healthy. Driven a few times purely to report the state in the message.
 	dl_health=$(drive_health "$dl_cid" 3)
-	if [ "$dl_kind" = CMD ]; then
-		echo "NOTE (distroless XFAIL now obsolete): podman-compose PRESERVED the shell-less service exec-form check as ${dl_test} (unwrapped CMD exec form) — the CMD->CMD-SHELL rewrite that broke distroless health checks is GONE and the provider now honors the exec form. This is the true provider-fixed signal (independent of whether /pause ever exits). Task 025a can raise this XFAIL to a HARD FAIL keyed on the preserved CMD exec form; revisit accepted limitation #2 in docs/rootless-podman.md. (Driven health state: ${dl_health}.)"
+	if [ "$dl_preserved" = true ]; then
+		echo "NOTE (distroless XFAIL now obsolete): podman-compose PRESERVED the shell-less service exec-form check as the exact ${dl_test} (unwrapped CMD exec form) — the CMD->CMD-SHELL rewrite that broke distroless health checks is GONE and the provider now honors the exec form. This is the true provider-fixed signal (independent of whether /pause ever exits). Task 025a can raise this XFAIL to a HARD FAIL keyed on the preserved CMD exec form; revisit accepted limitation #2 in docs/rootless-podman.md. (Driven health state: ${dl_health}.)"
 	elif [ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]; then
-		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into ${dl_test}, reintroducing /bin/sh — which is ABSENT from this image (proven: podman exec /bin/sh -> ${dl_shellerr}). The /pause binary IS present (it is the image entrypoint), so the shell wrap — not an absent check binary and not a never-exiting one — is why the check fails (driven state: ${dl_health}). This actively reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
+		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into the exact ${dl_test}, reintroducing /bin/sh — which is ABSENT from this image (proven: podman exec /bin/sh -> ${dl_shellerr}). The /pause binary IS present (it is the image entrypoint), so the shell wrap — not an absent check binary and not a never-exiting one — is why the check fails (driven state: ${dl_health}). This actively reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
 	elif [ "$dl_wrapped" = true ]; then
-		fail "distroless XFAIL reproduction is inconclusive: the exec-form check was shell-wrapped to ${dl_test}, but reproducing the wrap with podman exec /bin/sh did NOT report /bin/sh missing (${dl_shellerr}) — cannot confirm the absent shell is the cause"
+		fail "distroless XFAIL reproduction is inconclusive: the exec-form check was shell-wrapped to the expected ${dl_test}, but reproducing the wrap with podman exec /bin/sh did NOT fail for a shell-not-found reason (${dl_shellerr}) — cannot confirm the absent shell is the cause"
 	else
-		fail "distroless exec-form health check took an unexpected form (kind=${dl_kind}, test=${dl_test}); expected either the CMD-SHELL /bin/sh wrap (KNOWN-XFAIL) or a preserved CMD exec form (provider fixed)"
+		fail "distroless exec-form health check took an UNEXPECTED form (kind=${dl_kind}, test=${dl_test}); expected EXACTLY the CMD-SHELL wrap ${dl_expected_wrap} (KNOWN-XFAIL) or the preserved exec form ${dl_expected_exec} (provider fixed) — any other translated array (mangled / wrong-binary / extra-token) is inconclusive and fails hard"
 	fi
 fi
 

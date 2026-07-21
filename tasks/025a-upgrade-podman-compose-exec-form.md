@@ -51,7 +51,7 @@ Out of scope: changing the smoke's fixture/cleanup/gating structure beyond flipp
 
 ## Validation
 
-- This is base-image behavior: request a host/CI image rebuild and run `POWBOX_PODMAN=on POWBOX_SMOKE_REQUIRE_IMAGE=1 ./commands/smoke-test.sh` after rebuilding, confirming the distroless service now reaches `healthy` and that a forced rewrite fails the smoke.
+- This is base-image behavior: request a host/CI image rebuild and run `POWBOX_PODMAN=on POWBOX_SMOKE_REQUIRE_IMAGE=1 ./commands/smoke-test.sh` after rebuilding, confirming the wired `.Config.Healthcheck.Test` for the shell-less service is the PRESERVED `CMD` exec form (unwrapped, not `CMD-SHELL` / `/bin/sh -c …`) under the compliant provider, and that a wired `CMD-SHELL` / `/bin/sh -c …` rewrite fails the smoke — NOT that the service "reaches `healthy`" (the `/pause` probe never exits, so the outcome cannot distinguish a fixed provider from a broken one; see Scope). If the distroless probe is switched to a short-lived exit-0 binary in a shell-less image, "reaches `healthy`" MAY additionally be asserted, but the preserved-exec-form inspection stays the primary check.
 - Run `shellcheck` and `shfmt -d` on changed shell files and the pure-shell invariant test in-container.
 
 ## Review plan

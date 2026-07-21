@@ -38,15 +38,19 @@
 #      translation detection, and the healthy/negative assertions (hand-mirrored).
 #   6. The distroless (shell-less) XFAIL reproduction (task 025 fix-up): the probe
 #      pre-pulls a genuinely shell-less image and appends a third service with the
-#      SAME exec-form shape. The XFAIL is discriminated by the translated FORM +
-#      failure REASON, NOT a never-healthy outcome (a never-exiting binary is
-#      "never healthy" whether wrapped or preserved, so the outcome cannot tell
-#      broken from fixed): it asserts the wrap-detection (CMD-SHELL / "/bin/sh")
-#      AND that the wrap's /bin/sh is genuinely absent (proven with `podman exec`,
-#      since the health-check Log Output is empty on podman 5.x) as a KNOWN-XFAIL
-#      that keeps the run GREEN, and SELF-CLEARS to a loud NOTE when the translated
-#      form is the PRESERVED CMD exec form (the true provider-fixed signal). On a
-#      pull failure it SKIPs just that scenario (visible sentinel) — surfaced in the
+#      SAME exec-form shape. The XFAIL is discriminated by the EXACT translated FORM +
+#      a SPECIFIC failure REASON, NOT a never-healthy outcome (a never-exiting binary
+#      is "never healthy" whether wrapped or preserved, so the outcome cannot tell
+#      broken from fixed): the KNOWN-XFAIL (GREEN) branch requires the wired
+#      `.Config.Healthcheck.Test` to be EXACTLY the shell-wrap of the original —
+#      `["CMD-SHELL","/bin/sh -c /pause"]` — AND that the wrap's /bin/sh is genuinely
+#      absent, proven with `podman exec` failing for a specific not-found reason (not
+#      merely a message mentioning /bin/sh), since the health-check Log Output is empty
+#      on podman 5.x. It SELF-CLEARS to a loud NOTE only when the translated form is
+#      EXACTLY the preserved exec form `["CMD","/pause"]` (the true provider-fixed
+#      signal). ANY OTHER translated array (mangled command, wrong binary, extra tokens)
+#      matches neither and HARD-FAILS as inconclusive — it is never silently greened. On
+#      a pull failure it SKIPs just that scenario (visible sentinel) — surfaced in the
 #      umbrella banner via a marker the parent smoke wires. Bash/PowerShell parity is
 #      locked for all of the above.
 #
@@ -247,14 +251,18 @@ assert_grep "$SH" 'podman pull -q "$distroless_image"' "sh: pre-pulls the shell-
 assert_grep "$SH" 'SKIP [DISTROLESS-XFAIL]' "sh: emits a visible SKIP sentinel when the shell-less image cannot be pulled"
 assert_grep "$SH" 'if [ "$distroless_ok" = true ]; then' "sh: the shell-less service is appended/asserted only when the image pulled (pull-failure skip)"
 
-echo "Test: the Bash probe classifies the distroless break by translated FORM + failure REASON, not a never-healthy outcome"
+echo "Test: the Bash probe classifies the distroless break by EXACT translated FORM + specific failure REASON, not a never-healthy outcome"
 assert_grep "$SH" 'KNOWN-XFAIL (distroless)' "sh: surfaces the distroless break as a loud KNOWN-XFAIL"
-assert_grep "$SH" '*/bin/sh*) dl_wrapped=true' "sh: wrap-detection keys on the CMD-SHELL /bin/sh rewrite (the mistranslation)"
+assert_grep "$SH" 'dl_expected_wrap="[\"CMD-SHELL\",\"/bin/sh -c /pause\"]"' "sh: XFAIL keys on the EXACT shell-wrap of the original /pause exec command (not generic CMD-SHELL)"
+assert_grep "$SH" 'dl_expected_exec="[\"CMD\",\"/pause\"]"' "sh: NOTE self-clear keys on the EXACT preserved CMD exec form (not generic CMD)"
+assert_grep "$SH" '[ "$dl_test" = "$dl_expected_wrap" ] && dl_wrapped=true' "sh: dl_wrapped requires an exact match to the expected shell-wrap (a mangled array does not match)"
+assert_grep "$SH" '[ "$dl_test" = "$dl_expected_exec" ] && dl_preserved=true' "sh: dl_preserved requires an exact match to the expected preserved exec form"
 assert_grep "$SH" 'podman exec "$dl_cid" /bin/sh -c ":"' "sh: isolates the CAUSE by reproducing the wrap's /bin/sh with podman exec (health Log Output is empty on podman 5.x)"
-assert_grep "$SH" 'case "$dl_shellerr" in */bin/sh*) dl_shellmissing=true' "sh: confirms /bin/sh is genuinely absent (the shell wrap, not an absent check binary, is the cause)"
-assert_grep "$SH" '[ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]' "sh: XFAIL holds only when shell-WRAPPED AND the wrap's /bin/sh is proven missing (not keyed on never-healthy)"
-assert_grep "$SH" 'if [ "$dl_kind" = CMD ]; then' "sh: SELF-CLEARS on the PRESERVED CMD exec form (the true provider-fixed signal, not a health outcome)"
+assert_grep "$SH" '*"no such file"* | *"No such file"* | *"not found"*) dl_shellmissing=true' "sh: cause match requires a SPECIFIC not-found reason, not any message merely mentioning /bin/sh"
+assert_grep "$SH" '[ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]' "sh: XFAIL holds only when EXACT-shell-WRAPPED AND the wrap's /bin/sh is proven missing (not keyed on never-healthy)"
+assert_grep "$SH" 'if [ "$dl_preserved" = true ]; then' "sh: SELF-CLEARS on the EXACT preserved CMD exec form (the true provider-fixed signal, not a health outcome)"
 assert_grep "$SH" 'NOTE (distroless XFAIL now obsolete)' "sh: emits a loud NOTE when the exec form is preserved (provider fixed)"
+assert_grep "$SH" 'took an UNEXPECTED form' "sh: any OTHER translated array (mangled/wrong-binary/extra-token) HARD-FAILS as inconclusive (not silently XFAIL/NOTE)"
 
 echo "Test: the distroless SKIP is surfaced in the umbrella summary via a marker"
 assert_grep "$SH" 'SKIP \[DISTROLESS-XFAIL\]' "sh: the outer probe greps the SKIP sentinel to write the parent marker"
@@ -275,8 +283,12 @@ assert_grep "$PS1" 'SKIP [DISTROLESS-XFAIL]' "ps1: emits the same visible SKIP s
 assert_grep "$PS1" 'KNOWN-XFAIL (distroless)' "ps1: surfaces the distroless break as a KNOWN-XFAIL"
 assert_grep "$PS1" 'NOTE (distroless XFAIL now obsolete)' "ps1: mirrors the self-clearing NOTE branch (preserved CMD exec form)"
 assert_grep "$PS1" 'podman exec "$dl_cid" /bin/sh -c ":"' "ps1: mirrors the podman-exec /bin/sh cause-isolation probe"
-assert_grep "$PS1" '[ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]' "ps1: mirrors the wrap-detected + shell-missing XFAIL condition (not never-healthy)"
-assert_grep "$PS1" 'if [ "$dl_kind" = CMD ]; then' "ps1: mirrors the self-clear on the preserved CMD exec form"
+assert_grep "$PS1" 'dl_expected_wrap="[\"CMD-SHELL\",\"/bin/sh -c /pause\"]"' "ps1: mirrors the EXACT expected shell-wrap literal"
+assert_grep "$PS1" '[ "$dl_test" = "$dl_expected_exec" ] && dl_preserved=true' "ps1: mirrors the exact preserved-exec-form match"
+assert_grep "$PS1" '*"no such file"* | *"No such file"* | *"not found"*) dl_shellmissing=true' "ps1: mirrors the SPECIFIC not-found cause match (not any /bin/sh mention)"
+assert_grep "$PS1" '[ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]' "ps1: mirrors the exact-wrap + shell-missing XFAIL condition (not never-healthy)"
+assert_grep "$PS1" 'if [ "$dl_preserved" = true ]; then' "ps1: mirrors the self-clear on the EXACT preserved CMD exec form"
+assert_grep "$PS1" 'took an UNEXPECTED form' "ps1: mirrors the hard-fail on any other translated array (inconclusive)"
 assert_grep "$PS1" 'Set-Content -LiteralPath $env:POWBOX_SMOKE_SKIP_MARKER' "ps1: the outer probe writes the parent marker when the SKIP sentinel is seen"
 assert_grep "$UMBRELLA_PS1" '$env:POWBOX_SMOKE_SKIP_MARKER = $podmanMarker.FullName' "umbrella ps1: Stage 3 hands the podman probe a skip marker"
 assert_grep "$UMBRELLA_PS1" 'elseif ($podmanSkip) {' "umbrella ps1: Stage 3 records the distroless SKIP in the banner"

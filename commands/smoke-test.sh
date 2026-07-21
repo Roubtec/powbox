@@ -123,7 +123,8 @@ fi
 # CMD array (not CMD-SHELL), that the probe INSPECTS+classifies the wired translation
 # (so a CMD->CMD-SHELL rewrite is a detected KNOWN-XFAIL, not a silent pass), that it
 # drives the check and requires "healthy" while a never-succeeding negative control
-# must NOT reach healthy, that cleanup tears down the project + only the temp dir, and
+# must be driven to exactly terminal "unhealthy" (not merely "not healthy"), that cleanup
+# tears down the project + only the temp dir, and
 # that the Bash/PowerShell probes stay in parity — the load-bearing bits that a plain
 # edit could silently neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
 # not a baked artifact), so a host run suffices — but it needs `yq`. Prefer the

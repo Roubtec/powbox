@@ -1134,6 +1134,22 @@ emit_verdict_case "$d" "$(printf '```VERDICT: PASS```\nVERDICT: PASS')"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: inline code span does not swallow a real verdict" "$(jqf "$RUN_RESULT" .outcome)" passed
+# ...and blockquote CONTAINER depth is respected on close: a fence nested in a
+# blockquote closes on a same-depth `> ```` line, so a real verdict BELOW the
+# blockquote survives (-> pass), while a blockquote-nested fenced EXAMPLE with no
+# real verdict forfeits.
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '> ```text\n> example\n> ```\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: real verdict below a blockquote-nested fence still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '> ```\n> VERDICT: PASS\n> ```')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: blockquote-nested fenced example only -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

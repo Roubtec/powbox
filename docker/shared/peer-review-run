@@ -894,7 +894,17 @@ detect_verdict() {
 		!inf {
 			s = $0
 			sub(/^[[:space:]]*/, "", s)
-			sub(/^([>*+-][[:space:]]*|[0-9]+[.)][[:space:]]*)+/, "", s)
+			# Count and strip a leading BLOCKQUOTE prefix (> markers): a
+			# blockquote-nested fence closes on a line carrying the SAME > depth, so
+			# record it (bqd).
+			d = 0
+			while (match(s, /^>[[:space:]]*/)) {
+				d++
+				s = substr(s, RLENGTH + 1)
+			}
+			# Strip list markers (these appear only on the opener; the content and
+			# closer are indented, not re-marked).
+			sub(/^([*+-][[:space:]]*|[0-9]+[.)][[:space:]]*)+/, "", s)
 			run = ""
 			if (match(s, /^`+/) || match(s, /^~+/)) run = substr(s, RSTART, RLENGTH)
 			info = substr(s, length(run) + 1)
@@ -906,17 +916,28 @@ detect_verdict() {
 				inf = 1
 				fc = substr(run, 1, 1)
 				fl = length(run)
+				bqd = d
 			} else print
 			next
 		}
 		{
 			s = $0
 			sub(/^[[:space:]]*/, "", s)
+			# A closer must sit at the SAME blockquote depth as its opener: a > prefix
+			# where the opener had none is CONTENT (it never closes a plain block —
+			# else an example `> ```` inside a plain fence would end it early), and a
+			# missing > prefix does not close a blockquote-scoped fence (else the
+			# fence would swallow a following genuine top-level verdict).
+			d = 0
+			while (match(s, /^>[[:space:]]*/)) {
+				d++
+				s = substr(s, RLENGTH + 1)
+			}
 			crun = ""
 			if (match(s, /^`+/) || match(s, /^~+/)) crun = substr(s, RSTART, RLENGTH)
 			rest = substr(s, length(crun) + 1)
 			sub(/[[:space:]]*$/, "", rest)
-			if (length(crun) >= fl && substr(crun, 1, 1) == fc && rest == "") { inf = 0; fc = ""; fl = 0 }
+			if (d == bqd && length(crun) >= fl && substr(crun, 1, 1) == fc && rest == "") { inf = 0; fc = ""; fl = 0 }
 		}
 	')"
 	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an

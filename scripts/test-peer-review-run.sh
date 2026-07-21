@@ -759,7 +759,32 @@ if awk -v w="$probe_wall" 'BEGIN{exit !(w < 5)}'; then :; else
 	printf 'FAIL [10i: probe not bounded by --timeout]: run took %ss with --timeout 2\n' "$probe_wall" >&2
 fi
 
-# 10j: Claude peer auth precedence — login PRIMARY, ANTHROPIC_API_KEY FALLBACK,
+# 10i2: a SLOW-but-successful Codex `--help` probe is COUNTED in elapsedSeconds.
+# The probe runs inside the first attempt's build step; elapsedSeconds is the
+# contract's TOTAL wall time, so probe time the caller waited must be reflected.
+# Regression guard: the attempt clock once started AFTER build_cmd, so a slow
+# probe reported a near-zero elapsedSeconds while real wall time was seconds.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then sleep 0.6; echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 20)
+assert_eq "10i2: run passes after the slow probe" "$(jqf "$RUN_RESULT" .outcome)" passed
+elapsed_probe="$(jqf "$RUN_RESULT" .elapsedSeconds)"
+checks=$((checks + 1))
+if awk -v e="$elapsed_probe" 'BEGIN{exit !(e >= 0.5)}'; then :; else
+	fails=$((fails + 1))
+	printf 'FAIL [10i2: probe time excluded from elapsedSeconds]: got %ss, want >= 0.5 (the ~0.6s probe)\n' "$elapsed_probe" >&2
+fi
+
+# 10j: Claude peer auth precedence — login PRIMARY, env-credential FALLBACK
+# (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN),
 # driven by the runner (headless -p would otherwise always prefer an env key over
 # the login). The login signal is CLAUDE_CONFIG_DIR/.credentials.json (controlled
 # here for hermeticity). The shared fake records the credential env it received on
@@ -779,13 +804,24 @@ if [ "${MODE:-pass}" = login_fails ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 	echo "Error: usage limit reached. Please try again later." >&2
 	exit 1
 fi
+# MODE=oauth_fallback: the stored login is expired and the ONLY working env
+# credential is a CLAUDE_CODE_OAUTH_TOKEN setup token. Fail when the token is
+# ABSENT (login mode strips it) and succeed when it is PRESENT (key-mode
+# fallback keeps it) — exercises the setup-token fallback path.
+if [ "${MODE:-pass}" = oauth_fallback ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+	echo "Error: usage limit reached. Please try again later." >&2
+	exit 1
+fi
 jq -n '{type:"result",subtype:"success",is_error:false,result:"ok.\nVERDICT: PASS"}'
 EOF
 	chmod +x "$1/bin/claude"
 }
 
-# 10j-login: a working login EXISTS → the inherited key is cleared so the login
-# wins in ONE attempt (no fallback).
+# 10j-login: a working login EXISTS → ALL inherited env credentials (both
+# ANTHROPIC_* vars AND the CLAUDE_CODE_OAUTH_TOKEN setup token) are cleared so the
+# stored login wins in ONE attempt. Claude Code checks CLAUDE_CODE_OAUTH_TOKEN
+# AHEAD of the `.credentials.json` login, so a stale setup token left in place
+# would shadow a working login — it must be stripped in login mode too.
 d="$(new_case)"
 make_claude_env_fake "$d"
 mkdir -p "$d/claude-cfg"
@@ -795,7 +831,7 @@ export ARGV_LOG STDIN_LOG ENV_LOG
 export CLAUDE_CONFIG_DIR="$d/claude-cfg"
 export ANTHROPIC_API_KEY="stale-api-key-should-be-stripped"
 export ANTHROPIC_AUTH_TOKEN="stale-token-should-be-stripped"
-export CLAUDE_CODE_OAUTH_TOKEN="subscription-oauth-should-survive"
+export CLAUDE_CODE_OAUTH_TOKEN="stale-oauth-should-be-stripped"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
@@ -803,8 +839,9 @@ assert_eq "10j-login: claude peer passes on the login" "$(jqf "$RUN_RESULT" .out
 assert_eq "10j-login: one attempt (no fallback needed)" "$(jqf "$RUN_RESULT" .attempts)" 1
 assert_contains "10j-login: ANTHROPIC_API_KEY cleared when the login is used" "$(cat "$d/envlog")" "API_KEY=[<unset>]"
 assert_contains "10j-login: ANTHROPIC_AUTH_TOKEN cleared when the login is used" "$(cat "$d/envlog")" "AUTH_TOKEN=[<unset>]"
-# The subscription OAuth token IS the logged-in credential — it must survive.
-assert_contains "10j-login: subscription OAuth token preserved" "$(cat "$d/envlog")" "OAUTH=[subscription-oauth-should-survive]"
+# The setup token sits AHEAD of the stored login in Claude Code's credential
+# order, so a stale one would shadow the working login — it must be cleared too.
+assert_contains "10j-login: CLAUDE_CODE_OAUTH_TOKEN cleared when the login is used" "$(cat "$d/envlog")" "OAUTH=[<unset>]"
 unset ARGV_LOG STDIN_LOG ENV_LOG
 
 # 10j-nologin: NO stored login → the documented key fallback is used directly, so
@@ -845,7 +882,32 @@ assert_eq "10j-fallback: retried true" "$(jqf "$RUN_RESULT" .retried)" true
 # appended env log.
 assert_contains "10j-fallback: attempt 1 cleared the key (login mode)" "$(cat "$d/envlog")" "API_KEY=[<unset>]"
 assert_contains "10j-fallback: attempt 2 used the key (fallback mode)" "$(cat "$d/envlog")" "API_KEY=[fallback-key-authenticates]"
-assert_contains "10j-fallback: emitted the fallback note on stderr" "$RUN_ERR" "ANTHROPIC_API_KEY fallback"
+assert_contains "10j-fallback: emitted the fallback note on stderr" "$RUN_ERR" "env-credential fallback"
+unset ARGV_LOG STDIN_LOG ENV_LOG
+
+# 10j-fallback-oauth: a login EXISTS but is expired AND the only working env
+# credential is a CLAUDE_CODE_OAUTH_TOKEN setup token (no ANTHROPIC_* key).
+# Attempt 1 (login mode) strips the setup token so the expired stored login is
+# tried and fails; the runner then falls back to key mode, which keeps the token,
+# and it authenticates → passed in TWO attempts. Guards the login→fallback path
+# for a setup-token-only fallback, which an ANTHROPIC_*-only HAS_KEY check missed.
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG MODE=oauth_fallback
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export CLAUDE_CODE_OAUTH_TOKEN="setup-token-authenticates"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR MODE
+assert_eq "10j-fallback-oauth: setup-token fallback authenticates → passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "10j-fallback-oauth: two attempts (login then token)" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "10j-fallback-oauth: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+# Attempt 1 stripped the token (login mode); attempt 2 kept it (fallback mode).
+assert_contains "10j-fallback-oauth: attempt 1 stripped the setup token (login mode)" "$(cat "$d/envlog")" "OAUTH=[<unset>]"
+assert_contains "10j-fallback-oauth: attempt 2 used the setup token (fallback mode)" "$(cat "$d/envlog")" "OAUTH=[setup-token-authenticates]"
 unset ARGV_LOG STDIN_LOG ENV_LOG
 
 # 10j-nofallback: a login EXISTS but is expired/limited AND there is NO key →

@@ -303,20 +303,57 @@ capture_descendants() {
 # i.e. it was already gone) also suppresses the direct path — matching
 # pid_matches' fail-safe: never signal a PID we cannot positively re-identify.
 
+# group_has_runnable <pgid> — is any process in process group <pgid> in a
+# RUNNABLE state? A bare `kill -0 -<pgid>` answers only "is any member PRESENT",
+# and a ZOMBIE/dying member counts as present — a dead-but-uncollected leader the
+# inner `timeout` killed before the helper's wait, or a child collected only
+# later — so the group probe alone would make reap_tree spin its whole TERM/KILL
+# grace on a group holding nothing but a corpse no signal can remove. This
+# narrows the group probe to "is any member ALIVE": scan /proc for a process
+# whose process-group id (field 5 of /proc/PID/stat) equals <pgid> and whose
+# state is not Z/X/x. Same comm-safe parse as proc_ppid_start — after stripping
+# the "pid (comm) " prefix, state is field 1 and pgrp is field 3 of the
+# remainder. It runs only after the cheap `kill -0 -<pgid>` pre-check already
+# found the group non-empty, and short-circuits on the first runnable member, so
+# a live group still answers fast; a zombie-only group returns 1 so group_alive
+# falls through to the start-time-verified (and now zombie-filtered) sweep and
+# reap_tree returns at once instead of burning the grace.
+group_has_runnable() {
+	local want="$1" pidpath pid stat
+	for pidpath in /proc/[0-9]*; do
+		[ -e "$pidpath" ] || continue
+		pid="${pidpath#/proc/}"
+		stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || continue
+		stat="${stat##*) }"
+		# shellcheck disable=SC2086  # deliberate word-split of the stat fields
+		set -- $stat
+		[ "$#" -ge 3 ] || continue
+		[ "$3" = "$want" ] || continue
+		case "$1" in
+		Z | X | x) ;;
+		*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
-# alive? A live validated group answers immediately; in EVERY case the CAPTURED
-# descendant set (accumulated while the leader lived, refreshed with a live walk
-# only while the leader still matches its baseline — see capture_descendants) is
-# also swept: on the validated-PGID path that catches a descendant that has LEFT
-# the group (setsid), which the group probe alone would report as gone; on the
-# fallback it is the only check there is. A captured PID counts as alive ONLY
-# when it still names the same process (start-time match), so a recycled PID
-# standing in for an unrelated process is never mistaken for a live provider
-# descendant. The bare leader is covered from before the seed by the
-# implicit-member rule above.
+# alive? A validated group with a RUNNABLE member answers immediately (the group
+# probe is `kill -0 -<pgid>` for cheap presence, then group_has_runnable so a
+# group holding only a zombie/dying member does NOT count as alive — otherwise
+# reap_tree would spin its full grace on an unreapable corpse); in EVERY case the
+# CAPTURED descendant set (accumulated while the leader lived, refreshed with a
+# live walk only while the leader still matches its baseline — see
+# capture_descendants) is also swept: on the validated-PGID path that catches a
+# descendant that has LEFT the group (setsid), which the group probe alone would
+# report as gone; on the fallback it is the only check there is. A captured PID
+# counts as alive ONLY when it still names the same process (start-time match)
+# AND is in a runnable state, so neither a recycled PID standing in for an
+# unrelated process nor a zombie is mistaken for a live provider descendant. The
+# bare leader is covered from before the seed by the implicit-member rule above.
 group_alive() {
 	local pid="$1" pgid="$2" entry p st
-	if [ -n "$pgid" ] && kill -0 "-${pgid}" 2>/dev/null; then
+	if [ -n "$pgid" ] && kill -0 "-${pgid}" 2>/dev/null && group_has_runnable "$pgid"; then
 		return 0
 	fi
 	if ! captured_start "$pid" >/dev/null && st="$(proc_state "$pid")"; then
@@ -332,7 +369,22 @@ group_alive() {
 	for entry in $CAPTURED_DESC; do
 		p="${entry%%:*}"
 		st="${entry#*:}"
-		pid_matches "$p" "$st" && kill -0 "$p" 2>/dev/null && return 0
+		# A captured PID counts as alive ONLY when it still names the same process
+		# AND is in a runnable state. A zombie ("Z") or dying ("X"/"x") descendant
+		# still answers kill -0 and keeps its start time, but it is already dead for
+		# supervision — no signal can remove it, only its reaping ancestor's wait()
+		# — so treating it alive would make reap_tree spin its whole TERM/KILL grace
+		# on an unreapable process. This closes the SEEDED-leader gap the implicit-
+		# member filter above cannot reach: a seeded leader the inner `timeout`
+		# killed before the helper waited on it (the hung-probe path) is a zombie
+		# with a captured entry, so the direct probe is inert and only this sweep
+		# governs. An empty state (the PID vanished between checks) is not alive.
+		pid_matches "$p" "$st" || continue
+		kill -0 "$p" 2>/dev/null || continue
+		case "$(proc_state "$p")" in
+		'' | Z | X | x) ;;
+		*) return 0 ;;
+		esac
 	done
 	return 1
 }
@@ -765,17 +817,23 @@ build_cmd_claude() {
 		--disallowedTools Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch
 		--add-dir "$WORKTREE")
 	# Auth mode is chosen by the orchestrator (see "Claude peer auth precedence"):
-	# in `login` mode the inherited ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are
-	# cleared so the logged-in subscription session is used (headless `-p` would
-	# otherwise always prefer an env key over the login, letting a stray/stale key
-	# shadow it — turning the peer `unavailable` or billing to the pricier API
-	# account); in `key` mode they are left so the documented key fallback
+	# in `login` mode ALL inherited env credentials — ANTHROPIC_API_KEY,
+	# ANTHROPIC_AUTH_TOKEN, AND CLAUDE_CODE_OAUTH_TOKEN — are cleared so the
+	# logged-in subscription session (`.credentials.json`) is used. Claude Code's
+	# credential order checks every one of these env vars AHEAD of the stored
+	# login (ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_API_KEY, then apiKeyHelper, then
+	# CLAUDE_CODE_OAUTH_TOKEN, then the /login credentials) with NO fall-through
+	# within a single invocation, so a stray/stale value in ANY of them would
+	# shadow a working login — turning the peer `unavailable`, or billing to the
+	# pricier API account. CLAUDE_CODE_OAUTH_TOKEN is a SETUP-TOKEN env credential,
+	# not the on-disk login, so it must be cleared here too: clearing only the two
+	# ANTHROPIC_* vars would let a stale setup token still shadow the login. In
+	# `key` mode all three are left so the documented env-credential fallback
 	# authenticates the peer. The clear rides as an `env -u` prefix — it execs in
 	# place, so no extra process and the supervised leader PID is still the provider.
-	# CLAUDE_CODE_OAUTH_TOKEN and non-credential settings (e.g. ANTHROPIC_BASE_URL)
-	# are never touched.
+	# Non-credential settings (e.g. ANTHROPIC_BASE_URL) are never touched.
 	if [ "${CLAUDE_AUTH_MODE:-login}" = login ]; then
-		CMD=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "${CMD[@]}")
+		CMD=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN "${CMD[@]}")
 	fi
 	LIVE=0
 }
@@ -1097,6 +1155,14 @@ run_attempt() {
 		return 0
 	fi
 
+	# Start the attempt clock BEFORE build_cmd. For Codex, build_cmd_codex runs the
+	# bounded `codex exec --help` capability probe (once per run, on the first
+	# attempt) — real wall time the caller waited. elapsedSeconds is the contract's
+	# TOTAL wall time across all attempts, so the probe must be COUNTED; timing from
+	# after build_cmd would silently drop it (a slow-but-successful probe made the
+	# reported elapsedSeconds far shorter than the real wall time).
+	local start end child pgid rc timed_out=0 leader_start
+	start=$(date +%s.%N)
 	case "$PROVIDER" in
 	claude) build_cmd_claude ;;
 	codex) build_cmd_codex "$dir" ;;
@@ -1113,8 +1179,6 @@ run_attempt() {
 	# group) so the whole tree can be reaped by group id. The subshell exec's into
 	# the provider and is the group leader.
 	FWD_LINES=0
-	local start end child pgid rc timed_out=0 leader_start
-	start=$(date +%s.%N)
 	set -m
 	(cd "$WORKTREE" && exec "${CMD[@]}" <"$dir/prompt.txt" >"$out" 2>"$err") &
 	child=$!
@@ -1335,17 +1399,21 @@ write_meta() {
 		>"$dir/meta.json" 2>/dev/null || true
 }
 
-# --- Claude peer auth precedence: login PRIMARY, API key FALLBACK -------------
+# --- Claude peer auth precedence: login PRIMARY, env credential FALLBACK ------
 # powbox precedence (README "Cross-Agent Delegation"): a logged-in subscription
-# session is PRIMARY (cheaper, the intended path); an ANTHROPIC_API_KEY /
-# ANTHROPIC_AUTH_TOKEN is the FALLBACK for when the login is ABSENT or cannot
-# authenticate (expired, or hit a session limit). Headless `claude -p` would
-# instead always prefer an env key, so the orchestrator drives the precedence:
-# attempt the login first (key vars cleared — see build_cmd_claude), and if that
-# attempt comes back `unavailable` (an auth/usage failure that yields no verdict)
-# while a key IS available, retry ONCE in key mode. EITHER credential may be
-# expired; if neither authenticates, the peer stays `unavailable`. Codex is
-# unaffected (CODEX_API_KEY is a first-class auth path, not a login override).
+# session is PRIMARY (cheaper, the intended path); an env credential —
+# ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or a CLAUDE_CODE_OAUTH_TOKEN setup
+# token — is the FALLBACK for when the login is ABSENT or cannot authenticate
+# (expired, or hit a session limit). Headless `claude -p` would instead always
+# prefer an env credential (Claude Code checks all three AHEAD of the stored
+# `.credentials.json` login, with no fall-through in one invocation), so the
+# orchestrator drives the precedence: attempt the login first (ALL env
+# credentials cleared — see build_cmd_claude), and if that attempt comes back
+# `unavailable` (an auth/usage failure that yields no verdict) while an env
+# credential IS available, retry ONCE in key mode (env credentials left intact).
+# EITHER credential may be expired; if neither authenticates, the peer stays
+# `unavailable`. Codex is unaffected (CODEX_API_KEY is a first-class auth path,
+# not a login override).
 CLAUDE_HAS_LOGIN=0
 if [ "$PROVIDER" = claude ]; then
 	claude_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -1353,8 +1421,14 @@ if [ "$PROVIDER" = claude ]; then
 	# OAuth login; an API-key-only setup has none).
 	[ -s "$claude_cfg/.credentials.json" ] && CLAUDE_HAS_LOGIN=1
 fi
+# The env-credential fallback: any of these three env vars can authenticate the
+# peer, and login mode clears ALL of them (see build_cmd_claude), so ALL three
+# count as a usable fallback that justifies the login→key retry. Omitting the
+# setup token here would strand an expired stored login beside a WORKING
+# CLAUDE_CODE_OAUTH_TOKEN as `unavailable`: login mode strips the token, the
+# stored login fails, and no fallback would fire.
 CLAUDE_HAS_KEY=0
-{ [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && CLAUDE_HAS_KEY=1
+{ [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; } && CLAUDE_HAS_KEY=1
 # Start in login mode when a login exists; otherwise the key is the only auth.
 if [ "$CLAUDE_HAS_LOGIN" = 1 ]; then
 	CLAUDE_AUTH_MODE=login
@@ -1377,7 +1451,7 @@ TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3
 
 if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
 	# The login attempt could not AUTHENTICATE the peer (expired session, or a
-	# session limit) — fall back to the documented ANTHROPIC_API_KEY ONCE, in a
+	# session limit) — fall back to the documented env-credential path ONCE, in a
 	# brand-new attempt dir. Gated on ATT_BINARY_MISSING=0: a missing `claude`
 	# binary is also `unavailable`, but switching auth mode cannot fix it, so it
 	# must not trigger a pointless second attempt or a misleading retry note. This
@@ -1385,17 +1459,18 @@ if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOM
 	# not transient), and it is mutually exclusive with it — total attempts stay
 	# capped at 2. The key-mode result then stands as-is; if it too is
 	# `unavailable`, neither credential authenticated and we give up.
-	printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the ANTHROPIC_API_KEY fallback"}\n' >&2
+	printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the env-credential fallback (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"}\n' >&2
 	CLAUDE_AUTH_MODE=key
 	run_attempt 2
 	ATTEMPTS=2
 	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
-		# The key-fallback attempt ITSELF failed transiently. The 2-attempt cap
-		# means no further retry, so correct the per-attempt "…; retrying" reason
-		# (run_attempt leaves it optimistic) to reflect that this was the last try.
-		ATT_REASON="provider failed transiently on the API-key fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		# The env-credential fallback attempt ITSELF failed transiently. The
+		# 2-attempt cap means no further retry, so correct the per-attempt
+		# "…; retrying" reason (run_attempt leaves it optimistic) to reflect that
+		# this was the last try.
+		ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
 	fi
 elif [ "$ATT_TRANSIENT" = 1 ]; then
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).

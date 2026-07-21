@@ -82,15 +82,48 @@ CURRENT_PGID=""
 # rather than reporting a clean result as if the tree were fully reaped.
 REAP_WARN=0
 
-# Captured descendant PID set for the unvalidated-PGID fallback (space-padded for
-# whole-word membership tests). It is accumulated WHILE THE LEADER IS STILL ALIVE
-# — a live tree-walk rooted at a leader that has ALREADY exited finds nothing,
-# because its children have by then reparented to init. Capturing eagerly (during
-# the poll loop and before we wait on / reap the leader) means we still hold a
-# stray grandchild's PID after the leader dies and can terminate it. Only ever
-# populated on the fallback path; the validated-PGID path reaps by group id and
-# needs no PID snapshot.
+# Captured descendant set for the unvalidated-PGID fallback. Each entry is
+# "PID:STARTTIME" (STARTTIME = field 22 of /proc/PID/stat, the process's
+# boot-relative start jiffies), space-padded for whole-word membership tests.
+# Recording the start time next to the PID lets the later signal step DETECT PID
+# reuse: if the kernel recycled a captured PID for an unrelated process, that
+# process's start time differs, so we SKIP it rather than TERM/KILL a stranger
+# (addresses the bare-PID reuse hazard on this fallback). The set is accumulated
+# WHILE THE LEADER IS STILL ALIVE — a live tree-walk rooted at a leader that has
+# ALREADY exited finds nothing, because its children have by then reparented to
+# init. Capturing eagerly (during the poll loop and before we wait on / reap the
+# leader) means we still hold a stray grandchild's PID after the leader dies and
+# can terminate it. Only ever populated on the fallback path; the validated-PGID
+# path reaps by group id and needs no PID snapshot.
 CAPTURED_DESC=" "
+
+# proc_starttime <pid> — the process start time (field 22 of /proc/<pid>/stat), a
+# stable per-process token that changes when the kernel reuses the PID. Prints
+# nothing and returns non-zero when the process is gone or /proc is unreadable.
+# Robust to a comm field containing spaces or ')': everything up to the LAST ')'
+# is the "pid (comm)" prefix, so the fields after it begin at `state`, which makes
+# start time the 20th of those (overall field 22).
+proc_starttime() {
+	local stat
+	stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+	stat="${stat##*) }"
+	# shellcheck disable=SC2086  # deliberate word-split of the stat fields
+	set -- $stat
+	[ "$#" -ge 20 ] || return 1
+	printf '%s' "${20}"
+}
+
+# pid_matches <pid> <starttime> — does <pid> STILL name the same process we
+# captured? True when the recorded start time is empty (no baseline was readable
+# at capture time — fall back to the prior best-effort behavior and do not block
+# the signal) OR the process's current start time equals the recorded one. False
+# when the PID is gone or has been recycled by a different process.
+pid_matches() {
+	local pid="$1" want="$2" cur
+	[ -n "$want" ] || return 0
+	cur="$(proc_starttime "$pid")" || return 1
+	[ "$cur" = "$want" ]
+}
 
 # descendant_pids <root_pid> — print <root_pid> and every transitive child pid,
 # walked live at call time from the process table. Used ONLY on the unvalidated-
@@ -107,15 +140,19 @@ descendant_pids() {
 }
 
 # capture_descendants <leader_pid> — merge the leader's CURRENT descendant subtree
-# (leader included) into CAPTURED_DESC. Call repeatedly while the leader is alive
-# so a grandchild is recorded BEFORE it can reparent away on the leader's exit;
-# once captured a PID stays in the set even after the leader dies. Fallback-only.
+# (leader included), each PID tagged with its start time, into CAPTURED_DESC. Call
+# repeatedly while the leader is alive so a grandchild is recorded BEFORE it can
+# reparent away on the leader's exit; once captured a PID stays in the set even
+# after the leader dies. Fallback-only.
 capture_descendants() {
-	local root="$1" p
+	local root="$1" p st
 	for p in $(descendant_pids "$root"); do
 		case "$CAPTURED_DESC" in
-		*" $p "*) ;;
-		*) CAPTURED_DESC="${CAPTURED_DESC}${p} " ;;
+		*" $p:"*) ;;
+		*)
+			st="$(proc_starttime "$p" || true)"
+			CAPTURED_DESC="${CAPTURED_DESC}${p}:${st} "
+			;;
 		esac
 	done
 }
@@ -123,15 +160,20 @@ capture_descendants() {
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
 # alive? Uses the validated group when we have one, else sweeps the CAPTURED
 # descendant set (accumulated while the leader lived) refreshed with a live walk,
-# so a grandchild that reparented after the leader exited is still checked.
+# so a grandchild that reparented after the leader exited is still checked. A
+# captured PID counts as alive ONLY when it still names the same process
+# (start-time match), so a recycled PID standing in for an unrelated process is
+# never mistaken for a live provider descendant.
 group_alive() {
-	local pid="$1" pgid="$2" p
+	local pid="$1" pgid="$2" entry p st
 	if [ -n "$pgid" ]; then
 		kill -0 "-${pgid}" 2>/dev/null
 	else
 		capture_descendants "$pid"
-		for p in $CAPTURED_DESC; do
-			kill -0 "$p" 2>/dev/null && return 0
+		for entry in $CAPTURED_DESC; do
+			p="${entry%%:*}"
+			st="${entry#*:}"
+			pid_matches "$p" "$st" && kill -0 "$p" 2>/dev/null && return 0
 		done
 		return 1
 	fi
@@ -139,18 +181,23 @@ group_alive() {
 
 # signal_tree <SIG> <leader_pid> <pgid|""> — deliver a signal to the whole
 # validated group, or (fallback) to every CAPTURED descendant PID (leader
-# included). NEVER a negative, unvalidated PID (which could hit the helper's own
-# group); never pkill -f. Signalling the captured set — not a fresh walk rooted at
-# the possibly-dead leader — keeps the fallback a real tree reap: a grandchild
-# recorded while the leader was alive is still terminated after the leader exits
-# and the grandchild reparents to init.
+# included) that STILL names the same process. NEVER a negative, unvalidated PID
+# (which could hit the helper's own group); never pkill -f. The start-time check
+# before each kill means a captured PID the kernel has since recycled for an
+# unrelated process is skipped, not signalled. Signalling the captured set — not a
+# fresh walk rooted at the possibly-dead leader — keeps the fallback a real tree
+# reap: a grandchild recorded while the leader was alive is still terminated after
+# the leader exits and the grandchild reparents to init.
 signal_tree() {
-	local sig="$1" pid="$2" pgid="$3" p
+	local sig="$1" pid="$2" pgid="$3" entry p st
 	if [ -n "$pgid" ]; then
 		kill "-${sig}" "-${pgid}" 2>/dev/null || true
 	else
 		capture_descendants "$pid"
-		for p in $CAPTURED_DESC; do
+		for entry in $CAPTURED_DESC; do
+			p="${entry%%:*}"
+			st="${entry#*:}"
+			pid_matches "$p" "$st" || continue
 			kill "-${sig}" "$p" 2>/dev/null || true
 		done
 	fi
@@ -496,11 +543,31 @@ detect_verdict() {
 	# precedence over PASS: a body that both quotes an example pass token and
 	# renders a real issues verdict must resolve to issues, never false-pass.
 	local anchor='^[[:space:]>*#`-]*VERDICT[[:space:]]*[:=][[:space:]]*'
-	if printf '%s\n' "$text" | grep -Eiq "${anchor}(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)"; then
+	local issue='(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)'
+	local pass='(passed|pass|approved|approve|lgtm|no[[:space:]_-]*issues?)'
+	# A trailing token boundary: the recognized PASS token must END at a non-word
+	# char or end-of-line, so a longer word that merely STARTS with it is NOT a
+	# pass — `VERDICT: PASSING` must NOT match `pass`, and only a bare `pass`/
+	# `passed`/… is a real pass verdict.
+	local rb='([^[:alnum:]_]|$)'
+	# (a) An issues token at the verdict value → issues. Left unbounded on purpose:
+	# over-matching the ISSUES side is the SAFE direction (it can never cause a
+	# false pass), so we keep it broad.
+	if printf '%s\n' "$text" | grep -Eiq "${anchor}${issue}"; then
 		echo issues
 		return
 	fi
-	if printf '%s\n' "$text" | grep -Eiq "${anchor}(pass|passed|approve|approved|lgtm|no[[:space:]_-]*issues?)"; then
+	# (b) An ENUMERATION of both options on ONE verdict line — the literal contract
+	# template `VERDICT: PASS | ISSUES` (or `PASS / ISSUES`) — is NOT a real verdict
+	# and must never false-pass: a pass token joined by a `|`/`/` separator to an
+	# issues token resolves to issues (ISSUES present here), never pass.
+	if printf '%s\n' "$text" | grep -Eiq "${anchor}${pass}[[:space:]]*[|/][[:space:]]*${issue}"; then
+		echo issues
+		return
+	fi
+	# (c) A bare pass token as the verdict value, bounded so `PASSING` and any other
+	# longer word that only begins with a pass token cannot masquerade as a pass.
+	if printf '%s\n' "$text" | grep -Eiq "${anchor}${pass}${rb}"; then
 		echo pass
 		return
 	fi
@@ -587,6 +654,21 @@ run_attempt() {
 	# while it is still alive, so a stray grandchild is recorded before the leader
 	# exits and reparents it away — the reap below then still reaches it (the
 	# validated-PGID path needs none of this; the group signal covers the tree).
+	# reap_tree itself re-walks (group_alive/signal_tree call capture_descendants),
+	# so any descendant still reachable from a live walk at reap time is captured
+	# too — not only those seen during the poll.
+	#
+	# ACCEPTED RESIDUAL (unvalidated-PGID fallback only): a descendant the leader
+	# forks AND orphans within the final <100ms poll interval, right before the
+	# leader exits on its own, can reparent to init uncaptured — a PID walk rooted
+	# at the now-dead leader can no longer see it. This mirrors the same-UID
+	# traversal residual: it is bounded because (1) `set -m` normally isolates the
+	# child into its OWN group, so the validated-PGID group-signal path — which
+	# reaches reparented members with no PID snapshot — is the norm and has no such
+	# gap, and (2) even when the fallback is reached, the start-time-verified
+	# signalling above guarantees we never mis-signal a recycled PID. A fully
+	# race-free fallback would need the kernel's own process-tree reaping (a private
+	# PID namespace), which is out of scope for this helper.
 	while kill -0 "$child" 2>/dev/null; do
 		forward_tick "$out"
 		[ -z "$pgid" ] && capture_descendants "$child"

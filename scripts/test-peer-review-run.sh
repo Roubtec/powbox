@@ -703,7 +703,7 @@ assert_not_contains "11c: sibling session path not on B's stdin" "$(cat "$d/stdi
 # --cd is the worktree under review, NOT the artifact root/session (artifacts stay
 # out of the reviewed tree, and the provider is rooted at the tree, not at them).
 cd_val="$(awk '/^--cd$/{getline; print; exit}' "$d/argv")"
-assert_contains "11c: --cd is the worktree under review" "$cd_val" "/wt"
+assert_eq "11c: --cd is EXACTLY the worktree under review" "$cd_val" "$(realpath "$d/wt")"
 assert_not_contains "11c: --cd is NOT the artifact root/session" "$cd_val" "/artifacts"
 # --output-last-message points strictly inside B's OWN attempt dir — the ONLY
 # artifact path handed to the provider — never a sibling/parent.
@@ -756,6 +756,47 @@ chmod +x "$d/bin/claude"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11d: both verdict lines → ISSUES precedence" "$(jqf "$RUN_RESULT" .outcome)" issues
+
+# 11d-boundary: the PASS token needs a TRAILING boundary so a longer word cannot
+# false-pass, and the literal contract enumeration line must never pass.
+emit_verdict_case() {
+	# emit_verdict_case <case-dir> <body> — a claude fake whose final message is the
+	# given body verbatim.
+	cat >"$1/bin/claude" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+jq -n --arg r $(printf '%q' "$2") '{type:"result",is_error:false,result:\$r}'
+EOF
+	chmod +x "$1/bin/claude"
+}
+
+# (i) VERDICT: PASSING must NOT be read as a pass — no trailing boundary would let
+# `pass` match the prefix of `PASSING`.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASSING"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11d: VERDICT: PASSING is never a pass" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: VERDICT: PASSING → verdict none (forfeited)" "$(jqf "$RUN_RESULT" .verdict)" none
+
+# (ii) The literal contract template line `VERDICT: PASS | ISSUES` enumerates both
+# options — it is not a real verdict and must resolve to issues (ISSUES present),
+# never a false pass.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS | ISSUES"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11d: contract line 'VERDICT: PASS | ISSUES' never passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: 'VERDICT: PASS | ISSUES' → issues (ISSUES present)" "$(jqf "$RUN_RESULT" .verdict)" issues
+
+# (iii) A bare `VERDICT: PASS` alone still passes — the boundary fix must not
+# regress the ordinary clean verdict.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: bare 'VERDICT: PASS' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: bare 'VERDICT: PASS' → verdict pass" "$(jqf "$RUN_RESULT" .verdict)" pass
 
 # 11e: read-only / no-persistence flag set is locked in for both providers. (The
 # real write/read enforcement is the provider's own sandbox and is verifiable

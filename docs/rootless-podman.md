@@ -530,7 +530,7 @@ one *worse* than described fails the smoke.
    run.
 
 The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
-throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project (all
+throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project (up to
 three services) and removes only that directory on success or failure. Its scope is
 Compose exec-array translation and health-state propagation on a shell-bearing image
 (Alpine) plus the shell-less distroless reproduction above — not a general Compose

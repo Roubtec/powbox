@@ -135,7 +135,7 @@ else {
   }
 }
 
-# Stage 0e - peer-review-run unit test. The hermetic Bash test (fake `claude`/`codex`
+# Stage 0f - peer-review-run unit test. The hermetic Bash test (fake `claude`/`codex`
 # binaries on a per-case PATH - no real providers, image, or network) has no host bash
 # on Windows, so run it INSIDE the agent image against the BAKED
 # /usr/local/bin/peer-review-run (via PEER_REVIEW_RUN) with the repo mounted read-only.
@@ -144,8 +144,8 @@ else {
 # progress forwarding, the six normalized outcomes, timeout with process-tree reaping,
 # and retry-once. Self-skips (recorded in $skipped) when the image is absent.
 if (-not $imagePresent) {
-  Write-Warning "Skipping peer-review-run unit test (Stage 0e) - image '$Image' not found (no native bash on Windows to run it hermetically)."
-  $skipped.Add("Stage 0e: peer-review-run unit test (image absent)")
+  Write-Warning "Skipping peer-review-run unit test (Stage 0f) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0f: peer-review-run unit test (image absent)")
 }
 else {
   Write-Host "Running peer-review-run unit test (baked helper in $Image) ..."

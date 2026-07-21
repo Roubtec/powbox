@@ -144,7 +144,7 @@ else
 	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
 fi
 
-# Stage 0e — peer-review-run unit test. Hermetic (fake `claude`/`codex` binaries on
+# Stage 0f — peer-review-run unit test. Hermetic (fake `claude`/`codex` binaries on
 # a per-case PATH — no real providers, image, or network), so it runs up front like
 # the others. It guards the bidirectional peer-review runner's contract: the versioned
 # result schema, both provider directions, read-only permission flags, literal
@@ -157,17 +157,17 @@ fi
 # also runs against the BAKED /usr/local/bin/peer-review-run so a stale installed
 # helper is caught here rather than waved through by Stage 1's `command -v`
 # presence probe.
-stage0e_host_ran=0
+stage0f_host_ran=0
 if [ "$(uname -s)" = Linux ] && command -v jq >/dev/null 2>&1; then
 	echo "Running peer-review-run unit test (host /repo source) ..."
 	"${ROOT_DIR}/scripts/test-peer-review-run.sh"
-	stage0e_host_ran=1
+	stage0f_host_ran=1
 elif [ "$(uname -s)" != Linux ]; then
-	echo "WARNING: skipping peer-review-run host unit test (Stage 0e) — non-Linux host (the test needs a Linux userland: /proc, pgrep -P, GNU realpath -m, date +%N); the in-image run covers it when the image is present."
-	skipped+=("Stage 0e: peer-review-run host unit test (non-Linux host)")
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — non-Linux host (the test needs a Linux userland: /proc, pgrep -P, GNU realpath -m, date +%N); the in-image run covers it when the image is present."
+	skipped+=("Stage 0f: peer-review-run host unit test (non-Linux host)")
 else
-	echo "WARNING: skipping peer-review-run host unit test (Stage 0e) — host 'jq' unavailable."
-	skipped+=("Stage 0e: peer-review-run host unit test (host jq unavailable)")
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — host 'jq' unavailable."
+	skipped+=("Stage 0f: peer-review-run host unit test (host jq unavailable)")
 fi
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running peer-review-run unit test (baked helper in $IMAGE) ..."
@@ -181,12 +181,12 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	docker run --rm --init -v "${ROOT_DIR}:/repo:ro" \
 		-e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-peer-review-run.sh
-elif [ "$stage0e_host_ran" = 1 ]; then
-	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0e) — image '$IMAGE' absent; the host run already covered the /repo source."
-	skipped+=("Stage 0e: peer-review-run baked-helper test (image absent)")
+elif [ "$stage0f_host_ran" = 1 ]; then
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent; the host run already covered the /repo source."
+	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent)")
 else
-	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0e) — image '$IMAGE' absent, and the host run was skipped too (see above), so the peer-review-run test did not run at all."
-	skipped+=("Stage 0e: peer-review-run baked-helper test (image absent; host run also skipped — no coverage)")
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent, and the host run was skipped too (see above), so the peer-review-run test did not run at all."
+	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent; host run also skipped — no coverage)")
 fi
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and

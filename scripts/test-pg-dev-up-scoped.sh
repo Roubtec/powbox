@@ -412,6 +412,69 @@ try "instance still startable on its restored port after rollback" test "${url_r
 try "instance reachable after rollback" test "$(psql "$url_rb" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_E" -- --worktree down >/dev/null 2>&1 || true
 
+echo "== finding #2: a post-start marker-write failure must NOT orphan a live server =="
+# The rollback trap is armed BEFORE the server starts and cleared only AFTER the
+# datadir/port markers are written. If a marker write fails in the window while the
+# postmaster is already LIVE (a start timeout that still leaves it running, or the
+# atomic_write itself failing), rollback must STOP that newly-started server — never
+# restore/remove markers and leave a live cluster that scoped status/down can no
+# longer resolve. Force exactly that failure: pre-create the scoped DATADIR marker
+# as an unwritable (0000) DIRECTORY, so pg-dev-up's atomic_write (mktemp + mv) fails
+# when it records the datadir AFTER pg_ctl start has brought the server up. Use
+# --profile for a deterministic instance key we can pre-seed.
+orphan_prof="orphan-marker-lane"
+orphan_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$orphan_prof" | sha256sum | cut -c1-16)"
+orphan_inst="$SCOPED_ROOT/$orphan_key"
+orphan_pgd="$orphan_inst/pgdata"
+mkdir -p "$orphan_inst/datadir"
+chmod 000 "$orphan_inst/datadir"
+STARTED_DATADIRS+=("$orphan_pgd")
+try_not "up fails when the post-start marker write fails" pg "$NONGIT" -- --profile "$orphan_prof" up
+if [ -f "$orphan_pgd/postmaster.pid" ] && "$BINDIR/pg_ctl" -D "$orphan_pgd" status >/dev/null 2>&1; then
+	ko "rollback ORPHANED a live server at $orphan_pgd"
+	"$BINDIR/pg_ctl" -D "$orphan_pgd" -m immediate -w stop >/dev/null 2>&1 || true
+else
+	ok "rollback stopped the newly-started server (no live orphan)"
+fi
+# Restore the marker dir's perms so the EXIT cleanup can rm -rf the sandbox.
+chmod 700 "$orphan_inst/datadir" 2>/dev/null || true
+
+echo "== finding #1: rollback must not double-reserve a prior port another scope now holds =="
+# When a scoped `up` uses an override/allocated port DIFFERENT from the one this
+# scope recorded, it FREES the prior port. If that `up` then fails and ANOTHER scope
+# has meanwhile claimed the freed port, rollback must NOT blindly recreate this
+# scope's reservation for it — a duplicate cross-scope reservation could make a later
+# scoped url resolve to the OTHER scope's server. It must leave the other reservation
+# intact and drop its own marker, loudly.
+claim_prof="port-claim-lane"
+claim_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$claim_prof" | sha256sum | cut -c1-16)"
+claim_inst="$SCOPED_ROOT/$claim_key"
+# Bring the scope up (auto port), record its port, then down (reservation kept).
+pg "$NONGIT" POSTGRES_DB=app_cl -- --profile "$claim_prof" up >/dev/null
+STARTED_DATADIRS+=("$claim_inst/pgdata")
+claim_prior="$(cat "$claim_inst/port")"
+pg "$NONGIT" -- --profile "$claim_prof" down >/dev/null 2>&1 || true
+# Simulate ANOTHER scope having grabbed the prior port (as would happen if it were
+# freed mid-`up` by an override): plant a foreign scope reservation holding it.
+# port_reserved() scans every */port under the shared root, so this stands in for
+# the concurrent claimant deterministically.
+foreign_inst="$SCOPED_ROOT/foreign-claimant"
+mkdir -p "$foreign_inst"
+chmod 700 "$foreign_inst"
+printf '%s\n' "$claim_prior" >"$foreign_inst/port"
+# Drive a same-scope `up` with an explicit PGPORT pinned to a BUSY foreign listener:
+# it overwrites this scope's PORT_FILE (freeing the prior port) then fails at "port
+# in use", exercising rollback while the prior port is foreign-held.
+claim_busy="$(pick_free_port)"
+try "foreign listener occupies the override port ($claim_busy)" occupy_port "$claim_busy"
+try "override port differs from the prior recorded port" test "$claim_busy" != "$claim_prior"
+try_not "same-scope up with a busy override PGPORT fails" pg "$NONGIT" PGPORT="$claim_busy" -- --profile "$claim_prof" up
+try "the other scope's reservation for the prior port is left intact" test "$(cat "$foreign_inst/port")" = "$claim_prior"
+try_not "rollback did NOT recreate this scope's reservation for the foreign-held port" test -e "$claim_inst/port"
+# Housekeeping: drop the planted foreign reservation so it cannot fence a port off
+# from the remaining tests' auto-allocation.
+rm -rf "$foreign_inst"
+
 echo "== scoped dirs are forced owner-only; a pre-existing wide-open root is locked down =="
 # Finding #3 (positive): a pre-existing, world-accessible scoped root must be
 # corrected to 0700 before PostgreSQL serves its data/socket from it, and `up`

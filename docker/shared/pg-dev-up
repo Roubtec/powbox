@@ -108,6 +108,15 @@ PRIOR_PORT_CONTENT=""
 PRIOR_DATADIR_EXISTED=""
 PRIOR_DATADIR_CONTENT=""
 
+# Set to "yes" the moment THIS `up` is about to run `pg_ctl start` (i.e. it may
+# have brought a NEW postmaster live). The rollback trap reads it so a post-start
+# failure — a start timeout that still leaves the postmaster running, or a marker
+# write that fails after the server went live — stops that newly-started server
+# BEFORE restoring the prior markers, instead of orphaning a live cluster that
+# scoped status/down can no longer resolve. It stays empty when `up` only found an
+# already-running cluster (it started nothing, so there is nothing to stop).
+STARTED_NEW_SERVER=""
+
 # These get their final values in configure_paths(), after the command and any
 # scope flag are known: scoped mode replaces the data dir / socket dir / port,
 # unscoped mode keeps the historical /tmp defaults.
@@ -391,6 +400,21 @@ port_reserved() {
 	return 1
 }
 
+# 0 if the prior recorded port ($PRIOR_PORT_CONTENT) is currently held by THIS
+# scope's OWN prior cluster (its recorded datadir has a running postmaster
+# actually listening on that port) — as opposed to a FOREIGN scope or an
+# unrelated process. rollback_scoped_markers uses this so it never mistakes our
+# own already-running server for a cross-scope claimant and wrongly drops the
+# marker that points at it (which would itself orphan a live server).
+prior_port_owned_by_our_scope() {
+	local p
+	[ -n "$PRIOR_DATADIR_CONTENT" ] || return 1
+	[ -f "$PRIOR_DATADIR_CONTENT/postmaster.pid" ] || return 1
+	"$BINDIR/pg_ctl" -D "$PRIOR_DATADIR_CONTENT" status >/dev/null 2>&1 || return 1
+	p="$(sed -n '4p' "$PRIOR_DATADIR_CONTENT/postmaster.pid" | tr -cd '0-9')"
+	[ "$p" = "$PRIOR_PORT_CONTENT" ]
+}
+
 # Pick (or reuse) this scoped instance's port, serialized against other scoped
 # instances by a lock on the shared root so two concurrent `up`s never race onto
 # the same port. Sets PGPORT and records it in PORT_FILE.
@@ -569,6 +593,14 @@ print_url() {
 # markers intact instead of pointing a later down/status at a cluster that never
 # started.
 #
+# FIRST, if THIS `up` may have brought a NEW postmaster live (STARTED_NEW_SERVER),
+# STOP it before touching any marker. Otherwise a post-start failure — a start
+# that timed out with the postmaster still coming up, or a marker write that
+# failed after the server went live — would restore the prior markers and leave a
+# LIVE server that scoped status/down can no longer resolve (orphaned). The prior
+# markers cannot describe this new server (it is the very thing we are rolling
+# back), so the only safe rollback of a started server is to stop it.
+#
 # The PORT marker is a cross-scope reservation (other scopes' allocate_port scan
 # every */port under the shared root), so its restore MUST happen under the shared
 # `.portlock`: that keeps the reservation set's mutation atomic w.r.t. a concurrent
@@ -577,6 +609,18 @@ print_url() {
 # cross-scope semantics, so it is restored without the lock.
 rollback_scoped_markers() {
 	[ -n "$SCOPED" ] || return 0
+	# Stop a server THIS invocation started, so rollback can never leave a live
+	# postmaster orphaned from scoped status/down. Guard on an actually-running
+	# postmaster at $PGDATA: a start that failed with no server left running (e.g.
+	# port truly unavailable) leaves nothing to stop, and initdb-only failures never
+	# set STARTED_NEW_SERVER at all. A stop failure is loud — a still-running,
+	# now-unreferenced server is the exact hazard we must not hide.
+	if [ "$STARTED_NEW_SERVER" = yes ] && [ -f "$PGDATA/postmaster.pid" ] &&
+		"$BINDIR/pg_ctl" -D "$PGDATA" status >/dev/null 2>&1; then
+		if ! "$BINDIR/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null 2>&1; then
+			log "CRITICAL: this failed 'up' left a postmaster running at $PGDATA and could not stop it; it is now UNREFERENCED by scoped markers. Stop it manually: $BINDIR/pg_ctl -D $PGDATA -m fast stop"
+		fi
+	fi
 	# Reopen + lock the shared port lock (best-effort: still restore on a lock
 	# timeout rather than leaking a bogus reservation). fd 9 is closed for the
 	# daemonized postmaster in cmd_up, so reopening here is safe.
@@ -590,7 +634,24 @@ rollback_scoped_markers() {
 	# off, which is safe; a later scoped down+up for this scope reconciles it).
 	if flock -w 30 9; then
 		if [ "$PRIOR_PORT_EXISTED" = yes ]; then
-			atomic_write "$PORT_FILE" "$PRIOR_PORT_CONTENT"
+			# Do NOT blindly recreate the prior reservation. If this `up` used a
+			# DIFFERENT port ($PGPORT) from the prior one, the prior port was FREED
+			# while we ran — and another scope (or an unrelated process) may have
+			# taken it since. Recreating our reservation for a port another SCOPE now
+			# holds would double-reserve it and could make a later scoped url resolve
+			# to the OTHER scope's server. Detect that under the lock and, if so, drop
+			# our own port marker and surface loudly rather than clobbering theirs.
+			# `prior_port_owned_by_our_scope` excludes our own already-running prior
+			# cluster (whose listener/marker must, of course, be restored, not treated
+			# as a foreign claim).
+			if [ "$PGPORT" != "$PRIOR_PORT_CONTENT" ] &&
+				! prior_port_owned_by_our_scope &&
+				{ port_reserved "$PRIOR_PORT_CONTENT" || port_listening "$PRIOR_PORT_CONTENT"; }; then
+				rm -f "$PORT_FILE"
+				log "cannot restore this scope's prior port reservation ($PRIOR_PORT_CONTENT): it was freed while this 'up' used port $PGPORT and is now reserved by another scope or held by a live server. Leaving that reservation intact and dropping this scope's port marker — run the scoped 'down' then 'up' to get a fresh port."
+			else
+				atomic_write "$PORT_FILE" "$PRIOR_PORT_CONTENT"
+			fi
 		else
 			rm -f "$PORT_FILE"
 		fi
@@ -689,6 +750,12 @@ cmd_up() {
 		# PGPORT, an auto-allocated one, and a value reused from a recorded marker.
 		validate_port "$PGPORT"
 		log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
+		# Mark that we are about to bring a NEW postmaster live, BEFORE running
+		# pg_ctl. `pg_ctl -w start` can return non-zero on a startup TIMEOUT while
+		# the postmaster keeps coming up in the background — so the rollback trap
+		# must treat a failed start as possibly-live and stop it. Setting this only
+		# in scoped mode keeps unscoped behavior byte-for-byte (no rollback there).
+		[ -n "$SCOPED" ] && STARTED_NEW_SERVER=yes
 		# Close the scoped lock fds (8 = instance uplock, 9 = port lock) for the
 		# postmaster: it daemonizes and would otherwise inherit fd 8 and hold that
 		# advisory flock for its whole lifetime, deadlocking the next `up`.

@@ -886,9 +886,18 @@ detect_verdict() {
 	# fenced/quoted VERDICT: ISSUES still counts. A peer that needlessly QUOTES its
 	# OWN real verdict degrades to `none` (forfeited) — also safe; the caller's
 	# prompt asks for a bare VERDICT line. Residuals, honest and irreducible without
-	# a full Markdown parse: a bare UNQUOTED free-standing example line, and a
-	# 4-space-INDENTED code block (leading indentation is indistinguishable from a
-	# legitimately indented real verdict), both stay out of scope.
+	# a full Markdown BLOCK+INLINE parse (this scan is line-oriented) — all exotic,
+	# never produced by a compliant peer that emits its own bare VERDICT line:
+	#   * a bare UNQUOTED free-standing example line, byte-identical to a real one;
+	#   * a 4-space-INDENTED code block (indentation is indistinguishable from a
+	#     legitimately indented real verdict) — SAFE (over-strips to forfeit);
+	#   * a genuine verdict following an EXOTICALLY container-nested fenced example
+	#     (mixed list+blockquote, whose CommonMark continuation this line-oriented
+	#     lexer cannot track) may be forfeited — a false NEGATIVE, SAFE (never a
+	#     false pass); resolving it needs a full CommonMark container parser;
+	#   * a VERDICT line that is itself bare but enclosed by a MULTILINE inline code
+	#     span (single-backtick opened/closed on OTHER lines) reads as bare — the
+	#     one non-safe residual, in the R1 class, requiring inline-span lexing.
 	local scan_text
 	scan_text="$(printf '%s\n' "$text" | awk '
 		!inf {

@@ -493,6 +493,11 @@ case "$WORKTREE" in
 *) die_usage "--worktree must be an absolute path (got '$WORKTREE')" ;;
 esac
 [ -d "$WORKTREE" ] || die_usage "--worktree '$WORKTREE' is not a directory"
+# Keep the RAW (symlink-unresolved) worktree spelling too: the artifact-root
+# containment check below rejects an in-worktree spelling as well as an
+# in-worktree physical target, and matching the raw spelling covers a worktree
+# that is ITSELF reached through a symlink.
+RAW_WORKTREE="$WORKTREE"
 WORKTREE="$(realpath -- "$WORKTREE")" || die_usage "cannot resolve --worktree"
 
 [ -n "$PROMPT_FILE" ] || die_usage "--prompt-file is required"
@@ -505,20 +510,55 @@ case "$ARTIFACT_ROOT" in
 /*) ;;
 *) die_usage "--artifact-root must be an absolute path (got '$ARTIFACT_ROOT')" ;;
 esac
-# Resolve the artifact root WITHOUT creating anything (`realpath -m` canonicalizes
-# through existing symlinks and tolerates missing trailing components), so the
-# containment check below can run BEFORE any mkdir. This matters: creating the dir
-# first and rejecting after would MUTATE the read-only review target by leaving a
-# directory inside the worktree for a rejected in-worktree root.
-ARTIFACT_ROOT="$(realpath -m -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
-# The artifact root must live OUTSIDE the worktree: a read-only provider rooted
-# at the worktree must not be able to see attempt artifacts, and sibling
-# attempts stay isolated (0700). Rooting artifacts under the worktree would
-# leak them into the review surface. Checked before mkdir so a rejected root is
-# never created inside the worktree.
-case "$ARTIFACT_ROOT/" in
-"$WORKTREE/"*) die_usage "--artifact-root must be OUTSIDE --worktree (got '$ARTIFACT_ROOT' under '$WORKTREE')" ;;
+# Reject any `..` path component up front. A legitimate caller passes a clean
+# absolute artifact path; `..` only matters as an ATTACK on the containment check
+# below: `<worktree>/link/../../root` traverses an in-worktree symlink (`link`)
+# yet, because normalization COLLAPSES the `..`, its resolved spellings can land
+# outside both worktree prefixes and slip past the checks — while the path, walked
+# from the `--cd` worktree, still reaches the artifacts. Forbidding `..` removes
+# that whole class (the padding makes a leading/trailing/standalone `..` match too,
+# while a dir literally named `..foo` does not).
+case "/$ARTIFACT_ROOT/" in
+*/../*) die_usage "--artifact-root must not contain a '..' path component (got '$ARTIFACT_ROOT')" ;;
 esac
+# Resolve the artifact root in TWO spellings, WITHOUT creating anything (both
+# tolerate missing trailing components), so the containment checks below run
+# BEFORE any mkdir — creating the dir first and rejecting after would MUTATE the
+# read-only review target by leaving a directory inside the worktree for a
+# rejected in-worktree root.
+#   PHYS (`realpath -m`, symlinks RESOLVED) — the real directory we create and use.
+#   LEX  (`realpath -ms`, symlinks NOT resolved, `.`/`..` normalized) — the spelling
+#         the caller handed us.
+ARTIFACT_ROOT_PHYS="$(realpath -m -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
+ARTIFACT_ROOT_LEX="$(realpath -ms -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
+RAW_WORKTREE_LEX="$(realpath -ms -- "$RAW_WORKTREE")" || die_usage "cannot resolve --worktree"
+# The artifact root must live OUTSIDE the worktree: the peer is `--cd`'d into the
+# worktree read-only and can traverse anything reachable from it, so attempt
+# artifacts (and sibling 0700 attempts) must not be reachable from the review
+# surface. We reject BOTH:
+#   * an in-worktree PHYSICAL target (the obvious `--artifact-root <wt>/sub` case), and
+#   * an in-worktree LEXICAL spelling — a `--artifact-root` that IS, or passes
+#     THROUGH, a symlink LIVING in the worktree. `realpath -m` would rewrite such
+#     a spelling to its external target (passing the physical check), yet the
+#     peer can still reach the artifacts by traversing that in-worktree link, so
+#     the resolved-path check alone is not enough.
+# Both raw and resolved worktree prefixes are tested so a worktree reached through
+# a symlink is covered from either side, and with `..` already forbidden a
+# collapsed spelling cannot escape the prefix while still routing through an
+# in-worktree symlink. Checked before mkdir so a rejected root is never created
+# inside the worktree.
+# Residual (same class as the same-UID traversal note by SESSION_DIR): this closes
+# an artifact root ROUTED through an in-worktree symlink, not an arbitrary blind
+# symlink a repo might commit pointing at the caller's external root — whose
+# unpredictable per-invocation session-dir name it would still have to guess.
+for _art in "$ARTIFACT_ROOT_PHYS" "$ARTIFACT_ROOT_LEX"; do
+	for _wt in "$WORKTREE" "$RAW_WORKTREE_LEX"; do
+		case "$_art/" in
+		"$_wt/"*) die_usage "--artifact-root must be OUTSIDE --worktree (got '$ARTIFACT_ROOT' → '$_art' under '$_wt'); an in-worktree or in-worktree-symlinked root stays reachable by the read-only peer" ;;
+		esac
+	done
+done
+ARTIFACT_ROOT="$ARTIFACT_ROOT_PHYS"
 mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-root '$ARTIFACT_ROOT'"
 
 # Sibling-attempt isolation — the BY-DEFAULT guarantee, and its honest residual.
@@ -576,9 +616,13 @@ codex_supports() {
 		# included), so a background child the help path leaves behind (an
 		# updater, a wrapper's helper) is swept by the group signal instead of
 		# outliving the run — the helper's no-live-peer-process guarantee covers
-		# the probe, not only the attempts. An inner `timeout -k 5 10` (TERM at
-		# 10s, SIGKILL 5s later for a TERM-swallower) plus the poll deadline
-		# below is belt-and-suspenders against a hanging `--help`. If the probe
+		# the probe, not only the attempts. The WHOLE probe is bounded by
+		# min(--timeout, 10s) (see the budget derivation below) — an inner
+		# `timeout -k <grace> <term>` plus a poll deadline at that budget, belt-and-
+		# suspenders against a hanging `--help` — so a small --timeout caps the probe
+		# too: a `codex exec --help` that hangs cannot stall the run past the
+		# requested deadline before any attempt even starts, honoring the timeout
+		# contract. If the probe
 		# times out or fails, the capture stays empty, no flag matches, and every
 		# probed feature falls back to its safe default (no --json live progress,
 		# no extra flags) rather than assuming support. ACCEPTED RESIDUAL, same
@@ -597,8 +641,30 @@ codex_supports() {
 		# misbehaving probe cannot sit reading the helper's own stdin either. The
 		# capture lands in the session dir as a retained diagnostic artifact.
 		local probe_child probe_pgid probe_lead probe_t0 probe_now
+		local probe_budget probe_term probe_grace probe_bs
+		# Bound the WHOLE probe by min(--timeout, 10s): that budget is the hard poll
+		# backstop, with the inner `timeout` TERM at 1/2 the budget and SIGKILL at
+		# 3/4 (leaving a 1/4-budget cushion so the child is already dead by the
+		# backstop and reap_tree's group_alive returns immediately). For any realistic
+		# --timeout a hung `--help` is thus reaped within the deadline — not
+		# deadline+grace+slack — honoring the timeout contract. TIMEOUT is validated
+		# > 0 and may be fractional; `timeout` and `awk` both accept fractional
+		# seconds. The 10s cap keeps a hung `--help` from waiting the full default
+		# 900s. Two bounded residuals, both irreducible here: (1) the poll loop's
+		# ~0.1s tick is the effective floor, so a sub-0.1s budget (a degenerate
+		# --timeout no review could meet anyway) is bounded to ~0.1s rather than the
+		# tinier budget — and a budget that rounds a term/grace to 0.000 just disables
+		# the inner timer, leaving the poll backstop as the bound; (2) a probe
+		# descendant that BOTH escapes the group via setsid AND ignores TERM adds
+		# reap_tree's fixed TERM+grace+KILL window (~5s) — the same stubborn-escapee
+		# residual documented above, not reachable by any deadline the group timer
+		# enforces.
+		probe_budget="$(awk -v t="$TIMEOUT" 'BEGIN{b=(t<10)?t:10; printf "%.3f", b}')"
+		probe_term="$(awk -v b="$probe_budget" 'BEGIN{printf "%.3f", b/2}')"
+		probe_grace="$(awk -v b="$probe_budget" 'BEGIN{printf "%.3f", b/4}')"
+		probe_bs="$probe_budget"
 		set -m
-		(exec timeout -k 5 10 codex exec --help \
+		(exec timeout -k "$probe_grace" "$probe_term" codex exec --help \
 			>"$SESSION_DIR/codex-exec-help.txt" 2>&1 </dev/null) &
 		probe_child=$!
 		# Register the probe with the EXIT trap IMMEDIATELY, mirroring the
@@ -629,8 +695,8 @@ codex_supports() {
 		while kill -0 "$probe_child" 2>/dev/null; do
 			capture_descendants "$probe_child"
 			probe_now=$(date +%s.%N)
-			# Backstop deadline over the inner timeout's own 10s+5s bound.
-			if awk -v a="$probe_now" -v b="$probe_t0" 'BEGIN{exit !((a-b)>20)}'; then
+			# Backstop deadline over the inner timeout's own term+grace bound.
+			if awk -v a="$probe_now" -v b="$probe_t0" -v d="$probe_bs" 'BEGIN{exit !((a-b)>d)}'; then
 				break
 			fi
 			sleep 0.1
@@ -698,6 +764,19 @@ build_cmd_claude() {
 		--allowedTools Read Grep Glob
 		--disallowedTools Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch
 		--add-dir "$WORKTREE")
+	# Auth mode is chosen by the orchestrator (see "Claude peer auth precedence"):
+	# in `login` mode the inherited ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are
+	# cleared so the logged-in subscription session is used (headless `-p` would
+	# otherwise always prefer an env key over the login, letting a stray/stale key
+	# shadow it — turning the peer `unavailable` or billing to the pricier API
+	# account); in `key` mode they are left so the documented key fallback
+	# authenticates the peer. The clear rides as an `env -u` prefix — it execs in
+	# place, so no extra process and the supervised leader PID is still the provider.
+	# CLAUDE_CODE_OAUTH_TOKEN and non-credential settings (e.g. ANTHROPIC_BASE_URL)
+	# are never touched.
+	if [ "${CLAUDE_AUTH_MODE:-login}" = login ]; then
+		CMD=(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "${CMD[@]}")
+	fi
 	LIVE=0
 }
 
@@ -991,6 +1070,11 @@ run_attempt() {
 	ATT_VERDICT=none
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
+	# 1 only when this attempt was `unavailable` because the peer BINARY is
+	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
+	# key-fallback keys off this: a missing binary cannot be fixed by switching
+	# auth mode, so it must NOT trigger a pointless second attempt.
+	ATT_BINARY_MISSING=0
 
 	ATTEMPT_DIR="$(mktemp -d "${SESSION_DIR}/peer-review-${PROVIDER}-XXXXXX")" ||
 		die_usage "cannot create an attempt directory under '$SESSION_DIR'"
@@ -1006,6 +1090,7 @@ run_attempt() {
 	# Preflight: a missing peer binary is an unavailable outcome, not a crash.
 	if ! command -v "$PEER_BIN" >/dev/null 2>&1; then
 		ATT_OUTCOME=unavailable
+		ATT_BINARY_MISSING=1
 		ATT_ELAPSED=0
 		ATT_REASON="provider binary '$PEER_BIN' is not installed on PATH"
 		write_meta "$dir" "$attempt_no" "unavailable-preflight"
@@ -1250,6 +1335,33 @@ write_meta() {
 		>"$dir/meta.json" 2>/dev/null || true
 }
 
+# --- Claude peer auth precedence: login PRIMARY, API key FALLBACK -------------
+# powbox precedence (README "Cross-Agent Delegation"): a logged-in subscription
+# session is PRIMARY (cheaper, the intended path); an ANTHROPIC_API_KEY /
+# ANTHROPIC_AUTH_TOKEN is the FALLBACK for when the login is ABSENT or cannot
+# authenticate (expired, or hit a session limit). Headless `claude -p` would
+# instead always prefer an env key, so the orchestrator drives the precedence:
+# attempt the login first (key vars cleared — see build_cmd_claude), and if that
+# attempt comes back `unavailable` (an auth/usage failure that yields no verdict)
+# while a key IS available, retry ONCE in key mode. EITHER credential may be
+# expired; if neither authenticates, the peer stays `unavailable`. Codex is
+# unaffected (CODEX_API_KEY is a first-class auth path, not a login override).
+CLAUDE_HAS_LOGIN=0
+if [ "$PROVIDER" = claude ]; then
+	claude_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+	# Presence of the credentials file is the login signal (Claude writes it on
+	# OAuth login; an API-key-only setup has none).
+	[ -s "$claude_cfg/.credentials.json" ] && CLAUDE_HAS_LOGIN=1
+fi
+CLAUDE_HAS_KEY=0
+{ [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; } && CLAUDE_HAS_KEY=1
+# Start in login mode when a login exists; otherwise the key is the only auth.
+if [ "$CLAUDE_HAS_LOGIN" = 1 ]; then
+	CLAUDE_AUTH_MODE=login
+else
+	CLAUDE_AUTH_MODE=key
+fi
+
 # --- run with retry-once for transient failures ------------------------------
 ATTEMPTS=0
 RETRIED=false
@@ -1263,7 +1375,29 @@ run_attempt 1
 ATTEMPTS=1
 TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 
-if [ "$ATT_TRANSIENT" = 1 ]; then
+if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
+	# The login attempt could not AUTHENTICATE the peer (expired session, or a
+	# session limit) — fall back to the documented ANTHROPIC_API_KEY ONCE, in a
+	# brand-new attempt dir. Gated on ATT_BINARY_MISSING=0: a missing `claude`
+	# binary is also `unavailable`, but switching auth mode cannot fix it, so it
+	# must not trigger a pointless second attempt or a misleading retry note. This
+	# is a DISTINCT retry from the transient allowlist below (an auth failure is
+	# not transient), and it is mutually exclusive with it — total attempts stay
+	# capped at 2. The key-mode result then stands as-is; if it too is
+	# `unavailable`, neither credential authenticated and we give up.
+	printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the ANTHROPIC_API_KEY fallback"}\n' >&2
+	CLAUDE_AUTH_MODE=key
+	run_attempt 2
+	ATTEMPTS=2
+	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
+	RETRIED=true
+	if [ "$ATT_TRANSIENT" = 1 ]; then
+		# The key-fallback attempt ITSELF failed transiently. The 2-attempt cap
+		# means no further retry, so correct the per-attempt "…; retrying" reason
+		# (run_attempt leaves it optimistic) to reflect that this was the last try.
+		ATT_REASON="provider failed transiently on the API-key fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+	fi
+elif [ "$ATT_TRANSIENT" = 1 ]; then
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
 	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
 	run_attempt 2

@@ -28,10 +28,20 @@ set -uo pipefail
 #       (no transient signal) is NOT retried either (8d); and elapsedSeconds is
 #       the TOTAL across both attempts, not the final attempt alone (8e)
 #   (9) codex without --json support → buffered (liveProgress:false), still runs
-#  (10) containment/usage — artifact-root inside the worktree rejected, bad
-#       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir,
-#       and an invalid --timeout exits 64 BEFORE the session dir is created
-#       (a usage error never litters the artifact root)
+#  (10) containment/usage — artifact-root inside the worktree rejected (a physical
+#       in-worktree target, an in-worktree SYMLINK that resolves out (10h), and a
+#       `..`-escaping spelling through such a symlink (10h2)), bad flags exit 64,
+#       0700 attempt dirs, prompt copied into the attempt
+#       dir, an invalid --timeout exits 64 BEFORE the session dir is created (a
+#       usage error never litters the artifact root), the Codex capability probe
+#       is bounded by --timeout so a hung `codex exec --help` cannot stall past
+#       the deadline (10i), and the Claude peer's login-PRIMARY/key-FALLBACK auth
+#       precedence is driven by the runner: the login wins in one attempt when it
+#       works (10j-login), the key is used directly when there is no login
+#       (10j-nologin), an expired/limited login falls back to the key on a second
+#       attempt (10j-fallback), with neither working the peer stays unavailable
+#       (10j-nofallback), and a MISSING binary does not trigger a spurious
+#       key-fallback attempt (10j-missingbin)
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
 #       descendant escalated to KILL and actually dies, sibling isolation proven
 #       BEHAVIORALLY AND HONESTLY (a fake provider probes a sibling's planted
@@ -686,6 +696,218 @@ d="$(new_case)"
 run "$d" -h
 assert_eq "10f: -h exit 0" "$RUN_RC" 0
 assert_contains "10f: -h prints usage" "$RUN_OUT" "peer-review-run"
+
+# 10h: an --artifact-root supplied THROUGH a symlink that LIVES in the worktree is
+# rejected, even though the symlink resolves to an EXTERNAL target (which would
+# pass the resolved-path check alone). A peer --cd'd into the worktree could
+# otherwise traverse that in-worktree link and read the attempt artifacts.
+# Rejection happens at argument validation, before any provider launch — no fake
+# binary is needed.
+d="$(new_case)"
+mkdir -p "$d/external"
+ln -s "$d/external" "$d/wt/artlink"
+run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" --artifact-root "$d/wt/artlink" --timeout 5
+assert_eq "10h: in-worktree symlinked artifact-root rejected (exit 64)" "$RUN_RC" 64
+assert_contains "10h: explains the containment error" "$RUN_ERR" "OUTSIDE"
+# The external target must NOT have been populated — the rejection precedes mkdir.
+checks=$((checks + 1))
+leftover_h="$(find "$d/external" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$leftover_h" != 0 ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [10h: rejected symlinked root left artifacts]: %s populated\n' "$d/external" >&2
+fi
+
+# 10h2: a `..`-escaping spelling that traverses an in-worktree symlink yet would
+# NORMALIZE outside the worktree (e.g. `<wt>/link/../../root`) is rejected because
+# `..` path components are forbidden outright — closing the normalization-collapse
+# bypass of the containment check.
+d="$(new_case)"
+mkdir -p "$d/external"
+ln -s "$d/external" "$d/wt/artlink"
+run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" --artifact-root "$d/wt/artlink/../../root" --timeout 5
+assert_eq "10h2: '..'-escaping artifact-root rejected (exit 64)" "$RUN_RC" 64
+assert_contains "10h2: explains the '..' rejection" "$RUN_ERR" "'..'"
+
+# 10i: the Codex capability probe (`codex exec --help`) is bounded by --timeout,
+# so a small deadline caps the probe too. A fake codex whose --help HANGS must not
+# stall the helper past roughly the requested timeout (a fixed ~15-20s before this
+# was bounded); the empty capture then degrades to no --json, and the real attempt
+# still passes.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then sleep 60; echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+probe_t0=$(date +%s.%N)
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 2)
+probe_t1=$(date +%s.%N)
+probe_wall="$(awk -v a="$probe_t1" -v b="$probe_t0" 'BEGIN{printf "%.2f", a-b}')"
+assert_eq "10i: run still passes after a bounded, degraded probe" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "10i: no --json when the probe was killed" "$(jqf "$RUN_RESULT" .liveProgress)" false
+# The WHOLE probe is bounded by min(--timeout,10)=2s (TERM at 1s, KILL at 1.5s,
+# poll backstop at 2s), an order below the old fixed ~15s — assert the run stayed
+# under 5s, tight enough to prove the strict-budget bound (not just "< deadline +
+# grace + slack"), with margin for the fast fake attempt + CI jitter.
+checks=$((checks + 1))
+if awk -v w="$probe_wall" 'BEGIN{exit !(w < 5)}'; then :; else
+	fails=$((fails + 1))
+	printf 'FAIL [10i: probe not bounded by --timeout]: run took %ss with --timeout 2\n' "$probe_wall" >&2
+fi
+
+# 10j: Claude peer auth precedence — login PRIMARY, ANTHROPIC_API_KEY FALLBACK,
+# driven by the runner (headless -p would otherwise always prefer an env key over
+# the login). The login signal is CLAUDE_CONFIG_DIR/.credentials.json (controlled
+# here for hermeticity). The shared fake records the credential env it received on
+# EACH attempt (appended), and can be told to FAIL auth in login mode (no key) to
+# exercise the key-fallback retry.
+make_claude_env_fake() {
+	cat >"$1/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >>"$ARGV_LOG"
+{ printf 'API_KEY=[%s]\n' "${ANTHROPIC_API_KEY-<unset>}"
+  printf 'AUTH_TOKEN=[%s]\n' "${ANTHROPIC_AUTH_TOKEN-<unset>}"
+  printf 'OAUTH=[%s]\n' "${CLAUDE_CODE_OAUTH_TOKEN-<unset>}"; } >>"$ENV_LOG"
+cat >/dev/null
+# MODE=login_fails: simulate an expired/limited login — fail auth when NO key is
+# present (login mode). With a key present (fallback mode) succeed.
+if [ "${MODE:-pass}" = login_fails ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+	echo "Error: usage limit reached. Please try again later." >&2
+	exit 1
+fi
+jq -n '{type:"result",subtype:"success",is_error:false,result:"ok.\nVERDICT: PASS"}'
+EOF
+	chmod +x "$1/bin/claude"
+}
+
+# 10j-login: a working login EXISTS → the inherited key is cleared so the login
+# wins in ONE attempt (no fallback).
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"x"}}\n' >"$d/claude-cfg/.credentials.json"
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="stale-api-key-should-be-stripped"
+export ANTHROPIC_AUTH_TOKEN="stale-token-should-be-stripped"
+export CLAUDE_CODE_OAUTH_TOKEN="subscription-oauth-should-survive"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
+assert_eq "10j-login: claude peer passes on the login" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "10j-login: one attempt (no fallback needed)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_contains "10j-login: ANTHROPIC_API_KEY cleared when the login is used" "$(cat "$d/envlog")" "API_KEY=[<unset>]"
+assert_contains "10j-login: ANTHROPIC_AUTH_TOKEN cleared when the login is used" "$(cat "$d/envlog")" "AUTH_TOKEN=[<unset>]"
+# The subscription OAuth token IS the logged-in credential — it must survive.
+assert_contains "10j-login: subscription OAuth token preserved" "$(cat "$d/envlog")" "OAUTH=[subscription-oauth-should-survive]"
+unset ARGV_LOG STDIN_LOG ENV_LOG
+
+# 10j-nologin: NO stored login → the documented key fallback is used directly, so
+# the peer authenticates via ANTHROPIC_API_KEY in ONE attempt.
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg-empty" # a config dir with NO .credentials.json
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG
+export CLAUDE_CONFIG_DIR="$d/claude-cfg-empty"
+export ANTHROPIC_API_KEY="fallback-key-should-survive"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR
+assert_eq "10j-nologin: claude peer passes on the key" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "10j-nologin: one attempt (key is the only auth)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_contains "10j-nologin: ANTHROPIC_API_KEY preserved when no login" "$(cat "$d/envlog")" "API_KEY=[fallback-key-should-survive]"
+unset ARGV_LOG STDIN_LOG ENV_LOG
+
+# 10j-fallback: a login EXISTS but is expired/limited (fails auth) AND a key is
+# available → attempt 1 tries the login (key cleared) and comes back unavailable,
+# then the runner retries ONCE with the API key, which authenticates and passes.
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG MODE=login_fails
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="fallback-key-authenticates"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR MODE
+assert_eq "10j-fallback: key fallback authenticates → passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "10j-fallback: two attempts (login then key)" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "10j-fallback: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+# Attempt 1 tried the login (key cleared); attempt 2 used the key. Both are in the
+# appended env log.
+assert_contains "10j-fallback: attempt 1 cleared the key (login mode)" "$(cat "$d/envlog")" "API_KEY=[<unset>]"
+assert_contains "10j-fallback: attempt 2 used the key (fallback mode)" "$(cat "$d/envlog")" "API_KEY=[fallback-key-authenticates]"
+assert_contains "10j-fallback: emitted the fallback note on stderr" "$RUN_ERR" "ANTHROPIC_API_KEY fallback"
+unset ARGV_LOG STDIN_LOG ENV_LOG
+
+# 10j-nofallback: a login EXISTS but is expired/limited AND there is NO key →
+# nothing to fall back to; the peer stays unavailable after the single login
+# attempt (give up if neither authenticates).
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG MODE=login_fails
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset CLAUDE_CONFIG_DIR MODE
+assert_eq "10j-nofallback: no key → stays unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "10j-nofallback: one attempt (no key to fall back to)" "$(jqf "$RUN_RESULT" .attempts)" 1
+unset ARGV_LOG STDIN_LOG ENV_LOG
+
+# 10j-missingbin: the `claude` binary is MISSING (also an `unavailable` outcome)
+# with BOTH a login and a key configured. Switching auth mode cannot install a
+# binary, so this must NOT trigger a spurious key-fallback attempt — exactly one
+# attempt, unavailable, retried false.
+d="$(new_case)" # bin/ is empty → no claude binary
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"x"}}\n' >"$d/claude-cfg/.credentials.json"
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="a-key-that-should-not-be-tried"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+assert_eq "10j-missingbin: missing binary → unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "10j-missingbin: no spurious fallback attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "10j-missingbin: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+
+# 10j-fallback-transient: the login is unavailable AND the key-fallback attempt
+# ITSELF fails transiently. The 2-attempt cap means no third try, so the outcome
+# is `failed` and the reason must reflect the cap — NOT the optimistic
+# "…; retrying" that run_attempt leaves on a transient attempt.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+	echo "Error: usage limit reached. Please try again later." >&2 # login mode → unavailable
+	exit 1
+fi
+echo "Error: connection reset by peer" >&2 # key mode → transient
+exit 1
+EOF
+chmod +x "$d/bin/claude"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="key-that-hits-a-transient-error"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+assert_eq "10j-fallback-transient: login unavailable then key transient → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "10j-fallback-transient: two attempts (login then key), capped" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_contains "10j-fallback-transient: reason reflects the attempt cap" "$(jqf "$RUN_RESULT" .reason)" "attempt cap reached"
+assert_not_contains "10j-fallback-transient: reason not left optimistic" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
 
 # ============================================================================
 # (11) failure-path & stubborn-descendant reaping, sibling isolation, anchored

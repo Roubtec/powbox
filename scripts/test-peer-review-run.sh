@@ -169,6 +169,28 @@ std_args() {
 		"$provider" "$d" "$d" "$d" "${3:-10}"
 }
 
+# still_live PID — true only when PID names a STILL-RUNNABLE process; false if it
+# is gone OR merely a zombie/dead-but-uncollected entry. The reap assertions
+# below verify the HELPER's guarantee — "no LIVE peer process remains" — not "no
+# process-table entry remains": a descendant the helper KILLs after its leader
+# exited reparents to PID 1, and only a REAPING init collects the resulting
+# zombie. A bare `kill -0` still succeeds on that zombie, so it would false-FAIL
+# these assertions under a non-reaping PID 1 (the in-image path runs under
+# `docker run --init`; a host-source run may have no reaper). Classifying by
+# /proc state — the same Z/X/x the helper's own proc_state treats as dead — keeps
+# the assertions valid in EITHER environment; a genuinely running process is
+# never a zombie, so this never masks a real reap failure. The `pid (comm)`
+# prefix is stripped by cutting to the last ') ', so a space/')' in comm is safe.
+still_live() {
+	local pid="$1" st
+	kill -0 "$pid" 2>/dev/null || return 1
+	st="$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')"
+	case "$st" in
+	"" | Z | X | x) return 1 ;; # gone, or zombie/dead — not a live process
+	*) return 0 ;;
+	esac
+}
+
 # ============================================================================
 # (1) codex passed + live --json progress forwarded
 # ============================================================================
@@ -360,7 +382,7 @@ assert_eq "5: outcome timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
 assert_eq "5: exitStatus null on timeout" "$(jqf "$RUN_RESULT" .exitStatus)" null
 sp="$(cat "$SLEEPER_PID" 2>/dev/null || echo)"
 checks=$((checks + 1))
-if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
+if [ -n "$sp" ] && still_live "$sp"; then
 	fails=$((fails + 1))
 	printf 'FAIL [5: sleeper reaped]: pid %s still alive after timeout\n' "$sp" >&2
 	kill -9 "$sp" 2>/dev/null || true
@@ -691,7 +713,7 @@ run "$d" $(std_args "$d" codex)
 assert_eq "11a: deterministic failure → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
 sp="$(cat "$SLEEPER_PID" 2>/dev/null || echo)"
 checks=$((checks + 1))
-if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
+if [ -n "$sp" ] && still_live "$sp"; then
 	fails=$((fails + 1))
 	printf 'FAIL [11a: failure-path sleeper reaped]: pid %s still alive after exit\n' "$sp" >&2
 	kill -9 "$sp" 2>/dev/null || true
@@ -719,11 +741,11 @@ assert_eq "11b: outcome timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
 stub=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
 	stub="$(cat "$STUBBORN_PID" 2>/dev/null || echo)"
-	[ -n "$stub" ] && ! kill -0 "$stub" 2>/dev/null && break
+	[ -n "$stub" ] && ! still_live "$stub" && break
 	sleep 0.2
 done
 checks=$((checks + 1))
-if [ -n "$stub" ] && kill -0 "$stub" 2>/dev/null; then
+if [ -n "$stub" ] && still_live "$stub"; then
 	fails=$((fails + 1))
 	printf 'FAIL [11b: stubborn descendant KILLed]: pid %s survived TERM+KILL\n' "$stub" >&2
 	kill -9 "$stub" 2>/dev/null || true
@@ -974,6 +996,42 @@ emit_verdict_case "$d" "VERDICT: NO ISSUES - no changes needed"
 run "$d" $(std_args "$d" claude)
 assert_eq "11d: 'NO ISSUES - no changes needed' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 
+# 11e: fenced example-token guard. A peer that only QUOTES an example verdict
+# inside a fenced code block (```/~~~) and never renders its OWN must FORFEIT, not
+# false-pass: the PASS scan runs on a fence-stripped copy so the quoted example is
+# dropped (the anchor already handles INLINE examples — case 11d). The ISSUES
+# check stays on the FULL text (the safe direction), so a real issues verdict
+# below a fenced pass example still resolves to issues; and a real pass OUTSIDE
+# any fence still passes.
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf 'Format reminder, end with e.g.:\n```\nVERDICT: PASS\n```\nI ran out of context before I could review.')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11e: fenced example-only pass never passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11e: fenced example-only pass -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# a tilde fence is stripped the same way
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf '~~~\nVERDICT: PASS\n~~~')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: tilde-fenced example-only pass -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# a fenced pass example above the peer's OWN real ISSUES verdict -> issues (safe)
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf '```\nVERDICT: PASS\n```\nVERDICT: ISSUES\n- a real problem')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: fenced example pass + real ISSUES -> issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+# the peer's OWN real pass OUTSIDE a fence still passes (fence-strip resumes after
+# the closing fence — no regression to an ordinary clean verdict)
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf '```\nVERDICT: PASS\n```\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: real pass after a fenced pass example still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal
 # reaps that group — but a provider tool that starts a NEW session/process group
@@ -1003,11 +1061,11 @@ assert_eq "11f: outcome passed" "$(jqf "$RUN_RESULT" .outcome)" passed
 esc="$(cat "$ESCAPEE_PID" 2>/dev/null || echo)"
 # give the post-exit sweep a beat, then the escapee must be gone
 for _ in 1 2 3 4 5; do
-	[ -n "$esc" ] && ! kill -0 "$esc" 2>/dev/null && break
+	[ -n "$esc" ] && ! still_live "$esc" && break
 	sleep 0.2
 done
 checks=$((checks + 1))
-if [ -z "$esc" ] || kill -0 "$esc" 2>/dev/null; then
+if [ -z "$esc" ] || still_live "$esc"; then
 	fails=$((fails + 1))
 	printf 'FAIL [11f: setsid group-escapee reaped]: pid %s still alive (or unrecorded) after a clean exit\n' "${esc:-<none>}" >&2
 	[ -n "$esc" ] && kill -9 "$esc" 2>/dev/null
@@ -1324,6 +1382,15 @@ else
 		fails=$((fails + 1))
 		printf 'FAIL [12h: fixture child never became a zombie (state=%s)]\n' "$zst" >&2
 	else
+		# Guard the TEST's own still_live predicate against a REAL kernel zombie:
+		# `kill -0` still succeeds on it, but its /proc state is Z, so still_live
+		# must report it DEAD — the property that keeps the reap assertions (5,
+		# 11a, 11b, 11f, 13) valid under a non-reaping PID 1.
+		checks=$((checks + 1))
+		if still_live "$zpid"; then
+			fails=$((fails + 1))
+			printf 'FAIL [12h: still_live must treat a real zombie as dead]\n' >&2
+		fi
 		CAPTURED_DESC=" "
 		zt0=$(date +%s)
 		zrc=0
@@ -1388,7 +1455,7 @@ fi
 # synchronously inside the probe, before any attempt) — the test only observes.
 stray="$(cat "$PROBE_STRAY" 2>/dev/null || echo)"
 checks=$((checks + 1))
-if [ -z "$stray" ] || kill -0 "$stray" 2>/dev/null; then
+if [ -z "$stray" ] || still_live "$stray"; then
 	fails=$((fails + 1))
 	printf 'FAIL [13: helper reaps the probe stray]: pid %s still alive (or unrecorded) after the run\n' "${stray:-<none>}" >&2
 	[ -n "$stray" ] && kill -9 "$stray" 2>/dev/null

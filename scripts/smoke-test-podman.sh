@@ -164,14 +164,17 @@ cid=""
 compose_dir=""
 compose_proj=""
 cleanup() {
-	[ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1 || true
-	podman network rm smoke-net >/dev/null 2>&1 || true
+	# Best-effort teardown: drop errexit for the whole trap so no failing teardown
+	# command (e.g. the rm -rf tail) can abort it early and leak the rest.
+	set +e
+	[ -n "$cid" ] && podman rm -f "$cid" >/dev/null 2>&1
+	podman network rm smoke-net >/dev/null 2>&1
 	if [ -n "$compose_proj" ]; then
-		[ -n "$compose_dir" ] && docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" down -v >/dev/null 2>&1 || true
+		[ -n "$compose_dir" ] && docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" down -v >/dev/null 2>&1
 		for c in $(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" 2>/dev/null); do
-			podman rm -f "$c" >/dev/null 2>&1 || true
+			podman rm -f "$c" >/dev/null 2>&1
 		done
-		podman network rm "${compose_proj}_default" >/dev/null 2>&1 || true
+		podman network rm "${compose_proj}_default" >/dev/null 2>&1
 	fi
 	[ -n "$compose_dir" ] && rm -rf "$compose_dir"
 	return 0

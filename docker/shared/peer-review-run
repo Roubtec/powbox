@@ -867,28 +867,57 @@ detect_verdict() {
 		echo issues
 		return
 	fi
-	# Before the PASS-side checks (b, c), strip FENCED code blocks (``` or ~~~
-	# delimited) into a scan copy. This complements pass_anchor: a fenced example
-	# renders its VERDICT line with NO decoration of its OWN, so pass_anchor alone
-	# would still accept it — the fence-strip removes the whole block. The
-	# fence-delimiter recognizer allows a leading run of BLOCK decoration
-	# (indentation, blockquote >, and list markers - * + and ordered N. / N)) before
-	# the fence, so a fenced example NESTED in a list or blockquote is stripped too,
-	# not just a column-0 fence. QUOTED forms that put a marker on the VERDICT line
-	# ITSELF (blockquote, inline code, and any nesting like list-then-quote) need no
-	# stripping here; pass_anchor rejects them by excluding > and backtick from its
-	# decoration class. The ISSUES check (a) above deliberately stays on the FULL
-	# text: over-matching issues is the SAFE direction and can never false-pass, so
-	# a fenced/quoted VERDICT: ISSUES still counts. A peer that needlessly QUOTES
-	# its OWN real verdict degrades to `none` (forfeited) — also safe; the caller's
+	# Before the PASS-side checks (b, c), strip FENCED code blocks into a scan copy
+	# with a proper lexer, so an echoed example verdict inside a fence never reaches
+	# the PASS scan (pass_anchor alone would accept it — a fenced VERDICT line has
+	# no decoration of its OWN). A block OPENS on a line that, after optional
+	# indentation and optional BLOCK decoration (blockquote >, list markers - * +
+	# and ordered N. / N)), is a run of >= 3 identical ` or ~; the char and length
+	# are recorded. It CLOSES only on a line that, after optional indentation ONLY
+	# (a decorated line is CONTENT, never a closer), is a run of the SAME fence char
+	# of length >= the opener's, then nothing but whitespace. Enforcing CommonMark's
+	# char+length rule means a LONGER outer fence wrapping a shorter example, a
+	# mismatched ~/` delimiter, or a decorated line cannot desync the parity and
+	# leak the inner VERDICT line. QUOTED forms that put a marker on the VERDICT line
+	# ITSELF (blockquote, inline code, any nesting) need no stripping here —
+	# pass_anchor rejects them by excluding > and backtick from its decoration
+	# class. The ISSUES check (a) above deliberately stays on the FULL text:
+	# over-matching issues is the SAFE direction and can never false-pass, so a
+	# fenced/quoted VERDICT: ISSUES still counts. A peer that needlessly QUOTES its
+	# OWN real verdict degrades to `none` (forfeited) — also safe; the caller's
 	# prompt asks for a bare VERDICT line. Residuals, honest and irreducible without
 	# a full Markdown parse: a bare UNQUOTED free-standing example line, and a
 	# 4-space-INDENTED code block (leading indentation is indistinguishable from a
 	# legitimately indented real verdict), both stay out of scope.
 	local scan_text
 	scan_text="$(printf '%s\n' "$text" | awk '
-		/^[[:space:]]*([-*+>][[:space:]]*|[0-9][0-9]*[.)][[:space:]]*)*(```|~~~)/ { fence = !fence; next }
-		!fence { print }
+		!inf {
+			s = $0
+			sub(/^[[:space:]]*/, "", s)
+			sub(/^([>*+-][[:space:]]*|[0-9]+[.)][[:space:]]*)+/, "", s)
+			run = ""
+			if (match(s, /^`+/) || match(s, /^~+/)) run = substr(s, RSTART, RLENGTH)
+			info = substr(s, length(run) + 1)
+			# A backtick fence opener may NOT carry a backtick in its info string —
+			# that is a single-line inline CODE SPAN, not a fence, so it must not open
+			# a block and swallow a following genuine verdict. Tilde fences have no
+			# such restriction.
+			if (length(run) >= 3 && (substr(run, 1, 1) == "~" || index(info, "`") == 0)) {
+				inf = 1
+				fc = substr(run, 1, 1)
+				fl = length(run)
+			} else print
+			next
+		}
+		{
+			s = $0
+			sub(/^[[:space:]]*/, "", s)
+			crun = ""
+			if (match(s, /^`+/) || match(s, /^~+/)) crun = substr(s, RSTART, RLENGTH)
+			rest = substr(s, length(crun) + 1)
+			sub(/[[:space:]]*$/, "", rest)
+			if (length(crun) >= fl && substr(crun, 1, 1) == fc && rest == "") { inf = 0; fc = ""; fl = 0 }
+		}
 	')"
 	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an
 	# issue token — the literal contract template `VERDICT: PASS | ISSUES`, or a

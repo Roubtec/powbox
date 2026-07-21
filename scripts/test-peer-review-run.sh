@@ -1102,6 +1102,38 @@ emit_verdict_case "$d" "$(printf -- '- ```\n  example\n  ```\nVERDICT: PASS')"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: real pass below a list-nested fence still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# ...and the fence lexer enforces CommonMark's char+length rule: a shorter example
+# fence wrapped in a LONGER outer fence does not desync (the inner ``` do not close
+# the ```` block), and a decorated line is content, never a closer.
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf '````\n```\nVERDICT: PASS\n```\n````')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: longer outer fence wrapping an example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '```\n> ```\nVERDICT: PASS\n```')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: a decorated line cannot close a fence -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# ...while a real verdict after a LONGER fenced block still passes (char+length
+# match closes the ```` block correctly).
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf '````\ncode\n````\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: real pass after a longer fenced block still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# ...and a single-line inline CODE SPAN (a backtick run that opens AND closes on
+# one line, so its "info" carries a backtick) is NOT a fence opener and must not
+# swallow a following genuine verdict.
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are inline-code test data, not an expansion
+emit_verdict_case "$d" "$(printf '```VERDICT: PASS```\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: inline code span does not swallow a real verdict" "$(jqf "$RUN_RESULT" .outcome)" passed
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

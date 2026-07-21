@@ -75,7 +75,10 @@ die_usage() {
 # EXIT/INT/TERM trap reaps the tree so a helper interrupted mid-review never
 # leaves a live peer process. CURRENT_LEADER is assigned IMMEDIATELY after each
 # spawn ($!) — before the start-time read, the captured-set seed, and the PGID
-# probe — so the trap already knows the leader during that setup window.
+# probe — and the reap primitives treat that bare leader PID as an IMPLICIT
+# MEMBER of the supervised tree while it has no captured entry (see the
+# implicit-member rule above group_alive), so trap coverage of the leader
+# begins at that first assignment, not at the captured-set seed.
 # CURRENT_PGID is set ONLY after we confirm the child is the leader of its own
 # group (pgid == leader pid); it stays empty otherwise so we never send a
 # negative-PID (whole-group) signal against an unvalidated — possibly the
@@ -137,6 +140,21 @@ proc_starttime() {
 	local ps
 	ps="$(proc_ppid_start "$1")" || return 1
 	printf '%s' "${ps#* }"
+}
+
+# proc_state <pid> — the single-letter process state (field 3 of
+# /proc/<pid>/stat, the first field after the "pid (comm)" prefix; same
+# comm-safe parse as proc_ppid_start). Prints nothing and returns non-zero when
+# the process is gone or /proc is unreadable. Used to tell a RUNNABLE process
+# from a dead-but-uncollected one: a zombie ("Z", or the transient "X"/"x"
+# dying states) still answers `kill -0` and still shows its original start
+# time, but it cannot execute code or spawn — for supervision purposes it is
+# already dead.
+proc_state() {
+	local stat
+	stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+	stat="${stat##*) }"
+	printf '%s' "${stat%% *}"
 }
 
 # pid_matches <pid> <starttime> — does <pid> STILL name the same process we
@@ -240,6 +258,32 @@ capture_descendants() {
 	capture_walk "$root" "$base"
 }
 
+# IMPLICIT LEADER MEMBERSHIP (shared by group_alive and signal_tree): the
+# <leader_pid> argument is itself part of the supervised tree even BEFORE it has
+# a captured entry. During the spawn-setup gap — CURRENT_LEADER already assigned
+# from $!, captured set not yet seeded — the set-based sweep alone finds nothing
+# (and an empty pgid skips the group probe), so a trap-time reap_tree would
+# return "all gone" without ever signalling the fresh child, leaking it. So
+# while captured_start has NO entry for the leader, group_alive probes the bare
+# PID directly — counting it alive only in a RUNNABLE (non-zombie) /proc state,
+# so a dead-but-uncollected leader can never spin the grace loops "alive" until
+# they exhaust — and signal_tree kills the bare PID directly (always a positive
+# PID, NEVER a group). Once the seed lands, the leader HAS an entry and the
+# direct path goes inert: the start-time-verified sweep alone governs, so a
+# leader PID the kernel recycles after the helper has collected the child (the
+# normal-exit path waits BEFORE its reap, and on_exit can fire between that
+# wait and the CURRENT_LEADER clear) fails pid_matches and is never signalled.
+# The direct path is thus live exactly in the setup gap, where the child was
+# forked moments ago; a stranger on that bare PID would require the child to
+# die, the parent shell to collect it (bash reaps background children
+# asynchronously, well before the `wait` builtin), AND the kernel's PID space
+# to wrap onto that exact PID, all within that sub-millisecond window — the
+# same class of irreducible residual as the $!-to-CURRENT_LEADER assignment
+# window, and strictly narrower than the guaranteed leak it closes. A seeded
+# entry with an EMPTY baseline (the leader's /proc was unreadable at seed time,
+# i.e. it was already gone) also suppresses the direct path — matching
+# pid_matches' fail-safe: never signal a PID we cannot positively re-identify.
+
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
 # alive? A live validated group answers immediately; in EVERY case the CAPTURED
 # descendant set (accumulated while the leader lived, refreshed with a live walk
@@ -249,11 +293,21 @@ capture_descendants() {
 # fallback it is the only check there is. A captured PID counts as alive ONLY
 # when it still names the same process (start-time match), so a recycled PID
 # standing in for an unrelated process is never mistaken for a live provider
-# descendant.
+# descendant. The bare leader is covered from before the seed by the
+# implicit-member rule above.
 group_alive() {
 	local pid="$1" pgid="$2" entry p st
 	if [ -n "$pgid" ] && kill -0 "-${pgid}" 2>/dev/null; then
 		return 0
+	fi
+	if ! captured_start "$pid" >/dev/null && st="$(proc_state "$pid")"; then
+		# Implicit-member rule: an unseeded leader in a runnable state is alive;
+		# a zombie ("Z") or dying ("X"/"x") one is dead for supervision purposes
+		# (it cannot run or spawn — only its collector can clear the entry).
+		case "$st" in
+		Z | X | x) ;;
+		*) return 0 ;;
+		esac
 	fi
 	capture_descendants "$pid"
 	for entry in $CAPTURED_DESC; do
@@ -276,11 +330,18 @@ group_alive() {
 # unrelated process is skipped, not signalled. Signalling the captured set — not
 # a fresh walk rooted at the possibly-dead leader — keeps this a real tree reap:
 # a grandchild recorded while the leader was alive is still terminated after the
-# leader exits and the grandchild reparents to init.
+# leader exits and the grandchild reparents to init. The bare leader is covered
+# from before the seed by the implicit-member rule above group_alive.
 signal_tree() {
 	local sig="$1" pid="$2" pgid="$3" entry p st
 	if [ -n "$pgid" ]; then
 		kill "-${sig}" "-${pgid}" 2>/dev/null || true
+	fi
+	if ! captured_start "$pid" >/dev/null; then
+		# Implicit-member rule: an unseeded leader is signalled directly by its
+		# positive PID (never a group). Signalling a zombie is a harmless no-op,
+		# so no state check is needed here — only the liveness probe needs one.
+		kill "-${sig}" "$pid" 2>/dev/null || true
 	fi
 	capture_descendants "$pid"
 	for entry in $CAPTURED_DESC; do
@@ -523,11 +584,14 @@ codex_supports() {
 		probe_child=$!
 		# Register the probe with the EXIT trap IMMEDIATELY, mirroring the
 		# attempt launch (see run_attempt for the full ordering rationale):
-		# leader first with an EMPTY pgid — the trap then falls back to the
-		# fail-safe captured-set sweep, never an unvalidated group signal —
-		# captured-set seed next, validated pgid last, so the ps probe below
-		# runs fully covered. The signal window between $! and this assignment
-		# is the irreducible residual.
+		# leader first with an EMPTY pgid — from this very assignment the reap
+		# primitives cover the bare probe child directly (implicit-member rule:
+		# probed and signalled by positive PID while it has no captured entry),
+		# never an unvalidated group signal — captured-set seed next (the
+		# leader's identity baseline, extending coverage to descendants and
+		# handing the leader over to the start-time-verified sweep), validated
+		# pgid last, so the ps probe below runs fully covered. The signal
+		# window between $! and this assignment is the irreducible residual.
 		CURRENT_LEADER="$probe_child"
 		CURRENT_PGID=""
 		set +m
@@ -862,15 +926,21 @@ run_attempt() {
 	# landing during that setup still lets on_exit reap the child instead of
 	# leaking it (on_exit is gated on CURRENT_LEADER). CURRENT_PGID stays EMPTY
 	# until the group is validated: an empty pgid makes the trap's reap skip
-	# group signalling and rely on the start-time-verified captured-set sweep
-	# alone — fail-safe, it can never signal an unowned group. Ordering within
-	# the setup window, safest first: leader registration (arms the trap), then
-	# the captured-set seed (it is what the empty-pgid sweep actually signals;
-	# until it lands, a trap firing no-ops over the previous, already-reaped
-	# set — pid_matches skips every dead or recycled entry), then the PGID
-	# probe — the slowest step, a ps fork — which thus runs fully covered by
-	# both. Residual, irreducible in shell: a signal arriving between $! and
-	# this very next assignment still predates the trap's knowledge.
+	# group signalling and rely on the implicit-member direct leader signal plus
+	# the start-time-verified captured-set sweep — fail-safe, it can never
+	# signal an unowned group. Ordering within the setup window, safest first:
+	# leader registration (arms the trap — the reap primitives treat the bare
+	# leader as an implicit tree member, probing and signalling it by positive
+	# PID while it has no captured entry, so a trap firing in this gap already
+	# terminates the fresh child; the previous attempt's set was cleared after
+	# its reap, so the gap set is empty and cannot shadow the new leader), then
+	# the captured-set seed (the leader's identity baseline: from then on the
+	# start-time-verified sweep governs the leader, a later-recycled leader PID
+	# is never signalled, and each poll tick's live walk extends coverage to
+	# descendants), then the PGID probe — the slowest step, a ps fork — which
+	# thus runs fully covered by both. Residual, irreducible in shell: a signal
+	# arriving between $! and this very next assignment still predates the
+	# trap's knowledge.
 	CURRENT_LEADER="$child"
 	CURRENT_PGID=""
 	set +m
@@ -960,6 +1030,12 @@ run_attempt() {
 	fi
 	CURRENT_LEADER=""
 	CURRENT_PGID=""
+	# Clear the spent set so the NEXT attempt's setup gap starts empty: a stale
+	# entry that happened to collide with the next leader's freshly assigned PID
+	# would otherwise suppress the implicit-member direct path (entry present,
+	# baseline stale → pid_matches fails → nothing signalled) and re-open the
+	# gap leak. The probe path does the same after its reap.
+	CAPTURED_DESC=" "
 	forward_tick "$out" # flush any trailing lines
 	end=$(date +%s.%N)
 	ATT_ELAPSED=$(awk -v a="$end" -v b="$start" 'BEGIN{printf "%.3f", (a-b)}')

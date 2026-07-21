@@ -1093,7 +1093,7 @@ extract_fn() {
 	awk -v fn="$1" 'index($0, fn"() {")==1{g=1} g{print} g && /^}/{exit}' "$HELPER"
 }
 eval "$(
-	for f in proc_ppid_start proc_starttime pid_matches captured_start capture_walk capture_descendants group_alive signal_tree; do
+	for f in proc_ppid_start proc_starttime proc_state pid_matches captured_start capture_walk capture_descendants group_alive signal_tree reap_tree; do
 		extract_fn "$f"
 	done
 )"
@@ -1242,6 +1242,104 @@ fi
 [ -n "$gk" ] && kill "$gk" 2>/dev/null
 kill "$mid" 2>/dev/null || true
 wait "$mid" 2>/dev/null || true
+
+# (g) SETUP-GAP coverage (implicit leader membership): simulate the window
+# between `CURRENT_LEADER=$child` and the captured-set seed — a freshly spawned
+# leader, NO captured entry for it, unvalidated (empty) pgid. reap_tree must
+# still terminate the leader and report a clean reap: the leader PID argument is
+# an implicit member of the supervised tree, probed and signalled directly by
+# positive PID while it has no captured entry. Before that rule, group_alive
+# found nothing (empty pgid skipped the group probe, the sweep held no matching
+# entry), reap_tree returned "all gone" without signalling anything, and a
+# TERM/INT landing in the gap leaked the child.
+sleep 30 &
+gapkid=$!
+CAPTURED_DESC=" "
+checks=$((checks + 1))
+if ! reap_tree "$gapkid" ""; then
+	fails=$((fails + 1))
+	printf 'FAIL [12g: gap reap_tree must report a clean reap]\n' >&2
+fi
+gapst="$(sed 's/^.*) //' "/proc/$gapkid/stat" 2>/dev/null | awk '{print $1}' || true)"
+checks=$((checks + 1))
+if [ -n "$gapst" ] && [ "$gapst" != "Z" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [12g: gap leader must be terminated (empty captured set), state=%s]\n' "$gapst" >&2
+	kill -9 "$gapkid" 2>/dev/null || true
+fi
+wait "$gapkid" 2>/dev/null || true
+
+# ...and with a STALE set (entries from a previous, already-reaped attempt —
+# here pid 1 with an impossible baseline): the stale entry is skipped by
+# pid_matches (also proving the sweep never signals init), while the unseeded
+# leader is still reached via the direct path.
+sleep 30 &
+gapkid=$!
+# shellcheck disable=SC2034  # read as a global inside the eval'd functions
+CAPTURED_DESC=" 1:0 "
+checks=$((checks + 1))
+if ! reap_tree "$gapkid" ""; then
+	fails=$((fails + 1))
+	printf 'FAIL [12g: stale-set gap reap_tree must report a clean reap]\n' >&2
+fi
+gapst="$(sed 's/^.*) //' "/proc/$gapkid/stat" 2>/dev/null | awk '{print $1}' || true)"
+checks=$((checks + 1))
+if [ -n "$gapst" ] && [ "$gapst" != "Z" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [12g: gap leader must be terminated (stale captured set), state=%s]\n' "$gapst" >&2
+	kill -9 "$gapkid" 2>/dev/null || true
+fi
+wait "$gapkid" 2>/dev/null || true
+
+# (h) ZOMBIE-SEMANTICS CONTROL for the direct path: a KILLed-but-uncollected
+# leader (a real kernel zombie — its parent is an exec'd `sleep` that never
+# waits, so unlike a shell's own background child it is NOT reaped
+# asynchronously) must NOT count as alive. group_alive's direct probe classifies
+# by /proc state, so reap_tree returns success promptly instead of spinning the
+# TERM+KILL grace loops (~5s) against a process that can never die further and
+# then falsely reporting a KILL survivor.
+zfixfile="$WORK/12h-zombie"
+bash -c 'sleep 60 & echo $! >"$0"; exec sleep 20' "$zfixfile" </dev/null >/dev/null 2>&1 &
+zfix=$!
+zpid=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	zpid="$(cat "$zfixfile" 2>/dev/null || echo)"
+	[ -n "$zpid" ] && break
+	sleep 0.1
+done
+checks=$((checks + 1))
+if [ -z "$zpid" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [12h: zombie fixture never recorded its pid]\n' >&2
+else
+	kill -9 "$zpid" 2>/dev/null || true
+	zw=0
+	while [ "$zw" -lt 30 ]; do
+		zst="$(sed 's/^.*) //' "/proc/$zpid/stat" 2>/dev/null | awk '{print $1}' || true)"
+		[ "$zst" = "Z" ] && break
+		sleep 0.1
+		zw=$((zw + 1))
+	done
+	if [ "$zst" != "Z" ]; then
+		fails=$((fails + 1))
+		printf 'FAIL [12h: fixture child never became a zombie (state=%s)]\n' "$zst" >&2
+	else
+		CAPTURED_DESC=" "
+		zt0=$(date +%s)
+		zrc=0
+		reap_tree "$zpid" "" || zrc=$?
+		zt1=$(date +%s)
+		if [ "$zrc" != 0 ]; then
+			fails=$((fails + 1))
+			printf 'FAIL [12h: reap_tree must not report a survivor for a leader zombie]\n' >&2
+		elif [ $((zt1 - zt0)) -ge 3 ]; then
+			fails=$((fails + 1))
+			printf 'FAIL [12h: reap_tree spun the grace loops on a leader zombie (%ss)]\n' "$((zt1 - zt0))" >&2
+		fi
+	fi
+fi
+kill "$zfix" 2>/dev/null || true
+wait "$zfix" 2>/dev/null || true
 unset CAPTURED_DESC
 
 # ============================================================================

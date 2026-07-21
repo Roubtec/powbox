@@ -129,16 +129,22 @@ pick_free_port() {
 
 # Start a background LISTENER occupying loopback port $1 until the test exits, so
 # a scoped `up` that targets it hits pg-dev-up's "port in use; refusing to start"
-# path deterministically. Returns once the socket is actually accepting.
+# path deterministically. Returns once the socket is actually accepting. The
+# listener has no fixed lifetime (a timed sleep could lapse mid-run on a slow
+# host and make the "busy port" cases flaky): it stays up until the EXIT cleanup
+# kills it, and self-exits if it is ever reparented (the test died without its
+# cleanup) so it can never linger.
 occupy_port() {
 	local port="$1" i
 	python3 -c "
-import socket, time
+import os, socket, time
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $port))
 s.listen(1)
-time.sleep(120)
+ppid = os.getppid()
+while os.getppid() == ppid:
+    time.sleep(1)
 " &
 	LISTENER_PIDS+=("$!")
 	for ((i = 0; i < 100; i++)); do
@@ -497,11 +503,17 @@ echo "== refuse to start when a scoped dir cannot be secured (chmod fails) =="
 # world-accessible directory. /var/tmp is root-owned + world-writable here, so the
 # instance dir mkdir succeeds but the enforce-owner-only chmod on the root fails.
 # --profile lets us predict the single leftover dir and clean it.
+# Probe chmod-ability WITHOUT side effects: re-applying the dir's CURRENT mode is
+# a no-op on success but still requires ownership/CAP_FOWNER, so it decides
+# whether pg-dev-up could secure this root while never altering /var/tmp — a real
+# `chmod 700` probe would strip the world-writable sticky mode for every other
+# user/process whenever the test runs as root (or any user that can chmod it).
 RO_ROOT="/var/tmp"
-if [ "$(stat -c '%U' "$RO_ROOT" 2>/dev/null || true)" != "$(id -un)" ] && ! chmod 700 "$RO_ROOT" 2>/dev/null; then
+ro_mode="$(stat -c '%a' "$RO_ROOT" 2>/dev/null || true)"
+if [ -n "$ro_mode" ] && ! chmod "$ro_mode" "$RO_ROOT" 2>/dev/null; then
 	refuse_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "refuse-lane" | sha256sum | cut -c1-16)"
 	try_not "up refuses on a root-owned scoped root it cannot secure" pg "$NONGIT" POWBOX_PG_SCOPED_ROOT="$RO_ROOT" -- --profile refuse-lane up
-	try "refusal left no running cluster" test '!' -f "$RO_ROOT/$refuse_key/pgdata/postmaster.pid"
+	try "refusal left no running cluster" test ! -f "$RO_ROOT/$refuse_key/pgdata/postmaster.pid"
 	rm -rf "${RO_ROOT:?}/$refuse_key" 2>/dev/null || true
 else
 	echo "  skip refusal case: no un-chmod-able root-owned dir available here"
@@ -519,7 +531,7 @@ try_not "scoped up rejects a non-numeric PGPORT" pg "$REPO_A" PGPORT="abc" POSTG
 try_not "scoped up rejects an out-of-range PGPORT" pg "$REPO_A" PGPORT="99999" POSTGRES_DB=app_a -- --worktree up
 try_not "scoped up rejects PGPORT 0" pg "$REPO_A" PGPORT="0" POSTGRES_DB=app_a -- --worktree up
 try_not "unscoped url rejects a malformed PGPORT" pg "$WORK" PGPORT="5432; id" -- url
-try "the injection PGPORT never ran its shell payload" test '!' -e "$pwn_marker"
+try "the injection PGPORT never ran its shell payload" test ! -e "$pwn_marker"
 
 echo "== POWBOX_PG_SCOPED_ROOT rejects whitespace / shell metacharacters =="
 # Finding #4: the scoped root becomes the socket dir ($PG_SOCKDIR) interpolated
@@ -528,7 +540,7 @@ echo "== POWBOX_PG_SCOPED_ROOT rejects whitespace / shell metacharacters =="
 root_pwn="$WORK/root-pwn"
 try_not "scoped up rejects a scoped root with a space" pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="$WORK/bad root" POSTGRES_DB=app_a -- --worktree up
 try_not "scoped up rejects a scoped root with shell metacharacters" pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="\$(touch $root_pwn)" POSTGRES_DB=app_a -- --worktree up
-try "the metacharacter scoped root never ran its shell payload" test '!' -e "$root_pwn"
+try "the metacharacter scoped root never ran its shell payload" test ! -e "$root_pwn"
 
 echo "== orphan prevention: up with a NEW explicit PGDATA while the scope's prior server runs FAILS =="
 # Finding #3: a scope already has a running recorded cluster; a new `up` with a
@@ -543,11 +555,38 @@ data_f="$(pg "$REPO_F" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\))
 STARTED_DATADIRS+=("$data_f")
 orphan_data="$WORK/orphan-pgdata"
 try_not "up with a new explicit PGDATA while the scope runs is refused" pg "$REPO_F" PGDATA="$orphan_data" POSTGRES_DB=app_f -- --worktree up
-try "refusal did not initialize the new cluster" test '!' -e "$orphan_data/PG_VERSION"
+try "refusal did not initialize the new cluster" test ! -e "$orphan_data/PG_VERSION"
 rec_f="$(pg "$REPO_F" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
 try "prior server's markers untouched by the refusal" test "$rec_f" = "$data_f"
 try "prior server still serves queries after the refusal" test "$(psql "$url_f" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_F" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== plain scoped up RESUMES the recorded explicit data dir (running and after down) =="
+# Codex review: after an explicit-PGDATA scoped `up`, the restart recipe `down`
+# advertises is a PLAIN scoped `up`. It must resume the RECORDED instance — both
+# while it still runs (no orphan refusal, same URL) and after a `down` (restart
+# at the recorded data dir on the recorded port) — never fall back to the scoped
+# default pgdata, which would strand the recorded cluster's data and reuse its
+# port for a different cluster.
+REPO_G="$WORK/wt-g"
+add_worktree "$MAIN_REPO" "$REPO_G" wt-g
+resume_data="$WORK/resume-pgdata"
+url_g="$(pg "$REPO_G" PGDATA="$resume_data" POSTGRES_DB=app_g -- --worktree up | tail -1)"
+STARTED_DATADIRS+=("$resume_data")
+# Plain up while the recorded cluster RUNS resumes it rather than refusing.
+url_g2="$(pg "$REPO_G" POSTGRES_DB=app_g -- --worktree up | tail -1)"
+try "plain up resumes the running recorded instance (same URL)" test "$url_g2" = "$url_g"
+rec_g="$(pg "$REPO_G" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+try "plain up kept the recorded explicit data dir" test "$rec_g" = "$resume_data"
+pg "$REPO_G" -- --worktree down >/dev/null 2>&1 || true
+# Plain up after down RESTARTS the recorded data dir on the recorded port.
+url_g3="$(pg "$REPO_G" POSTGRES_DB=app_g -- --worktree up | tail -1)"
+try "plain up after down restarts on the recorded port (same URL)" test "$url_g3" = "$url_g"
+try "restart serves from the recorded data dir" test -f "$resume_data/postmaster.pid"
+rec_g2="$(pg "$REPO_G" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+try "restart re-recorded the explicit data dir" test "$rec_g2" = "$resume_data"
+try "restarted instance serves queries" test "$(psql "$url_g3" -tAc 'select 1' 2>/dev/null || true)" = "1"
+pg "$REPO_G" -- --worktree down >/dev/null 2>&1 || true
 
 echo "== unscoped invocations keep the historical defaults =="
 url_plain="$(pg "$WORK" -- url)"

@@ -342,10 +342,12 @@ resolve_scope() {
 		validate_scoped_owner "$SCOPED_ROOT" "$INSTANCE_DIR" "$PORT_FILE" "$DATADIR_FILE"
 	fi
 	# Resolve PGDATA. An explicit PGDATA is authoritative. Scoped mode NEVER falls
-	# back to the unscoped /tmp/pgdata default: on `up` it is the scoped default; on
-	# a read command it MUST come from the marker `up` recorded — if that marker is
-	# missing/empty, fail loudly rather than guess (which could otherwise let a
-	# scoped `down`/`status` act on an unrelated cluster).
+	# back to the unscoped /tmp/pgdata default: on `up` it starts from the scoped
+	# default (cmd_up then adopts the data dir this scope RECORDED, if any, under
+	# the uplock — see the resume block there); on a read command it MUST come from
+	# the marker `up` recorded — if that marker is missing/empty, fail loudly
+	# rather than guess (which could otherwise let a scoped `down`/`status` act on
+	# an unrelated cluster).
 	if [ -z "$PGDATA_EXPLICIT" ]; then
 		if [ "$portmode" = up ]; then
 			PGDATA="$INSTANCE_DIR/pgdata"
@@ -684,9 +686,20 @@ cmd_up() {
 		# once it acquires the lock, so its rollback can only ever restore the winner's
 		# state — it can never wipe or orphan the running cluster the winner recorded.
 		snapshot_scoped_markers
+		# A plain scoped `up` (no explicit PGDATA) must RESUME the instance this
+		# scope recorded — which may be an explicit data dir a prior `up` was given —
+		# not fall back to the scoped default: `down` advertises a plain scoped `up`
+		# as the restart recipe, and a fallback would abandon the recorded cluster's
+		# data and start a fresh default cluster on the recorded port. Adopt the
+		# recorded dir from the snapshot just taken UNDER the uplock, so a
+		# concurrent same-scope `up` can never feed this one a stale marker.
+		if [ -z "$PGDATA_EXPLICIT" ] && [ -n "$PRIOR_DATADIR_CONTENT" ]; then
+			PGDATA="$PRIOR_DATADIR_CONTENT"
+		fi
 		# Orphan guard: if this scope ALREADY recorded a DIFFERENT data dir whose
-		# server is still running, a new explicit PGDATA (or a switch back to the scoped
-		# default after a prior explicit-PGDATA up) would start a SECOND server and
+		# server is still running, a new explicit PGDATA (one different from the
+		# recorded dir — a plain `up` adopts the recorded dir above and cannot
+		# trip this) would start a SECOND server and
 		# strand the prior one — scoped down/status resolve only the recorded markers,
 		# so the old server would never be stopped by scoped teardown. Refuse and
 		# require an explicit stop. This runs BEFORE any marker or reservation is

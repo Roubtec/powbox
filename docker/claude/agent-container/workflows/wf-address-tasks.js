@@ -224,6 +224,179 @@ function storageProbePrompt(wtBase) {
 Run \`df -B1 --output=avail ${JSON.stringify(wtBase)}\` (POSIX fallback: \`df -kP\`, avail column, times 1024) and return the mount's free bytes as \`availBytes\`. If the path is missing or \`df\` fails, return \`availBytes: 0\`.`;
 }
 
+// Non-destructive cleanliness report for the SHARED main checkout. Every task
+// runs in its own `.worktrees/$CONTAINER_NAME/<slug>` worktree, but the
+// repository's MAIN checkout is shared with any peer harness invoked in this
+// same container (Codex ↔ Claude) and with the user. Capturing porcelain status
+// at the Bootstrap and Summary boundaries lets the batch flag main-checkout dirt
+// WITHOUT ever modifying it — no stage/reset/clean/stash, and never a failure
+// merely because the user deliberately started dirty.
+const MAIN_CHECKOUT_SCHEMA = {
+  type: "object",
+  properties: {
+    dirty: { type: "array", items: { type: "string" }, description: "One `git status --porcelain -z --untracked-files=all` record per changed path in the shared MAIN checkout (never a worktree): the 2-char `XY` status field, a space, then the repo-relative path (current path for a rename/copy). `--untracked-files=all` means each untracked FILE is listed on its own rather than collapsed to its directory, so files under a pre-existing untracked directory stay attributable. The `XY` prefix is preserved verbatim so the summary can tell a status-code change apart from a brand-new path. Empty when clean; ignored paths like `.worktrees/` never appear." },
+    measured: { type: "boolean", description: "True only if `git status` ran in the main checkout and produced a definitive list. False when it could not be measured — then `dirty` is best-effort and must not be read as authoritative." },
+  },
+  required: ["dirty", "measured"],
+};
+
+function mainCheckoutStatusPrompt(when) {
+  return `Non-destructive cleanliness snapshot of the SHARED main checkout (${when}). OBSERVE ONLY — do NOT stage, commit, reset, clean, stash, or edit anything. This step must never modify the tree; a checkout that is already dirty (e.g. the user's own work-in-progress) is fine and must not be "fixed".
+
+Why: each task runs in its own \`.worktrees/$CONTAINER_NAME/<slug>\` worktree, but the repository's MAIN checkout is shared — a peer harness invoked in this container and the user both see it. Snapshotting its porcelain status at batch boundaries lets the summary report main-checkout dirt without touching it.
+
+From the MAIN checkout root — your current working directory; confirm with \`git rev-parse --show-toplevel\` and do NOT \`cd\` into any \`.worktrees/...\` worktree — run \`git status --porcelain -z --untracked-files=all\` (the \`-z\` form leaves paths unquoted, so parsing is unambiguous; \`--untracked-files=all\` lists every untracked FILE individually instead of collapsing them to their directory, so a file added or removed beneath a pre-existing untracked directory stays individually attributable at the next boundary). Split the output on NUL and return one entry per changed record in \`dirty\`, each the record's 2-character \`XY\` status field, a space, then the repo-relative path — e.g. \` M src/app.ts\`, \`?? notes.txt\`. Keep the \`XY \` prefix verbatim (its first column can be a space) so the summary can distinguish a status-code change from a new path. For a rename/copy record git emits the ORIGINAL path as a second NUL-separated field after the current one — keep only the current-path entry and drop that trailing original. Return an empty array when the checkout is clean, with \`measured: true\`. If git cannot run, the directory is a linked worktree rather than the main checkout, or the status is otherwise indeterminate, return \`measured: false\` with whatever \`dirty\` you have and do not fail.`;
+}
+
+// Compare the pre-batch baseline against the post-batch snapshot. Purely
+// descriptive: it classifies each path by whether it was already dirty before
+// the batch (`preexisting`), appeared during it (`newPaths`), or DISAPPEARED
+// during it (`disappeared`). When NO baseline was measured there is nothing to
+// diff against, so final dirt is neither `new` nor `preexisting` — it goes into
+// the neutral `unattributed` bucket and is never claimed to have appeared during
+// the batch. A vanished baseline path is the load-bearing
+// signal — the feature exists to surface possible destructive loss of user
+// work, so a baseline path that is gone by Summary (a `git reset`/`clean`/
+// `stash`, or an errant commit, could have taken someone's uncommitted work
+// with it) must be reported, never swallowed into a "clean" verdict.
+//
+// Comparison is by PATH, not by the full `XY path` porcelain line: a path whose
+// only change is its status code (` M f` → `MM f`) is the SAME pre-existing
+// path (recorded as a `transition`), not a brand-new one. It never claims the
+// new paths were agent-created (a concurrent peer harness or the user could
+// equally be the source), and never claims the batch AS A WHOLE left the
+// checkout untouched — only this report step is provably non-destructive; the
+// batch's other stages run in per-task worktrees but are not separately proven
+// to have stayed out of the main checkout. With no measured baseline it
+// declines to attribute anything.
+function mainCheckoutSummary(baseline, final) {
+  // Included in every note so the report can never read as having itself
+  // changed the checkout. Deliberately free of mutation verbs — the vanished
+  // note below DOES name reset/clean/stash, but only as hypothetical EXTERNAL
+  // causes, never as something this step did.
+  const OBSERVED = "This report only observed the checkout and changed nothing in it.";
+  // Finding: do not claim the WHOLE workflow was non-destructive — only the
+  // observation step is guaranteed so.
+  const OTHER_STAGES = "Other batch stages run in per-task worktrees and are not separately proven to have left the main checkout untouched.";
+
+  // Parse one porcelain record into { raw, status, path }. Prefer `-z` output
+  // (unquoted paths) upstream, but stay robust to plain porcelain: the leading
+  // 2-char XY status field must NOT be trimmed (its first column can be a
+  // space, e.g. " M"); a rename/copy record reads as `ORIG -> NEW`, so keep NEW
+  // (the current path); and a defensively-unquoted path covers the non-`-z`
+  // quoting case. A bare string with no XY prefix (index 2 is not a space) is
+  // treated as a whole path with empty status.
+  const parseEntry = (value) => {
+    const raw = String(value == null ? "" : value);
+    let status = "";
+    let path = raw;
+    if (raw.length > 3 && raw[2] === " ") {
+      status = raw.slice(0, 2);
+      path = raw.slice(3);
+    }
+    const arrow = path.indexOf(" -> ");
+    if (arrow !== -1) path = path.slice(arrow + 4);
+    if (path.length >= 2 && path[0] === '"' && path[path.length - 1] === '"') {
+      path = path.slice(1, -1);
+    }
+    return { raw, status, path };
+  };
+  // Drop empty records before parsing: the `-z` porcelain output ends in a
+  // NUL, so a naive split leaves a trailing "" — that is a split artifact, not
+  // a real path, and must never surface as a phantom "" entry in
+  // `newPaths`/`disappeared`.
+  const parseList = (arr) =>
+    Array.isArray(arr)
+      ? arr.filter((v) => String(v == null ? "" : v) !== "").map(parseEntry)
+      : [];
+
+  const baselineMeasured = !!(baseline && baseline.measured);
+  const baselineEntries = baselineMeasured ? parseList(baseline.dirty) : [];
+  const baselineByPath = new Map(baselineEntries.map((e) => [e.path, e]));
+
+  if (!final || !final.measured) {
+    return {
+      measured: false,
+      baselineKnown: baselineMeasured,
+      preexisting: baselineEntries.map((e) => e.raw),
+      newPaths: [],
+      disappeared: [],
+      unattributed: [],
+      transitions: [],
+      flagged: false,
+      note: `Post-batch main-checkout status could not be measured; cleanliness comparison skipped. ${OBSERVED} ${OTHER_STAGES}`,
+    };
+  }
+
+  const finalEntries = parseList(final.dirty);
+  const finalByPath = new Map(finalEntries.map((e) => [e.path, e]));
+
+  const preexistingEntries = baselineMeasured
+    ? finalEntries.filter((e) => baselineByPath.has(e.path))
+    : [];
+  // With a measured baseline, final dirt splits into `new` (absent at baseline)
+  // vs `preexisting`. With NO baseline there is nothing to diff, so it is
+  // neither — it lands in the neutral `unattributed` bucket, never `new` (which
+  // would falsely assert it appeared DURING the batch).
+  const newEntries = baselineMeasured
+    ? finalEntries.filter((e) => !baselineByPath.has(e.path))
+    : [];
+  const unattributedEntries = baselineMeasured ? [] : finalEntries.slice();
+  const disappearedEntries = baselineMeasured
+    ? baselineEntries.filter((e) => !finalByPath.has(e.path))
+    : [];
+  const transitions = preexistingEntries
+    .filter((e) => baselineByPath.get(e.path).status !== e.status)
+    .map((e) => ({ path: e.path, from: baselineByPath.get(e.path).status, to: e.status }));
+
+  const preexisting = preexistingEntries.map((e) => e.raw);
+  const newPaths = newEntries.map((e) => e.raw);
+  const disappeared = disappearedEntries.map((e) => e.raw);
+  const unattributed = unattributedEntries.map((e) => e.raw);
+
+  let note;
+  let flagged = false;
+  if (!baselineMeasured) {
+    if (finalEntries.length === 0) {
+      note = `Shared main checkout is clean. ${OBSERVED}`;
+    } else {
+      flagged = true;
+      note = `Shared main checkout was dirty at the final boundary (${finalEntries.length} path(s)), but no pre-batch baseline was captured, so there is nothing to attribute them against and they are NOT credited to this batch. ${OBSERVED} ${OTHER_STAGES} Inspect and clean up yourself if unexpected.`;
+    }
+  } else if (newPaths.length === 0 && disappeared.length === 0) {
+    if (finalEntries.length === 0) {
+      note = `Shared main checkout is clean and no pre-batch dirt disappeared. ${OBSERVED}`;
+    } else {
+      const trans = transitions.length ? ` — ${transitions.length} changed status code while staying dirty on the same path` : "";
+      note = `Shared main checkout dirt is unchanged from the pre-batch baseline (${preexisting.length} pre-existing path(s)${trans}); nothing new appeared and nothing pre-existing disappeared during the batch. ${OBSERVED}`;
+    }
+  } else {
+    flagged = true;
+    const parts = [];
+    if (newPaths.length) parts.push(`gained ${newPaths.length} new dirty path(s)`);
+    if (disappeared.length) parts.push(`LOST ${disappeared.length} path(s) that were dirty at the baseline`);
+    const newClause = newPaths.length
+      ? " New paths are attributed to no one in particular — a concurrent peer harness, the user, or a run that strayed from its worktree could each be the source."
+      : "";
+    const vanishClause = disappeared.length
+      ? " Vanished baseline dirt can mean that uncommitted work was committed, reset, cleaned, or stashed away — by the user, a peer harness, or a batch stage that strayed from its worktree; if unexpected, check the reflog/stash before assuming it is lost."
+      : "";
+    note = `Shared main checkout ${parts.join(" and ")} during the batch, alongside ${preexisting.length} pre-existing path(s).${newClause}${vanishClause} ${OBSERVED} ${OTHER_STAGES} Review before any cleanup.`;
+  }
+
+  return {
+    measured: true,
+    baselineKnown: baselineMeasured,
+    preexisting,
+    newPaths,
+    disappeared,
+    unattributed,
+    transitions,
+    flagged,
+    note,
+  };
+}
+
 function resolvePrompt(input) {
   return `You are scoping a batch of pre-planned task files for implementation. Do NOT implement anything.
 
@@ -273,7 +446,8 @@ Resolve your worktree with the image-baked helper and \`cd\` into it:
 \`wt-enter\` is rerun-safe: it reuses this task's existing worktree (prior commits intact)${mayCreate ? `, attaches the existing branch \`${task.branch}\` if its worktree is gone, or creates the branch off \`${task.base}\` if neither exists yet` : ` or re-attaches the existing branch \`${task.branch}\`; it deliberately CANNOT create the branch for this stage — if it errors that the branch does not exist, the implementation is missing`}. If the command fails, STOP and report its error verbatim — never improvise your own \`git worktree add\` or \`git switch\`.
 
 Then verify: \`git rev-parse --show-toplevel\` prints exactly \`$WT\` and \`git branch --show-current\` prints \`${task.branch}\`. If either is wrong, STOP and report.
-Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.`;
+Do ALL work inside WT only. Never \`cd\` to the repo root or touch sibling worktrees — other agents are working in their own worktrees concurrently.
+Scope every cleanup to WT (\`git -C "$WT" …\`) and commit checkpoints often. The container's main checkout and its \`.worktrees\` volume are SHARED — a peer harness or a sibling task may hold uncommitted work there — so never run \`git reset --hard\`, and especially not \`git clean -fdx\` (it ignores \`.gitignore\`, so it would also wipe the \`.worktrees\` scaffolding), against the shared main checkout to reclaim space.`;
 }
 
 function implementPrompt(task, round, findings, remote) {
@@ -502,6 +676,16 @@ if (!boot || !boot.ok) {
 // missing/undefined probe result must fall back to local-branch-only rather
 // than silently attempt a publish.
 const remote = boot.remote === true;
+
+// Pre-batch baseline of the SHARED main checkout (see MAIN_CHECKOUT_SCHEMA).
+// Observation only — a dirty start is the user's prerogative and never blocks
+// the batch; a null/unmeasured result just means the Summary report cannot
+// attribute post-batch dirt to this run.
+const mainCheckoutBaseline = await agent(mainCheckoutStatusPrompt("pre-batch baseline"), {
+  label: "main-checkout-baseline",
+  schema: MAIN_CHECKOUT_SCHEMA,
+  effort: "low",
+});
 
 phase("Resolve batch");
 const plan = await agent(resolvePrompt(args), { label: "resolve", schema: PLAN_SCHEMA });
@@ -800,6 +984,27 @@ for (let w = 0; w < plan.waves.length; w++) {
 }
 
 phase("Summary");
+// Post-batch snapshot of the shared main checkout, compared against the baseline.
+// This report step is non-destructive: it only reports dirt — distinguishing
+// pre-existing from newly-appeared paths and, crucially, from baseline paths
+// that DISAPPEARED (a possible destructive loss) — and never modifies, resets,
+// or fails on it. It does not vouch for the batch's other stages.
+const mainCheckoutFinal = await agent(mainCheckoutStatusPrompt("post-batch"), {
+  label: "main-checkout-final",
+  schema: MAIN_CHECKOUT_SCHEMA,
+  effort: "low",
+});
+const mainCheckout = mainCheckoutSummary(mainCheckoutBaseline, mainCheckoutFinal);
+// Log flagged dirt AND the not-measured outcome: a skipped comparison is easy
+// to miss if only `flagged` reports surface, and its note says exactly why the
+// cleanliness check has nothing authoritative this run.
+if (mainCheckout.flagged || !mainCheckout.measured) {
+  const details = [];
+  if (mainCheckout.newPaths.length) details.push(`new: ${mainCheckout.newPaths.join(", ")}`);
+  if (mainCheckout.disappeared.length) details.push(`disappeared: ${mainCheckout.disappeared.join(", ")}`);
+  if (mainCheckout.unattributed.length) details.push(`unattributed: ${mainCheckout.unattributed.join(", ")}`);
+  log(`${mainCheckout.note}${details.length ? ` [${details.join("; ")}]` : ""}`);
+}
 const landed = results.filter((r) => r.status === "done").length;
 log(`Batch complete: ${landed}/${results.length} tasks landed a PR.`);
-return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, results };
+return { batch: args, defaultBase: plan.defaultBase, remote, waves: plan.waves.length, throttled, collisions, mainCheckout, results };

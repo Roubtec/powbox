@@ -504,11 +504,15 @@ one *worse* than described fails the smoke.
    binary (`/pause`) never exits, so the service is "never healthy" whether the check
    is the broken shell wrap *or* a correctly preserved exec form — that outcome cannot
    tell broken from fixed. So the XFAIL keys on signals that actually differ:
-   - **Broken-vs-fixed (primary):** the wired `.Config.Healthcheck.Test`. A
-     `CMD-SHELL` / `/bin/sh -c …` wrap is the mistranslation and keeps the run **green**
-     as the expected XFAIL; a **preserved `CMD` exec form** is the true "provider
-     fixed" signal and **self-clears loudly** to a `NOTE` — independent of whether the
-     check binary ever exits.
+   - **Broken-vs-fixed (primary):** the wired `.Config.Healthcheck.Test`, compared
+     against the two exact expected arrays. The exact wrap
+     `["CMD-SHELL","/bin/sh -c /pause"]` is the mistranslation and keeps the run
+     **green** as the expected XFAIL; the exact **preserved `["CMD","/pause"]` exec
+     form** is the true "provider fixed" signal and **self-clears loudly** to a `NOTE`
+     — independent of whether the check binary ever exits. Any other translated array
+     (mangled command, wrong binary, or extra tokens) matches neither literal and
+     **hard-fails** as an unexpected form rather than being silently classified as
+     XFAIL or NOTE.
    - **Cause isolation:** the smoke proves the break is the *missing `/bin/sh`*, not an
      absent check binary and not the never-exiting one. Podman 5.x does not record
      crun's exec error in `.State.Health.Log[].Output` (it is empty), so the smoke

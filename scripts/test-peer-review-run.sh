@@ -41,8 +41,10 @@ set -uo pipefail
 #       reach it; the test asserts the by-default guarantee without pretending the
 #       nesting is traversal-proof), anchored verdict + ISSUES-precedence (no
 #       example-token false-pass; a MIXED verdict line — pass token then issue
-#       token, e.g. "APPROVED, CHANGES REQUIRED" — resolves to issues, while
-#       negated pass language like "no issues found" still passes), and the
+#       token, e.g. "APPROVED, CHANGES REQUIRED", including one whose pass token
+#       is itself a negated alias, "NO ISSUES, CHANGES REQUIRED" — resolves to
+#       issues, while negated pass language like "no issues found" still
+#       passes), and the
 #       read-only tool-set / no-persistence flags for both providers (Claude
 #       restricted to native read tools passed one-rule-per-argv-element, no
 #       Bash; Codex config/hook isolation — --ignore-user-config /
@@ -916,6 +918,48 @@ emit_verdict_case "$d" "VERDICT: PASS (the API surface is unchanged)"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11d: 'PASS (… unchanged)' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+
+# ...and further negated-phrase pass shapes stay passes: the scrub tolerates one
+# intervening word ("no blocking changes") and the other negation words ("zero").
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASSED with no blocking changes"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'PASSED with no blocking changes' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS with zero failures"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'PASS with zero failures' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+
+# (vi) A `no issues`-style alias AT the verdict value is the pass token there —
+# the negation scrub must not delete it and hide a mixed line: an issue token
+# following it on the same line must resolve to issues, never a false pass.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: NO ISSUES, CHANGES REQUIRED"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11d: 'NO ISSUES, CHANGES REQUIRED' never passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: 'NO ISSUES, CHANGES REQUIRED' → issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+
+# ...while the alias stays a real pass when nothing mixed follows it — bare, with
+# trailing prose, or with a further NEGATED issue phrase (still pass language).
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: NO ISSUES"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: bare 'VERDICT: NO ISSUES' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: bare 'VERDICT: NO ISSUES' → verdict pass" "$(jqf "$RUN_RESULT" .verdict)" pass
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: no issues found"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'no issues found' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: NO ISSUES - no changes needed"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'NO ISSUES - no changes needed' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 
 # 11e: read-only / no-persistence flag set is locked in for both providers. (The
 # real write/read enforcement is the provider's own sandbox and is verifiable

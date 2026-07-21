@@ -631,10 +631,16 @@ detect_verdict() {
 	# word merely containing one (`unchanged`) cannot trip it, and NEGATED phrases
 	# ("no issues", "no blocking changes" — themselves pass language) are scrubbed
 	# from the scanned copy first so `VERDICT: PASS — no issues found` stays a
-	# pass; the pass check (c) below still runs on the ORIGINAL text.
+	# pass; the pass check (c) below still runs on the ORIGINAL text. BEFORE that
+	# scrub, a `no issues`-style alias sitting AT the verdict value — where it IS
+	# the pass token — is canonicalized to a literal `pass`, so the scrub cannot
+	# delete the verdict's own pass token and hide a mixed line from this scan:
+	# `VERDICT: NO ISSUES, CHANGES REQUIRED` must resolve to issues here, while a
+	# bare `VERDICT: NO ISSUES` (nothing mixed to find) still passes via (c).
 	local nb='[^[:alnum:]_]'
 	local scrubbed
 	scrubbed="$(printf '%s\n' "$text" |
+		sed -E "s/(${anchor})no[[:space:]_-]*issues?(${rb})/\\1pass\\2/I" |
 		sed -E "s/(^|${nb})(no|zero|without)([[:space:]_-]+[[:alnum:]]+)?[[:space:]_-]+(issues?|changes?|blockers?|blocking|problems?|failures?)/\\1/gI")"
 	if printf '%s\n' "$scrubbed" | grep -Eiq "${anchor}${pass}(${nb}.*)?${nb}${issue}${rb}"; then
 		echo issues

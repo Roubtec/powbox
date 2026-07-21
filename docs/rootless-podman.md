@@ -433,6 +433,114 @@ On trixie (Podman 5.4.2) all four forms work: `podman compose …` (native
 subcommand) and `docker compose …` (via the shim) both delegate to
 `podman-compose` (now v1.3.0), and `podman-compose`/`docker-compose` work directly.
 
+## Compose health-check behavior (exec-form checks; validated scope)
+
+**Validated command/provider (2026-07):** a Compose service defined with an
+**exec-form** health check (`healthcheck.test: ["CMD", "/bin/true"]`, the shape
+distroless images need) is exercised by the Podman smoke via `docker compose`
+(the shim spelling agents are expected to use). `docker compose` and
+`podman compose` are the **same path** here — both route to the `podman-compose`
+1.3 provider — so the smoke tests the one canonical spelling agents use rather
+than advertising two that could diverge. The smoke does five things that each
+**fail clearly**: it asserts the exec-form check is wired onto the service; it
+**inspects and classifies the translation** Compose applied
+(`.Config.Healthcheck.Test[0]`); it drives the check and asserts the alpine service
+reaches **`healthy`**; it runs a never-succeeding **negative-control** service that
+must be **driven to `unhealthy`**; and it stands up a third, genuinely **shell-less
+(distroless)** service that actively reproduces the Kalm2 break as a documented
+**XFAIL** (see limitation #2). So it fails if Compose drops the check, mangles the
+exec array beyond the known wrap, or leaves the alpine/negative-control services in
+the wrong health state.
+
+Two behaviors are limitations of this sandbox. They are not silently accepted: the
+smoke actively **detects and reports** each one, so a future reader (and CI log)
+sees the exact condition rather than trusting prose — and a change that makes either
+one *worse* than described fails the smoke.
+
+1. **No automatic health-state transition (no systemd).** Podman schedules the
+   *periodic* health check through a systemd transient timer. This container runs
+   `cgroup_manager=cgroupfs` with no systemd (`/run/systemd/system` is absent), so
+   nothing ever fires the check on its own and a service's health status stays at
+   `starting` indefinitely — this is true even for a plain
+   `podman run --health-cmd …`, not just Compose, and even for a shell-bearing
+   image. The supported trigger in this environment is to run the check explicitly:
+   `podman healthcheck run <container>` executes the wired command once and
+   propagates the result to `healthy`/`unhealthy`. The smoke therefore *drives* the
+   check with `podman healthcheck run` and then asserts propagation to `healthy`.
+   Because driving the check could otherwise *mask* a service that would sit at
+   `starting`, the smoke pairs the positive service with a **negative control**: a
+   second service whose exec-form check runs `/bin/false`, driven the exact same way,
+   which must be **driven to `unhealthy`** — not merely fail to reach `healthy`.
+   Requiring the terminal-failure state (Podman flips to `unhealthy` only after the
+   `start_period` elapses *and* `retries` consecutive failures) proves the check was
+   genuinely wired and executed, so a never-wired check left at `starting` cannot pass
+   the control vacuously. That makes the positive `healthy` assertion non-vacuous — it
+   can catch a service Compose leaves perpetually at `starting`. Projects that rely on
+   a Compose service's own health state (e.g. a `depends_on: { condition:
+   service_healthy }`) should account for this: without systemd the dependency gate
+   will not advance on its own.
+2. **`podman-compose` 1.3 shell-wraps the exec form.** An exec-form test
+   `["CMD", "/bin/true"]` is translated to `["CMD-SHELL", "/bin/sh -c /bin/true"]`,
+   i.e. it is run through `/bin/sh`. A shell-bearing image (Alpine, Debian) runs it
+   fine; a **distroless** image with no `/bin/sh` cannot, so the wrapped command
+   fails and the service never goes `healthy` — exactly the Kalm2 SPIRE-overlay
+   symptom that motivated this check. The smoke does not paper over this: it inspects
+   the wired check and, when it finds the rewrite, emits a loud **`KNOWN-XFAIL`**
+   diagnostic naming the exact translated array (so the regression is visible in the
+   run, not just in this doc). It only **fails** if the exec form is dropped or
+   mangled *beyond* that known wrap (the intended binary did not survive), and it
+   emits a **`NOTE`** instead if a future `podman-compose` stops wrapping (at which
+   point this limitation, and the workarounds below, can be revisited). Until the
+   provider stops wrapping the exec form, give a distroless service a health-check
+   binary reachable through a shell, or ship a minimal shell, or run the check binary
+   as the container command and gate on liveness another way.
+
+   Because alpine *has* `/bin/sh`, its check still reaches `healthy` despite the wrap,
+   so the alpine service alone never exercises the path that actually broke. The smoke
+   therefore adds a third, genuinely **shell-less** service (a stock
+   `registry.k8s.io/pause` image, no `/bin/sh`) with the same exec-form check shape to
+   **actively reproduce** the distroless break. The discriminator is deliberately the
+   **translated form plus the failure reason, not a never-healthy outcome**: the check
+   binary (`/pause`) never exits, so the service is "never healthy" whether the check
+   is the broken shell wrap *or* a correctly preserved exec form — that outcome cannot
+   tell broken from fixed. So the XFAIL keys on signals that actually differ:
+   - **Broken-vs-fixed (primary):** the wired `.Config.Healthcheck.Test`, compared
+     against the two exact expected arrays. The exact wrap
+     `["CMD-SHELL","/bin/sh -c /pause"]` is the mistranslation and keeps the run
+     **green** as the expected XFAIL; the exact **preserved `["CMD","/pause"]` exec
+     form** is the true "provider fixed" signal and **self-clears loudly** to a `NOTE`
+     — independent of whether the check binary ever exits. Any other translated array
+     (mangled command, wrong binary, or extra tokens) matches neither literal and
+     **hard-fails** as an unexpected form rather than being silently classified as
+     XFAIL or NOTE.
+   - **Cause isolation:** the smoke proves the break is the *missing `/bin/sh`*, not an
+     absent check binary and not the never-exiting one. Podman 5.x does not record
+     crun's exec error in `.State.Health.Log[].Output` (it is empty), so the smoke
+     re-runs the wrap's shell directly with `podman exec … /bin/sh` and captures the
+     reason: `executable file /bin/sh not found`. Since the `/pause` binary *is*
+     present (it is the image entrypoint), that pins the shell wrap as the cause.
+
+   Together these keep the run **green** on `podman-compose` 1.3 and let a follow-up
+   (task 025a) raise the XFAIL to a hard failure keyed on the preserved-`CMD`
+   exec-form inspection — *not* on "reaches healthy", which the never-exiting `/pause`
+   probe can never satisfy. If the shell-less image cannot be pulled (registry
+   unreachable) the smoke **skips just that scenario** with a visible reason and
+   surfaces it in the umbrella banner — never a false pass, and never a hard failure on
+   a pull outage; the alpine positive test and the `/bin/false` negative control still
+   run.
+
+The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
+throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project (up to
+three services) and removes only that directory on success or failure. Its scope is
+Compose exec-array translation and health-state propagation on a shell-bearing image
+(Alpine) plus the shell-less distroless reproduction above — not a general Compose
+conformance suite. `scripts/test-podman-compose-healthcheck.sh` is the hermetic,
+image-free guard that locks the probe's invariants (exec form, the
+translation-detection classifier, the `healthy` assertion plus the driven-to-`unhealthy`
+negative control, the distroless wrap-detection + `/bin/sh`-missing cause isolation
+with its self-clearing `NOTE` on a preserved `CMD` exec form and its pull-failure skip,
+cleanup, and Bash/PowerShell parity).
+
 Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
 container before committing — all candidates resolve): `FROM node:24-trixie-slim`;
 `php8.2-*` → `php8.4-*`; **Microsoft repo via the official
@@ -519,13 +627,17 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
   validation prompt above: engine sanity (rootless, `cgroupfs`, `netavark`, the
   `firewall_driver=iptables` drop-in, subuid/subgid, the `podman compose`
   subcommand that the trixie bump exists for), a nested run on the default network
-  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), and a bridge
+  (proves seccomp + `/dev/net/tun` + the `ping_group_range` sysctl), a bridge
   network with a published port (proves the iptables firewall driver + the
-  `route_localnet` sysctl `systempaths=unconfined` unblocks). It mirrors the
+  `route_localnet` sysctl `systempaths=unconfined` unblocks), and a **Compose
+  exec-form health check** reaching `healthy` through `docker compose` (proves the
+  provider translates the `["CMD", …]` exec array to a runnable check and that
+  health state propagates — see **Compose health-check behavior** above for the
+  no-systemd/exec-wrap limitations the check works around). It mirrors the
   launcher's `POWBOX_PODMAN` gate. The probe has two halves: the device-free
   engine-wiring checks (engine present, the drop-in, `podman info`, the `compose`
-  subcommand) run on **every** host, and the nested-run/published-port checks
-  **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
+  subcommand) run on **every** host, and the nested-run/published-port/Compose-
+  health-check checks **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
   default `auto`, where `POWBOX_PODMAN=on` forces the full run. So an environment
   that simply cannot do nested networking is not failed, but a genuinely broken
   image (missing engine, dropped drop-in) **fails** the stage on any host — a

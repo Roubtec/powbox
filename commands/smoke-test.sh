@@ -117,6 +117,33 @@ else
 	skipped+=("Stage 0d: worktree orphan-safety baked-helper test (image absent)")
 fi
 
+# Stage 0e — Podman Compose exec-form health-check probe invariants (task 025).
+# Hermetic guard for scripts/smoke-test-podman.sh's Compose health-check block: it
+# parses the embedded fixture with yq and asserts the health check stays an EXEC-form
+# CMD array (not CMD-SHELL), that the probe INSPECTS+classifies the wired translation
+# (so a CMD->CMD-SHELL rewrite is a detected KNOWN-XFAIL, not a silent pass), that it
+# drives the check and requires "healthy" while a never-succeeding negative control
+# must be driven to exactly terminal "unhealthy" (not merely "not healthy"), that cleanup
+# tears down the project + only the temp dir, and
+# that the Bash/PowerShell probes stay in parity — the load-bearing bits that a plain
+# edit could silently neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
+# not a baked artifact), so a host run suffices — but it needs the jq-backed
+# `yq -r <filter>` interface (python-yq). Prefer the in-image run (that yq is
+# guaranteed in the agent image) when the image is present; else fall back to a host
+# run only when the test's own `--check-yq` capability probe passes — not a bare
+# `command -v yq`, because an incompatible host implementation (e.g. mikefarah's Go
+# yq v3) would fail the smoke spuriously instead of recording a skip — else skip.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running Podman Compose health-check probe unit test (in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-podman-compose-healthcheck.sh
+elif "${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh" --check-yq >/dev/null 2>&1; then
+	echo "Running Podman Compose health-check probe unit test (host source — image '$IMAGE' absent) ..."
+	"${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh"
+else
+	echo "WARNING: skipping Podman Compose health-check probe unit test (Stage 0e) — image '$IMAGE' absent and no compatible host 'yq' (the jq-backed 'yq -r <filter>' interface is needed to parse the embedded fixture)."
+	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -245,7 +272,8 @@ fi
 # Stage 3 — rootless Podman engine: the agent image bakes podman + a docker shim
 # (docs/rootless-podman.md). This is the automated guard that follow-up asked for —
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in,
-# a Podman without the `compose` subcommand, a nested run that no longer starts) is
+# a Podman without the `compose` subcommand, a nested run that no longer starts, or
+# a Compose exec-form health check that no longer reaches healthy) is
 # caught here. The helper runs the image with the launch-time device + security
 # wiring the launcher normally supplies via the compose overlays. On a host that
 # cannot expose /dev/net/tun it still validates the static engine wiring and skips
@@ -265,12 +293,26 @@ else
 	# — the child evaluates the same host /dev/net/tun condition before its docker
 	# run, so the two agree. The child still prints the skip message; we track it here.
 	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
-	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
+	# The child self-skips one nested scenario at RUNTIME — the distroless (shell-less)
+	# Compose XFAIL reproduction, when its image cannot be pulled — which the parent
+	# cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
+	# there and we surface it in the banner so the partial coverage is not hidden.
+	podman_marker="$(mktemp "${TMPDIR:-/tmp}/powbox-smoke-podman-skip.XXXXXX")"
+	# Remove the marker even if the child smoke FAILS: under `set -e` a non-zero child
+	# exit aborts this script before the rm below, so a plain trailing rm would leak the
+	# temp file on failure. The trap fires on EXIT (success or failure); it is cleared
+	# once the marker is consumed so later stages' EXIT handling is untouched.
+	trap 'rm -f "$podman_marker"' EXIT
+	POWBOX_SMOKE_SKIP_MARKER="$podman_marker" "${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 	if [ "$podman_gate" = "off" ]; then
 		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
 	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
 		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
+	elif [ -s "$podman_marker" ]; then
+		skipped+=("Stage 3: $(cat "$podman_marker")")
 	fi
+	rm -f "$podman_marker"
+	trap - EXIT
 fi
 
 # Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's

@@ -230,15 +230,21 @@ case "$ARTIFACT_ROOT" in
 /*) ;;
 *) die_usage "--artifact-root must be an absolute path (got '$ARTIFACT_ROOT')" ;;
 esac
-mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-root '$ARTIFACT_ROOT'"
-ARTIFACT_ROOT="$(realpath -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
+# Resolve the artifact root WITHOUT creating anything (`realpath -m` canonicalizes
+# through existing symlinks and tolerates missing trailing components), so the
+# containment check below can run BEFORE any mkdir. This matters: creating the dir
+# first and rejecting after would MUTATE the read-only review target by leaving a
+# directory inside the worktree for a rejected in-worktree root.
+ARTIFACT_ROOT="$(realpath -m -- "$ARTIFACT_ROOT")" || die_usage "cannot resolve --artifact-root"
 # The artifact root must live OUTSIDE the worktree: a read-only provider rooted
 # at the worktree must not be able to see attempt artifacts, and sibling
 # attempts stay isolated (0700). Rooting artifacts under the worktree would
-# leak them into the review surface.
+# leak them into the review surface. Checked before mkdir so a rejected root is
+# never created inside the worktree.
 case "$ARTIFACT_ROOT/" in
 "$WORKTREE/"*) die_usage "--artifact-root must be OUTSIDE --worktree (got '$ARTIFACT_ROOT' under '$WORKTREE')" ;;
 esac
+mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-root '$ARTIFACT_ROOT'"
 
 # Sibling-attempt isolation. All attempt dirs share ONE Unix owner, so 0700 keeps
 # OTHER users out but does NOT stop this owner's read-only provider from reading a
@@ -695,7 +701,12 @@ esac
 live_json=false
 [ "$LIVE" = 1 ] && live_json=true
 
-jq -nc \
+# Emitting this single JSON object IS the helper's contract with the caller — if
+# jq cannot produce it, the run has no parseable result, so fail as an OPERATIONAL
+# error (non-zero) rather than exiting 0 with no/garbled output that a caller might
+# misread. All inputs here are already validated/normalized, so this is a
+# belt-and-suspenders guard.
+if ! jq -nc \
 	--arg schema "$SCHEMA" \
 	--arg provider "$PROVIDER" \
 	--arg outcome "$ATT_OUTCOME" \
@@ -707,6 +718,9 @@ jq -nc \
 	--argjson liveProgress "$live_json" \
 	--arg artifactDir "$ATTEMPT_DIR" \
 	--arg reason "$ATT_REASON" \
-	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,artifactDir:$artifactDir,reason:$reason}'
+	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,artifactDir:$artifactDir,reason:$reason}'; then
+	echo "peer-review-run: internal error — could not emit the result JSON" >&2
+	exit 70
+fi
 
 exit 0

@@ -508,6 +508,13 @@ chmod +x "$d/bin/codex"
 run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" --artifact-root "$d/wt/inside" --timeout 5
 assert_eq "10a: artifact-root inside worktree rejected (exit 64)" "$RUN_RC" 64
 assert_contains "10a: explains the containment error" "$RUN_ERR" "OUTSIDE"
+# The rejection must NOT have mutated the read-only review target: the rejected
+# in-worktree artifact-root is never created (containment is checked before mkdir).
+checks=$((checks + 1))
+if [ -e "$d/wt/inside" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [10a: rejected in-worktree root not created]: %s exists\n' "$d/wt/inside" >&2
+fi
 
 # 10b: unknown provider rejected.
 d="$(new_case)"

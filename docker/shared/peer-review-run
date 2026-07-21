@@ -73,10 +73,13 @@ die_usage() {
 # --- process-group supervision ----------------------------------------------
 # The currently supervised job's leader pid and validated process-group id. The
 # EXIT/INT/TERM trap reaps the tree so a helper interrupted mid-review never
-# leaves a live peer process. CURRENT_PGID is set ONLY after we confirm the child
-# is the leader of its own group (pgid == leader pid); it stays empty otherwise
-# so we never send a negative-PID (whole-group) signal against an unvalidated —
-# possibly the helper's own — process group.
+# leaves a live peer process. CURRENT_LEADER is assigned IMMEDIATELY after each
+# spawn ($!) — before the start-time read, the captured-set seed, and the PGID
+# probe — so the trap already knows the leader during that setup window.
+# CURRENT_PGID is set ONLY after we confirm the child is the leader of its own
+# group (pgid == leader pid); it stays empty otherwise so we never send a
+# negative-PID (whole-group) signal against an unvalidated — possibly the
+# helper's own — process group.
 CURRENT_LEADER=""
 CURRENT_PGID=""
 # Set to 1 if reap_tree ever reports a survivor after SIGKILL, so the returned
@@ -518,6 +521,15 @@ codex_supports() {
 		(exec timeout -k 5 10 codex exec --help \
 			>"$SESSION_DIR/codex-exec-help.txt" 2>&1 </dev/null) &
 		probe_child=$!
+		# Register the probe with the EXIT trap IMMEDIATELY, mirroring the
+		# attempt launch (see run_attempt for the full ordering rationale):
+		# leader first with an EMPTY pgid — the trap then falls back to the
+		# fail-safe captured-set sweep, never an unvalidated group signal —
+		# captured-set seed next, validated pgid last, so the ps probe below
+		# runs fully covered. The signal window between $! and this assignment
+		# is the irreducible residual.
+		CURRENT_LEADER="$probe_child"
+		CURRENT_PGID=""
 		set +m
 		probe_lead="$(proc_starttime "$probe_child" || true)"
 		CAPTURED_DESC=" ${probe_child}:${probe_lead} "
@@ -529,7 +541,6 @@ codex_supports() {
 		elif [ "$probe_pgid" != "$probe_child" ]; then
 			probe_pgid=""
 		fi
-		CURRENT_LEADER="$probe_child"
 		CURRENT_PGID="$probe_pgid"
 		probe_t0=$(date +%s.%N)
 		while kill -0 "$probe_child" 2>/dev/null; do
@@ -846,6 +857,22 @@ run_attempt() {
 	set -m
 	(cd "$WORKTREE" && exec "${CMD[@]}" <"$dir/prompt.txt" >"$out" 2>"$err") &
 	child=$!
+	# Register the leader with the EXIT trap IMMEDIATELY — before the start-time
+	# read, the captured-set seed, and the PGID probe below — so a TERM/INT
+	# landing during that setup still lets on_exit reap the child instead of
+	# leaking it (on_exit is gated on CURRENT_LEADER). CURRENT_PGID stays EMPTY
+	# until the group is validated: an empty pgid makes the trap's reap skip
+	# group signalling and rely on the start-time-verified captured-set sweep
+	# alone — fail-safe, it can never signal an unowned group. Ordering within
+	# the setup window, safest first: leader registration (arms the trap), then
+	# the captured-set seed (it is what the empty-pgid sweep actually signals;
+	# until it lands, a trap firing no-ops over the previous, already-reaped
+	# set — pid_matches skips every dead or recycled entry), then the PGID
+	# probe — the slowest step, a ps fork — which thus runs fully covered by
+	# both. Residual, irreducible in shell: a signal arriving between $! and
+	# this very next assignment still predates the trap's knowledge.
+	CURRENT_LEADER="$child"
+	CURRENT_PGID=""
 	set +m
 	# Seed the fresh per-attempt captured set with the leader's launch-time
 	# identity IMMEDIATELY: every later live walk (capture_descendants) verifies
@@ -874,7 +901,6 @@ run_attempt() {
 	elif [ "$pgid" != "$child" ]; then
 		pgid=""
 	fi
-	CURRENT_LEADER="$child"
 	CURRENT_PGID="$pgid"
 
 	# Poll: forward progress and enforce the deadline. On the deadline we only flag

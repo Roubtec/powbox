@@ -24,11 +24,14 @@ set -uo pipefail
 #   (8) retry policy is a TRANSIENT ALLOWLIST — a POSITIVELY transient failure
 #       (network/5xx/timeout) is retried ONCE with a NEW attempt dir and recovers;
 #       two transient failures → failed (retry exhausted); a deterministic
-#       bad-flag/usage failure is NOT retried; and an UNCLASSIFIED non-zero exit
-#       (no transient signal) is NOT retried either (8d)
+#       bad-flag/usage failure is NOT retried; an UNCLASSIFIED non-zero exit
+#       (no transient signal) is NOT retried either (8d); and elapsedSeconds is
+#       the TOTAL across both attempts, not the final attempt alone (8e)
 #   (9) codex without --json support → buffered (liveProgress:false), still runs
 #  (10) containment/usage — artifact-root inside the worktree rejected, bad
-#       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir
+#       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir,
+#       and an invalid --timeout exits 64 BEFORE the session dir is created
+#       (a usage error never litters the artifact root)
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
 #       descendant escalated to KILL and actually dies, sibling isolation proven
 #       BEHAVIORALLY AND HONESTLY (a fake provider probes a sibling's planted
@@ -37,11 +40,16 @@ set -uo pipefail
 #       artifact-root where a same-UID reader with no mount-namespace sandbox CAN
 #       reach it; the test asserts the by-default guarantee without pretending the
 #       nesting is traversal-proof), anchored verdict + ISSUES-precedence (no
-#       example-token false-pass), and the read-only tool-set / no-persistence
-#       flags for both providers (Claude restricted to native read tools passed
-#       one-rule-per-argv-element, no Bash; Codex config/hook isolation —
-#       --ignore-user-config / --ignore-rules / --disable hooks — asserted
-#       present when the CLI advertises them, omitted when not, see case 9)
+#       example-token false-pass; a MIXED verdict line — pass token then issue
+#       token, e.g. "APPROVED, CHANGES REQUIRED" — resolves to issues, while
+#       negated pass language like "no issues found" still passes), and the
+#       read-only tool-set / no-persistence flags for both providers (Claude
+#       restricted to native read tools passed one-rule-per-argv-element, no
+#       Bash; Codex config/hook isolation — --ignore-user-config /
+#       --ignore-rules / --disable hooks / --ask-for-approval never — asserted
+#       present when the CLI advertises them, omitted when not (see case 9),
+#       with the version-independent -c approval_policy=never and
+#       -c project_doc_max_bytes=0 overrides passed unconditionally)
 #  (12) FAIL-SAFE unvalidated-PGID fallback: a captured descendant PID whose
 #       baseline /proc start time was empty/unreadable at capture is treated as
 #       NON-matching — never counted alive, never signalled — so a recycled PID
@@ -178,6 +186,11 @@ assert_eq "1: attempts 1" "$(jqf "$RUN_RESULT" .attempts)" 1
 assert_contains "1: codex read-only sandbox" "$(cat "$d/argv")" "--sandbox
 read-only"
 assert_contains "1: codex mcp disabled" "$(cat "$d/argv")" "mcp_servers={}"
+# Version-independent -c overrides ride unconditionally: approvals can never
+# stall a headless run, and the reviewed worktree's AGENTS.md is not read as
+# instructions (the code under review must not steer its own reviewer).
+assert_contains "1: codex approvals forced off" "$(cat "$d/argv")" "approval_policy=never"
+assert_contains "1: codex project docs (AGENTS.md) disabled" "$(cat "$d/argv")" "project_doc_max_bytes=0"
 assert_contains "1: codex --json when supported" "$(cat "$d/argv")" "--json"
 assert_contains "1: codex --cd worktree" "$(cat "$d/argv")" "$d/wt"
 assert_contains "1: prompt read from stdin (argv has -)" "$(cat "$d/argv")" "-"
@@ -500,6 +513,35 @@ assert_eq "8d: NOT retried (unknown is not transient)" "$(jqf "$RUN_RESULT" .att
 assert_eq "8d: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 assert_eq "8d: exitStatus preserved" "$(jqf "$RUN_RESULT" .exitStatus)" 5
 
+# 8e: elapsedSeconds on a retried run is the TOTAL across BOTH attempts, not the
+# final attempt overwritten in place. Each fake attempt sleeps ≥0.6s, so two
+# attempts must report ≥1.1s — a single final-attempt value (~0.6s) would fail.
+# (Lower-bound only: sleep never returns early, so this cannot flake fast.)
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+sleep 0.6
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "8e: transient recovers → passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "8e: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
+elapsed="$(jqf "$RUN_RESULT" .elapsedSeconds)"
+checks=$((checks + 1))
+if ! awk -v e="$elapsed" 'BEGIN{exit !(e>=1.1)}'; then
+	fails=$((fails + 1))
+	printf 'FAIL [8e: elapsedSeconds totals both attempts]: got %s, want >= 1.1\n' "$elapsed" >&2
+fi
+unset MARK
+
 # ============================================================================
 # (9) codex WITHOUT --json support → buffered, still runs (liveProgress false)
 # ============================================================================
@@ -526,6 +568,11 @@ assert_not_contains "9: --json omitted when unsupported" "$(cat "$d/argv")" "--j
 assert_not_contains "9: --ignore-user-config omitted when unsupported" "$(cat "$d/argv")" "--ignore-user-config"
 assert_not_contains "9: --ignore-rules omitted when unsupported" "$(cat "$d/argv")" "--ignore-rules"
 assert_not_contains "9: --disable hooks omitted when unsupported" "$(cat "$d/argv")" "--disable"
+assert_not_contains "9: --ask-for-approval omitted when unsupported" "$(cat "$d/argv")" "--ask-for-approval"
+# The -c overrides are NOT probed flags: they must survive an older CLI too
+# (an unrecognized config key is ignored without --strict-config).
+assert_contains "9: approval_policy=never still passed on an older CLI" "$(cat "$d/argv")" "approval_policy=never"
+assert_contains "9: project_doc_max_bytes=0 still passed on an older CLI" "$(cat "$d/argv")" "project_doc_max_bytes=0"
 unset ARGV_LOG
 
 # ============================================================================
@@ -587,6 +634,15 @@ if [ ! -f "$adir/prompt.txt" ]; then
 	printf 'FAIL [10e: prompt copied into attempt dir]: %s/prompt.txt missing\n' "$adir" >&2
 fi
 assert_eq "10e: copied prompt is the literal prompt" "$(cat "$adir/prompt.txt")" "Please review the diff and end with a VERDICT line."
+
+# 10g: an invalid --timeout is a usage error (exit 64) that must be caught
+# BEFORE the session dir is created — an argument error must not litter the
+# artifact root with an empty prr-* directory.
+d="$(new_case)"
+run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" --artifact-root "$d/artifacts" --timeout nope
+assert_eq "10g: invalid --timeout rejected (exit 64)" "$RUN_RC" 64
+leftover="$(find "$d/artifacts" -mindepth 1 | wc -l | tr -d ' ')"
+assert_eq "10g: no session dir created on a usage error" "$leftover" 0
 
 # 10f: -h prints usage and exits 0.
 d="$(new_case)"
@@ -828,6 +884,39 @@ run "$d" $(std_args "$d" claude)
 assert_eq "11d: bare 'VERDICT: PASS' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_eq "11d: bare 'VERDICT: PASS' → verdict pass" "$(jqf "$RUN_RESULT" .verdict)" pass
 
+# (iv) A MIXED verdict line — an approval token followed by an issue token on the
+# SAME line, beyond the `|`/`/` template separators — must resolve to issues,
+# never pass: the verdict value is scanned as a whole.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: APPROVED, CHANGES REQUIRED"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11d: 'APPROVED, CHANGES REQUIRED' never passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: 'APPROVED, CHANGES REQUIRED' → issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS but changes required in a follow-up"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'PASS but changes required' → issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+
+# (v) A NEGATED issue phrase is pass language, not a mixed signal: the whole-line
+# scan must not turn "no issues found" into an issues verdict.
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS — no issues found"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'PASS — no issues found' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11d: 'PASS — no issues found' → verdict pass" "$(jqf "$RUN_RESULT" .verdict)" pass
+
+# ...and an ordinary word merely CONTAINING an issue token ("unchanged") does not
+# trip the mixed-line scan either (both-side boundary check).
+d="$(new_case)"
+emit_verdict_case "$d" "VERDICT: PASS (the API surface is unchanged)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11d: 'PASS (… unchanged)' still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+
 # 11e: read-only / no-persistence flag set is locked in for both providers. (The
 # real write/read enforcement is the provider's own sandbox and is verifiable
 # only in the live smoke; here we assert the enforcing flags are actually passed.)
@@ -858,7 +947,7 @@ unset ARGV_LOG
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json --ignore-user-config --ignore-rules --disable <FEATURE>"; exit 0; fi
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json --ignore-user-config --ignore-rules --disable <FEATURE> --ask-for-approval <APPROVAL_POLICY>"; exit 0; fi
 printf '%s\n' "$@" >>"$ARGV_LOG"
 last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
 cat >/dev/null
@@ -881,6 +970,13 @@ assert_contains "11e: codex --ignore-user-config (drops project trust)" "$(cat "
 assert_contains "11e: codex --ignore-rules (no execpolicy rules)" "$(cat "$d/argv")" "--ignore-rules"
 assert_contains "11e: codex hooks feature disabled" "$(cat "$d/argv")" "--disable
 hooks"
+# Approvals can never stall the headless run: the probed flag spelling is added
+# when the CLI advertises it, and the -c override rides unconditionally.
+assert_contains "11e: codex --ask-for-approval never when advertised" "$(cat "$d/argv")" "--ask-for-approval
+never"
+assert_contains "11e: codex approval_policy=never override" "$(cat "$d/argv")" "approval_policy=never"
+# The reviewed worktree's AGENTS.md is not loaded as reviewer instructions.
+assert_contains "11e: codex project docs disabled (AGENTS.md not read)" "$(cat "$d/argv")" "project_doc_max_bytes=0"
 unset ARGV_LOG
 
 # ============================================================================

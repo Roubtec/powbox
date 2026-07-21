@@ -36,6 +36,8 @@
 #     retried, liveProgress, artifactDir, reason }
 #   outcome  ∈ passed | issues | unavailable | timeout | forfeited | failed
 #   verdict  ∈ pass | issues | none   (normalized from the peer's final message)
+#   elapsedSeconds  total wall time across ALL attempts — a retried run reports
+#               the sum, never the final attempt alone.
 #   exitStatus  the provider exit code, or null when unknown (missing binary /
 #               killed on timeout).
 # The helper NEVER reports success because an output file is absent or empty.
@@ -59,7 +61,7 @@ readonly DEFAULT_TIMEOUT=900
 EX_USAGE=64
 
 usage() {
-	sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -309,6 +311,14 @@ claude | codex) ;;
 *) die_usage "unsupported --provider '$PROVIDER' (claude|codex)" ;;
 esac
 
+# Validate --timeout BEFORE any filesystem side effect (the artifact-root mkdir
+# and session-dir mktemp below): a usage error must exit 64 without littering
+# the artifact root with an empty session directory.
+case "$TIMEOUT" in
+'' | *[!0-9.]* | '.' | *.*.*) die_usage "--timeout must be a positive number of seconds (got '$TIMEOUT')" ;;
+esac
+awk -v t="$TIMEOUT" 'BEGIN{exit !(t>0)}' || die_usage "--timeout must be > 0 (got '$TIMEOUT')"
+
 [ -n "$WORKTREE" ] || die_usage "--worktree is required"
 case "$WORKTREE" in
 /*) ;;
@@ -375,11 +385,6 @@ mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-
 SESSION_DIR="$(mktemp -d "${ARTIFACT_ROOT}/prr-XXXXXXXXXXXX")" ||
 	die_usage "cannot create a session directory under '$ARTIFACT_ROOT'"
 chmod 700 "$SESSION_DIR"
-
-case "$TIMEOUT" in
-'' | *[!0-9.]* | '.' | *.*.*) die_usage "--timeout must be a positive number of seconds (got '$TIMEOUT')" ;;
-esac
-awk -v t="$TIMEOUT" 'BEGIN{exit !(t>0)}' || die_usage "--timeout must be > 0 (got '$TIMEOUT')"
 
 # The peer binary is the OPPOSITE agent's CLI, resolved by provider name.
 PEER_BIN="$PROVIDER"
@@ -471,11 +476,25 @@ build_cmd_codex() {
 	# verdict parsing. `-` reads the prompt from stdin. --json (when supported)
 	# adds the live event stream we forward.
 	local dir="$1"
+	# -c approval_policy=never: a headless read-only review must never stop to
+	# ask for approval — under an inherited `on-request`/`untrusted` policy a
+	# reviewer that needs to run `git diff`/`rg` would stall or burn the timeout
+	# instead of returning a verdict. The config override is version-independent
+	# (highest precedence; an unrecognized key is ignored without
+	# --strict-config), so it also covers older CLIs that inherit an approval
+	# policy from user config; the flag spelling (--ask-for-approval never) is
+	# probed below and added only where `codex exec` accepts it.
+	# -c project_doc_max_bytes=0: do NOT read the reviewed worktree's AGENTS.md
+	# as instructions. --ignore-user-config/--ignore-rules leave project docs
+	# enabled, so without this the code under review could steer its own
+	# reviewer through its (possibly PR-modified) AGENTS.md.
 	CMD=(codex exec
 		--sandbox read-only
 		--cd "$WORKTREE"
 		--ephemeral
 		-c "mcp_servers={}"
+		-c "approval_policy=never"
+		-c "project_doc_max_bytes=0"
 		--output-last-message "$dir/codex-last-message.txt")
 	# Config/hook isolation — the Codex analog of the Claude adapter's
 	# --safe-mode: the code under review must not be able to steer its own
@@ -496,6 +515,10 @@ build_cmd_codex() {
 	codex_supports '--ignore-user-config' && CMD+=(--ignore-user-config)
 	codex_supports '--ignore-rules' && CMD+=(--ignore-rules)
 	codex_supports '--disable( |=|<)' && CMD+=(--disable hooks)
+	# The explicit flag form of the approvals-off policy, where `codex exec`
+	# accepts it (current CLIs, e.g. 0.144.6, do not list it on exec — there the
+	# `-c approval_policy=never` override above already applies).
+	codex_supports '--ask-for-approval' && CMD+=(--ask-for-approval never)
 	if codex_supports '--json'; then
 		CMD+=(--json)
 		LIVE=1
@@ -600,11 +623,20 @@ detect_verdict() {
 		echo issues
 		return
 	fi
-	# (b) An ENUMERATION of both options on ONE verdict line — the literal contract
-	# template `VERDICT: PASS | ISSUES` (or `PASS / ISSUES`) — is NOT a real verdict
-	# and must never false-pass: a pass token joined by a `|`/`/` separator to an
-	# issues token resolves to issues (ISSUES present here), never pass.
-	if printf '%s\n' "$text" | grep -Eiq "${anchor}${pass}[[:space:]]*[|/][[:space:]]*${issue}"; then
+	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an
+	# issue token — the literal contract template `VERDICT: PASS | ISSUES`, or a
+	# reviewer hedging like `VERDICT: APPROVED, CHANGES REQUIRED` — is NOT a clean
+	# pass and resolves to issues (an issue token is present), never a false pass.
+	# The trailing issue token is boundary-checked on BOTH sides so an ordinary
+	# word merely containing one (`unchanged`) cannot trip it, and NEGATED phrases
+	# ("no issues", "no blocking changes" — themselves pass language) are scrubbed
+	# from the scanned copy first so `VERDICT: PASS — no issues found` stays a
+	# pass; the pass check (c) below still runs on the ORIGINAL text.
+	local nb='[^[:alnum:]_]'
+	local scrubbed
+	scrubbed="$(printf '%s\n' "$text" |
+		sed -E "s/(^|${nb})(no|zero|without)([[:space:]_-]+[[:alnum:]]+)?[[:space:]_-]+(issues?|changes?|blockers?|blocking|problems?|failures?)/\\1/gI")"
+	if printf '%s\n' "$scrubbed" | grep -Eiq "${anchor}${pass}(${nb}.*)?${nb}${issue}${rb}"; then
 		echo issues
 		return
 	fi
@@ -849,15 +881,22 @@ write_meta() {
 # --- run with retry-once for transient failures ------------------------------
 ATTEMPTS=0
 RETRIED=false
+# Total wall time across ALL attempts. ATT_ELAPSED is per-attempt and would be
+# overwritten by a retry, under-reporting a retried run's real cost to a caller
+# using elapsedSeconds for diagnostics or scheduling — so the emitted value is
+# the accumulated sum, not the final attempt alone.
+TOTAL_ELAPSED=0
 
 run_attempt 1
 ATTEMPTS=1
+TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 
 if [ "$ATT_TRANSIENT" = 1 ]; then
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
 	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
 	run_attempt 2
 	ATTEMPTS=2
+	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
 		# Both attempts failed transiently → exhausted.
@@ -892,7 +931,7 @@ if ! jq -nc \
 	--arg provider "$PROVIDER" \
 	--arg outcome "$ATT_OUTCOME" \
 	--arg verdict "$ATT_VERDICT" \
-	--argjson elapsed "$ATT_ELAPSED" \
+	--argjson elapsed "$TOTAL_ELAPSED" \
 	--argjson exitStatus "$exit_json" \
 	--argjson attempts "$ATTEMPTS" \
 	--argjson retried "$RETRIED" \

@@ -75,27 +75,54 @@ die_usage() {
 # possibly the helper's own — process group.
 CURRENT_LEADER=""
 CURRENT_PGID=""
+# Set to 1 if reap_tree ever reports a survivor after SIGKILL, so the returned
+# outcome's `reason` HONESTLY reflects that a descendant may still be running
+# rather than reporting a clean result as if the tree were fully reaped.
+REAP_WARN=0
+
+# descendant_pids <root_pid> — print <root_pid> and every transitive child pid,
+# walked live at call time from the process table. Used ONLY on the unvalidated-
+# PGID fallback path so that even without a group signal we still reach the
+# leader's known descendant subtree (a stray grandchild) rather than the leader
+# alone. Best-effort: a process re-parented away (e.g. daemonized into a new
+# group) is out of scope for any PID walk, exactly as it is for a group signal.
+descendant_pids() {
+	local root="$1" kid
+	printf '%s\n' "$root"
+	for kid in $(pgrep -P "$root" 2>/dev/null || true); do
+		descendant_pids "$kid"
+	done
+}
 
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
-# alive? Uses the validated group when we have one, else just the leader pid.
+# alive? Uses the validated group when we have one, else sweeps the leader AND its
+# known descendant subtree by PID (not just the leader alone).
 group_alive() {
-	local pid="$1" pgid="$2"
+	local pid="$1" pgid="$2" p
 	if [ -n "$pgid" ]; then
 		kill -0 "-${pgid}" 2>/dev/null
 	else
-		kill -0 "$pid" 2>/dev/null
+		for p in $(descendant_pids "$pid"); do
+			kill -0 "$p" 2>/dev/null && return 0
+		done
+		return 1
 	fi
 }
 
 # signal_tree <SIG> <leader_pid> <pgid|""> — deliver a signal to the whole
-# validated group, or (fallback) only the leader pid. NEVER a negative,
-# unvalidated PID; never pkill -f.
+# validated group, or (fallback) to the leader AND every known descendant PID.
+# NEVER a negative, unvalidated PID (which could hit the helper's own group);
+# never pkill -f. The descendant-PID sweep keeps the fallback a real tree reap
+# rather than a leader-only signal, so a grandchild is still terminated when job
+# control could not isolate the child into its own group.
 signal_tree() {
-	local sig="$1" pid="$2" pgid="$3"
+	local sig="$1" pid="$2" pgid="$3" p
 	if [ -n "$pgid" ]; then
 		kill "-${sig}" "-${pgid}" 2>/dev/null || true
 	else
-		kill "-${sig}" "$pid" 2>/dev/null || true
+		for p in $(descendant_pids "$pid"); do
+			kill "-${sig}" "$p" 2>/dev/null || true
+		done
 	fi
 }
 
@@ -268,25 +295,39 @@ LIVE=0
 CMD=()
 
 build_cmd_claude() {
-	# Read-only headless review. Omitting --dangerously-skip-permissions is what
-	# keeps it read-only: in non-interactive `-p` mode a tool outside the
-	# allowlist cannot prompt, so it is denied and the model continues. The
-	# allowlist grants read/inspect tools and safe git reads ONLY — no
-	# write-capable command (note `sed` is intentionally absent: `sed -i` writes;
-	# every reading need is served by cat/head/tail/rg/grep). The explicit disallow
-	# list is defense-in-depth against any edit/write/push tool.
+	# Read-only headless review. Claude has NO filesystem sandbox, so its
+	# read-only guarantee is purely permission/tool-surface based. We therefore do
+	# NOT rely on allowlisted read *commands*: an allowlisted `Bash(cat:*)` (or any
+	# command-prefix rule) still permits shell REDIRECTION — `cat secret > file`
+	# WRITES, because the permission match is on the command prefix, not the
+	# redirection. That is the same write vector as the earlier `sed -i` hole.
+	#
+	# Instead we shrink the very TOOL SET Claude can use to the native read-only
+	# tools (Read/Grep/Glob) via `--tools`, so no shell (Bash) tool exists at all —
+	# there is no command to redirect, and no write-capable tool in the set. The
+	# allowlist auto-approves exactly those read tools (in `-p` mode a tool that is
+	# not allowed cannot prompt, so it is denied), and the disallow list is
+	# defense-in-depth naming Bash and every write tool explicitly.
 	#   --safe-mode disables CLAUDE.md, skills, plugins, hooks, MCP servers, custom
 	#     commands/agents and other customizations, so an untrusted review run
 	#     cannot inherit user hooks/MCP state (auth, tools and permissions still
 	#     work normally).
 	#   --no-session-persistence keeps the prompt and result off disk (no resumable
 	#     session), so nothing persists outside this attempt's artifact dir.
-	local allow="Read Grep Glob Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(git status:*) Bash(git blame:*) Bash(cat:*) Bash(ls:*) Bash(rg:*) Bash(head:*) Bash(tail:*)"
-	local deny="Write Edit MultiEdit NotebookEdit Bash(git push:*) Bash(git commit:*) Bash(git reset:*) Bash(rm:*)"
+	# Residual, honest: Read/Grep/Glob can still READ any path Claude's own user can
+	# read (that is the point of a review), but none of them can WRITE. Because
+	# there is no Bash tool, the Claude reviewer cannot run `git diff`/`git log`
+	# itself — a diff-oriented prompt should embed the diff or reference the base;
+	# the file tree is reviewable directly over --add-dir. Omitting
+	# --dangerously-skip-permissions keeps permissions enforced.
+	local tools="Read,Grep,Glob"
+	local allow="Read Grep Glob"
+	local deny="Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch"
 	CMD=(claude -p
 		--safe-mode
 		--no-session-persistence
 		--output-format json
+		--tools "$tools"
 		--allowedTools "$allow"
 		--disallowedTools "$deny"
 		--add-dir "$WORKTREE")
@@ -346,21 +387,17 @@ looks_unavailable() {
 		"$@"
 }
 
-# A DETERMINISTIC (non-transient) execution failure: a bad flag, usage/config
-# error, permission problem, or malformed command. These fail identically on a
-# retry, so retrying only wastes time and quota — they are NOT retried. Detected
-# both by well-known "your invocation is wrong" exit codes (2 bad usage, 64
-# EX_USAGE, 126 not executable, 127 not found) and by canonical CLI error
-# phrasing on stdout/stderr. Everything else that exits non-zero is treated as a
-# transient execution failure and retried once.
-looks_deterministic() {
-	local rc="$1"
-	shift
-	case "$rc" in
-	2 | 64 | 126 | 127) return 0 ;;
-	esac
+# A TRANSIENT execution failure: one that a second attempt could plausibly
+# recover from — a network/connection error, an explicit timeout, or a server-side
+# 5xx/overloaded/"try again" signal. The retry policy is an ALLOWLIST, not a
+# denylist: we retry ONLY when a failure is positively identified as transient
+# here. An unclassified/unknown non-zero exit is NOT transient and is NOT retried
+# (retrying an unknown deterministic failure just wastes time and quota). Rate
+# limit / quota / auth signals are handled earlier as `unavailable` (also
+# non-transient), so they never reach this test.
+looks_transient() {
 	grep -Eiq \
-		'unknown (option|flag|argument|command|subcommand)|unrecognized (option|argument|subcommand)|invalid (option|flag|argument|value|choice)|unexpected argument|arguments? (are|is) required|missing (value|argument)|conflicting arguments|usage:|permission denied|no such file or directory|not a git repository|command not found|bad configuration|invalid config' \
+		'network (error|is unreachable|unreachable)|connection (refused|reset|closed|timed out|error|aborted)|could not (connect|resolve)|failed to (connect|resolve)|name resolution|dns (error|lookup)|socket hang ?up|broken pipe|error sending request|temporar(y|ily) (unavailable|fail)|(^|[^a-z])(etimedout|econnreset|econnrefused|econnaborted|enetunreach|ehostunreach|eai_again|epipe)([^a-z]|$)|timed out|timeout (of|while|waiting|exceeded|error)|(^|[^0-9])(502|503|504)([^0-9]|$)|bad gateway|gateway time-?out|service (unavailable|temporarily)|server (error|is overloaded)|overloaded|please try again|try again (later|in)|upstream (error|connect)' \
 		"$@"
 }
 
@@ -502,8 +539,10 @@ run_attempt() {
 	if [ "$timed_out" = 1 ]; then
 		# Deadline hit while the tree was still running: TERM it, wait a bounded
 		# grace, escalate to KILL for survivors, and confirm nothing remains.
-		reap_tree "$child" "$pgid" ||
+		reap_tree "$child" "$pgid" || {
+			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after timeout"}\n' "$PROVIDER" >&2
+		}
 		wait "$child" 2>/dev/null || true
 	else
 		# The leader exited on its own (that is why the poll loop ended). Collect
@@ -511,8 +550,10 @@ run_attempt() {
 		# failed provider left behind in the group — TERM, grace, KILL, confirm —
 		# so no grandchild outlives the run.
 		if wait "$child"; then rc=0; else rc=$?; fi
-		reap_tree "$child" "$pgid" ||
+		reap_tree "$child" "$pgid" || {
+			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after exit"}\n' "$PROVIDER" >&2
+		}
 	fi
 	CURRENT_LEADER=""
 	CURRENT_PGID=""
@@ -532,30 +573,31 @@ run_attempt() {
 
 	if [ "$rc" -ne 0 ]; then
 		# Classify the non-zero exit (scan only on failure so a successful review
-		# that merely DISCUSSES rate limits or usage errors is never misread):
-		#   * auth/login or usage/quota problem  → UNAVAILABLE (non-transient;
+		# that merely DISCUSSES rate limits or usage errors is never misread). The
+		# retry policy is a TRANSIENT ALLOWLIST — retry ONLY a positively identified
+		# transient failure; an unknown/unclassified failure is NOT retried:
+		#   * auth/login or usage/quota problem   → UNAVAILABLE (non-transient;
 		#     retrying wastes quota).
-		#   * deterministic invocation failure (bad flag/config/permission/usage) →
-		#     FAILED, NOT retried (a retry fails identically).
-		#   * anything else                       → transient FAILED, retried once
-		#     with a fresh attempt dir.
+		#   * positively transient (network/5xx/timeout/overloaded) → FAILED,
+		#     retried once with a fresh attempt dir.
+		#   * anything else (unclassified/deterministic) → FAILED, NOT retried.
 		if looks_unavailable "$out" "$err"; then
 			ATT_OUTCOME=unavailable
 			ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
 			write_meta "$dir" "$attempt_no" "unavailable"
 			return 0
 		fi
-		if looks_deterministic "$rc" "$out" "$err"; then
+		if looks_transient "$out" "$err"; then
 			ATT_OUTCOME=failed
-			ATT_TRANSIENT=0
-			ATT_REASON="provider failed deterministically (exit $rc); not retried"
-			write_meta "$dir" "$attempt_no" "failed-deterministic"
+			ATT_TRANSIENT=1
+			ATT_REASON="provider hit a transient failure (exit $rc); retrying"
+			write_meta "$dir" "$attempt_no" "failed-transient"
 			return 0
 		fi
 		ATT_OUTCOME=failed
-		ATT_TRANSIENT=1
-		ATT_REASON="provider exited non-zero ($rc); transient, retrying"
-		write_meta "$dir" "$attempt_no" "failed-exit"
+		ATT_TRANSIENT=0
+		ATT_REASON="provider failed (exit $rc); not a recognized transient failure, not retried"
+		write_meta "$dir" "$attempt_no" "failed-nontransient"
 		return 0
 	fi
 
@@ -638,6 +680,13 @@ if [ "$ATT_TRANSIENT" = 1 ]; then
 fi
 
 # --- emit the versioned result ----------------------------------------------
+# If any reap reported a survivor after SIGKILL, the "leave no live peer process"
+# guarantee could not be fully met on this run — reflect that honestly in the
+# reason so a consumer never reads a clean outcome as proof the tree is gone.
+if [ "$REAP_WARN" = 1 ]; then
+	ATT_REASON="${ATT_REASON} [WARNING: a provider descendant survived SIGKILL and may still be running]"
+fi
+
 exit_json="$ATT_EXIT"
 case "$exit_json" in
 '' | null) exit_json=null ;;

@@ -21,17 +21,20 @@ set -uo pipefail
 #   (6) malformed/error-envelope response → forfeited (distinct from failed),
 #       NEVER a pass — a pass token in an error/non-result envelope is rejected
 #   (7) forfeited — exit 0 with empty / no-verdict output (never a false pass)
-#   (8) retry — transient failure retried ONCE with a NEW attempt dir; a clean
-#       retry recovers; two failures → failed (retry exhausted); a DETERMINISTIC
-#       (bad-flag/usage) failure is NOT retried
+#   (8) retry policy is a TRANSIENT ALLOWLIST — a POSITIVELY transient failure
+#       (network/5xx/timeout) is retried ONCE with a NEW attempt dir and recovers;
+#       two transient failures → failed (retry exhausted); a deterministic
+#       bad-flag/usage failure is NOT retried; and an UNCLASSIFIED non-zero exit
+#       (no transient signal) is NOT retried either (8d)
 #   (9) codex without --json support → buffered (liveProgress:false), still runs
 #  (10) containment/usage — artifact-root inside the worktree rejected, bad
 #       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
-#       descendant escalated to KILL and actually dies, per-invocation session
-#       isolation (no sibling attempt dir neighbours the handed path), anchored
-#       verdict + ISSUES-precedence (no example-token false-pass), and the
-#       read-only / no-persistence flag set for both providers
+#       descendant escalated to KILL and actually dies, BEHAVIORAL sibling
+#       isolation (a fake provider actively probes for a sibling's planted secret
+#       via handed paths and comes up empty), anchored verdict + ISSUES-precedence
+#       (no example-token false-pass), and the read-only tool-set / no-persistence
+#       flags for both providers (Claude restricted to native read tools, no Bash)
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -198,6 +201,13 @@ assert_contains "2: claude allowlist includes Read" "$(cat "$d/argv")" "Read Gre
 assert_contains "2: claude disallows Write/Edit" "$(cat "$d/argv")" "Write Edit"
 assert_contains "2: claude --add-dir worktree" "$(cat "$d/argv")" "$d/wt"
 assert_not_contains "2: claude NOT skip-permissions" "$(cat "$d/argv")" "--dangerously-skip-permissions"
+# Read-only is enforced by the TOOL SET, not allowlisted read commands: the Bash
+# tool is restricted out entirely (so there is no shell to redirect-write with)
+# and only the native read tools remain. --tools carries exactly those.
+assert_contains "2: claude --tools restricts to native read tools" "$(cat "$d/argv")" "Read,Grep,Glob"
+assert_contains "2: claude disallow names Bash" "$(cat "$d/argv")" "Bash Write Edit"
+assert_not_contains "2: no Bash(cat) read-shim (redirection write vector)" "$(cat "$d/argv")" "Bash(cat"
+assert_not_contains "2: no Bash(git ...) read-shim" "$(cat "$d/argv")" "Bash(git"
 assert_eq "2: literal prompt on stdin" "$(cat "$d/stdin")" "Please review the diff and end with a VERDICT line."
 unset ARGV_LOG STDIN_LOG
 
@@ -388,7 +398,9 @@ cat >"$d/bin/codex" <<'EOF'
 if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
 last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
 cat >/dev/null
-if [ ! -f "$MARK" ]; then : >"$MARK"; echo "transient crash" >&2; exit 1; fi
+# First attempt fails with a POSITIVELY transient signal (network reset); the
+# retry allowlist recognizes it and retries once, then it passes.
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
 printf 'VERDICT: PASS\n' >"$last"; exit 0
 EOF
 chmod +x "$d/bin/codex"
@@ -425,12 +437,13 @@ assert_eq "8c: deterministic failure → failed" "$(jqf "$RUN_RESULT" .outcome)"
 assert_eq "8c: NOT retried (deterministic)" "$(jqf "$RUN_RESULT" .attempts)" 1
 assert_eq "8c: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 
-# 8b: fail twice → failed (retry exhausted).
+# 8b: a TRANSIENT failure on BOTH attempts → failed (retry exhausted). Both emit
+# a positively transient signal, so the allowlist retries once then exhausts.
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
-echo "crash" >&2
+echo "error: network is unreachable (ECONNREFUSED)" >&2
 exit 7
 EOF
 chmod +x "$d/bin/claude"
@@ -439,6 +452,25 @@ run "$d" $(std_args "$d" claude)
 assert_eq "8b: exhausted → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
 assert_eq "8b: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
 assert_eq "8b: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+
+# 8d: an UNCLASSIFIED non-zero exit — no transient signal, no auth/usage phrase —
+# must NOT be retried. This proves the retry policy is a transient ALLOWLIST
+# (retry only positively-identified transient failures), not a denylist that
+# retries every unknown non-zero exit.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "boom: the model produced an internal assertion we do not recognize" >&2
+exit 5
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "8d: unknown failure → failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "8d: NOT retried (unknown is not transient)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "8d: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+assert_eq "8d: exitStatus preserved" "$(jqf "$RUN_RESULT" .exitStatus)" 5
 
 # ============================================================================
 # (9) codex WITHOUT --json support → buffered, still runs (liveProgress false)
@@ -586,31 +618,58 @@ if [ -n "$stub" ] && kill -0 "$stub" 2>/dev/null; then
 fi
 unset STUBBORN_PID
 
-# 11c: sibling-attempt isolation. Attempt dirs are nested under a per-invocation,
-# unpredictably-named session dir — NEVER direct children of the shared
-# artifact-root — so the path a provider is handed (and whose neighbourhood it can
-# list) contains only THIS invocation's attempts, not a concurrent invocation's.
+# 11c: sibling-attempt isolation, proven BEHAVIORALLY. Two invocations share ONE
+# artifact-root. Each fake provider PLANTS a secret sentinel in its own attempt
+# dir and then ACTIVELY PROBES for any OTHER invocation's sentinel using only the
+# filesystem paths the runner handed it (its own attempt dir via
+# --output-last-message, and its cwd). It must come up empty: the runner nests
+# every attempt under a per-invocation, unpredictably-named session dir and hands
+# the provider only paths inside its OWN session, so a sibling's artifacts are not
+# reachable "by default" — never handed on argv, never on stdin, not a neighbour
+# of the handed path. (Residual, documented in the helper: a determined same-UID
+# reader could still enumerate the artifact-root by walking up; filesystem
+# permissions alone cannot stop that. This test proves the by-default guarantee.)
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+printf '%s\n' "$@" >"$ARGV_LOG"     # overwrite: capture THIS invocation's argv only
 last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
-cat >/dev/null
+cat >"$STDIN_LOG"
+mydir="$(dirname "$last")"
+# Plant this invocation's own secret in its own attempt dir.
+printf 'TOP-SECRET\n' >"$mydir/SIBLING-SECRET.txt"
+# Probe: try to read ANY OTHER invocation's secret using ONLY the paths the runner
+# handed us — our own attempt dir and our cwd. Our own sentinel is excluded, so a
+# non-empty find means a sibling leaked into a handed path.
+found=NOLEAK
+while IFS= read -r hit; do
+	[ "$hit" = "$mydir/SIBLING-SECRET.txt" ] && continue
+	found="LEAK:$hit"
+done < <(find "$mydir" "$PWD" -name SIBLING-SECRET.txt 2>/dev/null)
+printf '%s\n' "$found" >"$PROBE_LOG"
 printf 'VERDICT: PASS\n' >"$last"; exit 0
 EOF
 chmod +x "$d/bin/codex"
-# two separate invocations sharing ONE artifact-root
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" PROBE_LOG="$d/probe"
+export ARGV_LOG STDIN_LOG PROBE_LOG
+# invocation A: plants secret A
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex)
 adir1="$(jqf "$RUN_RESULT" .artifactDir)"
+sess1="$(dirname "$adir1")"
+# invocation B: plants secret B and PROBES for A's secret via handed paths only
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex)
 adir2="$(jqf "$RUN_RESULT" .artifactDir)"
-sess1="$(dirname "$adir1")"
 sess2="$(dirname "$adir2")"
-# The attempt dir is two levels below artifact-root: artifact-root / session /
-# attempt. So its parent (the session dir) is itself a direct child of the
-# artifact-root — proving the attempt is nested, never a direct child.
+# Behavioral proof: invocation B could NOT read invocation A's sentinel by default.
+assert_eq "11c: B cannot read a sibling secret from handed paths" "$(cat "$d/probe")" NOLEAK
+# And the runner never handed B a path referencing A's session (argv/stdin).
+assert_not_contains "11c: sibling session path not on B's argv" "$(cat "$d/argv")" "$sess1"
+assert_not_contains "11c: sibling session path not on B's stdin" "$(cat "$d/stdin")" "$sess1"
+# Structural backing for the above: distinct per-invocation session dirs, nested
+# under the artifact-root (never a direct child), each holding only its own attempt.
 assert_eq "11c: artifactDir parent is the artifact-root's child (session)" "$(dirname "$sess1")" "$d/artifacts"
 checks=$((checks + 1))
 if [ "$sess1" = "$sess2" ]; then
@@ -621,6 +680,7 @@ direct_attempts="$(find "$d/artifacts" -mindepth 1 -maxdepth 1 -type d -name 'pe
 assert_eq "11c: no attempt dir directly under artifact-root" "$direct_attempts" 0
 own_only="$(find "$sess1" -maxdepth 1 -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
 assert_eq "11c: session dir holds only its own invocation's attempt" "$own_only" 1
+unset ARGV_LOG STDIN_LOG PROBE_LOG
 
 # 11d: anchored verdict + ISSUES precedence. A body that QUOTES an example pass
 # token inline but renders a real ISSUES verdict must resolve to issues; and when
@@ -667,7 +727,10 @@ export ARGV_LOG
 run "$d" $(std_args "$d" claude)
 assert_contains "11e: claude --safe-mode (customizations off)" "$(cat "$d/argv")" "--safe-mode"
 assert_contains "11e: claude --no-session-persistence" "$(cat "$d/argv")" "--no-session-persistence"
-assert_not_contains "11e: claude allowlist drops write-capable sed" "$(cat "$d/argv")" "Bash(sed:*)"
+assert_contains "11e: claude --tools restricts the built-in tool set" "$(cat "$d/argv")" "Read,Grep,Glob"
+# No Bash tool at all → no allowlisted read command can redirect-write. Assert no
+# `Bash(...)` command-prefix shim survives anywhere in the argv.
+assert_not_contains "11e: no Bash(...) command-prefix read-shim" "$(cat "$d/argv")" "Bash("
 assert_not_contains "11e: claude NOT skip-permissions" "$(cat "$d/argv")" "--dangerously-skip-permissions"
 unset ARGV_LOG
 

@@ -248,15 +248,21 @@ url_pr="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree url)"
 try "recorded explicit port resolved on read" test "$url_pr" = "$url_p"
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 
-# A running scoped cluster must NOT be retargeted by a later mismatched PGPORT:
-# up while running on $free_port but asked for a different port stays on the real
-# one (never talks to whatever sits on the requested port).
+# A running scoped cluster must NOT be silently retargeted by a mismatched explicit
+# PGPORT. Since an explicit override is authoritative, `up` with an explicit PGPORT
+# different from the port the cluster is ACTUALLY running on FAILS SAFELY (finding
+# #2) rather than adopting the running port and ignoring the override. The cluster
+# stays up on its real port, untouched.
 url_pm="$(pg "$REPO_A" PGPORT="$free_port" POSTGRES_DB=app_a -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$data_a")
 try "still on real port after up" test "${url_pm##*:}" = "${free_port}/app_a"
 mismatch_port="$(pick_free_port)"
-url_mis="$(pg "$REPO_A" PGPORT="$mismatch_port" POSTGRES_DB=app_a -- --worktree up 2>/dev/null | tail -1)"
-try "mismatched PGPORT does not retarget a running cluster" test "${url_mis##*:}" = "${free_port}/app_a"
+try_not "explicit PGPORT conflicting with a running scope fails" pg "$REPO_A" PGPORT="$mismatch_port" POSTGRES_DB=app_a -- --worktree up
+# The conflict must NOT have stopped, retargeted, or corrupted the running cluster:
+# a later read still resolves the real port and it still serves queries.
+url_pc="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree url)"
+try "running cluster still on its real port after the conflict" test "$url_pc" = "$url_pm"
+try "running cluster still serves queries after the conflict" test "$(psql "$url_pm" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 
 # Explicit PGDATA replaces the scoped data dir but keeps scoped port allocation,
@@ -437,6 +443,48 @@ if [ "$(stat -c '%U' "$RO_ROOT" 2>/dev/null || true)" != "$(id -un)" ] && ! chmo
 else
 	echo "  skip refusal case: no un-chmod-able root-owned dir available here"
 fi
+
+echo "== PGPORT is validated as a bare TCP integer (injection/malformed rejected) =="
+# Finding #4: $PGPORT is interpolated into the pg_ctl -o option string, which pg_ctl
+# runs through a shell, so a non-integer PGPORT must be rejected BEFORE use rather
+# than splicing extra options / shell metacharacters into the postmaster command.
+# `url` exercises the same validation hermetically (no cluster touched).
+pwn_marker="$WORK/pgport-pwn"
+try_not "scoped up rejects a shell-injection PGPORT" pg "$REPO_A" PGPORT="5432; touch $pwn_marker" POSTGRES_DB=app_a -- --worktree up
+try_not "scoped up rejects an option-injection PGPORT" pg "$REPO_A" PGPORT="5432 -k /tmp" POSTGRES_DB=app_a -- --worktree up
+try_not "scoped up rejects a non-numeric PGPORT" pg "$REPO_A" PGPORT="abc" POSTGRES_DB=app_a -- --worktree up
+try_not "scoped up rejects an out-of-range PGPORT" pg "$REPO_A" PGPORT="99999" POSTGRES_DB=app_a -- --worktree up
+try_not "scoped up rejects PGPORT 0" pg "$REPO_A" PGPORT="0" POSTGRES_DB=app_a -- --worktree up
+try_not "unscoped url rejects a malformed PGPORT" pg "$WORK" PGPORT="5432; id" -- url
+try "the injection PGPORT never ran its shell payload" test '!' -e "$pwn_marker"
+
+echo "== POWBOX_PG_SCOPED_ROOT rejects whitespace / shell metacharacters =="
+# Finding #4: the scoped root becomes the socket dir ($PG_SOCKDIR) interpolated
+# UNQUOTED into pg_ctl -o (shell-executed), so a root with a space or a
+# metacharacter must be rejected up front.
+root_pwn="$WORK/root-pwn"
+try_not "scoped up rejects a scoped root with a space" pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="$WORK/bad root" POSTGRES_DB=app_a -- --worktree up
+try_not "scoped up rejects a scoped root with shell metacharacters" pg "$REPO_A" POWBOX_PG_SCOPED_ROOT="\$(touch $root_pwn)" POSTGRES_DB=app_a -- --worktree up
+try "the metacharacter scoped root never ran its shell payload" test '!' -e "$root_pwn"
+
+echo "== orphan prevention: up with a NEW explicit PGDATA while the scope's prior server runs FAILS =="
+# Finding #3: a scope already has a running recorded cluster; a new `up` with a
+# DIFFERENT explicit PGDATA would start a second server and orphan the prior one
+# from scoped down/status (which resolve only the recorded markers). It must refuse
+# (require an explicit stop) and leave both the running prior server and the markers
+# intact — never start the new cluster.
+REPO_F="$WORK/wt-f"
+add_worktree "$MAIN_REPO" "$REPO_F" wt-f
+url_f="$(pg "$REPO_F" POSTGRES_DB=app_f -- --worktree up | tail -1)"
+data_f="$(pg "$REPO_F" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+STARTED_DATADIRS+=("$data_f")
+orphan_data="$WORK/orphan-pgdata"
+try_not "up with a new explicit PGDATA while the scope runs is refused" pg "$REPO_F" PGDATA="$orphan_data" POSTGRES_DB=app_f -- --worktree up
+try "refusal did not initialize the new cluster" test '!' -e "$orphan_data/PG_VERSION"
+rec_f="$(pg "$REPO_F" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p')"
+try "prior server's markers untouched by the refusal" test "$rec_f" = "$data_f"
+try "prior server still serves queries after the refusal" test "$(psql "$url_f" -tAc 'select 1' 2>/dev/null || true)" = "1"
+pg "$REPO_F" -- --worktree down >/dev/null 2>&1 || true
 
 echo "== unscoped invocations keep the historical defaults =="
 url_plain="$(pg "$WORK" -- url)"

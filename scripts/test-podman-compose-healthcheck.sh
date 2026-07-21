@@ -17,7 +17,8 @@
 #      EXEC-form CMD array (test[0] == "CMD"), NOT a CMD-SHELL string — the exec
 #      form is the entire point (the Kalm2 distroless case), and a stray rewrite to
 #      CMD-SHELL would stop testing it while still looking green. It also carries a
-#      never-succeeding /bin/false negative-control service.
+#      never-succeeding /bin/false negative-control service and a shell-less
+#      "distroless" service (its own heredoc) that actively reproduces the break.
 #   2. The probe INSPECTS what Compose actually wired (`.Config.Healthcheck.Test[0]`)
 #      and classifies it, so an incorrect CMD->CMD-SHELL translation is DETECTED and
 #      surfaced as a loud KNOWN-XFAIL rather than passing silently on a non-empty
@@ -31,16 +32,27 @@
 #      label-scoped rm + `rm -rf` of the mktemp dir).
 #   5. The Bash and PowerShell probes stay in parity on the exec-form line, the
 #      translation detection, and the healthy/negative assertions (hand-mirrored).
+#   6. The distroless (shell-less) XFAIL reproduction (task 025 fix-up): the probe
+#      pre-pulls a genuinely shell-less image and appends a third service with the
+#      SAME exec-form shape; it asserts the wrap-detection (CMD-SHELL / "/bin/sh")
+#      plus never-healthy pair as a KNOWN-XFAIL that keeps the run GREEN, SELF-CLEARS
+#      to a loud NOTE if the wrap is gone OR the service reaches healthy, and on a
+#      pull failure SKIPs just that scenario (visible sentinel) — surfaced in the
+#      umbrella banner via a marker the parent smoke wires. Bash/PowerShell parity is
+#      locked for all of the above.
 #
 # Needs bash + yq (python-yq, jq-backed) on PATH — both ship in the agent image.
 # Usage: scripts/test-podman-compose-healthcheck.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SH="$SCRIPT_DIR/smoke-test-podman.sh"
 PS1="$SCRIPT_DIR/smoke-test-podman.ps1"
+UMBRELLA_SH="$ROOT_DIR/commands/smoke-test.sh"
+UMBRELLA_PS1="$ROOT_DIR/commands/smoke-test.ps1"
 
-for f in "$SH" "$PS1"; do
+for f in "$SH" "$PS1" "$UMBRELLA_SH" "$UMBRELLA_PS1"; do
 	[ -f "$f" ] || {
 		echo "FATAL: expected probe not found at $f" >&2
 		exit 1
@@ -69,6 +81,18 @@ extract_yaml() {
 	awk '
 		/<<"?SMOKE_COMPOSE_YAML"?/ { f = 1; next }
 		f && $0 ~ /^[[:space:]]*SMOKE_COMPOSE_YAML[[:space:]]*$/ { f = 0 }
+		f { print }
+	' "$SH"
+}
+
+# extract_distroless_yaml — echo the body of the conditionally-appended
+# `<<"SMOKE_COMPOSE_DISTROLESS" … SMOKE_COMPOSE_DISTROLESS` heredoc (the shell-less
+# XFAIL service). It is a service-map fragment (indented under `services:`), so callers
+# prepend a `services:` root before handing it to yq.
+extract_distroless_yaml() {
+	awk '
+		/<<"?SMOKE_COMPOSE_DISTROLESS"?/ { f = 1; next }
+		f && $0 ~ /^[[:space:]]*SMOKE_COMPOSE_DISTROLESS[[:space:]]*$/ { f = 0 }
 		f { print }
 	' "$SH"
 }
@@ -176,6 +200,66 @@ assert_grep "$PS1" '{{index .Config.Healthcheck.Test 0}}' "ps1: inspects the wir
 assert_grep "$PS1" 'KNOWN-XFAIL' "ps1: surfaces the CMD->CMD-SHELL rewrite as a detected xfail"
 assert_grep "$PS1" 'negative control broke' "ps1: FAILS if the never-succeeding check reports healthy"
 assert_grep "$PS1" 'rm -rf "$compose_dir"' "ps1: cleanup removes only the temp fixture dir"
+
+echo "Test: the distroless (shell-less) XFAIL service is present and uses the exec form"
+DL_YAML="$(printf 'services:\n%s\n' "$(extract_distroless_yaml)")"
+if [ -z "$(extract_distroless_yaml)" ]; then
+	ko "could not extract the SMOKE_COMPOSE_DISTROLESS heredoc body from $SH (the shell-less XFAIL service is missing)"
+else
+	dl0="$(printf '%s\n' "$DL_YAML" | yq -r '.services.distroless.healthcheck.test[0]' 2>/dev/null || echo '')"
+	if [ "$dl0" = "CMD" ]; then
+		ok "distroless service health check is exec form (test[0] == CMD)"
+	else
+		ko "distroless service health check test[0] is '$dl0', expected exec-form 'CMD'"
+	fi
+	dl1="$(printf '%s\n' "$DL_YAML" | yq -r '.services.distroless.healthcheck.test[1]' 2>/dev/null || echo '')"
+	if [ -n "$dl1" ] && [ "$dl1" != null ]; then
+		ok "distroless health-check binary is set (test[1] == '$dl1')"
+	else
+		ko "distroless health-check binary (test[1]) is empty/null"
+	fi
+	dlimg="$(printf '%s\n' "$DL_YAML" | yq -r '.services.distroless.image' 2>/dev/null || echo '')"
+	case "$dlimg" in
+	*pause*) ok "distroless service uses a shell-less stock image ($dlimg)" ;;
+	*) ko "distroless service image is '$dlimg', expected a shell-less image (registry.k8s.io/pause)" ;;
+	esac
+	# The heredoc image literal must match the $distroless_image the probe pre-pulls,
+	# or the pull check and the fixture would drift (pull one image, run another).
+	if grep -qF "distroless_image=\"$dlimg\"" "$SH"; then
+		ok "the pre-pull \$distroless_image matches the fixture image literal ($dlimg)"
+	else
+		ko "the pre-pull \$distroless_image does not match the fixture image literal '$dlimg' (they must stay in sync)"
+	fi
+fi
+
+echo "Test: the Bash probe pre-pulls the shell-less image and SKIPs (never a false pass) on failure"
+assert_grep "$SH" 'podman pull -q "$distroless_image"' "sh: pre-pulls the shell-less image before building the fixture"
+assert_grep "$SH" 'SKIP [DISTROLESS-XFAIL]' "sh: emits a visible SKIP sentinel when the shell-less image cannot be pulled"
+assert_grep "$SH" 'if [ "$distroless_ok" = true ]; then' "sh: the shell-less service is appended/asserted only when the image pulled (pull-failure skip)"
+
+echo "Test: the Bash probe classifies the distroless break as a wrap-detected, never-healthy KNOWN-XFAIL"
+assert_grep "$SH" 'KNOWN-XFAIL (distroless)' "sh: surfaces the distroless break as a loud KNOWN-XFAIL"
+assert_grep "$SH" '*/bin/sh*) dl_wrapped=true' "sh: wrap-detection keys on the CMD-SHELL /bin/sh rewrite (isolates shell-wrapping as the cause)"
+assert_grep "$SH" '[ "$dl_wrapped" = true ] && [ "$dl_health" != healthy ]' "sh: XFAIL holds only when the check is shell-wrapped AND never reached healthy"
+assert_grep "$SH" 'NOTE (distroless XFAIL now obsolete)' "sh: SELF-CLEARS to a loud NOTE if the wrap is gone OR the service reaches healthy"
+
+echo "Test: the distroless SKIP is surfaced in the umbrella summary via a marker"
+assert_grep "$SH" 'SKIP \[DISTROLESS-XFAIL\]' "sh: the outer probe greps the SKIP sentinel to write the parent marker"
+assert_grep "$SH" 'POWBOX_SMOKE_SKIP_MARKER' "sh: writes the distroless skip reason to the parent-provided marker"
+assert_grep "$UMBRELLA_SH" 'POWBOX_SMOKE_SKIP_MARKER="$podman_marker"' "umbrella sh: Stage 3 hands the podman probe a skip marker"
+assert_grep "$UMBRELLA_SH" 'elif [ -s "$podman_marker" ]; then' "umbrella sh: Stage 3 records the distroless SKIP in the banner"
+
+echo "Test: the PowerShell probe mirrors the distroless XFAIL, self-clear, skip, and marker"
+assert_grep "$PS1" 'image: registry.k8s.io/pause' "ps1: embeds the same shell-less distroless service"
+assert_grep "$PS1" 'test: ["CMD", "/pause"]' "ps1: distroless service uses the same exec-form check shape"
+assert_grep "$PS1" 'podman pull -q "$distroless_image"' "ps1: pre-pulls the shell-less image"
+assert_grep "$PS1" 'SKIP [DISTROLESS-XFAIL]' "ps1: emits the same visible SKIP sentinel on a pull failure"
+assert_grep "$PS1" 'KNOWN-XFAIL (distroless)' "ps1: surfaces the distroless break as a KNOWN-XFAIL"
+assert_grep "$PS1" 'NOTE (distroless XFAIL now obsolete)' "ps1: mirrors the self-clearing NOTE branch"
+assert_grep "$PS1" '[ "$dl_wrapped" = true ] && [ "$dl_health" != healthy ]' "ps1: mirrors the wrap-detected never-healthy XFAIL condition"
+assert_grep "$PS1" 'Set-Content -LiteralPath $env:POWBOX_SMOKE_SKIP_MARKER' "ps1: the outer probe writes the parent marker when the SKIP sentinel is seen"
+assert_grep "$UMBRELLA_PS1" '$env:POWBOX_SMOKE_SKIP_MARKER = $podmanMarker.FullName' "umbrella ps1: Stage 3 hands the podman probe a skip marker"
+assert_grep "$UMBRELLA_PS1" 'elseif ($podmanSkip) {' "umbrella ps1: Stage 3 records the distroless SKIP in the banner"
 
 echo ""
 echo "Results: $pass passed, $fail failed."

@@ -129,6 +129,17 @@ $script = @(
   'chmod 700 "$compose_dir"'
   'compose_proj="smokehc$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d " \n")"'
   '[ "$compose_proj" = smokehc ] && compose_proj="smokehc$$"'
+  '# Distroless (shell-less) XFAIL reproduction: pre-pull an image with NO /bin/sh so a'
+  '# registry outage is a VISIBLE SKIP (not a false pass / hard fail) and so compose up'
+  '# finds it locally. registry.k8s.io/pause keeps itself alive via its own /pause'
+  '# entrypoint with no shell/coreutils. Image literal kept in sync with the heredoc.'
+  'distroless_image="registry.k8s.io/pause:3.9"'
+  'distroless_ok=false'
+  'if podman pull -q "$distroless_image" >/dev/null 2>&1; then'
+  '  distroless_ok=true'
+  'else'
+  '  echo "SKIP [DISTROLESS-XFAIL]: could not pull ${distroless_image} (registry unreachable) -- the shell-less distroless Compose health-check reproduction is skipped; the alpine positive test and /bin/false negative control still run."'
+  'fi'
   'cat >"$compose_dir/docker-compose.yml" <<"SMOKE_COMPOSE_YAML"'
   'services:'
   '  hc:'
@@ -150,6 +161,20 @@ $script = @(
   '      retries: 3'
   '      start_period: 1s'
   'SMOKE_COMPOSE_YAML'
+  '# Append the shell-less service only when its image pulled (see 4c). Quoted heredoc'
+  '# delimiter -> no expansion; the image literal matches $distroless_image above.'
+  'if [ "$distroless_ok" = true ]; then'
+  '  cat >>"$compose_dir/docker-compose.yml" <<"SMOKE_COMPOSE_DISTROLESS"'
+  '  distroless:'
+  '    image: registry.k8s.io/pause:3.9'
+  '    healthcheck:'
+  '      test: ["CMD", "/pause"]'
+  '      interval: 2s'
+  '      timeout: 2s'
+  '      retries: 3'
+  '      start_period: 1s'
+  'SMOKE_COMPOSE_DISTROLESS'
+  'fi'
   'up_out=$(docker compose -f "$compose_dir/docker-compose.yml" -p "$compose_proj" up -d 2>&1) || fail "docker compose up on the exec-form health-check fixture failed: $up_out"'
   'hc_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=hc" 2>/dev/null | head -n1)'
   '[ -n "$hc_cid" ] || fail "compose service container not found for project $compose_proj (compose up did not create it)"'
@@ -179,6 +204,27 @@ $script = @(
   'bad_health=$(drive_health "$bad_cid" 6)'
   '[ "$bad_health" = healthy ] && fail "negative control broke: a never-succeeding health command (/bin/false) reported healthy (state: ${bad_health}) -- the healthy assertion is vacuous and would not catch a stuck-at-starting service"'
   'echo "Negative control OK: the never-succeeding /bin/false service correctly never reached healthy (last state: ${bad_health})."'
+  '# 4c. Distroless (shell-less) XFAIL reproduction (mirror of smoke-test-podman.sh 4c):'
+  '# alpine reaches healthy DESPITE the CMD->CMD-SHELL rewrite because it HAS /bin/sh; a'
+  '# genuinely shell-less service proves the break is real AND caused by the shell wrap'
+  '# ((1) wired check is CMD-SHELL / "/bin/sh -c ..."; /pause the binary IS present, so'
+  '# it isolates shell-wrapping vs an absent binary; (2) it never reaches healthy).'
+  '# Together a KNOWN-XFAIL that stays GREEN; SELF-CLEARS to a loud NOTE if unwrapped OR'
+  '# healthy -- the signal a follow-up will act on. Pull failure handled as a SKIP above.'
+  'if [ "$distroless_ok" = true ]; then'
+  '  dl_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj" --filter "label=com.docker.compose.service=distroless" 2>/dev/null | head -n1)'
+  '  [ -n "$dl_cid" ] || fail "distroless (shell-less) compose service container not found for project $compose_proj (compose up did not create it)"'
+  '  dl_kind=$(podman inspect --format "{{if and .Config.Healthcheck .Config.Healthcheck.Test}}{{index .Config.Healthcheck.Test 0}}{{end}}" "$dl_cid" 2>/dev/null || echo "")'
+  '  dl_test=$(podman inspect --format "{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{else}}null{{end}}" "$dl_cid" 2>/dev/null || echo "")'
+  '  dl_wrapped=false'
+  '  case "$dl_kind" in CMD-SHELL) case "$dl_test" in */bin/sh*) dl_wrapped=true ;; esac ;; esac'
+  '  dl_health=$(drive_health "$dl_cid" 6)'
+  '  if [ "$dl_wrapped" = true ] && [ "$dl_health" != healthy ]; then'
+  '    echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into ${dl_test}; with no /bin/sh it never reached healthy (last state: ${dl_health}). The /pause binary IS present, so the shell wrap -- not an absent binary -- is the cause. This reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state here. See docs/rootless-podman.md Compose health-check behavior."'
+  '  else'
+  '    echo "NOTE (distroless XFAIL now obsolete): the shell-less service exec-form check translated to ${dl_test} (kind=${dl_kind}) and reached health state ${dl_health}. The CMD->CMD-SHELL wrap and/or the resulting distroless break is GONE -- podman-compose may now honor the exec form. A follow-up task can raise this XFAIL to a hard failure; revisit accepted limitation #2 in docs/rootless-podman.md."'
+  '  fi'
+  'fi'
   'echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy (with a never-healthy negative control failing as expected) all work."'
 ) -join "`n"
 
@@ -188,8 +234,19 @@ $runArgs += @(
   "--entrypoint", "/bin/sh", $Image, "-lc", $script
 )
 
-docker @runArgs
+# Tee the probe output to a log so we can detect the ONE self-skip the probe emits --
+# the distroless (shell-less) XFAIL reproduction when its image cannot be pulled -- and
+# surface it in the umbrella banner via the parent's marker. This script runs as the
+# host user (it can write the marker); the nested container's rootless userns cannot.
+# Tee-Object is a cmdlet, so $LASTEXITCODE still reflects docker's exit after the pipe.
+$probeLog = New-TemporaryFile
+docker @runArgs 2>&1 | Tee-Object -FilePath $probeLog.FullName
 $rc = $LASTEXITCODE
+
+if ($env:POWBOX_SMOKE_SKIP_MARKER -and (Select-String -LiteralPath $probeLog.FullName -SimpleMatch 'SKIP [DISTROLESS-XFAIL]' -Quiet)) {
+  Set-Content -LiteralPath $env:POWBOX_SMOKE_SKIP_MARKER -Value 'rootless Podman distroless Compose XFAIL reproduction (shell-less image could not be pulled)'
+}
+Remove-Item -LiteralPath $probeLog.FullName -ErrorAction SilentlyContinue
 
 if ($rc -eq 0) {
   Write-Host "Smoke test (podman) passed."

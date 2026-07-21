@@ -298,13 +298,29 @@ else {
   # the child evaluates the same host /dev/net/tun condition before its docker run,
   # so the two agree. The child still prints the skip message; we track it here.
   $podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
-  & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+  # The child self-skips one nested scenario at RUNTIME - the distroless (shell-less)
+  # Compose XFAIL reproduction, when its image cannot be pulled - which the parent
+  # cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
+  # there and we surface it in the banner so the partial coverage is not hidden.
+  $podmanMarker = New-TemporaryFile
+  try {
+    $env:POWBOX_SMOKE_SKIP_MARKER = $podmanMarker.FullName
+    & (Join-Path $rootDir "scripts/smoke-test-podman.ps1") -Image $Image
+  }
+  finally {
+    Remove-Item Env:\POWBOX_SMOKE_SKIP_MARKER -ErrorAction SilentlyContinue
+  }
+  $podmanSkip = Get-Content -LiteralPath $podmanMarker.FullName -Raw -ErrorAction SilentlyContinue
   if ($podmanRequest -eq "off") {
     $skipped.Add("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
   }
   elseif ($podmanRequest -ne "on" -and -not (Test-Path "/dev/net/tun")) {
     $skipped.Add("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
   }
+  elseif ($podmanSkip) {
+    $skipped.Add("Stage 3: $($podmanSkip.Trim())")
+  }
+  Remove-Item -LiteralPath $podmanMarker.FullName -ErrorAction SilentlyContinue
 }
 
 # Stage 4 - self-hosted ("-Isolated") launch mode. Validates the launcher's

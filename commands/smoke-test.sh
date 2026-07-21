@@ -289,12 +289,20 @@ else
 	# — the child evaluates the same host /dev/net/tun condition before its docker
 	# run, so the two agree. The child still prints the skip message; we track it here.
 	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
-	"${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
+	# The child self-skips one nested scenario at RUNTIME — the distroless (shell-less)
+	# Compose XFAIL reproduction, when its image cannot be pulled — which the parent
+	# cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
+	# there and we surface it in the banner so the partial coverage is not hidden.
+	podman_marker="$(mktemp "${TMPDIR:-/tmp}/powbox-smoke-podman-skip.XXXXXX")"
+	POWBOX_SMOKE_SKIP_MARKER="$podman_marker" "${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 	if [ "$podman_gate" = "off" ]; then
 		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
 	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
 		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
+	elif [ -s "$podman_marker" ]; then
+		skipped+=("Stage 3: $(cat "$podman_marker")")
 	fi
+	rm -f "$podman_marker"
 fi
 
 # Stage 4 - self-hosted ("--isolated") launch mode. Validates the launcher's

@@ -441,13 +441,16 @@ distroless images need) is exercised by the Podman smoke via `docker compose`
 (the shim spelling agents are expected to use). `docker compose` and
 `podman compose` are the **same path** here — both route to the `podman-compose`
 1.3 provider — so the smoke tests the one canonical spelling agents use rather
-than advertising two that could diverge. The smoke does four things that each
+than advertising two that could diverge. The smoke does five things that each
 **fail clearly**: it asserts the exec-form check is wired onto the service; it
 **inspects and classifies the translation** Compose applied
-(`.Config.Healthcheck.Test[0]`); it drives the check and asserts the service reaches
-**`healthy`**; and it runs a never-succeeding **negative-control** service that must
-*not* reach healthy. So it fails if Compose drops the check, mangles the exec array
-beyond the known wrap, or leaves the service stuck at `starting`/`unhealthy`.
+(`.Config.Healthcheck.Test[0]`); it drives the check and asserts the alpine service
+reaches **`healthy`**; it runs a never-succeeding **negative-control** service that
+must *not* reach healthy; and it stands up a third, genuinely **shell-less
+(distroless)** service that actively reproduces the Kalm2 break as a documented
+**XFAIL** (see limitation #2). So it fails if Compose drops the check, mangles the
+exec array beyond the known wrap, or leaves the alpine/negative-control services in
+the wrong health state.
 
 Two behaviors are limitations of this sandbox. They are not silently accepted: the
 smoke actively **detects and reports** each one, so a future reader (and CI log)
@@ -488,14 +491,33 @@ one *worse* than described fails the smoke.
    binary reachable through a shell, or ship a minimal shell, or run the check binary
    as the container command and gate on liveness another way.
 
+   Because alpine *has* `/bin/sh`, its check still reaches `healthy` despite the wrap,
+   so the alpine service alone never exercises the path that actually broke. The smoke
+   therefore adds a third, genuinely **shell-less** service (a stock
+   `registry.k8s.io/pause` image, no `/bin/sh`) with the same exec-form check shape to
+   **actively reproduce** the distroless break: it confirms the wired check is
+   `CMD-SHELL` / `/bin/sh -c …` (the wrap that reintroduces the missing shell — and
+   since the `/pause` binary *is* present, this isolates the shell wrap, not an absent
+   binary, as the cause) **and** that the service never reaches `healthy` when driven.
+   Those two facts together are the documented **XFAIL** and keep the run **green** on
+   `podman-compose` 1.3. It **self-clears loudly** — a `NOTE`, not a silent pass — if
+   the check is no longer shell-wrapped **or** the service does reach `healthy`, the
+   signal that a follow-up can raise this XFAIL to a hard failure and upgrade the
+   provider. If the shell-less image cannot be pulled (registry unreachable) the smoke
+   **skips just that scenario** with a visible reason and surfaces it in the umbrella
+   banner — never a false pass, and never a hard failure on a pull outage; the alpine
+   positive test and the `/bin/false` negative control still run.
+
 The smoke uses a hermetic, invocation-uniquely-named Compose project built in a
-throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project and
-removes only that directory on success or failure. Its scope is Compose exec-array
-translation and health-state propagation on a shell-bearing image (Alpine) — not a
-general Compose conformance suite. `scripts/test-podman-compose-healthcheck.sh` is
-the hermetic, image-free guard that locks the probe's invariants (exec form, the
+throwaway `mktemp -d`, with an `EXIT` trap that tears down that exact project (all
+three services) and removes only that directory on success or failure. Its scope is
+Compose exec-array translation and health-state propagation on a shell-bearing image
+(Alpine) plus the shell-less distroless reproduction above — not a general Compose
+conformance suite. `scripts/test-podman-compose-healthcheck.sh` is the hermetic,
+image-free guard that locks the probe's invariants (exec form, the
 translation-detection classifier, the `healthy` assertion plus the never-healthy
-negative control, cleanup, and Bash/PowerShell parity).
+negative control, the distroless wrap-detection + never-healthy XFAIL with its
+self-clearing `NOTE` and pull-failure skip, cleanup, and Bash/PowerShell parity).
 
 Migration applied to `docker/base/Dockerfile` (validated in a nested `debian:trixie`
 container before committing — all candidates resolve): `FROM node:24-trixie-slim`;

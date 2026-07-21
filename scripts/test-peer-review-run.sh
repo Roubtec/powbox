@@ -58,13 +58,17 @@ set -uo pipefail
 #  (12) FAIL-SAFE unvalidated-PGID fallback: a captured descendant PID whose
 #       baseline /proc start time was empty/unreadable at capture is treated as
 #       NON-matching — never counted alive, never signalled — so a recycled PID
-#       cannot be TERM/KILL'd; and a LIVE WALK is refused once the walk root no
+#       cannot be TERM/KILL'd; a LIVE WALK is refused once the walk root no
 #       longer matches its captured baseline, so a recycled LEADER PID can never
-#       have an unrelated process's children captured for the sweep (driving the
-#       real supervision functions directly)
-#  (13) the codex help probe cannot hang: a background child of `--help` that
-#       inherits stdout must not hold the capture open past the probe timeout
-#       (file-based capture, no pipe)
+#       have an unrelated process's children captured for the sweep; and the
+#       walk verifies lineage PER LEVEL (12f) — a parent that no longer matches
+#       its baseline after a child's snapshot contributes nothing, so a
+#       recycled INTERMEDIATE PID cannot either (driving the real supervision
+#       functions directly)
+#  (13) the codex help probe can neither hang nor leak: a background child of
+#       `--help` that inherits stdout must not hold the capture open past the
+#       probe timeout (file-based capture, no pipe), and the helper itself
+#       reaps a probe-spawned in-group stray (supervised probe, group sweep)
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -1089,7 +1093,7 @@ extract_fn() {
 	awk -v fn="$1" 'index($0, fn"() {")==1{g=1} g{print} g && /^}/{exit}' "$HELPER"
 }
 eval "$(
-	for f in proc_starttime pid_matches descendant_pids captured_start capture_descendants group_alive signal_tree; do
+	for f in proc_ppid_start proc_starttime pid_matches captured_start capture_walk capture_descendants group_alive signal_tree; do
 		extract_fn "$f"
 	done
 )"
@@ -1174,22 +1178,93 @@ case "$CAPTURED_DESC" in
 esac
 kill "$kid" 2>/dev/null || true
 wait "$kid" 2>/dev/null || true
+
+# (f) VERIFIED LINEAGE (per-level walk guard, one level deeper than 12e's root
+# guard): capture_walk records a child only when, AFTER the child's /proc
+# snapshot, the PARENT still matches its verified baseline. A stale/wrong
+# baseline for the walk parent simulates an INTERMEDIATE node whose PID the
+# kernel recycled for an unrelated process mid-walk: its enumerated children
+# (which genuinely list the recycled PID as their parent, so a PPID check alone
+# would accept them) must be discarded, never recorded with fresh valid start
+# times for the sweep.
+sleep 30 &
+kid=$!
+CAPTURED_DESC=" "
+capture_walk $$ "1" # wrong baseline for the walk parent (this shell)
+checks=$((checks + 1))
+case "$CAPTURED_DESC" in
+*" ${kid}:"*)
+	fails=$((fails + 1))
+	printf 'FAIL [12f: stale-parent walk must NOT record its children (recycled-intermediate hazard)]\n' >&2
+	;;
+esac
+# Control: with the CORRECT baseline the same walk DOES record the child.
+CAPTURED_DESC=" "
+capture_walk $$ "$(proc_starttime $$)"
+checks=$((checks + 1))
+case "$CAPTURED_DESC" in
+*" ${kid}:"*) ;;
+*)
+	fails=$((fails + 1))
+	printf 'FAIL [12f: matched-parent walk must record the child]\n' >&2
+	;;
+esac
+kill "$kid" 2>/dev/null || true
+wait "$kid" 2>/dev/null || true
+
+# ...and the verification CHAINS through the recursion: a GRANDCHILD reached via
+# a live verified intermediate is still captured (the per-level guard must not
+# break multi-level capture).
+gkfile="$WORK/12f-grandkid"
+bash -c 'sleep 30 & echo $! >"$0"; wait' "$gkfile" &
+mid=$!
+gk=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	gk="$(cat "$gkfile" 2>/dev/null || echo)"
+	[ -n "$gk" ] && break
+	sleep 0.1
+done
+CAPTURED_DESC=" "
+capture_walk $$ "$(proc_starttime $$)"
+checks=$((checks + 1))
+if [ -z "$gk" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [12f: grandchild fixture never recorded its pid]\n' >&2
+else
+	case "$CAPTURED_DESC" in
+	*" ${gk}:"*) ;;
+	*)
+		fails=$((fails + 1))
+		printf 'FAIL [12f: verified walk must still capture a grandchild through a live intermediate]\n' >&2
+		;;
+	esac
+fi
+[ -n "$gk" ] && kill "$gk" 2>/dev/null
+kill "$mid" 2>/dev/null || true
+wait "$mid" 2>/dev/null || true
 unset CAPTURED_DESC
 
 # ============================================================================
-# (13) the codex help probe must not hang when `--help` leaves a background
-#      child that INHERITED stdout: with a pipe-based $(...) capture the read
-#      would block on EOF until that child exits (~60s here), long after
-#      `timeout` killed the probe itself; the file-based capture has no pipe
-#      reader, so the run completes promptly.
+# (13) the codex help probe must neither hang NOR leak. Hang: a background
+#      child of `--help` that INHERITED stdout would, with a pipe-based $(...)
+#      capture, block the read on EOF until that child exits (~60s here), long
+#      after the probe itself died; the file-based capture has no pipe reader,
+#      so the run completes promptly. Leak: the probe runs under the same
+#      process-group supervision as an attempt, so the HELPER ITSELF must reap
+#      the stray (here left in the probe's group, where the post-probe group
+#      sweep reaches it even after the fast probe has exited) — the test
+#      asserts the stray is DEAD, it does not clean it up. (A probe child that
+#      daemonizes into a new session before any poll tick is the documented
+#      accepted residual, same class as the attempt loop's.)
 # ============================================================================
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 if [ "$1" = exec ] && [ "$2" = --help ]; then
 	# background child inheriting stdout/stderr — the write end a pipe capture
-	# would wait on; setsid keeps it clear of the probe's own process group
-	setsid sleep 60 &
+	# would wait on; it stays in the probe's process group, so the helper's
+	# post-probe sweep must reap it
+	sleep 60 &
 	echo $! >"$PROBE_STRAY"
 	echo "--json"
 	exit 0
@@ -1211,8 +1286,15 @@ if [ $((t1 - t0)) -ge 30 ]; then
 	fails=$((fails + 1))
 	printf 'FAIL [13: probe capture must not hang on the stray child]: run took %ss\n' "$((t1 - t0))" >&2
 fi
+# The HELPER must have reaped the stray before returning (its reap runs
+# synchronously inside the probe, before any attempt) — the test only observes.
 stray="$(cat "$PROBE_STRAY" 2>/dev/null || echo)"
-[ -n "$stray" ] && kill -9 "$stray" 2>/dev/null
+checks=$((checks + 1))
+if [ -z "$stray" ] || kill -0 "$stray" 2>/dev/null; then
+	fails=$((fails + 1))
+	printf 'FAIL [13: helper reaps the probe stray]: pid %s still alive (or unrecorded) after the run\n' "${stray:-<none>}" >&2
+	[ -n "$stray" ] && kill -9 "$stray" 2>/dev/null
+fi
 unset PROBE_STRAY
 
 if [ "$fails" -ne 0 ]; then

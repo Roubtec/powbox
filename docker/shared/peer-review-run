@@ -22,8 +22,10 @@
 #                    the provider on stdin, never interpolated through a shell.
 #   --artifact-root  absolute directory OUTSIDE the worktree under which a
 #                    per-invocation owner-only (0700) session dir is created, with
-#                    a fresh owner-only attempt dir per attempt nested inside it
-#                    (so the provider only ever sees this invocation's attempts).
+#                    a fresh owner-only attempt dir per attempt nested inside it, so
+#                    the provider is only ever POINTED AT this invocation's own
+#                    attempts, never a sibling's (see the sibling-isolation note by
+#                    SESSION_DIR for the honest same-UID traversal residual).
 #   --base           optional base/reference metadata (recorded, not injected).
 #   --timeout        wall-clock seconds before the provider tree is reaped
 #                    (default 900).
@@ -80,6 +82,16 @@ CURRENT_PGID=""
 # rather than reporting a clean result as if the tree were fully reaped.
 REAP_WARN=0
 
+# Captured descendant PID set for the unvalidated-PGID fallback (space-padded for
+# whole-word membership tests). It is accumulated WHILE THE LEADER IS STILL ALIVE
+# — a live tree-walk rooted at a leader that has ALREADY exited finds nothing,
+# because its children have by then reparented to init. Capturing eagerly (during
+# the poll loop and before we wait on / reap the leader) means we still hold a
+# stray grandchild's PID after the leader dies and can terminate it. Only ever
+# populated on the fallback path; the validated-PGID path reaps by group id and
+# needs no PID snapshot.
+CAPTURED_DESC=" "
+
 # descendant_pids <root_pid> — print <root_pid> and every transitive child pid,
 # walked live at call time from the process table. Used ONLY on the unvalidated-
 # PGID fallback path so that even without a group signal we still reach the
@@ -94,15 +106,31 @@ descendant_pids() {
 	done
 }
 
+# capture_descendants <leader_pid> — merge the leader's CURRENT descendant subtree
+# (leader included) into CAPTURED_DESC. Call repeatedly while the leader is alive
+# so a grandchild is recorded BEFORE it can reparent away on the leader's exit;
+# once captured a PID stays in the set even after the leader dies. Fallback-only.
+capture_descendants() {
+	local root="$1" p
+	for p in $(descendant_pids "$root"); do
+		case "$CAPTURED_DESC" in
+		*" $p "*) ;;
+		*) CAPTURED_DESC="${CAPTURED_DESC}${p} " ;;
+		esac
+	done
+}
+
 # group_alive <leader_pid> <pgid|""> — is any member of the supervised tree still
-# alive? Uses the validated group when we have one, else sweeps the leader AND its
-# known descendant subtree by PID (not just the leader alone).
+# alive? Uses the validated group when we have one, else sweeps the CAPTURED
+# descendant set (accumulated while the leader lived) refreshed with a live walk,
+# so a grandchild that reparented after the leader exited is still checked.
 group_alive() {
 	local pid="$1" pgid="$2" p
 	if [ -n "$pgid" ]; then
 		kill -0 "-${pgid}" 2>/dev/null
 	else
-		for p in $(descendant_pids "$pid"); do
+		capture_descendants "$pid"
+		for p in $CAPTURED_DESC; do
 			kill -0 "$p" 2>/dev/null && return 0
 		done
 		return 1
@@ -110,17 +138,19 @@ group_alive() {
 }
 
 # signal_tree <SIG> <leader_pid> <pgid|""> — deliver a signal to the whole
-# validated group, or (fallback) to the leader AND every known descendant PID.
-# NEVER a negative, unvalidated PID (which could hit the helper's own group);
-# never pkill -f. The descendant-PID sweep keeps the fallback a real tree reap
-# rather than a leader-only signal, so a grandchild is still terminated when job
-# control could not isolate the child into its own group.
+# validated group, or (fallback) to every CAPTURED descendant PID (leader
+# included). NEVER a negative, unvalidated PID (which could hit the helper's own
+# group); never pkill -f. Signalling the captured set — not a fresh walk rooted at
+# the possibly-dead leader — keeps the fallback a real tree reap: a grandchild
+# recorded while the leader was alive is still terminated after the leader exits
+# and the grandchild reparents to init.
 signal_tree() {
 	local sig="$1" pid="$2" pgid="$3" p
 	if [ -n "$pgid" ]; then
 		kill "-${sig}" "-${pgid}" 2>/dev/null || true
 	else
-		for p in $(descendant_pids "$pid"); do
+		capture_descendants "$pid"
+		for p in $CAPTURED_DESC; do
 			kill "-${sig}" "$p" 2>/dev/null || true
 		done
 	fi
@@ -246,17 +276,35 @@ case "$ARTIFACT_ROOT/" in
 esac
 mkdir -p -- "$ARTIFACT_ROOT" 2>/dev/null || die_usage "cannot create --artifact-root '$ARTIFACT_ROOT'"
 
-# Sibling-attempt isolation. All attempt dirs share ONE Unix owner, so 0700 keeps
-# OTHER users out but does NOT stop this owner's read-only provider from reading a
-# concurrent invocation's artifacts if it can locate them. We therefore nest every
-# attempt of THIS invocation under one per-invocation, unpredictably-named session
-# dir (0700) and only ever hand the provider a path INSIDE its own session — the
-# directory it is told about (and whose neighbourhood it can list) contains only
-# this invocation's own attempts, never a sibling invocation's. Residual, honest:
-# a read-only sandbox running as the same UID could still enumerate ARTIFACT_ROOT
-# and read another invocation's session by its random name; filesystem permissions
-# alone cannot prevent a same-UID reader. The provider's read-only sandbox scope is
-# the real trust boundary — this nesting removes trivial "by default" exposure.
+# Sibling-attempt isolation — the BY-DEFAULT guarantee, and its honest residual.
+# All attempt dirs share ONE Unix owner, so 0700 keeps OTHER users out but does
+# NOT stop this owner's provider from reading a concurrent invocation's artifacts
+# if it can LOCATE them. We make the by-default guarantee as strong as filesystem
+# permissions allow:
+#   * every attempt of THIS invocation is nested under one per-invocation,
+#     unpredictably-named session dir (0700), never a direct child of ARTIFACT_ROOT;
+#   * the provider is handed only the MINIMAL paths it needs — it is `--cd`'d into
+#     the WORKTREE under review (artifacts stay OUT of that tree), and given only
+#     the one specific output-file path inside its OWN attempt dir; it is never
+#     handed ARTIFACT_ROOT, the session dir, or a sibling/retry path on argv,
+#     stdin, --cd, or --output-last-message;
+#   * so the only directory the provider is pointed at, and whose neighbourhood it
+#     can list, contains just this invocation's own attempts — a normal review
+#     never encounters a sibling or a retry sibling.
+# Residual, stated honestly (NOT complete isolation): the providers' read-only
+# sandboxes are permission/read-only, NOT a private mount namespace, and they run
+# as the SAME UID as these artifacts. A DETERMINED provider that manually traverses
+# the filesystem — climbing `..` out of its handed attempt dir to ARTIFACT_ROOT and
+# enumerating sibling session dirs by name — CAN therefore read paths it was never
+# handed. Filesystem permissions alone cannot prevent a same-UID reader, and this
+# nesting does not claim to: it removes trivial "by default" exposure only. Complete
+# traversal-proof isolation would require a filesystem sandbox (bubblewrap / a
+# private mount namespace) confining the provider to the worktree plus its own
+# attempt dir, which is OUT OF SCOPE for this helper. The guarantee here is
+# precisely: the helper does not HAND a sibling/parent path and a normal review
+# does not encounter one — not that a hostile provider cannot manually traverse to
+# one. See scripts/test-peer-review-run.sh case 11c, which asserts both the handed-
+# path guarantee AND (honestly) the traversable residual.
 SESSION_DIR="$(mktemp -d "${ARTIFACT_ROOT}/prr-XXXXXXXXXXXX")" ||
 	die_usage "cannot create a session directory under '$ARTIFACT_ROOT'"
 chmod 700 "$SESSION_DIR"
@@ -278,11 +326,13 @@ CODEX_JSON_SUPPORTED=""
 codex_supports_json() {
 	if [ -z "$CODEX_JSON_SUPPORTED" ]; then
 		# Bound the probe: `codex exec --help` should return instantly, but it must
-		# never be able to hang or leak descendants, so it runs under `timeout`
-		# (which reaps the whole probe tree on expiry). If the probe times out or
+		# never be able to hang or leak descendants, so it runs under `timeout` with
+		# KILL escalation — `-k 5 10` sends TERM at 10s and, if the probe IGNORES
+		# TERM, a SIGKILL 5s later — so a TERM-swallowing `--help` cannot hang the
+		# runner or evade its process-reaping guarantee. If the probe times out or
 		# fails, grep matches nothing and we fall back to the safe no-live-progress
 		# default rather than assuming --json support.
-		if timeout 10 codex exec --help 2>&1 | grep -q -- '--json'; then
+		if timeout -k 5 10 codex exec --help 2>&1 | grep -q -- '--json'; then
 			CODEX_JSON_SUPPORTED=yes
 		else
 			CODEX_JSON_SUPPORTED=no
@@ -502,6 +552,7 @@ run_attempt() {
 	# group) so the whole tree can be reaped by group id. The subshell exec's into
 	# the provider and is the group leader.
 	FWD_LINES=0
+	CAPTURED_DESC=" " # fresh per attempt; only populated on the fallback path
 	local start end child pgid rc timed_out=0
 	start=$(date +%s.%N)
 	set -m
@@ -531,9 +582,14 @@ run_attempt() {
 
 	# Poll: forward progress and enforce the deadline. On the deadline we only flag
 	# the timeout and break; the single reap_tree below handles termination for
-	# BOTH the timeout and the normal/failed-exit paths identically.
+	# BOTH the timeout and the normal/failed-exit paths identically. On the
+	# unvalidated-PGID fallback we ALSO snapshot the leader's descendants each tick
+	# while it is still alive, so a stray grandchild is recorded before the leader
+	# exits and reparents it away — the reap below then still reaches it (the
+	# validated-PGID path needs none of this; the group signal covers the tree).
 	while kill -0 "$child" 2>/dev/null; do
 		forward_tick "$out"
+		[ -z "$pgid" ] && capture_descendants "$child"
 		end=$(date +%s.%N)
 		if awk -v a="$end" -v b="$start" -v t="$TIMEOUT" 'BEGIN{exit !((a-b)>t)}'; then
 			timed_out=1

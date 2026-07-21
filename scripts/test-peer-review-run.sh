@@ -30,10 +30,14 @@ set -uo pipefail
 #  (10) containment/usage — artifact-root inside the worktree rejected, bad
 #       flags exit 64, 0700 attempt dirs, prompt copied into the attempt dir
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
-#       descendant escalated to KILL and actually dies, BEHAVIORAL sibling
-#       isolation (a fake provider actively probes for a sibling's planted secret
-#       via handed paths and comes up empty), anchored verdict + ISSUES-precedence
-#       (no example-token false-pass), and the read-only tool-set / no-persistence
+#       descendant escalated to KILL and actually dies, sibling isolation proven
+#       BEHAVIORALLY AND HONESTLY (a fake provider probes a sibling's planted
+#       secret two ways: through HANDED paths — argv/stdin/--cd/--output-last-message
+#       — where it comes up empty, AND by DELIBERATE ../.. traversal to the shared
+#       artifact-root where a same-UID reader with no mount-namespace sandbox CAN
+#       reach it; the test asserts the by-default guarantee without pretending the
+#       nesting is traversal-proof), anchored verdict + ISSUES-precedence (no
+#       example-token false-pass), and the read-only tool-set / no-persistence
 #       flags for both providers (Claude restricted to native read tools, no Bash)
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
@@ -625,17 +629,30 @@ if [ -n "$stub" ] && kill -0 "$stub" 2>/dev/null; then
 fi
 unset STUBBORN_PID
 
-# 11c: sibling-attempt isolation, proven BEHAVIORALLY. Two invocations share ONE
-# artifact-root. Each fake provider PLANTS a secret sentinel in its own attempt
-# dir and then ACTIVELY PROBES for any OTHER invocation's sentinel using only the
-# filesystem paths the runner handed it (its own attempt dir via
-# --output-last-message, and its cwd). It must come up empty: the runner nests
-# every attempt under a per-invocation, unpredictably-named session dir and hands
-# the provider only paths inside its OWN session, so a sibling's artifacts are not
-# reachable "by default" — never handed on argv, never on stdin, not a neighbour
-# of the handed path. (Residual, documented in the helper: a determined same-UID
-# reader could still enumerate the artifact-root by walking up; filesystem
-# permissions alone cannot stop that. This test proves the by-default guarantee.)
+# 11c: sibling-attempt isolation, proven BEHAVIORALLY and HONESTLY. Two invocations
+# share ONE artifact-root. Each fake provider PLANTS a secret sentinel in its own
+# attempt dir, then runs TWO probes:
+#
+#   Probe A — HANDED PATHS ONLY (the guarantee the helper actually makes): search
+#     the paths the runner handed it — its own attempt dir (via
+#     --output-last-message) and its cwd (--cd, the worktree). A sibling must NOT
+#     appear here: the runner nests every attempt under a per-invocation,
+#     unpredictably-named session dir and hands the provider only paths inside its
+#     OWN session, so a sibling's artifacts are never handed on argv/stdin/--cd/
+#     --output-last-message, nor are they a neighbour of the handed attempt dir.
+#
+#   Probe B — DELIBERATE ../.. TRAVERSAL (the documented residual): climb out of
+#     the handed attempt dir to the shared artifact-root and search it. This is
+#     NOT read-only-namespaced in this hermetic harness (nor under the providers'
+#     real read-only sandboxes, which are permission/read-only, not a private
+#     mount namespace), so a determined SAME-UID reader that manually walks up CAN
+#     reach a sibling. The test asserts this HONESTLY rather than pretending the
+#     nesting is traversal-proof: filesystem permissions alone cannot stop a
+#     same-UID reader, and complete isolation would need a filesystem sandbox
+#     (bubblewrap / private mount namespace) — out of scope for this helper. What
+#     the helper guarantees is that it never HANDS a sibling/parent path and a
+#     normal review never encounters one (Probe A); it does NOT claim a hostile
+#     provider cannot manually traverse to one (Probe B).
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -644,39 +661,62 @@ printf '%s\n' "$@" >"$ARGV_LOG"     # overwrite: capture THIS invocation's argv 
 last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
 cat >"$STDIN_LOG"
 mydir="$(dirname "$last")"
-# Plant this invocation's own secret in its own attempt dir.
-printf 'TOP-SECRET\n' >"$mydir/SIBLING-SECRET.txt"
-# Probe: try to read ANY OTHER invocation's secret using ONLY the paths the runner
-# handed us — our own attempt dir and our cwd. Our own sentinel is excluded, so a
-# non-empty find means a sibling leaked into a handed path.
-found=NOLEAK
+own="$mydir/SIBLING-SECRET.txt"
+printf 'TOP-SECRET\n' >"$own"
+# Probe A: HANDED paths only (own attempt dir + cwd), no climbing out. Our own
+# sentinel is excluded, so any hit means a sibling leaked into a HANDED path.
+handed=NOLEAK
 while IFS= read -r hit; do
-	[ "$hit" = "$mydir/SIBLING-SECRET.txt" ] && continue
-	found="LEAK:$hit"
+	[ "$hit" -ef "$own" ] && continue
+	handed="LEAK:$hit"
 done < <(find "$mydir" "$PWD" -name SIBLING-SECRET.txt 2>/dev/null)
-printf '%s\n' "$found" >"$PROBE_LOG"
+printf '%s\n' "$handed" >"$HANDED_LOG"
+# Probe B: DELIBERATE upward traversal to the shared artifact-root (../.. out of
+# the handed attempt dir → session dir → artifact-root). Records whether a
+# same-UID reader with no mount-namespace sandbox CAN reach a sibling this way.
+trav=NONE
+while IFS= read -r hit; do
+	[ "$hit" -ef "$own" ] && continue
+	trav="REACHED:$hit"
+done < <(find "$mydir/../.." -name SIBLING-SECRET.txt 2>/dev/null)
+printf '%s\n' "$trav" >"$TRAV_LOG"
 printf 'VERDICT: PASS\n' >"$last"; exit 0
 EOF
 chmod +x "$d/bin/codex"
-ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" PROBE_LOG="$d/probe"
-export ARGV_LOG STDIN_LOG PROBE_LOG
-# invocation A: plants secret A
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" HANDED_LOG="$d/handed" TRAV_LOG="$d/trav"
+export ARGV_LOG STDIN_LOG HANDED_LOG TRAV_LOG
+# invocation A: plants secret A (its own upward-traversal finds no sibling yet)
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex)
 adir1="$(jqf "$RUN_RESULT" .artifactDir)"
 sess1="$(dirname "$adir1")"
-# invocation B: plants secret B and PROBES for A's secret via handed paths only
+# invocation B: plants secret B, then probes for A's secret both ways
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex)
 adir2="$(jqf "$RUN_RESULT" .artifactDir)"
 sess2="$(dirname "$adir2")"
-# Behavioral proof: invocation B could NOT read invocation A's sentinel by default.
-assert_eq "11c: B cannot read a sibling secret from handed paths" "$(cat "$d/probe")" NOLEAK
-# And the runner never handed B a path referencing A's session (argv/stdin).
+# (a) THE GUARANTEE: B could NOT read A's sentinel through any HANDED path.
+assert_eq "11c: handed-path probe finds no sibling (the by-default guarantee)" "$(cat "$d/handed")" NOLEAK
+# The runner never handed B a path referencing A's session, on argv or stdin.
 assert_not_contains "11c: sibling session path not on B's argv" "$(cat "$d/argv")" "$sess1"
 assert_not_contains "11c: sibling session path not on B's stdin" "$(cat "$d/stdin")" "$sess1"
-# Structural backing for the above: distinct per-invocation session dirs, nested
-# under the artifact-root (never a direct child), each holding only its own attempt.
+# --cd is the worktree under review, NOT the artifact root/session (artifacts stay
+# out of the reviewed tree, and the provider is rooted at the tree, not at them).
+cd_val="$(awk '/^--cd$/{getline; print; exit}' "$d/argv")"
+assert_contains "11c: --cd is the worktree under review" "$cd_val" "/wt"
+assert_not_contains "11c: --cd is NOT the artifact root/session" "$cd_val" "/artifacts"
+# --output-last-message points strictly inside B's OWN attempt dir — the ONLY
+# artifact path handed to the provider — never a sibling/parent.
+olm_val="$(awk '/^--output-last-message$/{getline; print; exit}' "$d/argv")"
+assert_eq "11c: --output-last-message is inside B's own attempt dir" "$olm_val" "$adir2/codex-last-message.txt"
+assert_not_contains "11c: --output-last-message does not point at the sibling session" "$olm_val" "$sess1"
+# (b) THE RESIDUAL, asserted honestly: a manual ../.. traversal by a same-UID
+# provider DOES reach the sibling here (no mount-namespace sandbox). The helper is
+# NOT traversal-proof and the test must not pretend otherwise; complete isolation
+# would require a filesystem sandbox (bubblewrap / private mount namespace).
+assert_contains "11c: manual ../.. traversal CAN reach a sibling (documented residual, not traversal-proof)" "$(cat "$d/trav")" "REACHED:"
+# Structural backing: distinct per-invocation session dirs, nested under the
+# artifact-root (never a direct child), each holding only its own attempt.
 assert_eq "11c: artifactDir parent is the artifact-root's child (session)" "$(dirname "$sess1")" "$d/artifacts"
 checks=$((checks + 1))
 if [ "$sess1" = "$sess2" ]; then
@@ -687,7 +727,7 @@ direct_attempts="$(find "$d/artifacts" -mindepth 1 -maxdepth 1 -type d -name 'pe
 assert_eq "11c: no attempt dir directly under artifact-root" "$direct_attempts" 0
 own_only="$(find "$sess1" -maxdepth 1 -type d -name 'peer-review-*' | wc -l | tr -d ' ')"
 assert_eq "11c: session dir holds only its own invocation's attempt" "$own_only" 1
-unset ARGV_LOG STDIN_LOG PROBE_LOG
+unset ARGV_LOG STDIN_LOG HANDED_LOG TRAV_LOG
 
 # 11d: anchored verdict + ISSUES precedence. A body that QUOTES an example pass
 # token inline but renders a real ISSUES verdict must resolve to issues; and when

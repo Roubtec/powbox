@@ -995,7 +995,10 @@ const mainCheckoutFinal = await agent(mainCheckoutStatusPrompt("post-batch"), {
   effort: "low",
 });
 const mainCheckout = mainCheckoutSummary(mainCheckoutBaseline, mainCheckoutFinal);
-if (mainCheckout.flagged) {
+// Log flagged dirt AND the not-measured outcome: a skipped comparison is easy
+// to miss if only `flagged` reports surface, and its note says exactly why the
+// cleanliness check has nothing authoritative this run.
+if (mainCheckout.flagged || !mainCheckout.measured) {
   const details = [];
   if (mainCheckout.newPaths.length) details.push(`new: ${mainCheckout.newPaths.join(", ")}`);
   if (mainCheckout.disappeared.length) details.push(`disappeared: ${mainCheckout.disappeared.join(", ")}`);

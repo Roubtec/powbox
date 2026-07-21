@@ -96,6 +96,16 @@ POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
 
 Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up help`.
 
+For parallel worktrees that each run database tests, opt into a worktree-scoped cluster so they do not share one data dir or port. Put the flag before the subcommand; it derives an isolated data directory and a free loopback port from the current Git worktree (recorded so later `status`/`url`/`down` resolve the same server):
+
+```bash
+pg-dev-up --worktree up                        # isolated cluster on an allocated port
+eval "$(pg-dev-up --worktree url --export)"     # export this worktree's DATABASE_URL
+pg-dev-up --worktree down                       # stops only this worktree's cluster
+```
+
+Outside a Git repo, pass an explicit identifier instead: `pg-dev-up --profile <id> up`. Explicit `PGDATA`/`PGPORT` still override the scoped defaults (`POWBOX_PG_SCOPED_ROOT` overrides the scoped temp root).
+
 ## Installing additional packages
 
 - **System packages:** `sudo apt-get update && sudo apt-get install -y <package>` — sudo is allowed for `apt-get`.

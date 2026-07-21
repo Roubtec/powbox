@@ -17,29 +17,156 @@
 #   pg-dev-up check     verify the server binaries are present (no daemon needed)
 #   pg-dev-up help
 #
+# Scoped mode (opt-in) — isolate the cluster per Git worktree so parallel
+# worktrees can run database tests concurrently without sharing one cluster,
+# data directory, or port. The flag goes BEFORE the command and applies to
+# up / status / url / down:
+#   pg-dev-up --worktree [up|status|url|down]   scope to the current Git worktree
+#   pg-dev-up --profile <id> [up|status|...]    scope to an explicit identifier
+# e.g.
+#   pg-dev-up --worktree up
+#   eval "$(pg-dev-up --worktree url --export)"
+#   pg-dev-up --worktree down
+# Scoped mode derives an isolated data directory under a private temp root and
+# allocates its own free loopback port (recorded next to the data dir so later
+# status/url/down resolve the SAME server that up started). `--worktree` requires
+# being inside a Git repository; outside one, pass `--profile <id>` with a stable
+# identifier rather than guessing. Two different worktrees (or profiles) receive
+# distinct data dirs and ports and stop independently. Ordinary `pg-dev-up up`
+# (no flag) is UNCHANGED: /tmp/pgdata on port 5432.
+#
 # Environment overrides (defaults in parentheses):
-#   PGDATA            cluster data directory    (/tmp/pgdata)
-#   PGPORT            listen port               (5432)
-#   POSTGRES_USER     app role to ensure        (postgres)
-#   POSTGRES_PASSWORD app role password         (postgres)
-#   POSTGRES_DB       app database to ensure    (postgres)
+#   PGDATA            cluster data directory  (/tmp/pgdata; scoped: <root>/<key>/pgdata)
+#   PGPORT            listen port             (5432; scoped: an allocated free port)
+#   POSTGRES_USER     app role to ensure      (postgres)
+#   POSTGRES_PASSWORD app role password       (postgres)
+#   POSTGRES_DB       app database to ensure  (postgres)
+# An explicit PGDATA or PGPORT is authoritative and REPLACES only that one scoped
+# default (the other scoped defaults still apply); POSTGRES_USER/PASSWORD/DB
+# behave the same scoped or not. Because an override is authoritative, a scoped `up`
+# REFUSES (rather than silently adapting) when the scope already has a running
+# cluster that a new explicit PGPORT conflicts with, or that a new PGDATA would
+# orphan — stop it with the scoped `down` first. PGPORT must be a bare 1-65535
+# integer. POWBOX_PG_SCOPED_ROOT overrides the scoped temp root (default
+# ${TMPDIR:-/tmp}/pg-dev-up-scoped); it is used unquoted in the postmaster command,
+# so it must contain only the characters A-Za-z0-9._/- (no spaces/metacharacters).
 #
 # To match a project's expected credentials, set the env vars before calling,
 # e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
 #
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
+#   eval "$(pg-dev-up --worktree url --export)"   # scoped
 set -euo pipefail
 
-PGDATA="${PGDATA:-/tmp/pgdata}"
-PGPORT="${PGPORT:-5432}"
+# Capture whether the caller set PGDATA/PGPORT EXPLICITLY (to a NON-empty value)
+# before we apply any defaults, so scoped mode can honor an explicit override
+# while still deriving every other scoped value. An empty value is meaningless
+# and must NOT count as explicit — otherwise a stray `PGDATA=` in the environment
+# would silently fall back to /tmp/pgdata and let a scoped `down` stop the
+# unscoped cluster.
+PGDATA_EXPLICIT=""
+[ -n "${PGDATA:-}" ] && PGDATA_EXPLICIT="yes"
+PGPORT_EXPLICIT=""
+[ -n "${PGPORT:-}" ] && PGPORT_EXPLICIT="yes"
+
 PG_HOST="127.0.0.1"
-PG_SOCKDIR="/tmp"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-postgres}"
 
+# Scoped-mode state (populated by the flag parse + resolve_scope below).
+SCOPED=""
+SCOPE_MODE=""       # worktree | profile
+SCOPE_PROFILE_ID="" # for --profile <id>
+# Canonicalize the scoped root to an ABSOLUTE path ONCE, up front. A relative
+# POWBOX_PG_SCOPED_ROOT or TMPDIR would otherwise re-resolve against whatever the
+# current directory happens to be, so two invocations (or a `cd` mid-run) could
+# derive different instance/lock/marker paths for the same scope and silently
+# split one cluster in two. realpath -m tolerates the root not existing yet;
+# an already-absolute value is left byte-for-byte (unscoped behavior unchanged).
+# Mirrors the explicit-PGDATA canonicalization in resolve_scope.
+SCOPED_ROOT="${POWBOX_PG_SCOPED_ROOT:-${TMPDIR:-/tmp}/pg-dev-up-scoped}"
+case "$SCOPED_ROOT" in
+	/*) : ;;
+	*) SCOPED_ROOT="$(realpath -m -- "$SCOPED_ROOT")" ;;
+esac
+INSTANCE_DIR=""
+PORT_FILE=""
+DATADIR_FILE=""
+
+# Snapshot of the scoped port/datadir markers as they were BEFORE this `up` began
+# to touch them (captured by snapshot_scoped_markers, under the per-scope
+# `.uplock`, in cmd_up). cmd_up rolls the markers back to this snapshot if
+# initialization or start fails, so a failed override can never orphan the
+# previously-running scoped instance or leave later down/status resolving a
+# cluster that never came up. Taking the snapshot under the lock also means a
+# concurrent same-scope `up` cannot roll back over the markers a successful holder
+# just wrote — the loser snapshots (and can only restore) the winner's state.
+PRIOR_PORT_EXISTED=""
+PRIOR_PORT_CONTENT=""
+PRIOR_DATADIR_EXISTED=""
+PRIOR_DATADIR_CONTENT=""
+
+# Set to "yes" the moment THIS `up` is about to run `pg_ctl start` (i.e. it may
+# have brought a NEW postmaster live). The rollback trap reads it so a post-start
+# failure — a start timeout that still leaves the postmaster running, or a marker
+# write that fails after the server went live — stops that newly-started server
+# BEFORE restoring the prior markers, instead of orphaning a live cluster that
+# scoped status/down can no longer resolve. It stays empty when `up` only found an
+# already-running cluster (it started nothing, so there is nothing to stop).
+STARTED_NEW_SERVER=""
+
+# These get their final values in configure_paths(), after the command and any
+# scope flag are known: scoped mode replaces the data dir / socket dir / port,
+# unscoped mode keeps the historical /tmp defaults.
+PGDATA="${PGDATA:-}"
+PGPORT="${PGPORT:-}"
+PG_SOCKDIR="/tmp"
+
 log() { printf 'pg-dev-up: %s\n' "$*" >&2; }
+
+# Validate a listen port is a BARE integer in the TCP range. $PGPORT is
+# interpolated into the pg_ctl -o option string, which pg_ctl runs through a shell
+# (system()), so a value with whitespace or shell/option metacharacters could
+# inject extra postmaster options or a shell command; it also goes into the
+# DATABASE_URL. Reject anything that is not 1-65535 (the length guard keeps the
+# arithmetic comparison from overflowing on an absurdly long digit string).
+validate_port() {
+	local p="$1"
+	case "$p" in
+		'' | *[!0-9]*)
+			log "invalid PGPORT '$p': must be a bare integer in 1-65535."
+			exit 2
+			;;
+	esac
+	if [ "${#p}" -gt 5 ] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+		log "invalid PGPORT '$p': out of range (1-65535)."
+		exit 2
+	fi
+}
+
+# Publish a scoped marker file ATOMICALLY: write to a sibling temp file, then
+# rename it into place. A concurrent reader (a `down`/`status` in another
+# worktree) therefore sees either the previous complete value or the new
+# complete one — never an empty/partial file caught mid-write, which could
+# otherwise resolve to the wrong (or the unscoped) cluster.
+# -T (--no-target-directory) makes a DIRECTORY squatting at the marker path a
+# hard failure: plain `mv -f` would "succeed" by moving the temp file INSIDE
+# that directory, so cmd_up would believe the marker was recorded (and clear
+# its rollback trap) while the marker path stays unreadable as a file — later
+# status/down could then never resolve the running server. Failing here keeps
+# the rollback trap armed, which stops the newly-started server instead of
+# orphaning it.
+atomic_write() {
+	local dest="$1" content="$2" tmp
+	tmp="$(mktemp "${dest}.XXXXXX")"
+	printf '%s\n' "$content" >"$tmp"
+	if ! mv -f -T "$tmp" "$dest"; then
+		rm -f "$tmp"
+		return 1
+	fi
+}
 
 # Debian keeps the server binaries (initdb, pg_ctl, postgres) off PATH under
 # /usr/lib/postgresql/<major>/bin; pick the highest installed major version.
@@ -62,6 +189,359 @@ require_bindir() {
 		log "PostgreSQL server binaries not found (expected /usr/lib/postgresql/*/bin)."
 		exit 1
 	fi
+}
+
+# --- scoped-mode identity + port bookkeeping -------------------------------
+#
+# The scoped instance KEY is a hash — not a human-readable slug — of the Powbox
+# container identity, the repository's common Git dir, and the current worktree
+# toplevel (or, for --profile, the explicit id). A basename alone can collide
+# across repositories; hashing the common Git dir + toplevel makes two worktrees
+# of one repo, and same-named worktrees of different repos, land in distinct
+# instances. Truncated SHA-256 is plenty for a per-container temp namespace.
+scope_key() {
+	local common top
+	# NUL-separate the fields so no field value can bleed into the next: a path or
+	# id containing the separator can't forge a different tuple that hashes the
+	# same. NUL can appear in neither a filesystem path nor an env value, so it is
+	# an unambiguous frame. Pipe straight into sha256sum — never store NULs in a
+	# shell variable (bash command substitution would strip them).
+	if [ "$SCOPE_MODE" = profile ]; then
+		printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$SCOPE_PROFILE_ID" |
+			sha256sum | cut -c1-16
+	else
+		common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+		top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+		printf 'worktree\0%s\0%s\0%s\0' "${CONTAINER_NAME:-}" "$common" "$top" |
+			sha256sum | cut -c1-16
+	fi
+}
+
+# Reject a scoped root containing whitespace or shell/option metacharacters. The
+# scoped socket dir ($SCOPED_ROOT/<key>, used as $PG_SOCKDIR) is interpolated
+# UNQUOTED into the pg_ctl -o option string, which pg_ctl executes via a shell
+# (system()): a space would re-split it into extra postmaster options and a
+# metacharacter could inject a shell command. The default root and any sane
+# POWBOX_PG_SCOPED_ROOT are plain paths, so constrain it to a conservative safe set.
+validate_scoped_root() {
+	case "$SCOPED_ROOT" in
+		*[!A-Za-z0-9._/-]*)
+			log "invalid POWBOX_PG_SCOPED_ROOT '$SCOPED_ROOT': only A-Za-z0-9 . _ / - are allowed (it is interpolated unquoted into the postmaster command)."
+			exit 2
+			;;
+	esac
+}
+
+# READ-side defense-in-depth (see resolve_scope): every existing path given must be
+# owned by the caller and carry no group/other permission bits, else refuse. This
+# blocks a DIFFERENT user's planted or widened scoped marker/dir from steering a
+# scoped down/status at an unrelated (but same-container) cluster. Same-UID forgery
+# is out of scope: it requires write access inside the 0700 node-owned root, i.e.
+# code already executing as this user, which can do anything regardless. Non-existent
+# paths are skipped (a not-yet-created marker is handled by the caller's "no scoped
+# instance" path). Mirrors the up-side enforce_owner_only hard-fail.
+validate_scoped_owner() {
+	local path owner perms me
+	me="$(id -u)"
+	for path in "$@"; do
+		[ -e "$path" ] || continue
+		owner="$(stat -c '%u' "$path" 2>/dev/null || true)"
+		if [ "$owner" != "$me" ]; then
+			log "refusing scoped operation: $path is owned by uid ${owner:-?}, not the current user (uid $me); a foreign-owned scoped marker/dir must not drive teardown."
+			exit 1
+		fi
+		perms="$(stat -c '%a' "$path" 2>/dev/null || true)"
+		case "$perms" in
+			*00) : ;;
+			*)
+				log "refusing scoped operation: $path is not owner-only (perms=$perms); a group/world-accessible scoped marker/dir must not drive teardown."
+				exit 1
+				;;
+		esac
+	done
+}
+
+# Force each given directory to owner-only (0700) and VERIFY it stuck, FAILING
+# hard otherwise. PostgreSQL refuses to run with a group/world-accessible data or
+# socket dir, and — more importantly — a pre-existing scoped dir with wider perms
+# (or one owned by another user we cannot chmod) would expose the cluster's data
+# and unix socket. We must never let the server start on such a directory, so a
+# chmod failure or lingering group/other bits are a clear error, not a warning.
+enforce_owner_only() {
+	local d perms
+	for d in "$@"; do
+		if ! chmod 700 "$d" 2>/dev/null; then
+			log "cannot secure scoped directory $d (chmod 700 failed — not owner?); refusing to proceed with group/world-accessible cluster data."
+			exit 1
+		fi
+		perms="$(stat -c '%a' "$d" 2>/dev/null || true)"
+		# Any non-zero group/other bit (the last two octal digits) is a leak.
+		case "$perms" in
+			*00) : ;;
+			*)
+				log "scoped directory $d is not owner-only (perms=$perms); refusing to proceed."
+				exit 1
+				;;
+		esac
+	done
+}
+
+# Snapshot the current scoped port/datadir markers so cmd_up can restore them if
+# this `up` fails (see rollback_scoped_markers). MUST run while holding the
+# per-scope `.uplock` and BEFORE port allocation or an override rewrites them, so
+# a concurrent same-scope `up` that loses the lock snapshots the WINNER's markers
+# (and thus can only ever restore them) instead of an empty/stale pre-winner
+# state. $(cat) strips the trailing newline atomic_write adds; the rollback
+# re-adds it, so the round-trip is exact.
+snapshot_scoped_markers() {
+	PRIOR_PORT_EXISTED=""
+	PRIOR_PORT_CONTENT=""
+	if [ -f "$PORT_FILE" ]; then
+		PRIOR_PORT_EXISTED=yes
+		PRIOR_PORT_CONTENT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+	fi
+	PRIOR_DATADIR_EXISTED=""
+	PRIOR_DATADIR_CONTENT=""
+	if [ -f "$DATADIR_FILE" ]; then
+		PRIOR_DATADIR_EXISTED=yes
+		PRIOR_DATADIR_CONTENT="$(cat "$DATADIR_FILE" 2>/dev/null || true)"
+	fi
+}
+
+# Populate INSTANCE_DIR / PORT_FILE / DATADIR_FILE / PGDATA / PG_SOCKDIR for
+# scoped mode. An explicit PGDATA still wins; the socket dir is always scoped so
+# two clusters never share a /tmp socket file (clients connect over TCP anyway).
+# `portmode` is up|read|stop|none: on a read command (down/status/url — `stop`
+# is `read` minus the port requirement) we resolve the data dir `up` recorded,
+# so a `down` finds the SAME cluster `up` started even if that `up` used an
+# explicit PGDATA that this call did not repeat.
+resolve_scope() {
+	local portmode="$1" key
+	# The scoped root becomes the socket dir interpolated (unquoted) into the pg_ctl
+	# -o option string, which pg_ctl runs through a shell; reject a root with
+	# whitespace or shell/option metacharacters before we build any path from it.
+	validate_scoped_root
+	if ! key="$(scope_key)"; then
+		log "scoped --worktree mode requires being inside a Git repository."
+		log "Run it from a repo/worktree, or pass an explicit id: pg-dev-up --profile <id> <command>"
+		exit 1
+	fi
+	INSTANCE_DIR="$SCOPED_ROOT/$key"
+	PORT_FILE="$INSTANCE_DIR/port"
+	DATADIR_FILE="$INSTANCE_DIR/datadir"
+	# Only `up` may CREATE the instance dir; a read command (down/status/url)
+	# must not materialize an empty instance for a scope that was never `up`ed
+	# (it would leave a stray dir behind and mask "no instance yet" errors).
+	if [ "$portmode" = up ]; then
+		(umask 077 && mkdir -p "$INSTANCE_DIR")
+		# The temp root and the instance dir hold the cluster's data + unix socket,
+		# which PostgreSQL requires be private. Enforce owner-only perms and FAIL if
+		# they cannot be locked down, rather than serving from a group/world-readable
+		# directory (a pre-existing wide-open or foreign-owned dir must not slip
+		# through). The markers are snapshotted later, under the `.uplock` in cmd_up,
+		# so a failing concurrent same-scope `up` cannot roll back over the markers a
+		# successful holder just wrote.
+		enforce_owner_only "$SCOPED_ROOT" "$INSTANCE_DIR"
+	else
+		# READ path (down/status/url): we are about to TRUST a recorded marker to
+		# point down/status at a data dir. Before doing so, confirm the scoped root,
+		# this scope's instance dir, and the marker files are owned by the caller and
+		# owner-only — a marker planted or widened by a DIFFERENT user could otherwise
+		# redirect scoped teardown at an unrelated (same-container) cluster. Same-UID
+		# forgery stays out of scope (it needs write access inside the 0700 node-owned
+		# root, i.e. code already running as this user).
+		validate_scoped_owner "$SCOPED_ROOT" "$INSTANCE_DIR" "$PORT_FILE" "$DATADIR_FILE"
+	fi
+	# Resolve PGDATA. An explicit PGDATA is authoritative. Scoped mode NEVER falls
+	# back to the unscoped /tmp/pgdata default: on `up` it starts from the scoped
+	# default (cmd_up then adopts the data dir this scope RECORDED, if any, under
+	# the uplock — see the resume block there); on a read command it MUST come from
+	# the marker `up` recorded — if that marker is missing/empty, fail loudly
+	# rather than guess (which could otherwise let a scoped `down`/`status` act on
+	# an unrelated cluster).
+	if [ -z "$PGDATA_EXPLICIT" ]; then
+		if [ "$portmode" = up ]; then
+			PGDATA="$INSTANCE_DIR/pgdata"
+		elif [ -s "$DATADIR_FILE" ]; then
+			PGDATA="$(cat "$DATADIR_FILE")"
+		else
+			log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
+			exit 1
+		fi
+	else
+		# An explicit PGDATA must be made ABSOLUTE before we persist or resolve it:
+		# `up` records this path so a later down/status (possibly from a DIFFERENT
+		# working directory) can find the same cluster. A relative value recorded
+		# verbatim would re-resolve against the other CWD and could target — and
+		# stop — an unrelated cluster. Anchor a relative path to the current dir now
+		# (realpath -m tolerates not-yet-created components); an already-absolute
+		# path is left byte-for-byte so unscoped/default behavior is unchanged.
+		case "$PGDATA" in
+			/*) : ;;
+			*) PGDATA="$(realpath -m -- "$PGDATA")" ;;
+		esac
+	fi
+	PG_SOCKDIR="$INSTANCE_DIR"
+}
+
+# 0 if something is already accepting connections on 127.0.0.1:$1. The subshell
+# owns fd 3, so it closes automatically when the subshell exits; the subshell's
+# status IS the connect result.
+port_listening() {
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# The port a running cluster is ACTUALLY listening on (line 4 of postmaster.pid).
+# Anchored to PGDATA, so it reports the real port even if $PGPORT was overridden
+# to something else — keeping us from ever talking to a different server.
+running_port() {
+	local pid_file="$PGDATA/postmaster.pid"
+	[ -s "$pid_file" ] || return 1
+	sed -n '4p' "$pid_file" | tr -cd '0-9'
+}
+
+# 0 if a DIFFERENT scoped instance has recorded $1 as its port (even if its
+# server is momentarily stopped) — so we never hand the same port to two of them.
+port_reserved() {
+	local pf p want="$1"
+	for pf in "$SCOPED_ROOT"/*/port; do
+		[ -f "$pf" ] || continue
+		[ "$pf" = "$PORT_FILE" ] && continue
+		p="$(cat "$pf" 2>/dev/null || true)"
+		[ "$p" = "$want" ] && return 0
+	done
+	return 1
+}
+
+# 0 if the prior recorded port ($PRIOR_PORT_CONTENT) is currently held by THIS
+# scope's OWN prior cluster (its recorded datadir has a running postmaster
+# actually listening on that port) — as opposed to a FOREIGN scope or an
+# unrelated process. rollback_scoped_markers uses this so it never mistakes our
+# own already-running server for a cross-scope claimant and wrongly drops the
+# marker that points at it (which would itself orphan a live server).
+prior_port_owned_by_our_scope() {
+	local p
+	[ -n "$PRIOR_DATADIR_CONTENT" ] || return 1
+	[ -f "$PRIOR_DATADIR_CONTENT/postmaster.pid" ] || return 1
+	"$BINDIR/pg_ctl" -D "$PRIOR_DATADIR_CONTENT" status >/dev/null 2>&1 || return 1
+	p="$(sed -n '4p' "$PRIOR_DATADIR_CONTENT/postmaster.pid" | tr -cd '0-9')"
+	[ "$p" = "$PRIOR_PORT_CONTENT" ]
+}
+
+# Pick (or reuse) this scoped instance's port, serialized against other scoped
+# instances by a lock on the shared root so two concurrent `up`s never race onto
+# the same port. Sets PGPORT and records it in PORT_FILE.
+allocate_port() {
+	# A wide range so distinct scopes rarely exhaust it — a stopped instance keeps
+	# its reservation (so a restart is deterministic), and the scoped root lives on
+	# the ephemeral temp fs, so reservations are reclaimed on container recreate.
+	local p start=5433 end=6432
+	exec 9>"$SCOPED_ROOT/.portlock"
+	if ! flock -w 30 9; then
+		log "timed out waiting for the scoped port lock ($SCOPED_ROOT/.portlock)."
+		exit 1
+	fi
+	if [ -s "$PORT_FILE" ]; then
+		PGPORT="$(cat "$PORT_FILE")"
+		flock -u 9
+		return 0
+	fi
+	for ((p = start; p <= end; p++)); do
+		port_reserved "$p" && continue
+		port_listening "$p" && continue
+		PGPORT="$p"
+		atomic_write "$PORT_FILE" "$p"
+		flock -u 9
+		return 0
+	done
+	flock -u 9
+	log "no free loopback port in ${start}-${end} for this scoped instance."
+	exit 1
+}
+
+# `up` path: resolve the port to start on. Explicit PGPORT wins (used as-is);
+# otherwise allocate/reuse under the lock. cmd_up records the EFFECTIVE port in
+# PORT_FILE once it knows the real running port, so later url/status/down resolve
+# it without re-passing the env var.
+scoped_port_for_up() {
+	if [ -z "$PGPORT_EXPLICIT" ]; then
+		allocate_port
+		return 0
+	fi
+	# Explicit PGPORT still goes through the shared reservation lock, so a
+	# concurrent auto-allocating scoped `up` cannot race onto the same port: we
+	# take the lock, refuse if ANOTHER scoped instance already reserved this port,
+	# then record our reservation before releasing. (The auto-allocator skips any
+	# port that appears in another instance's PORT_FILE.)
+	exec 9>"$SCOPED_ROOT/.portlock"
+	if ! flock -w 30 9; then
+		log "timed out waiting for the scoped port lock ($SCOPED_ROOT/.portlock)."
+		exit 1
+	fi
+	if port_reserved "$PGPORT"; then
+		flock -u 9
+		log "explicit PGPORT $PGPORT is already reserved by another scoped instance; refusing to collide (pick a different PGPORT)."
+		exit 1
+	fi
+	atomic_write "$PORT_FILE" "$PGPORT"
+	flock -u 9
+}
+
+# read path (url/status/down): resolve the port `up` already chose.
+scoped_port_for_read() {
+	if [ -n "$PGPORT_EXPLICIT" ]; then
+		return 0
+	fi
+	if [ -s "$PORT_FILE" ]; then
+		PGPORT="$(cat "$PORT_FILE")"
+	else
+		log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
+		exit 1
+	fi
+}
+
+# Resolve PGDATA / PGPORT / PG_SOCKDIR for the requested command. `portmode` is
+# how this command needs the port: `up` allocates, `read` reads a recorded one,
+# `stop` resolves the scoped instance but tolerates a MISSING recorded port
+# (`down` stops via the recorded data dir alone), `none` (check/help) needs
+# neither a port nor a scoped instance.
+configure_paths() {
+	local portmode="$1"
+	# An explicit PGPORT flows into the pg_ctl -o option string (run via a shell) and
+	# the DATABASE_URL, so reject anything that is not a bare TCP port up front, in
+	# BOTH scoped and unscoped mode, for any command that touches a port. The
+	# auto-allocated scoped port is always a safe integer; a value recovered from a
+	# marker is re-validated at the point of use in cmd_up.
+	if [ -n "$PGPORT_EXPLICIT" ] && [ "$portmode" != none ]; then
+		validate_port "$PGPORT"
+	fi
+	if [ -n "$SCOPED" ] && [ "$portmode" != none ]; then
+		resolve_scope "$portmode"
+		# For `up`, the port is allocated LATER, inside cmd_up, under the per-scope
+		# `.uplock` — together with the marker snapshot and rollback — so a concurrent
+		# same-scope `up` cannot race on the reservation or clobber the winner's
+		# markers. A read command has no such contention and resolves its recorded
+		# port here. `stop` (down) does NOT require the port marker: stopping needs
+		# only the recorded data dir, and rollback_scoped_markers legitimately drops
+		# the port marker (a prior port now foreign-held) while keeping the datadir
+		# marker — teardown must still work then. url/status DO fail on a missing
+		# port marker: they report the connection endpoint, which without the
+		# recorded port is unknowable.
+		case "$portmode" in
+			up | stop) : ;;
+			*) scoped_port_for_read ;;
+		esac
+		# resolve_scope (+ scoped_port_for_read on a read command) set PGDATA and
+		# PGPORT to fully scoped values (or already exited on a missing marker); the
+		# `up` path sets PGPORT in cmd_up. Return BEFORE the unscoped defaults below so
+		# a scoped command can NEVER fall back to /tmp/pgdata:5432 and act on the
+		# unrelated unscoped cluster.
+		return 0
+	fi
+	# Unscoped path (and scoped check/help, which touch no cluster): historical
+	# /tmp defaults, byte-for-byte as before scoped mode existed.
+	PGDATA="${PGDATA:-/tmp/pgdata}"
+	PGPORT="${PGPORT:-5432}"
 }
 
 pg_running() {
@@ -128,22 +608,213 @@ print_url() {
 	fi
 }
 
+# Restore the scoped port/datadir markers to their pre-`up` snapshot (captured by
+# snapshot_scoped_markers). Runs from cmd_up's EXIT trap when initialization or
+# start fails, so a failed override leaves the previously-running scoped instance's
+# markers intact instead of pointing a later down/status at a cluster that never
+# started.
+#
+# FIRST, if THIS `up` may have brought a NEW postmaster live (STARTED_NEW_SERVER),
+# STOP it before touching any marker. Otherwise a post-start failure — a start
+# that timed out with the postmaster still coming up, or a marker write that
+# failed after the server went live — would restore the prior markers and leave a
+# LIVE server that scoped status/down can no longer resolve (orphaned). The prior
+# markers cannot describe this new server (it is the very thing we are rolling
+# back), so the only safe rollback of a started server is to stop it.
+#
+# The PORT marker is a cross-scope reservation (other scopes' allocate_port scan
+# every */port under the shared root), so its restore MUST happen under the shared
+# `.portlock`: that keeps the reservation set's mutation atomic w.r.t. a concurrent
+# allocator and prevents another scope from allocating the port we release here and
+# then colliding with the reservation we recreate. The datadir marker carries no
+# cross-scope semantics, so it is restored without the lock.
+rollback_scoped_markers() {
+	[ -n "$SCOPED" ] || return 0
+	# Stop a server THIS invocation started, so rollback can never leave a live
+	# postmaster orphaned from scoped status/down. Guard on an actually-running
+	# postmaster at $PGDATA: a start that failed with no server left running (e.g.
+	# port truly unavailable) leaves nothing to stop, and initdb-only failures never
+	# set STARTED_NEW_SERVER at all. A stop failure is loud — a still-running,
+	# now-unreferenced server is the exact hazard we must not hide.
+	if [ "$STARTED_NEW_SERVER" = yes ] && [ -f "$PGDATA/postmaster.pid" ] &&
+		"$BINDIR/pg_ctl" -D "$PGDATA" status >/dev/null 2>&1; then
+		if ! "$BINDIR/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null 2>&1; then
+			log "CRITICAL: this failed 'up' left a postmaster running at $PGDATA and could not stop it; it is now UNREFERENCED by scoped markers. Stop it manually: $BINDIR/pg_ctl -D $PGDATA -m fast stop"
+		fi
+	fi
+	# Reopen + lock the shared port lock (best-effort: still restore on a lock
+	# timeout rather than leaking a bogus reservation). fd 9 is closed for the
+	# daemonized postmaster in cmd_up, so reopening here is safe.
+	exec 9>"$SCOPED_ROOT/.portlock"
+	# The port marker is a CROSS-SCOPE reservation; mutating it WITHOUT the shared
+	# lock could race a concurrent allocator into a duplicate-port collision — the
+	# very hazard locking exists to prevent, and most acute exactly when contention
+	# is high enough to time out the lock. So if we cannot take the lock, do NOT
+	# mutate the reservation unlocked: surface loudly that it could not be safely
+	# rolled back and leave it as-is (the transient reservation keeps that port fenced
+	# off, which is safe; a later scoped down+up for this scope reconciles it).
+	if flock -w 30 9; then
+		if [ "$PRIOR_PORT_EXISTED" = yes ]; then
+			# Do NOT blindly recreate the prior reservation. If this `up` used a
+			# DIFFERENT port ($PGPORT) from the prior one, the prior port was FREED
+			# while we ran — and another scope (or an unrelated process) may have
+			# taken it since. Recreating our reservation for a port another SCOPE now
+			# holds would double-reserve it and could make a later scoped url resolve
+			# to the OTHER scope's server. Detect that under the lock and, if so, drop
+			# our own port marker and surface loudly rather than clobbering theirs.
+			# `prior_port_owned_by_our_scope` excludes our own already-running prior
+			# cluster (whose listener/marker must, of course, be restored, not treated
+			# as a foreign claim).
+			if [ "$PGPORT" != "$PRIOR_PORT_CONTENT" ] &&
+				! prior_port_owned_by_our_scope &&
+				{ port_reserved "$PRIOR_PORT_CONTENT" || port_listening "$PRIOR_PORT_CONTENT"; }; then
+				rm -f "$PORT_FILE"
+				log "cannot restore this scope's prior port reservation ($PRIOR_PORT_CONTENT): it was freed while this 'up' used port $PGPORT and is now reserved by another scope or held by a live server. Leaving that reservation intact and dropping this scope's port marker — run the scoped 'down' then 'up' to get a fresh port."
+			else
+				atomic_write "$PORT_FILE" "$PRIOR_PORT_CONTENT"
+			fi
+		else
+			rm -f "$PORT_FILE"
+		fi
+		flock -u 9
+	else
+		log "could not acquire the scoped port lock ($SCOPED_ROOT/.portlock) to roll back the port reservation; leaving it untouched to avoid an unlocked mutation. If a later scoped url/status resolves the wrong port, run the scoped 'down' then 'up' again."
+	fi
+	if [ "$PRIOR_DATADIR_EXISTED" = yes ]; then
+		atomic_write "$DATADIR_FILE" "$PRIOR_DATADIR_CONTENT"
+	else
+		rm -f "$DATADIR_FILE"
+	fi
+}
+
 cmd_up() {
+	local actual
 	require_bindir
+	if [ -n "$SCOPED" ]; then
+		# Serialize concurrent `up` for the SAME scope so two callers never race
+		# through initdb / pg_ctl start against one data directory. Held (via fd 8)
+		# until this process exits.
+		exec 8>"$INSTANCE_DIR/.uplock"
+		if ! flock -w 60 8; then
+			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
+			exit 1
+		fi
+		# Now that we hold the per-scope lock, snapshot the markers and allocate the
+		# port — BOTH under the lock. Snapshotting here (not earlier, unlocked) means a
+		# concurrent same-scope `up` that lost the lock captures the WINNER's markers
+		# once it acquires the lock, so its rollback can only ever restore the winner's
+		# state — it can never wipe or orphan the running cluster the winner recorded.
+		snapshot_scoped_markers
+		# A plain scoped `up` (no explicit PGDATA) must RESUME the instance this
+		# scope recorded — which may be an explicit data dir a prior `up` was given —
+		# not fall back to the scoped default: `down` advertises a plain scoped `up`
+		# as the restart recipe, and a fallback would abandon the recorded cluster's
+		# data and start a fresh default cluster on the recorded port. Adopt the
+		# recorded dir from the snapshot just taken UNDER the uplock, so a
+		# concurrent same-scope `up` can never feed this one a stale marker.
+		if [ -z "$PGDATA_EXPLICIT" ] && [ -n "$PRIOR_DATADIR_CONTENT" ]; then
+			PGDATA="$PRIOR_DATADIR_CONTENT"
+		fi
+		# Orphan guard: if this scope ALREADY recorded a DIFFERENT data dir whose
+		# server is still running, a new explicit PGDATA (one different from the
+		# recorded dir — a plain `up` adopts the recorded dir above and cannot
+		# trip this) would start a SECOND server and
+		# strand the prior one — scoped down/status resolve only the recorded markers,
+		# so the old server would never be stopped by scoped teardown. Refuse and
+		# require an explicit stop. This runs BEFORE any marker or reservation is
+		# mutated, so the plain exit leaves the prior instance and its markers fully
+		# intact (no rollback needed).
+		if [ "$PRIOR_DATADIR_EXISTED" = yes ] && [ -n "$PRIOR_DATADIR_CONTENT" ] &&
+			[ "$PRIOR_DATADIR_CONTENT" != "$PGDATA" ] &&
+			[ -f "$PRIOR_DATADIR_CONTENT/postmaster.pid" ] &&
+			"$BINDIR/pg_ctl" -D "$PRIOR_DATADIR_CONTENT" status >/dev/null 2>&1; then
+			log "this scope already has a running cluster at $PRIOR_DATADIR_CONTENT; starting a new one at $PGDATA would orphan it from scoped teardown. Stop it first (scoped 'down'), then 'up' again."
+			exit 1
+		fi
+		scoped_port_for_up
+		# If initialization or start fails below, roll the markers back to the snapshot
+		# just captured. The port reservation is written early (see allocate_port) to
+		# fence concurrent allocators, but the recorded data dir / port describing THIS
+		# cluster are (re)written only AFTER start succeeds — so a failed override never
+		# orphans the previously-running scoped instance or corrupts teardown
+		# resolution. Cleared once start succeeds.
+		trap 'rollback_scoped_markers' EXIT
+	fi
 	if [ ! -s "$PGDATA/PG_VERSION" ]; then
 		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
 		mkdir -p "$PGDATA"
 		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null
 	fi
 	if pg_running; then
+		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
+		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
+		# unrelated server that happens to sit on the requested port. Unscoped mode
+		# keeps its historical behavior byte-for-byte (it just reports the requested
+		# port), so existing callers see the same URL as before scoped mode existed.
+		if [ -n "$SCOPED" ]; then
+			actual="$(running_port || true)"
+			if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then
+				# An EXPLICIT PGPORT is authoritative: if it conflicts with the port the
+				# cluster is actually running on, FAIL rather than silently adopting the
+				# running port and ignoring the override. A non-explicit (auto-allocated
+				# or recorded) PGPORT that disagrees with reality is corrected to the real
+				# running port — a stale marker must not make us report the wrong port.
+				if [ -n "$PGPORT_EXPLICIT" ]; then
+					log "scope already running on port $actual; explicit PGPORT=$PGPORT conflicts — stop it first (scoped 'down') or drop the PGPORT override."
+					exit 1
+				fi
+				log "Cluster at $PGDATA is already running on port $actual (ignoring recorded $PGPORT; run 'down' first to change it)."
+				PGPORT="$actual"
+			fi
+		fi
 		log "Already running on $PG_HOST:$PGPORT."
 	else
+		# Not our cluster running: in scoped mode, refuse to start onto a port
+		# another process already holds (e.g. a stale recorded port now taken),
+		# rather than colliding with an unrelated server. Unscoped keeps its
+		# historical behavior (pg_ctl surfaces the bind failure).
+		if [ -n "$SCOPED" ] && port_listening "$PGPORT"; then
+			log "scoped port $PGPORT is already in use by another process; refusing to start (free it or set a different PGPORT)."
+			exit 1
+		fi
+		# Validate the effective port immediately before it is interpolated into the
+		# pg_ctl -o option string (pg_ctl runs -o through a shell). Covers an explicit
+		# PGPORT, an auto-allocated one, and a value reused from a recorded marker.
+		validate_port "$PGPORT"
 		log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
+		# Mark that we are about to bring a NEW postmaster live, BEFORE running
+		# pg_ctl. `pg_ctl -w start` can return non-zero on a startup TIMEOUT while
+		# the postmaster keeps coming up in the background — so the rollback trap
+		# must treat a failed start as possibly-live and stop it. Setting this only
+		# in scoped mode keeps unscoped behavior byte-for-byte (no rollback there).
+		[ -n "$SCOPED" ] && STARTED_NEW_SERVER=yes
+		# Close the scoped lock fds (8 = instance uplock, 9 = port lock) for the
+		# postmaster: it daemonizes and would otherwise inherit fd 8 and hold that
+		# advisory flock for its whole lifetime, deadlocking the next `up`.
 		"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
-			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null
+			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null 8>&- 9>&-
+	fi
+	# Start (or an already-running detection) succeeded: NOW record the effective
+	# data dir and port so url/status/down resolve the exact server this `up`
+	# settled on, then drop the rollback trap — a later ensure_role_db failure must
+	# not undo markers that correctly describe the now-running cluster.
+	if [ -n "$SCOPED" ]; then
+		atomic_write "$DATADIR_FILE" "$PGDATA"
+		atomic_write "$PORT_FILE" "$PGPORT"
+		trap - EXIT
 	fi
 	ensure_role_db
-	log "Ready. DATABASE_URL printed below; export it with: eval \"\$(pg-dev-up url --export)\""
+	# Recommend the SCOPE-CORRECT export recipe: an unscoped `url --export` would
+	# export the /tmp:5432 cluster's URL, not this scoped instance's.
+	local export_cmd="pg-dev-up url --export"
+	if [ -n "$SCOPED" ]; then
+		if [ "$SCOPE_MODE" = profile ]; then
+			export_cmd="pg-dev-up --profile $SCOPE_PROFILE_ID url --export"
+		else
+			export_cmd="pg-dev-up --worktree url --export"
+		fi
+	fi
+	log "Ready. DATABASE_URL printed below; export it with: eval \"\$($export_cmd)\""
 	print_url
 }
 
@@ -151,7 +822,17 @@ cmd_down() {
 	require_bindir
 	if pg_running; then
 		"$BINDIR/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null
-		log "Stopped. Data kept at $PGDATA (run 'pg-dev-up' to restart)."
+		# Show the SCOPE-CORRECT restart recipe: for a scoped instance a plain
+		# `pg-dev-up` would start the UNSCOPED /tmp:5432 cluster, not this one.
+		local restart="pg-dev-up"
+		if [ -n "$SCOPED" ]; then
+			if [ "$SCOPE_MODE" = profile ]; then
+				restart="pg-dev-up --profile $SCOPE_PROFILE_ID up"
+			else
+				restart="pg-dev-up --worktree up"
+			fi
+		fi
+		log "Stopped. Data kept at $PGDATA (run '$restart' to restart)."
 	else
 		log "Not running."
 	fi
@@ -173,18 +854,75 @@ cmd_check() {
 	"$BINDIR/postgres" --version
 }
 
-usage() { sed -n '2,31p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+usage() { sed -n '2,59p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+
+# Consume a leading scope flag (--worktree / --profile <id>) BEFORE the command;
+# everything after the flag is the command and its own arguments (e.g. the
+# `--export` that `url` takes), so we stop at the first non-scope token.
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--worktree)
+			SCOPED=1
+			SCOPE_MODE=worktree
+			shift
+			;;
+		--profile)
+			SCOPED=1
+			SCOPE_MODE=profile
+			shift
+			[ $# -gt 0 ] || {
+				log "--profile requires an identifier"
+				exit 2
+			}
+			SCOPE_PROFILE_ID="$1"
+			shift
+			;;
+		--profile=*)
+			SCOPED=1
+			SCOPE_MODE=profile
+			SCOPE_PROFILE_ID="${1#--profile=}"
+			shift
+			;;
+		--)
+			shift
+			break
+			;;
+		*) break ;;
+	esac
+done
+
+if [ "$SCOPE_MODE" = profile ]; then
+	case "$SCOPE_PROFILE_ID" in
+		'') log "--profile requires a non-empty identifier"; exit 2 ;;
+		*[!A-Za-z0-9._-]*) log "invalid --profile id (allowed: A-Za-z0-9._-)"; exit 2 ;;
+	esac
+fi
 
 case "${1:-up}" in
-	up | "") cmd_up ;;
-	down | stop) cmd_down ;;
-	status) cmd_status ;;
+	up | "")
+		configure_paths up
+		cmd_up
+		;;
+	down | stop)
+		configure_paths stop
+		cmd_down
+		;;
+	status)
+		configure_paths read
+		cmd_status
+		;;
 	url)
+		configure_paths read
 		shift
 		print_url "${1:-}"
 		;;
-	check) cmd_check ;;
-	help | -h | --help) usage ;;
+	check)
+		configure_paths none
+		cmd_check
+		;;
+	help | -h | --help)
+		usage
+		;;
 	*)
 		log "unknown command '$1' (try: up, down, status, url, check, help)"
 		exit 2

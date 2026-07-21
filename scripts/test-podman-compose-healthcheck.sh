@@ -55,7 +55,10 @@
 #      locked for all of the above.
 #
 # Needs bash + yq (python-yq, jq-backed) on PATH — both ship in the agent image.
-# Usage: scripts/test-podman-compose-healthcheck.sh
+# The yq interface is verified up front by a behavioral capability probe (see
+# yq_capable), so an incompatible implementation fails fast with one clear FATAL
+# instead of confusing per-assertion failures.
+# Usage: scripts/test-podman-compose-healthcheck.sh [--check-yq]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -65,6 +68,34 @@ PS1="$SCRIPT_DIR/smoke-test-podman.ps1"
 UMBRELLA_SH="$ROOT_DIR/commands/smoke-test.sh"
 UMBRELLA_PS1="$ROOT_DIR/commands/smoke-test.ps1"
 
+# yq_capable — behavioral capability probe for the jq-backed `yq -r <jq filter>`
+# interface (python-yq) this test relies on. It exercises the exact feature set
+# used below — raw (-r) scalar output, jq path + array-index filters, `| length`,
+# and a non-zero exit on malformed YAML (the well-formedness assertion depends on
+# it) — so any yq that answers correctly can run the test, while an incompatible
+# implementation on PATH (e.g. mikefarah's Go yq v3, whose CLI is
+# `yq r <file> <path>`) is rejected up front instead of producing confusing
+# YAML/fixture failures further down. Silent: callers print their own message.
+yq_capable() {
+	command -v yq >/dev/null 2>&1 || return 1
+	local out
+	out="$(printf 'probe:\n  test: ["CMD", "ok"]\n' | yq -r '.probe.test[0]' 2>/dev/null)" || return 1
+	[ "$out" = "CMD" ] || return 1
+	out="$(printf 'probe:\n  test: ["CMD", "ok"]\n' | yq -r '.probe.test | length' 2>/dev/null)" || return 1
+	[ "$out" = "2" ] || return 1
+	if printf '{"unclosed\n' | yq -r '.' >/dev/null 2>&1; then return 1; fi
+	return 0
+}
+
+# --check-yq: run ONLY the yq presence/capability probe and exit 0 (capable) or 1.
+# The umbrella smoke's Stage 0e host fallback gates on this so an absent OR
+# incompatible host yq becomes a recorded skip there — without duplicating the
+# probe logic — instead of a spurious mid-test failure here.
+if [ "${1:-}" = "--check-yq" ]; then
+	yq_capable || exit 1
+	exit 0
+fi
+
 for f in "$SH" "$PS1" "$UMBRELLA_SH" "$UMBRELLA_PS1"; do
 	[ -f "$f" ] || {
 		echo "FATAL: expected probe not found at $f" >&2
@@ -73,6 +104,10 @@ for f in "$SH" "$PS1" "$UMBRELLA_SH" "$UMBRELLA_PS1"; do
 done
 command -v yq >/dev/null 2>&1 || {
 	echo "FATAL: yq not found on PATH (needed to parse the embedded fixture)" >&2
+	exit 1
+}
+yq_capable || {
+	echo "FATAL: the 'yq' on PATH does not provide the jq-backed 'yq -r <filter>' interface (python-yq) this test needs — e.g. mikefarah's Go yq v3 ('yq r <file> <path>') is incompatible" >&2
 	exit 1
 }
 

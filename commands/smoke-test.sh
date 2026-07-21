@@ -127,18 +127,21 @@ fi
 # tears down the project + only the temp dir, and
 # that the Bash/PowerShell probes stay in parity — the load-bearing bits that a plain
 # edit could silently neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
-# not a baked artifact), so a host run suffices — but it needs `yq`. Prefer the
-# in-image run (yq is guaranteed in the agent image) when the image is present; else
-# fall back to a host run only when `yq` is available, else record a skip.
+# not a baked artifact), so a host run suffices — but it needs the jq-backed
+# `yq -r <filter>` interface (python-yq). Prefer the in-image run (that yq is
+# guaranteed in the agent image) when the image is present; else fall back to a host
+# run only when the test's own `--check-yq` capability probe passes — not a bare
+# `command -v yq`, because an incompatible host implementation (e.g. mikefarah's Go
+# yq v3) would fail the smoke spuriously instead of recording a skip — else skip.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running Podman Compose health-check probe unit test (in $IMAGE) ..."
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-podman-compose-healthcheck.sh
-elif command -v yq >/dev/null 2>&1; then
+elif "${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh" --check-yq >/dev/null 2>&1; then
 	echo "Running Podman Compose health-check probe unit test (host source — image '$IMAGE' absent) ..."
 	"${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh"
 else
-	echo "WARNING: skipping Podman Compose health-check probe unit test (Stage 0e) — image '$IMAGE' absent and host 'yq' is unavailable (needed to parse the embedded fixture)."
-	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs yq)")
+	echo "WARNING: skipping Podman Compose health-check probe unit test (Stage 0e) — image '$IMAGE' absent and no compatible host 'yq' (the jq-backed 'yq -r <filter>' interface is needed to parse the embedded fixture)."
+	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
 fi
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and

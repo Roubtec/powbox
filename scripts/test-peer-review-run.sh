@@ -38,7 +38,10 @@ set -uo pipefail
 #       reach it; the test asserts the by-default guarantee without pretending the
 #       nesting is traversal-proof), anchored verdict + ISSUES-precedence (no
 #       example-token false-pass), and the read-only tool-set / no-persistence
-#       flags for both providers (Claude restricted to native read tools, no Bash)
+#       flags for both providers (Claude restricted to native read tools passed
+#       one-rule-per-argv-element, no Bash; Codex config/hook isolation —
+#       --ignore-user-config / --ignore-rules / --disable hooks — asserted
+#       present when the CLI advertises them, omitted when not, see case 9)
 #  (12) FAIL-SAFE unvalidated-PGID fallback: a captured descendant PID whose
 #       baseline /proc start time was empty/unreadable at capture is treated as
 #       NON-matching — never counted alive, never signalled — so a recycled PID
@@ -122,10 +125,14 @@ new_case() {
 run() {
 	local d="$1"
 	shift
-	set +e
+	# The harness runs under `set -uo pipefail` WITHOUT -e, so a non-zero helper
+	# exit lands in RUN_RC without any errexit toggling. (An earlier version
+	# bracketed this with `set +e` / `set -e`, but that ENABLED errexit globally
+	# from the first run() call onward — the script never turns it on — changing
+	# control flow so an unexpected non-zero status could abort the harness
+	# instead of being recorded as a failed assertion.)
 	RUN_OUT="$(PATH="$d/bin:/usr/bin:/bin" bash "$HELPER" "$@" 2>"$d/err")"
 	RUN_RC=$?
-	set -e 2>/dev/null || true
 	RUN_ERR="$(cat "$d/err" 2>/dev/null || true)"
 	# stdout carries ONLY the final result JSON (progress goes to stderr), so the
 	# whole captured stdout IS the parseable result object.
@@ -205,15 +212,28 @@ assert_contains "2: buffered honesty note on stderr" "$RUN_ERR" '"liveProgress":
 assert_contains "2: claude headless -p" "$(cat "$d/argv")" "-p"
 assert_contains "2: claude json output" "$(cat "$d/argv")" "--output-format
 json"
-assert_contains "2: claude allowlist includes Read" "$(cat "$d/argv")" "Read Grep Glob"
-assert_contains "2: claude disallows Write/Edit" "$(cat "$d/argv")" "Write Edit"
+# Permission rules ride as SEPARATE argv elements (one rule per value, the
+# documented permission-rule syntax) — the argv log prints one line per arg, so
+# consecutive lines prove distinct arguments, and a single space-joined
+# "Read Grep Glob" value (one line) must NOT appear: a strict rule parser would
+# read that as one unmatched rule and approve nothing.
+assert_contains "2: claude allow rules are separate args" "$(cat "$d/argv")" "--allowedTools
+Read
+Grep
+Glob"
+assert_not_contains "2: allow rules NOT one space-joined value" "$(cat "$d/argv")" "Read Grep Glob"
+assert_contains "2: claude disallows Write/Edit as separate args" "$(cat "$d/argv")" "Write
+Edit"
 assert_contains "2: claude --add-dir worktree" "$(cat "$d/argv")" "$d/wt"
 assert_not_contains "2: claude NOT skip-permissions" "$(cat "$d/argv")" "--dangerously-skip-permissions"
 # Read-only is enforced by the TOOL SET, not allowlisted read commands: the Bash
 # tool is restricted out entirely (so there is no shell to redirect-write with)
 # and only the native read tools remain. --tools carries exactly those.
 assert_contains "2: claude --tools restricts to native read tools" "$(cat "$d/argv")" "Read,Grep,Glob"
-assert_contains "2: claude disallow names Bash" "$(cat "$d/argv")" "Bash Write Edit"
+assert_contains "2: claude disallow names Bash first" "$(cat "$d/argv")" "--disallowedTools
+Bash
+Write
+Edit"
 assert_not_contains "2: no Bash(cat) read-shim (redirection write vector)" "$(cat "$d/argv")" "Bash(cat"
 assert_not_contains "2: no Bash(git ...) read-shim" "$(cat "$d/argv")" "Bash(git"
 assert_eq "2: literal prompt on stdin" "$(cat "$d/stdin")" "Please review the diff and end with a VERDICT line."
@@ -500,6 +520,12 @@ run "$d" $(std_args "$d" codex)
 assert_eq "9: still passes without --json" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_eq "9: liveProgress false when unsupported" "$(jqf "$RUN_RESULT" .liveProgress)" false
 assert_not_contains "9: --json omitted when unsupported" "$(cat "$d/argv")" "--json"
+# The probed isolation flags degrade the same way: an older CLI that does not
+# advertise them is invoked without them (mcp-only isolation), never with an
+# unknown flag it would reject.
+assert_not_contains "9: --ignore-user-config omitted when unsupported" "$(cat "$d/argv")" "--ignore-user-config"
+assert_not_contains "9: --ignore-rules omitted when unsupported" "$(cat "$d/argv")" "--ignore-rules"
+assert_not_contains "9: --disable hooks omitted when unsupported" "$(cat "$d/argv")" "--disable"
 unset ARGV_LOG
 
 # ============================================================================
@@ -820,6 +846,9 @@ run "$d" $(std_args "$d" claude)
 assert_contains "11e: claude --safe-mode (customizations off)" "$(cat "$d/argv")" "--safe-mode"
 assert_contains "11e: claude --no-session-persistence" "$(cat "$d/argv")" "--no-session-persistence"
 assert_contains "11e: claude --tools restricts the built-in tool set" "$(cat "$d/argv")" "Read,Grep,Glob"
+# Permission rules are one-per-argv-element (see case 2) — never a space-joined
+# single value a strict rule parser would treat as one unmatched rule.
+assert_not_contains "11e: allow rules never one space-joined value" "$(cat "$d/argv")" "Read Grep Glob"
 # No Bash tool at all → no allowlisted read command can redirect-write. Assert no
 # `Bash(...)` command-prefix shim survives anywhere in the argv.
 assert_not_contains "11e: no Bash(...) command-prefix read-shim" "$(cat "$d/argv")" "Bash("
@@ -829,7 +858,7 @@ unset ARGV_LOG
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json --ignore-user-config --ignore-rules --disable <FEATURE>"; exit 0; fi
 printf '%s\n' "$@" >>"$ARGV_LOG"
 last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
 cat >/dev/null
@@ -844,6 +873,14 @@ assert_contains "11e: codex --sandbox read-only" "$(cat "$d/argv")" "--sandbox
 read-only"
 assert_contains "11e: codex --ephemeral (no session persistence)" "$(cat "$d/argv")" "--ephemeral"
 assert_contains "11e: codex mcp disabled" "$(cat "$d/argv")" "mcp_servers={}"
+# Config/hook isolation (the Codex analog of --safe-mode): when the CLI
+# advertises them, user config (and with it persisted project trust), execpolicy
+# rules, and the hooks feature are all switched off, so the reviewed worktree's
+# project-local config/hooks cannot steer its own reviewer.
+assert_contains "11e: codex --ignore-user-config (drops project trust)" "$(cat "$d/argv")" "--ignore-user-config"
+assert_contains "11e: codex --ignore-rules (no execpolicy rules)" "$(cat "$d/argv")" "--ignore-rules"
+assert_contains "11e: codex hooks feature disabled" "$(cat "$d/argv")" "--disable
+hooks"
 unset ARGV_LOG
 
 # ============================================================================

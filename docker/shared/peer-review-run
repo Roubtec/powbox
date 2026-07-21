@@ -214,6 +214,19 @@ signal_tree() {
 # escalate to KILL for survivors, and confirm nothing remains. Used on EVERY
 # terminating path (timeout AND normal/failed exit) so no descendant outlives the
 # run. Returns 0 when the tree is gone, 1 if something survived even after KILL.
+#
+# Zombie collection: a descendant killed AFTER the leader has already exited has
+# by then reparented to the nearest reaping ancestor, and only THAT process can
+# collect its exit status — the helper can kill it but cannot wait() on it. The
+# powbox runtime provides the collector: every agent container launches with
+# `init: true` (compose.shared.yml), so PID 1 is docker-init, a real init that
+# promptly reaps reparented children — which is why the hermetic test's reap
+# assertions (kill -0 must FAIL after the reap; a lingering zombie would still
+# answer kill -0) hold in-container. Under a NON-reaping PID 1 outside such a
+# container, KILLed orphans still die — no live peer process remains, the
+# guarantee this helper makes — but their process-table entries would linger
+# until an init/subreaper collects them; providing one is the runtime's job,
+# not this helper's.
 reap_tree() {
 	local pid="$1" pgid="$2" i
 	group_alive "$pid" "$pgid" || return 0
@@ -372,27 +385,28 @@ awk -v t="$TIMEOUT" 'BEGIN{exit !(t>0)}' || die_usage "--timeout must be > 0 (go
 PEER_BIN="$PROVIDER"
 
 # --- provider capability probe ----------------------------------------------
-# Codex can stream structured events with `codex exec --json`, but only when the
-# installed CLI supports it. Probe once; represent the result honestly in
-# liveProgress rather than assuming. Claude's `-p --output-format json` buffers
-# its single final result — no live events — so it is always liveProgress:false.
-CODEX_JSON_SUPPORTED=""
-codex_supports_json() {
-	if [ -z "$CODEX_JSON_SUPPORTED" ]; then
+# The Codex adapter adapts to the INSTALLED CLI: `--json` live streaming and the
+# config/hook-isolation flags below all exist only on sufficiently new CLIs, so
+# each is probed against one cached `codex exec --help` capture and omitted when
+# absent — honest degradation, never an unknown-flag hard failure. Claude's
+# `-p --output-format json` buffers its single final result — no live events —
+# so it is always liveProgress:false and needs no probe.
+CODEX_EXEC_HELP=""
+CODEX_HELP_PROBED=0
+codex_supports() {
+	if [ "$CODEX_HELP_PROBED" = 0 ]; then
 		# Bound the probe: `codex exec --help` should return instantly, but it must
 		# never be able to hang or leak descendants, so it runs under `timeout` with
 		# KILL escalation — `-k 5 10` sends TERM at 10s and, if the probe IGNORES
 		# TERM, a SIGKILL 5s later — so a TERM-swallowing `--help` cannot hang the
 		# runner or evade its process-reaping guarantee. If the probe times out or
-		# fails, grep matches nothing and we fall back to the safe no-live-progress
-		# default rather than assuming --json support.
-		if timeout -k 5 10 codex exec --help 2>&1 | grep -q -- '--json'; then
-			CODEX_JSON_SUPPORTED=yes
-		else
-			CODEX_JSON_SUPPORTED=no
-		fi
+		# fails, the capture stays empty, no flag matches, and every probed feature
+		# falls back to its safe default (no --json live progress, no extra flags)
+		# rather than assuming support.
+		CODEX_EXEC_HELP="$(timeout -k 5 10 codex exec --help 2>&1 || true)"
+		CODEX_HELP_PROBED=1
 	fi
-	[ "$CODEX_JSON_SUPPORTED" = yes ]
+	printf '%s' "$CODEX_EXEC_HELP" | grep -Eq -- "$1"
 }
 
 # LIVE=1 when the provider streams progress this run; drives forward_tick and
@@ -430,16 +444,19 @@ build_cmd_claude() {
 	# itself — a diff-oriented prompt should embed the diff or reference the base;
 	# the file tree is reviewable directly over --add-dir. Omitting
 	# --dangerously-skip-permissions keeps permissions enforced.
-	local tools="Read,Grep,Glob"
-	local allow="Read Grep Glob"
-	local deny="Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch"
+	#
+	# Rule-list form: `--allowedTools`/`--disallowedTools` are variadic
+	# (`<tools...>`) and the documented permission-rule syntax is one `Tool` /
+	# `Tool(specifier)` rule per value, so every rule rides as its OWN argv
+	# element — never one space-joined string, which a strict rule parser would
+	# read as a single (unmatched) rule and therefore approve nothing.
 	CMD=(claude -p
 		--safe-mode
 		--no-session-persistence
 		--output-format json
-		--tools "$tools"
-		--allowedTools "$allow"
-		--disallowedTools "$deny"
+		--tools "Read,Grep,Glob"
+		--allowedTools Read Grep Glob
+		--disallowedTools Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch
 		--add-dir "$WORKTREE")
 	LIVE=0
 }
@@ -460,7 +477,26 @@ build_cmd_codex() {
 		--ephemeral
 		-c "mcp_servers={}"
 		--output-last-message "$dir/codex-last-message.txt")
-	if codex_supports_json; then
+	# Config/hook isolation — the Codex analog of the Claude adapter's
+	# --safe-mode: the code under review must not be able to steer its own
+	# reviewer. Clearing mcp_servers alone is not enough — for a TRUSTED project,
+	# Codex still loads the repo's project-local config and hooks, letting the
+	# reviewed worktree inject behavior into the supposedly isolated peer run.
+	#   --ignore-user-config  skips $CODEX_HOME/config.toml (auth still works).
+	#     Because persisted project TRUST lives in that user config's `projects`
+	#     table, ignoring it also drops the trust mark, so trusted-project
+	#     behaviors (project-local config/hooks) do not activate for the
+	#     reviewed worktree.
+	#   --ignore-rules        skips user AND project execpolicy `.rules` files.
+	#   --disable hooks       turns the hooks feature off for this invocation
+	#     (defense in depth against repo hooks, e.g. <repo>/.codex/hooks.json).
+	# Each flag is probed (one cached `codex exec --help`) and omitted on an
+	# older CLI that lacks it — degrading to the mcp-only isolation rather than
+	# failing on an unknown flag.
+	codex_supports '--ignore-user-config' && CMD+=(--ignore-user-config)
+	codex_supports '--ignore-rules' && CMD+=(--ignore-rules)
+	codex_supports '--disable( |=|<)' && CMD+=(--disable hooks)
+	if codex_supports '--json'; then
 		CMD+=(--json)
 		LIVE=1
 	else

@@ -149,13 +149,20 @@ fi
 # the others. It guards the bidirectional peer-review runner's contract: the versioned
 # result schema, both provider directions, read-only permission flags, literal
 # stdin-fed prompts, Codex progress forwarding, the six normalized outcomes, timeout
-# with process-tree reaping, and retry-once. It runs directly on the host /repo source
-# (needs only bash + jq), then — when the image is present — again against the BAKED
-# /usr/local/bin/peer-review-run so a stale installed helper is caught here rather than
-# waved through by Stage 1's `command -v` presence probe.
-if command -v jq >/dev/null 2>&1; then
+# with process-tree reaping, and retry-once. The host-source run is gated to LINUX
+# hosts with jq: beyond bash + jq, the helper and test lean on a Linux userland —
+# /proc/<pid>/stat, `pgrep -P`, GNU `realpath -m`, `date +%N`, plus ps/timeout/
+# find/awk/sed/stat — so on macOS or another non-Linux host it is skipped and the
+# test runs only inside the (Linux) image below. When the image is present the test
+# also runs against the BAKED /usr/local/bin/peer-review-run so a stale installed
+# helper is caught here rather than waved through by Stage 1's `command -v`
+# presence probe.
+if [ "$(uname -s)" = Linux ] && command -v jq >/dev/null 2>&1; then
 	echo "Running peer-review-run unit test (host /repo source) ..."
 	"${ROOT_DIR}/scripts/test-peer-review-run.sh"
+elif [ "$(uname -s)" != Linux ]; then
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0e) — non-Linux host (the test needs a Linux userland: /proc, pgrep -P, GNU realpath -m, date +%N); the in-image run covers it when the image is present."
+	skipped+=("Stage 0e: peer-review-run host unit test (non-Linux host)")
 else
 	echo "WARNING: skipping peer-review-run host unit test (Stage 0e) — host 'jq' unavailable."
 	skipped+=("Stage 0e: peer-review-run host unit test (host jq unavailable)")

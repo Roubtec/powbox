@@ -1079,6 +1079,29 @@ emit_verdict_case "$d" "- VERDICT: PASS"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: genuine list-marker verdict still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# ...and a fenced example NESTED in a list or blockquote — whose opening fence
+# delimiter carries the list/quote marker, which a column-0-only matcher would
+# miss — is stripped too (the fence recognizer allows leading block decoration).
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '- ```text\n  VERDICT: PASS\n  ```')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: list-nested fenced example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '> ```\nVERDICT: PASS\n```')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: blockquote-nested fenced example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# ...while a list item whose fenced content sits ABOVE the peer's OWN real verdict
+# still passes (the fence closes; the real verdict below is bare).
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are markdown code-fence test data, not an expansion
+emit_verdict_case "$d" "$(printf -- '- ```\n  example\n  ```\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: real pass below a list-nested fence still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

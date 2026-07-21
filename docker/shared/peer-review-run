@@ -869,21 +869,25 @@ detect_verdict() {
 	fi
 	# Before the PASS-side checks (b, c), strip FENCED code blocks (``` or ~~~
 	# delimited) into a scan copy. This complements pass_anchor: a fenced example
-	# renders VERDICT at line-start with NO decoration, so pass_anchor alone would
-	# still accept it — the fence-strip removes the whole block. QUOTED forms that
-	# carry a line PREFIX (blockquote, inline code, and ANY nesting like a
-	# list-then-quote) need no line-dropping here; pass_anchor rejects them by
-	# excluding > and backtick from its decoration class. The ISSUES check (a) above
-	# deliberately stays on the FULL text: over-matching issues is the SAFE
-	# direction and can never false-pass, so a fenced/quoted VERDICT: ISSUES still
-	# counts. A peer that needlessly QUOTES its OWN real verdict degrades to `none`
-	# (forfeited) — also safe; the caller's prompt asks for a bare VERDICT line.
-	# Residual, honest and irreducible without semantics: a bare, UNQUOTED
-	# free-standing example line (e.g. `Example output:` then a plain VERDICT line)
-	# is indistinguishable from a real verdict and stays out of scope.
+	# renders its VERDICT line with NO decoration of its OWN, so pass_anchor alone
+	# would still accept it — the fence-strip removes the whole block. The
+	# fence-delimiter recognizer allows a leading run of BLOCK decoration
+	# (indentation, blockquote >, and list markers - * + and ordered N. / N)) before
+	# the fence, so a fenced example NESTED in a list or blockquote is stripped too,
+	# not just a column-0 fence. QUOTED forms that put a marker on the VERDICT line
+	# ITSELF (blockquote, inline code, and any nesting like list-then-quote) need no
+	# stripping here; pass_anchor rejects them by excluding > and backtick from its
+	# decoration class. The ISSUES check (a) above deliberately stays on the FULL
+	# text: over-matching issues is the SAFE direction and can never false-pass, so
+	# a fenced/quoted VERDICT: ISSUES still counts. A peer that needlessly QUOTES
+	# its OWN real verdict degrades to `none` (forfeited) — also safe; the caller's
+	# prompt asks for a bare VERDICT line. Residuals, honest and irreducible without
+	# a full Markdown parse: a bare UNQUOTED free-standing example line, and a
+	# 4-space-INDENTED code block (leading indentation is indistinguishable from a
+	# legitimately indented real verdict), both stay out of scope.
 	local scan_text
 	scan_text="$(printf '%s\n' "$text" | awk '
-		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+		/^[[:space:]]*([-*+>][[:space:]]*|[0-9][0-9]*[.)][[:space:]]*)*(```|~~~)/ { fence = !fence; next }
 		!fence { print }
 	')"
 	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an

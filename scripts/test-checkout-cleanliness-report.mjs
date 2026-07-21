@@ -70,6 +70,26 @@ const SELF_MUTATION_RE = /\b(?:this report|the report|the workflow|we|it)\s+(?:r
   check("note does not claim batch created the dirt", !/created|agent-created|this batch (?:created|added)/i.test(r.note));
 }
 
+// 2b. Robustness: a trailing empty record — the common artifact of splitting
+//     `git status --porcelain -z` output on NUL (the output ends in a NUL, so a
+//     naive split leaves a final "") — must be ignored, never surfacing as a
+//     phantom "" path in newPaths/disappeared or flagging a clean checkout.
+{
+  const r = mainCheckoutSummary(
+    { measured: true, dirty: [" M src/a.ts", ""] },
+    { measured: true, dirty: [" M src/a.ts"] }
+  );
+  check("trailing empty baseline record → nothing disappeared", r.disappeared.length === 0);
+  check("trailing empty baseline record → not flagged", r.flagged === false);
+  check("trailing empty baseline record → real path still pre-existing", r.preexisting.length === 1 && r.preexisting[0] === " M src/a.ts");
+  const r2 = mainCheckoutSummary(
+    { measured: true, dirty: [] },
+    { measured: true, dirty: [""] }
+  );
+  check("trailing empty final record → no phantom new path", r2.newPaths.length === 0 && r2.flagged === false);
+  check("trailing empty final record → checkout reads clean", /is clean/i.test(r2.note));
+}
+
 // 3. A new path appears during the batch → flagged, distinguished from pre-existing,
 //    and NOT attributed solely to agents.
 {

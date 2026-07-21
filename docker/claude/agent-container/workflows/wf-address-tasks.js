@@ -301,7 +301,14 @@ function mainCheckoutSummary(baseline, final) {
     }
     return { raw, status, path };
   };
-  const parseList = (arr) => (Array.isArray(arr) ? arr.map(parseEntry) : []);
+  // Drop empty records before parsing: the `-z` porcelain output ends in a
+  // NUL, so a naive split leaves a trailing "" — that is a split artifact, not
+  // a real path, and must never surface as a phantom "" entry in
+  // `newPaths`/`disappeared`.
+  const parseList = (arr) =>
+    Array.isArray(arr)
+      ? arr.filter((v) => String(v == null ? "" : v) !== "").map(parseEntry)
+      : [];
 
   const baselineMeasured = !!(baseline && baseline.measured);
   const baselineEntries = baselineMeasured ? parseList(baseline.dirty) : [];

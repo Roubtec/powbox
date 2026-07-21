@@ -844,6 +844,15 @@ detect_verdict() {
 	# precedence over PASS: a body that both quotes an example pass token and
 	# renders a real issues verdict must resolve to issues, never false-pass.
 	local anchor='^[[:space:]>*#`-]*VERDICT[[:space:]]*[:=][[:space:]]*'
+	# The PASS side uses a STRICTER anchor whose leading-decoration class EXCLUDES
+	# the QUOTE markers > (blockquote) and backtick (inline code / code fence): a
+	# real pass verdict is not quoted, so a VERDICT token reachable only THROUGH a
+	# quote marker at ANY depth in the decoration run — a blockquote, a
+	# list-then-blockquote, a list-then-inline-code, etc. — is an ECHOED example and
+	# must not pass. Neutral structural decoration (whitespace, list markers * and
+	# -, heading #) is still allowed. The ISSUES check (a) keeps the lenient anchor
+	# (over-matching issues is the safe direction and can never false-pass).
+	local pass_anchor='^[[:space:]*#-]*VERDICT[[:space:]]*[:=][[:space:]]*'
 	local issue='(issues?|changes?|blocking|block|reject|rejected|fail|failed|request[[:space:]_-]*changes?)'
 	local pass='(passed|pass|approved|approve|lgtm|no[[:space:]_-]*issues?)'
 	# A trailing token boundary: the recognized PASS token must END at a non-word
@@ -858,26 +867,23 @@ detect_verdict() {
 		echo issues
 		return
 	fi
-	# Before the PASS-side checks (b, c), drop QUOTED material into a scan copy so a
-	# peer that merely ECHOES an example verdict is not read as its own. Three quote
-	# forms are excluded, because the anchor's own decoration class (>, backtick,
-	# ...) would otherwise accept a line-start VERDICT token inside any of them as a
-	# real verdict — the example-token false pass this parser is meant to prevent:
-	#   * a fenced code block (``` or ~~~ delimited) — its content lines are dropped;
-	#   * a blockquoted line (starts with >), which also covers a blockquoted fence
-	#     whose delimiters are not whitespace-led;
-	#   * an inline-code / backtick-led line.
-	# The ISSUES check (a) above deliberately stays on the FULL text: over-matching
-	# issues is the SAFE direction and can never false-pass, so a quoted
-	# VERDICT: ISSUES still counts. A peer that needlessly QUOTES its OWN real
-	# verdict degrades to `none` (forfeited) — also safe; the caller's prompt asks
-	# for a bare VERDICT line. Residual, honest and irreducible without semantics: a
-	# bare, UNQUOTED free-standing example line (e.g. `Example output:` then a plain
-	# VERDICT line) is indistinguishable from a real verdict and stays out of scope.
+	# Before the PASS-side checks (b, c), strip FENCED code blocks (``` or ~~~
+	# delimited) into a scan copy. This complements pass_anchor: a fenced example
+	# renders VERDICT at line-start with NO decoration, so pass_anchor alone would
+	# still accept it — the fence-strip removes the whole block. QUOTED forms that
+	# carry a line PREFIX (blockquote, inline code, and ANY nesting like a
+	# list-then-quote) need no line-dropping here; pass_anchor rejects them by
+	# excluding > and backtick from its decoration class. The ISSUES check (a) above
+	# deliberately stays on the FULL text: over-matching issues is the SAFE
+	# direction and can never false-pass, so a fenced/quoted VERDICT: ISSUES still
+	# counts. A peer that needlessly QUOTES its OWN real verdict degrades to `none`
+	# (forfeited) — also safe; the caller's prompt asks for a bare VERDICT line.
+	# Residual, honest and irreducible without semantics: a bare, UNQUOTED
+	# free-standing example line (e.g. `Example output:` then a plain VERDICT line)
+	# is indistinguishable from a real verdict and stays out of scope.
 	local scan_text
 	scan_text="$(printf '%s\n' "$text" | awk '
 		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-		!fence && /^[[:space:]]*[>`]/ { next }
 		!fence { print }
 	')"
 	# (b) A MIXED verdict line: a pass token followed LATER ON THE SAME LINE by an
@@ -899,13 +905,15 @@ detect_verdict() {
 	scrubbed="$(printf '%s\n' "$scan_text" |
 		sed -E "s/(${anchor})no[[:space:]_-]*issues?(${rb})/\\1pass\\2/I" |
 		sed -E "s/(^|${nb})(no|zero|without)([[:space:]_-]+[[:alnum:]]+)?[[:space:]_-]+(issues?|changes?|blockers?|blocking|problems?|failures?)/\\1/gI")"
-	if printf '%s\n' "$scrubbed" | grep -Eiq "${anchor}${pass}(${nb}.*)?${nb}${issue}${rb}"; then
+	if printf '%s\n' "$scrubbed" | grep -Eiq "${pass_anchor}${pass}(${nb}.*)?${nb}${issue}${rb}"; then
 		echo issues
 		return
 	fi
 	# (c) A bare pass token as the verdict value, bounded so `PASSING` and any other
 	# longer word that only begins with a pass token cannot masquerade as a pass.
-	if printf '%s\n' "$scan_text" | grep -Eiq "${anchor}${pass}${rb}"; then
+	# Uses pass_anchor (no >/backtick), so a quoted or nested-quoted example never
+	# reaches a pass here.
+	if printf '%s\n' "$scan_text" | grep -Eiq "${pass_anchor}${pass}${rb}"; then
 		echo pass
 		return
 	fi

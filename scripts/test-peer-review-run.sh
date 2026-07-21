@@ -1059,6 +1059,26 @@ emit_verdict_case "$d" "> VERDICT: ISSUES"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: blockquoted issues still -> issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+# ...and NESTED decoration cannot smuggle a quote past the guard: the strict
+# pass-anchor rejects > / backtick at ANY depth in the leading decoration run, so
+# a list-then-blockquote and a list-then-inline-code both forfeit, while a genuine
+# list-marker verdict (structural decoration only) still passes.
+d="$(new_case)"
+emit_verdict_case "$d" "- > VERDICT: PASS"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: list-then-blockquote example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+# shellcheck disable=SC2016  # literal backticks are inline-code test data, not an expansion
+emit_verdict_case "$d" '* `VERDICT: PASS`'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: list-then-inline-code example -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+emit_verdict_case "$d" "- VERDICT: PASS"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: genuine list-marker verdict still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

@@ -144,6 +144,51 @@ else
 	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
 fi
 
+# Stage 0f — peer-review-run unit test. Hermetic (fake `claude`/`codex` binaries on
+# a per-case PATH — no real providers, image, or network), so it runs up front like
+# the others. It guards the bidirectional peer-review runner's contract: the versioned
+# result schema, both provider directions, read-only permission flags, literal
+# stdin-fed prompts, Codex progress forwarding, the six normalized outcomes, timeout
+# with process-tree reaping, and retry-once. The host-source run is gated to LINUX
+# hosts with jq: beyond bash + jq, the helper and test lean on a Linux userland —
+# /proc/<pid>/stat, `pgrep -P`, GNU `realpath -m`, `date +%N`, plus ps/timeout/
+# find/awk/sed/stat — so on macOS or another non-Linux host it is skipped and the
+# test runs only inside the (Linux) image below. When the image is present the test
+# also runs against the BAKED /usr/local/bin/peer-review-run so a stale installed
+# helper is caught here rather than waved through by Stage 1's `command -v`
+# presence probe.
+stage0f_host_ran=0
+if [ "$(uname -s)" = Linux ] && command -v jq >/dev/null 2>&1; then
+	echo "Running peer-review-run unit test (host /repo source) ..."
+	"${ROOT_DIR}/scripts/test-peer-review-run.sh"
+	stage0f_host_ran=1
+elif [ "$(uname -s)" != Linux ]; then
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — non-Linux host (the test needs a Linux userland: /proc, pgrep -P, GNU realpath -m, date +%N); the in-image run covers it when the image is present."
+	skipped+=("Stage 0f: peer-review-run host unit test (non-Linux host)")
+else
+	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — host 'jq' unavailable."
+	skipped+=("Stage 0f: peer-review-run host unit test (host jq unavailable)")
+fi
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running peer-review-run unit test (baked helper in $IMAGE) ..."
+	# --init matters here: the test's reap assertions probe killed descendants
+	# with `kill -0`, which still succeeds on an un-collected ZOMBIE. Without an
+	# init, bash would be PID 1 and orphans KILLed after their parent died can
+	# linger as zombies, failing the reap checks even though the helper
+	# terminated them. The powbox runtime always provides a reaping PID 1
+	# (`init: true` in compose.shared.yml → docker-init), so the test container
+	# must match that assumption.
+	docker run --rm --init -v "${ROOT_DIR}:/repo:ro" \
+		-e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-peer-review-run.sh
+elif [ "$stage0f_host_ran" = 1 ]; then
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent; the host run already covered the /repo source."
+	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent)")
+else
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent, and the host run was skipped too (see above), so the peer-review-run test did not run at all."
+	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent; host run also skipped — no coverage)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -190,6 +235,7 @@ fi
 	"command -v powbox-provenance >/dev/null" \
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \
+	"command -v peer-review-run >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	"ping -V >/dev/null" \
 	"nc -h >/dev/null 2>&1" \

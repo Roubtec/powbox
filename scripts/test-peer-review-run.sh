@@ -728,6 +728,17 @@ run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" --art
 assert_eq "10h2: '..'-escaping artifact-root rejected (exit 64)" "$RUN_RC" 64
 assert_contains "10h2: explains the '..' rejection" "$RUN_ERR" "'..'"
 
+# 10h3: the filesystem ROOT as a worktree is rejected outright (exit 64). With
+# `--worktree /`, containment is impossible — every absolute path lives under `/`
+# — and the prefix check degenerates ("$_wt/" becomes `//`, which no ordinary
+# artifact root like `/tmp/prr` matches), so a root worktree would otherwise be
+# WRONGLY accepted. It is refused at worktree validation, before any provider
+# launch and before the artifact root is even created.
+d="$(new_case)"
+run "$d" --provider codex --worktree / --prompt-file "$d/prompt.txt" --artifact-root "$d/artifacts" --timeout 5
+assert_eq "10h3: filesystem-root --worktree rejected (exit 64)" "$RUN_RC" 64
+assert_contains "10h3: explains the root-worktree rejection" "$RUN_ERR" "filesystem root"
+
 # 10i: the Codex capability probe (`codex exec --help`) is bounded by --timeout,
 # so a small deadline caps the probe too. A fake codex whose --help HANGS must not
 # stall the helper past roughly the requested timeout (a fixed ~15-20s before this
@@ -1434,6 +1445,44 @@ emit_verdict_case "$d" "$(printf -- '> ```\n> VERDICT: PASS\n> ```')"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "11e: blockquote-nested fenced example only -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# ...and a 4-space / tab-INDENTED code block line (a CommonMark indented code
+# block, >= 4 columns of leading indent) is stripped from the PASS scan just like
+# a fence, so an indented example verdict a forfeiting peer echoes (`    VERDICT:
+# PASS`) cannot false-pass. Over-stripping a genuine but needlessly-indented
+# verdict only forfeits it (the safe direction), so a 1-3 space indent — below the
+# code-block threshold — still passes, and an indented ISSUES verdict still
+# resolves to issues (the ISSUES check stays on the full text).
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf '    VERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_not_contains "11e: 4-space-indented example pass never passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "11e: 4-space-indented example pass -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf '\tVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: tab-indented example pass -> forfeited" "$(jqf "$RUN_RESULT" .verdict)" none
+# an indented example ABOVE the peer's OWN bare verdict still passes: the indented
+# line is dropped, the bare column-0 verdict below survives.
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf 'ran out of context, e.g.:\n\n    VERDICT: PASS\n\nVERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: real pass below an indented example still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# a 1-3 space indent stays below the CommonMark code-block threshold -> still a pass.
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf '  VERDICT: PASS')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: 2-space-indented verdict is below the threshold and still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+# an indented ISSUES verdict still resolves to issues (safe direction: the ISSUES
+# check (a) runs on the FULL text), so indenting cannot HIDE a real issues verdict.
+d="$(new_case)"
+emit_verdict_case "$d" "$(printf '    VERDICT: ISSUES')"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "11e: indented issues still -> issues" "$(jqf "$RUN_RESULT" .verdict)" issues
 
 # 11f: a descendant that LEAVES the validated process group must still be
 # reaped. `set -m` isolates the provider into its own group and the group signal

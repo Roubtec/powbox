@@ -551,6 +551,15 @@ esac
 # that is ITSELF reached through a symlink.
 RAW_WORKTREE="$WORKTREE"
 WORKTREE="$(realpath -- "$WORKTREE")" || die_usage "cannot resolve --worktree"
+# Reject the filesystem ROOT as a worktree. Containment ("artifact-root OUTSIDE
+# the worktree") is impossible when the worktree is `/` — every absolute path
+# lives under it — and the prefix check below silently DEGENERATES there: the
+# `"$_wt/"` prefix becomes `//`, which no ordinary absolute artifact root (e.g.
+# `/tmp/prr`) matches, so a root worktree would WRONGLY be accepted even though
+# the read-only peer can reach the attempt artifacts. A root spelled `//`, `/.`,
+# a symlink to `/`, etc. all resolve here to `/`, so this one check covers them.
+# Reviewing the entire filesystem root is never a legitimate peer-review target.
+[ "$WORKTREE" != "/" ] || die_usage "--worktree must not be the filesystem root '/' (got '$RAW_WORKTREE')"
 
 [ -n "$PROMPT_FILE" ] || die_usage "--prompt-file is required"
 [ -f "$PROMPT_FILE" ] || die_usage "--prompt-file '$PROMPT_FILE' is not a regular file"
@@ -1004,10 +1013,10 @@ detect_verdict() {
 		echo issues
 		return
 	fi
-	# Before the PASS-side checks (b, c), strip FENCED code blocks into a scan copy
-	# with a proper lexer, so an echoed example verdict inside a fence never reaches
-	# the PASS scan (pass_anchor alone would accept it — a fenced VERDICT line has
-	# no decoration of its OWN). A block OPENS on a line that, after optional
+	# Before the PASS-side checks (b, c), strip FENCED and INDENTED code blocks into
+	# a scan copy with a proper lexer, so an echoed example verdict inside one never
+	# reaches the PASS scan (pass_anchor alone would accept it — a fenced or indented
+	# VERDICT line has no decoration of its OWN). A fenced block OPENS on a line that, after optional
 	# indentation and optional BLOCK decoration (blockquote >, list markers - * +
 	# and ordered N. / N)), is a run of >= 3 identical ` or ~; the char and length
 	# are recorded. It CLOSES only on a line that, after optional indentation ONLY
@@ -1015,19 +1024,22 @@ detect_verdict() {
 	# of length >= the opener's, then nothing but whitespace. Enforcing CommonMark's
 	# char+length rule means a LONGER outer fence wrapping a shorter example, a
 	# mismatched ~/` delimiter, or a decorated line cannot desync the parity and
-	# leak the inner VERDICT line. QUOTED forms that put a marker on the VERDICT line
+	# leak the inner VERDICT line. An INDENTED code block line (>= 4 columns of
+	# leading indentation — four spaces, or a tab from column 0-3) is dropped the
+	# same way, so an indented `    VERDICT: PASS` example a forfeiting peer echoes
+	# never reaches the PASS scan; over-stripping a needlessly indented REAL verdict
+	# only forfeits it (SAFE), and a 1-3 space indent stays below the threshold and
+	# still passes. QUOTED forms that put a marker on the VERDICT line
 	# ITSELF (blockquote, inline code, any nesting) need no stripping here —
 	# pass_anchor rejects them by excluding > and backtick from its decoration
 	# class. The ISSUES check (a) above deliberately stays on the FULL text:
 	# over-matching issues is the SAFE direction and can never false-pass, so a
-	# fenced/quoted VERDICT: ISSUES still counts. A peer that needlessly QUOTES its
+	# fenced/quoted/indented VERDICT: ISSUES still counts. A peer that needlessly QUOTES its
 	# OWN real verdict degrades to `none` (forfeited) — also safe; the caller's
 	# prompt asks for a bare VERDICT line. Residuals, honest and irreducible without
 	# a full Markdown BLOCK+INLINE parse (this scan is line-oriented) — all exotic,
 	# never produced by a compliant peer that emits its own bare VERDICT line:
 	#   * a bare UNQUOTED free-standing example line, byte-identical to a real one;
-	#   * a 4-space-INDENTED code block (indentation is indistinguishable from a
-	#     legitimately indented real verdict) — SAFE (over-strips to forfeit);
 	#   * a genuine verdict following an EXOTICALLY container-nested fenced example
 	#     (mixed list+blockquote, whose CommonMark continuation this line-oriented
 	#     lexer cannot track) may be forfeited — a false NEGATIVE, SAFE (never a
@@ -1063,7 +1075,15 @@ detect_verdict() {
 				fc = substr(run, 1, 1)
 				fl = length(run)
 				bqd = d
-			} else print
+			} else if ($0 !~ /^(    |\t| \t|  \t|   \t)/) print
+			# else: a CommonMark INDENTED code block line (>= 4 columns of leading
+			# indentation — four spaces, or a tab from column 0-3) is DROPPED from the
+			# scan copy, exactly like a fenced block, so an echoed `    VERDICT: PASS`
+			# example a forfeiting peer indents never reaches the PASS scan. Dropping
+			# ONLY over-strips (a genuine but needlessly >=4-indented verdict degrades
+			# to a forfeit) — the SAFE direction, never a false pass; a compliant peer
+			# emits its own verdict at column 0. A 1-3 space indent stays below the
+			# code-block threshold and still passes.
 			next
 		}
 		{

@@ -249,6 +249,19 @@ else
 		fi
 	done
 	unset _dir
+
+	# Harden history rewrites: make --force-with-lease additionally require that
+	# the remote tip being overwritten was actually integrated into the local
+	# branch's reflog (git's --force-if-includes). A no-op for fast-forward
+	# pushes AND for raw --force; overridable per-push with --no-force-if-includes.
+	# This matters more here than on a normal clone because concurrent agents and
+	# worktrees share one clone, so a background fetch can silently advance a
+	# remote-tracking ref and defeat a bare --force-with-lease. Single-valued key,
+	# so a plain set is idempotent across restarts. Written only to the
+	# container-local GIT_CONFIG_GLOBAL; the host .gitconfig-host is left untouched.
+	if ! git config --global push.useForceIfIncludes true; then
+		echo "Warning: failed to set push.useForceIfIncludes; continuing." >&2
+	fi
 fi
 
 # On Windows hosts (detected via the WSL2 kernel's "microsoft" release

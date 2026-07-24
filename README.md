@@ -342,6 +342,13 @@ The point is to run **many containers for the same repo at once**, each on its o
 
 The repo is a **required** input in this mode (the container must know what to clone) — an `owner/repo` slug or a clone URL. Give it as the positional argument or with `--repo`; if you omit it while standing inside a git repo, the launcher infers it from `git remote get-url origin`.
 
+Concrete recipe — self-hosted `--isolated` launch against the `main` branch of `Roubtec/agent-skills`, named `skills` (substitute repo/branch/name for your own; run either command as needed):
+
+```bash
+cc --isolated Roubtec/agent-skills --name skills --ref main
+cx --isolated Roubtec/agent-skills --name skills --ref main
+```
+
 ```bash
 # Two named instances of the same repo, running concurrently on independent checkouts:
 cc --isolated owner/repo --name feature-a

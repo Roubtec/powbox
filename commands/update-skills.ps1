@@ -7,14 +7,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Refresh the image-baked agent skills (and Claude workflows) onto the persistent
-# config volumes.
+# Refresh the image-baked agent skills onto the persistent config volumes.
 #
-# Skills (folders) and Claude dynamic workflows (flat .js files) are baked into
-# powbox-agent:latest at build time and seeded onto the claude-config /
-# codex-config volumes the first time each item is absent (no-clobber, see
-# docker/shared/entrypoint-*-hook.sh). That no-clobber means a rebuilt image with
-# updated skills/workflows does NOT overwrite the stale copies already on the
+# This manages the bake+seed channel only - today that is exactly the Codex
+# skill palette, fetched in full from Roubtec/agent-skills at build time. All
+# Claude skills and wf-* workflows arrive via the dev-skills@roubtec plugin
+# instead and are not seeded or refreshed here; previously-seeded Claude copies
+# on older volumes are classified as orphans that -Prune retires (see the
+# update-skills.sh header for the full custody story).
+#
+# Skills (folders) are baked into powbox-agent:latest at build time and seeded
+# onto the codex-config volume the first time each is absent (no-clobber, see
+# docker/shared/entrypoint-codex-hook.sh). That no-clobber means a rebuilt image
+# with updated skills does NOT overwrite the stale copies already on the
 # volume. This command closes that gap: it runs a throwaway container that
 # force-copies the freshly built items over the volume copies, removing the old
 # "enter a container, delete skills, exit, relaunch" dance.

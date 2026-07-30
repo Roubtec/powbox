@@ -49,9 +49,9 @@ try {
   }
 
   # --- agent-skills fetch (host-side, credentials never enter the image) ------
-  # The Codex skill palette baked into the agent image is the UNION of the two
-  # in-tree powbox-specific Codex skills and the shared dev-workflow skills that
-  # now live in Roubtec/agent-skills (task 015b). Fetch that repo HERE, on the
+  # The Codex skill palette baked into the agent image comes ENTIRELY from
+  # Roubtec/agent-skills (task 015b moved the shared skills there; the forfeit
+  # moved the last powbox-specific ones too). Fetch that repo HERE, on the
   # host where the gh credential helper is configured - never with a
   # `RUN git clone` inside the Dockerfile. The repo is currently PRIVATE, so an
   # in-Dockerfile clone would need a token plumbed into the build (risking it
@@ -279,8 +279,8 @@ $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
   # user requests -Pull on the agent target we refresh the base first (cascading
   # any digest change into the agent layers automatically) and then build the
   # agent.
-  # The agent image bakes the union of the in-tree Codex skills and the
-  # agent-skills Codex skills, so fetch the latter before any agent bake. Done
+  # The agent image bakes its whole Codex skill palette from the fetched
+  # agent-skills clone, so fetch it before any agent bake. Done
   # here (not for the base-only target) so `build.ps1 base` never needs network
   # access to agent-skills, and so the fetch fails the build BEFORE the base
   # build when it is going to fail at all.

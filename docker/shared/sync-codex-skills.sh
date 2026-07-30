@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# sync-codex-skills.sh — give Codex a START-TIME refresh of the 8 SHARED dev-skills
-# so both agents converge on `Roubtec/agent-skills` main at the SAME cadence.
+# sync-codex-skills.sh — give Codex a START-TIME refresh of the SHARED dev-skills
+# palette so both agents converge on `Roubtec/agent-skills` main at the SAME cadence.
 #
 # THE FETCH ALREADY HAPPENED. Claude's plugin bootstrap (seed-claude-plugins.sh)
 # keeps a full clone of the agent-skills marketplace on the shared claude-config
 # volume at $CLAUDE_CONFIG_DIR/plugins/marketplaces/roubtec/, and refreshes it
 # (`marketplace update` = git pull) on EVERY container start. That clone carries
-# codex/dev-skills/skills/ — the Codex copies of the same 8 skills. So this is a
-# LOCAL sync from that clone into the codex-config volume's skill dir: NO network
-# op of its own, and it inherits the plugin channel's freshness. Codex's two
-# powbox-specific skills (enable-worktrees, session-learnings) are NOT in the
-# clone, so iterating the clone's names can only ever touch the 8 shared skills —
-# those two stay exclusively bake-owned.
+# codex/dev-skills/skills/ — the Codex copies of the full shared palette,
+# INCLUDING enable-worktrees and session-learnings, which used to be baked
+# exclusively from this repo but were forfeited to agent-skills and now arrive
+# via the clone like every other skill. So this is a LOCAL sync from that clone
+# into the codex-config volume's skill dir: NO network op of its own, and it
+# inherits the plugin channel's freshness.
 #
 # INVOCATION MODEL — entrypoint-core.sh chains this DIRECTLY AFTER the detached
 # seed-claude-plugins.sh run (same post-firewall `setsid` detach, stdin </dev/null,
@@ -73,15 +73,11 @@ CODEX_SKILLS_DEST="${POWBOX_CODEX_SKILLS_DEST:-$HOME/.codex/agents/skills}"
 # epoch/commit baseline. Missing metadata degrades to placeholders in seed-skills.sh.
 CODEX_SEED_META="${POWBOX_CODEX_SEED_META:-/home/node/.agent-container/codex}"
 
-# BAKE-OWNED DENYLIST — Codex's two powbox-specific skills. They ship EXCLUSIVELY via
-# the image bake and must never be written by this plugin-clone sync. Today the
-# marketplace clone simply does not carry them, so iterating its names already cannot
-# touch them; this explicit denylist is DEFENSE IN DEPTH so that if a shared skill dir
-# of the same name ever appeared upstream in the clone, the marker-gated overwrite
-# below still could not clobber the bake-owned copy via that name collision. Fixed on
-# purpose (not env-overridable): it encodes a safety invariant, not a tunable. Whitespace-
-# separated; each clone entry name is matched exactly against this set in sync_from_clone.
-POWBOX_CODEX_BAKE_ONLY_SKILLS="enable-worktrees session-learnings"
+# NOTE: there is no bake-owned denylist anymore. The former one guarded
+# enable-worktrees and session-learnings while they were baked exclusively from
+# this repo; those two now live in agent-skills and arrive via the clone like
+# every other skill, so the sync must be free to refresh them. User-adopted
+# copies (marker deleted) remain protected by the marker gate below.
 
 # Log to the SAME bootstrap log the Claude plugin run uses (entrypoint-core.sh
 # passes it), so one boot's skill convergence — plugin + Codex sync — reads as one
@@ -238,17 +234,6 @@ sync_from_clone() {
 	local name target synced=0 skipped=0 rc=0
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
-		# Bake-owned denylist (defense in depth): a plugin-clone entry whose name
-		# collides with a Codex-specific bake-only skill must NEVER overwrite the
-		# bake-owned copy, even if it carries our marker. The clone does not ship
-		# these today, so this can only fire on a future upstream name collision.
-		case " $POWBOX_CODEX_BAKE_ONLY_SKILLS " in
-		*" $name "*)
-			log "skip '$name': bake-only Codex skill; the plugin-clone sync never writes it"
-			skipped=$((skipped + 1))
-			continue
-			;;
-		esac
 		target="$CODEX_SKILLS_DEST/$name"
 		# An existing entry may only be refreshed when it is a directory WE placed
 		# (carries the marker). An unmarked dir, or any non-directory collision

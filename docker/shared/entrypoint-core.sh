@@ -7,7 +7,8 @@ else
 	/usr/local/bin/init-firewall.sh
 fi
 
-# Claude dev-skills plugin (dev-skills@roubtec, the 8 shared skills) — converge it HERE,
+# Claude dev-skills plugin (dev-skills@roubtec, the shared skill palette and the
+# wf-* workflows) — converge it HERE,
 # AFTER init-firewall.sh, so its network ops (marketplace add/install/update, all to the
 # PUBLIC Roubtec/agent-skills over HTTPS) are ordered after the firewall — and fully
 # DETACHED, for EVERY launch, whether Claude is the primary agent or not (the Claude hook
@@ -97,7 +98,7 @@ if [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ] &&
 	#      touches POWBOX_PLUGIN_DONE_FILE when THIS step exits, releasing the
 	#      entrypoint's bounded Claude wait — BEFORE step 2 runs, so that wait never
 	#      gates on the Codex sync.
-	#   2. sync-codex-skills.sh syncs the Codex copies of the same 8 shared skills
+	#   2. sync-codex-skills.sh syncs the Codex copies of the shared skill palette
 	#      from the just-refreshed clone (a LOCAL sync, no network). Ordered strictly
 	#      AFTER step 1 so it reads the freshest clone; a SEPARATE process so Codex —
 	#      which observes skill-file changes live and needs no wait — is never folded

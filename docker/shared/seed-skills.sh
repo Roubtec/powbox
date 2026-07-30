@@ -4,11 +4,19 @@
 # Single source of truth for copying image-baked skills (folders) and Claude
 # dynamic workflows (flat `.js` files) onto a persistent config volume. Sourced
 # (not executed) by:
-#   - the agent entrypoint hooks (docker/shared/entrypoint-{claude,codex}-hook.sh)
-#     in `noclobber` mode — seed only skills/workflows whose destination is
-#     absent, and
+#   - the Codex entrypoint hook (docker/shared/entrypoint-codex-hook.sh) in
+#     `noclobber` mode — seed only skills whose destination is absent (the
+#     Claude hook no longer seeds anything: Claude's skills and workflows all
+#     arrive via the dev-skills@roubtec plugin channel),
+#   - the start-time Codex plugin-clone sync (docker/shared/sync-codex-skills.sh),
+#     which reuses the marker semantics and atomic per-skill copy, and
 #   - the update-skills worker (docker/shared/update-skills-incontainer.sh), which uses
 #     the primitives below to force-refresh, resolve conflicts, and prune.
+#
+# The workflow primitives further down are retained even though powbox no longer
+# bakes any workflows: the update-skills worker still needs them to classify and
+# prune the previously-seeded wf-*.js copies (and their sidecar markers) left on
+# older claude-config volumes.
 #
 # Ownership marker: every skill/workflow this code PLACES gets a hidden
 # `.powbox-seeded` marker recording the image build epoch and the powbox commit

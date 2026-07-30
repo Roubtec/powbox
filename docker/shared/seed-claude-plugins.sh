@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# seed-claude-plugins.sh — bring the shared Claude skills into a container via the
-# SAME channel colleagues use: the `dev-skills@roubtec` plugin, served from the
-# Roubtec/agent-skills marketplace. Task 015b stopped baking those 8 skills into
-# the image; this script is what brings them back, NAMESPACED (they arrive as
-# `/dev-skills:<name>`, e.g. `/dev-skills:address-review` — the model-side
-# Skill-tool matching by description is unaffected, only the slash-command muscle
-# memory changes; see task 015d docs).
+# seed-claude-plugins.sh — bring the shared Claude skills (and the wf-* dynamic
+# workflows) into a container via the SAME channel colleagues use: the
+# `dev-skills@roubtec` plugin, served from the Roubtec/agent-skills marketplace.
+# Task 015b stopped baking the shared skills into the image, and the forfeit
+# later moved the last powbox-specific Claude skills and the workflows to
+# agent-skills too; this script is what delivers all of them, NAMESPACED (they
+# arrive as `/dev-skills:<name>`, e.g. `/dev-skills:address-review`,
+# `/dev-skills:wf-address-tasks` — the model-side Skill-tool matching by
+# description is unaffected, only the slash-command muscle memory changes; see
+# task 015d docs).
 #
 # INVOCATION MODEL — entrypoint-core.sh runs this DETACHED (setsid, stdin
 # </dev/null, stdout/stderr to the bootstrap log) immediately AFTER

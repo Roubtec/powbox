@@ -53,8 +53,8 @@ COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-c
 # own, and Claude's skills and workflows all arrive via the dev-skills@roubtec
 # plugin channel instead of the bake). The agent-skills tree is fetched
 # host-side by scripts/build-image.{sh,ps1} into the gitignored
-# .agent-skills-src staging dir (credentials never enter the image; the HTTPS
-# clone URL keeps working unchanged when that repo flips public). A standalone
+# .agent-skills-src staging dir (that repo is public, so the fetch is an
+# anonymous HTTPS clone and no credential can enter the image). A standalone
 # `docker build` without a populated .agent-skills-src will fail at this COPY,
 # which is intentional: the documented build path is `./build.sh agent`.
 COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.agent-container/codex/skills/

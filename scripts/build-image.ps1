@@ -52,13 +52,16 @@ try {
   # The Codex skill palette baked into the agent image comes ENTIRELY from
   # Roubtec/agent-skills (task 015b moved the shared skills there; the forfeit
   # moved the last powbox-specific ones too). Fetch that repo HERE, on the
-  # host where the gh credential helper is configured - never with a
-  # `RUN git clone` inside the Dockerfile. The repo is currently PRIVATE, so an
-  # in-Dockerfile clone would need a token plumbed into the build (risking it
-  # landing in a layer/cache). Cloning host-side into a gitignored staging dir
-  # under the build context, which the Dockerfile COPYs, keeps every credential
-  # out of the image. The HTTPS clone URL keeps working unchanged when the repo
-  # later flips public - no edit needed.
+  # host - never with a `RUN git clone` inside the Dockerfile. The repo is
+  # PUBLIC (it started out private and was flipped in task 015e), so the clone
+  # below needs no credentials at all; the container-side plugin channel relies
+  # on that same public visibility to clone the marketplace anonymously.
+  # Fetching host-side into a gitignored staging dir under the build context,
+  # which the Dockerfile COPYs, is still what we want: the fetch runs on EVERY
+  # build and records the resulting HEAD SHA as AgentSkillsCommit (stamped on
+  # the image), so a moved agent-skills tip is always picked up and provenanced
+  # instead of being hidden behind a cached `RUN git clone` layer - and no
+  # GitHub token can ever land in a layer/cache should the repo be re-privatized.
   $script:AgentSkillsRepoUrl = "https://github.com/Roubtec/agent-skills.git"
   $script:AgentSkillsRef = "main"
   $script:AgentSkillsStaging = Join-Path $rootDir ".agent-skills-src"

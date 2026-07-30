@@ -42,7 +42,7 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 1. base (`powbox-agent-base`)
 2. Codex install layer (infrequent updates)
 3. Claude install layer (frequent, larger updates)
-4. shared seeding assets: both hooks, both skills trees, both statusline assets, prompt template, build epoch.
+4. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
 
 Consequence:
 

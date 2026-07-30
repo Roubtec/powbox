@@ -57,11 +57,12 @@ try {
   # below needs no credentials at all; the container-side plugin channel relies
   # on that same public visibility to clone the marketplace anonymously.
   # Fetching host-side into a gitignored staging dir under the build context,
-  # which the Dockerfile COPYs, is still what we want: the fetch runs on EVERY
-  # build and records the resulting HEAD SHA as AgentSkillsCommit (stamped on
-  # the image), so a moved agent-skills tip is always picked up and provenanced
-  # instead of being hidden behind a cached `RUN git clone` layer - and no
-  # GitHub token can ever land in a layer/cache should the repo be re-privatized.
+  # which the Dockerfile COPYs, is still what we want: the fetch runs on every
+  # AGENT build (never the base-only target - see the dispatch below) and
+  # records the resulting HEAD SHA as AgentSkillsCommit (stamped on the image),
+  # so a moved agent-skills tip is always picked up and provenanced instead of
+  # being hidden behind a cached `RUN git clone` layer - and no GitHub token
+  # can ever land in a layer/cache should the repo be re-privatized.
   $script:AgentSkillsRepoUrl = "https://github.com/Roubtec/agent-skills.git"
   $script:AgentSkillsRef = "main"
   $script:AgentSkillsStaging = Join-Path $rootDir ".agent-skills-src"
@@ -73,8 +74,10 @@ try {
     # error aborts the build rather than baking a stale/empty seed dir.
     $err = @"
 agent-skills fetch failed; cannot build the Codex skill palette.
-Ensure this host is authenticated to GitHub (gh auth status) and can reach
-$($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
+Ensure this host can reach $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)).
+The repo is public, so the clone is anonymous and needs no GitHub auth - check
+the network/proxy first (auth would only matter if the repo were re-privatized).
+No image was built.
 "@
     Write-Host "Fetching Roubtec/agent-skills ($($script:AgentSkillsRef)) for the Codex skill bake..."
     $gitDir = Join-Path $script:AgentSkillsStaging ".git"

@@ -1,5 +1,7 @@
 # Task 041 — Port the peer-review stage into wf-address-tasks.js and wf-address-review.js via peer-review-run
 
+> **Relocation note (2026-07-30):** powbox forfeited the `wf-*` workflow sources to `Roubtec/agent-skills` (`plugins/dev-skills/workflows/`; see task 051). The file paths below refer to the pre-forfeit in-tree copies; this task must now be executed against the agent-skills repo (re-home it there), with powbox contributing only the baked `peer-review-run` contract the stage consumes.
+
 ## Why this task exists
 
 The seeded Claude workflows `wf-address-tasks.js` and `wf-address-review.js` are ports of the `dev-skills` prose skills `address-tasks` / `address-review`, but they dropped the cross-harness peer-reviewer stage the prose versions carry (Codex preflight, read-only `codex exec` beside the fresh reviewer, grounded-findings gating, `peer-opinions=off` escape hatch).

@@ -1,5 +1,7 @@
 # Task 047 — Bake wf-check (workflow-script validation) and wf-status (run introspection) helpers
 
+> **Relocation note (2026-07-30):** the seeded `wf-*` workflow sources moved to `Roubtec/agent-skills` (`plugins/dev-skills/workflows/`; see task 051). The helpers themselves can still be baked by powbox (they are generic over any workflow `.js`), but the fixture references below to `docker/claude/agent-container/workflows/*.js` no longer resolve — use the agent-skills copies (e.g. from the marketplace clone) as fixtures instead.
+
 ## Why this task exists
 
 Iterating on Workflow scripts inside a container is currently hand-rolled in two places, both observed costing multiple turns in a scribz `wf-address-tasks` run:

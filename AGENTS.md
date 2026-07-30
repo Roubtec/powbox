@@ -13,6 +13,11 @@ Use one line per paragraph in Markdown if possible.
 
 Before doing a code review, read ALL existing review comments and threads on the PR for context before making suggestions. Findings previously delegated to follow-up work need not be re-raised unless the facts changed since the delegation.
 
+## Git History Rewrites
+
+Never rewrite published history with raw `git push --force`/`-f`. Use `git push --force-with-lease` (ideally the exact form `--force-with-lease=<branch>:<sha>`) so a concurrent push to the old tip is not silently clobbered.
+The container sets `push.useForceIfIncludes=true` (in `docker/shared/entrypoint-core.sh`), which further requires that the remote tip you are overwriting was actually integrated locally — this only hardens `--force-with-lease` and does nothing for raw `--force`, so the no-raw-force rule above is what carries the protection. Keep one writer per PR branch; that remains the strongest safeguard against lost pushes.
+
 ## Key Paths
 
 | Path | Purpose |

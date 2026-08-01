@@ -511,6 +511,38 @@ git -C "$ws/vendor/lib" add -f app/bin/tool.sh
 printf 'not an index' >"$ws/vendor/lib/.git/index"
 assert_absent "$ws" "$ws/vendor/lib/app/bin" "an unreadable nested index preserves the directory"
 
+echo "Test: a tracked bin/ that is ABSENT on disk is still not shadowed"
+# "Absent means it cannot hold tracked content" is false: a gitlink whose
+# submodule was never initialized, or a path a sparse checkout left out, is
+# tracked with nothing on disk — and shadowing it sends the eventual checkout
+# into a tmpfs that dies with the container.
+ws="$(git_ws dotnet-tracked-absent)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/tool.sh"
+git -C "$ws" add -f app/bin/tool.sh
+rm -rf "$ws/app/bin"
+assert_absent "$ws" "$ws/app/bin" "an absent-but-tracked bin is not shadowed"
+assert_emits "$ws" "$ws/app/obj" "the untracked sibling obj is still shadowed"
+
+echo "Test: a never-built project still gets both shadows (the whole point)"
+ws="$(git_ws dotnet-fresh-clone)"
+mkdir -p "$ws/app"
+touch "$ws/app/App.csproj"
+git -C "$ws" add -f app/App.csproj
+assert_emits "$ws" "$ws/app/bin" "absent bin emitted on a fresh clone"
+assert_emits "$ws" "$ws/app/obj" "absent obj emitted on a fresh clone"
+
+echo "Test: a BARE repository at bin/ is not shadowed"
+# It has no .git of its own and the outer index does not track it, so nothing
+# else would stop its object store being masked.
+ws="$(git_ws dotnet-bare-repo)"
+mkdir -p "$ws/app"
+touch "$ws/app/App.csproj"
+git -c init.defaultBranch=main init -q --bare "$ws/app/bin"
+assert_absent "$ws" "$ws/app/bin" "a bare repo at bin/ is not shadowed"
+assert_stderr "$ws" "Git repository or submodule checkout" "bare-repo skip is announced on stderr"
+assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected"
+
 echo "Test: a project path with glob metacharacters is probed literally"
 # --literal-pathspecs keeps `app[1]` from being read as a character class.
 ws="$(git_ws dotnet-metachars)"

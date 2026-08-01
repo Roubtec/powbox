@@ -88,12 +88,17 @@ nested_repo_owns() {
 	return 1
 }
 
-# For those few directories, ask their own repository directly.  Vetoes unless
-# that repository POSITIVELY reports no tracked content, so an unreadable index
+# For those few directories, ask their own repository directly.  Asked from the
+# PARENT (the project directory, which exists because find(1) matched a project
+# file in it) with the candidate's name as the pathspec, so it answers just as
+# well for a candidate that is not on disk — a gitlink whose submodule was never
+# initialized, or a sparse checkout — as for one that is.  Vetoes unless that
+# repository POSITIVELY reports no tracked content, so an unreadable index
 # preserves the directory rather than masking it.
 nested_dir_holds_content() {
-	local tracked
-	if ! tracked="$(git_scrubbed -C "$1" ls-files --cached -- . 2>/dev/null)"; then
+	local parent="${1%/*}" name="${1##*/}" tracked
+	if ! tracked="$(git_scrubbed --literal-pathspecs -C "$parent" \
+		ls-files --cached -- "$name" 2>/dev/null)"; then
 		return 0
 	fi
 	[ -n "$tracked" ]
@@ -208,7 +213,12 @@ while IFS= read -r -d '' proj_dir; do
 			echo "detect-shadows: skipping '$artifact_dir' — not a directory." >&2
 			continue
 		fi
-		if [ -e "$artifact_dir/.git" ]; then
+		# A .git covers a normal checkout and an initialized submodule; the
+		# HEAD+objects+refs triple covers a BARE repository, which has no .git of
+		# its own and is invisible to the outer index, so nothing else would stop
+		# it being masked.  MSBuild output never looks like either.
+		if [ -e "$artifact_dir/.git" ] ||
+			{ [ -e "$artifact_dir/HEAD" ] && [ -d "$artifact_dir/objects" ] && [ -d "$artifact_dir/refs" ]; }; then
 			echo "detect-shadows: skipping '$artifact_dir' — Git repository or submodule checkout, not build output." >&2
 			continue
 		fi
@@ -223,19 +233,20 @@ done < <(
 )
 
 if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
-	# One `git ls-files` for the whole scan, restricted to the candidates that
-	# actually exist: a path that is not there cannot hold tracked content, and on
-	# a fresh clone — the case the shadow exists for — that is all of them.
+	# One `git ls-files` for the whole scan, over EVERY candidate — including the
+	# ones not on disk.  "Absent means it cannot hold tracked content" is not
+	# true: a gitlink whose submodule was never initialized, or a path excluded by
+	# a sparse checkout, is tracked with nothing on disk, and shadowing it would
+	# send the eventual `submodule update` or sparse-checkout widening into a
+	# tmpfs that dies with the container.  Batching them costs nothing — the call
+	# count does not depend on the pathspec count.
 	#
 	# `--literal-pathspecs` so a project directory named `app[1]` is matched as
 	# itself rather than as a character class; git_scrubbed for the GIT_* and
 	# safe.directory handling described at its definition.
 	declare -A tracked_artifact_dir=()
-	existing_rel=()
+	candidate_rel=()
 	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
-		if [ ! -d "$artifact_dir" ]; then
-			continue
-		fi
 		if nested_repo_owns "$artifact_dir"; then
 			# Owned by a repository nested under the workspace: one git call for
 			# this directory alone.  Rare enough not to matter for the scan's
@@ -247,10 +258,10 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 		fi
 		# Compare workspace-RELATIVE, the same form `git -C` prints, so no
 		# absolute-path arithmetic can disagree with git's own spelling.
-		existing_rel+=("${artifact_dir#"$WORKSPACE_DIR"/}")
+		candidate_rel+=("${artifact_dir#"$WORKSPACE_DIR"/}")
 	done
 	probe_failed=0
-	if [ ${#existing_rel[@]} -gt 0 ]; then
+	if [ ${#candidate_rel[@]} -gt 0 ]; then
 		# The output is NUL-delimited (a tracked path may contain anything, and
 		# command substitution cannot carry NULs), so the exit status is smuggled
 		# out as a trailing sentinel rather than captured: every real record starts
@@ -262,13 +273,13 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 				probe_ok=1
 				continue
 			fi
-			for rel in "${existing_rel[@]}"; do
+			for rel in "${candidate_rel[@]}"; do
 				case "$tracked_file" in
 				"$rel" | "$rel"/*) tracked_artifact_dir["$rel"]=1 ;;
 				esac
 			done
 		done < <(git_scrubbed --literal-pathspecs -C "$WORKSPACE_DIR" \
-			ls-files -z --cached -- "${existing_rel[@]}" 2>/dev/null &&
+			ls-files -z --cached -- "${candidate_rel[@]}" 2>/dev/null &&
 			printf '%s\0' "$probe_sentinel")
 		if [ "$probe_ok" = 0 ] &&
 			{

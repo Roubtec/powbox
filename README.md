@@ -482,6 +482,8 @@ If none of these declarations exist, the feature is a no-op.
 
 The .NET scan prunes `node_modules`, `.git`, `.worktrees`, and `bin`/`obj` themselves, so it stays cheap (~0.16s on a 1700-directory monorepo) and skips worktree checkouts — those live in a container-local volume with no host counterpart to collide with.
 Unlike the workspace globs, `bin`/`obj` are emitted as **literal** paths, so they are created and shadowed even on a fresh clone where no build has run yet; the cost is an empty `bin`/`obj` mountpoint dir appearing for a project that has never been built (or one that redirects output via `ArtifactsPath`), which every standard .NET template already gitignores.
+An existing `bin`/`obj` that is a **symlink** is skipped rather than followed — this scan is derived from repo content rather than declared by you, so resolving `app/bin -> ../src` would let the tree itself decide to mask real source for the whole session. Declare such a path in `.powbox.yml` if you genuinely want its target shadowed.
+A .NET project added mid-session is picked up by re-running `shadow-refresh.sh` (there is no `dotnet` wrapper equivalent to the `pnpm` one below), so run it before your first build of a new project.
 
 ### Mid-Session Packages
 

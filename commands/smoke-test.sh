@@ -212,6 +212,18 @@ fi
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/…` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
+# The dotnet probes pin the two pieces of the SDK layer that can regress
+# silently: the sentinel probe re-derives the SDK version the same way the
+# Dockerfile's warm-up RUN does and asserts both marker files exist under
+# $HOME/.dotnet, so an SDK bump that renames a sentinel — or a `dotnet --version`
+# that grows a second stdout line, which would have made the build `touch`
+# garbage filenames while still succeeding — brings back the first-build
+# "issue was encountered verifying workloads" warning here instead of in an
+# agent's first build; the env probe pins the four documented opt-outs (notably
+# DOTNET_GENERATE_ASPNET_CERTIFICATE, whose loss silently installs an ASP.NET
+# HTTPS dev cert). Deliberately no `dotnet new` + build probe: that would pull
+# NuGet packages over the network, the same reason the image is not warmed that
+# way.
 # shellcheck disable=SC2016  # the probes' $HOME expands in the container shell, NOT the host
 "${ROOT_DIR}/scripts/smoke-test-image.sh" "$IMAGE" \
 	"claude --version >/dev/null" \
@@ -273,6 +285,9 @@ fi
 	'mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go/bin/powbox-gobin-probe" && chmod +x "$HOME/go/bin/powbox-gobin-probe" && powbox-gobin-probe | grep -qx gobin-ok' \
 	"opa version >/dev/null" \
 	'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"' \
+	"dotnet --version >/dev/null" \
+	'sdk="$(dotnet --version)" && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ]' \
+	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]' \
 	"file --version >/dev/null" \
 	"printf test | xxd >/dev/null" \
 	"envsubst --version >/dev/null" \

@@ -22,7 +22,8 @@ set -euo pipefail
 #   (a) unresolved-only filtering, and --all
 #   (b) a two-page thread list followed via endCursor (two separate gh calls,
 #       right `after` values, no --paginate)
-#   (c) a contaminated response — fail closed on repeat, succeed on a clean retry
+#   (c) a contaminated response — fail closed on repeat, succeed on a clean
+#       retry, including contamination that only arrives on a later page
 #   (d) the /pull/12 vs /pull/123 boundary (and end/`#` acceptance)
 #   (e) nested comment-page fetch-up
 #   (f) default repo resolution via `gh repo view` when --repo is omitted
@@ -292,6 +293,25 @@ run "$d" --repo acme/widgets 12
 assert_eq "c2: clean retry exit 0" "$RUN_RC" 0
 assert_eq "c2: emits the clean thread" "$(jqr '.[0].id' "$RUN_OUT")" T_ok
 assert_eq "c2: clean comment url" "$(jqr '.[0].comments[0].url' "$RUN_OUT")" "https://github.com/acme/widgets/pull/12#discussion_r401"
+
+# c3: the scope check must cover EVERY page, not just the first. Page one is
+# clean and advertises more; only the cursor-reached page carries the cross-PR
+# url. Today the helper checks the fully merged nodes, so page position cannot
+# matter — but that is an implementation detail, and this pins the CONTRACT: a
+# future fail-fast refactor that validated urls per page could regress to
+# checking only the first and would be caught here rather than in production.
+d="$(new_case)"
+threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-1"
+threads_one_page "$CONTAMINATED" >"$d/threads-2"
+threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-3"
+threads_one_page "$CONTAMINATED" >"$d/threads-4"
+run "$d" --repo acme/widgets 12
+assert_eq "c3: later-page contamination fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "c3: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
+assert_contains "c3: names the offending url on stderr" "$RUN_ERR" "https://github.com/acme/widgets/pull/999"
+assert_eq "c3: whole fetch retried (four thread-list calls)" "$(count_matches "$d/log" '[owner=')" 4
+assert_contains "c3: second call follows the cursor" "$(nth_match 2 "$d/log" '[owner=')" "[after=CURSOR_C]"
+assert_not_contains "c3: retry restarts at page one" "$(nth_match 3 "$d/log" '[owner=')" "[after="
 
 # ============================================================================
 # (d) boundary-safe, repo-qualified /pull/<N> match

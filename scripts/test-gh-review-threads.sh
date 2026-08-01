@@ -184,12 +184,15 @@ nth_match() {
 
 # A single-page reviewThreads response wrapping the given nodes JSON, echoing
 # the response identity the helper asserts (nameWithOwner + PR number/url).
-# threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] — defaults match the
-# canonical test repo/PR (acme/widgets, PR 12).
+# threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] [<pr-url>] — defaults
+# match the canonical test repo/PR (acme/widgets, PR 12); the url derives from
+# the other two unless overridden. The (i) cases override it back to canonical
+# so each presents exactly ONE wrong asserted identity field.
 threads_one_page() {
-	local nodes="$1" pr="${2:-12}" nwo="${3:-acme/widgets}"
-	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"https://github.com/%s/pull/%s","reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
-		"$nwo" "$pr" "$nwo" "$pr" "$nodes"
+	local nodes="$1" pr="${2:-12}" nwo="${3:-acme/widgets}" url
+	url="${4:-https://github.com/$nwo/pull/$pr}"
+	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+		"$nwo" "$pr" "$url" "$nodes"
 }
 
 # ============================================================================
@@ -449,26 +452,30 @@ assert_eq "h3: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')"
 # only the identity gate can reject them; its stderr diagnosis is the generic
 # "response identity does not match" line (no urls are named — the whole page
 # is untrusted), distinct from the offender-listing scope diagnosis (c1/d1/d4)
-# and the extraction diagnosis (h1–h3).
+# and the extraction diagnosis (h1–h3). Each case keeps pullRequest.url pinned
+# to the CANONICAL value so exactly one asserted identity field is wrong — a
+# helper that skipped the nameWithOwner/number checks could not pass these by
+# validating the (unasserted) url instead.
+CANONICAL_PR_URL='https://github.com/acme/widgets/pull/12'
 NODES_I='[
   {"id":"T_id","isResolved":false,"isOutdated":false,"path":"i.js","line":1,
    "comments":{"nodes":[{"databaseId":831,"author":{"login":"codex","__typename":"Bot"},"body":"in scope","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r831"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
 ]'
 
-# i1: the response echoes the WRONG nameWithOwner.
+# i1: the response echoes the WRONG nameWithOwner (url stays canonical).
 d="$(new_case)"
-threads_one_page "$NODES_I" 12 other/widgets >"$d/threads-1"
-threads_one_page "$NODES_I" 12 other/widgets >"$d/threads-2"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-1"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
 run "$d" --repo acme/widgets 12
 assert_eq "i1: wrong nameWithOwner fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "i1: no stdout emitted" "$RUN_OUT" ""
 assert_contains "i1: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
 assert_eq "i1: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
 
-# i2: the response echoes the WRONG pullRequest.number.
+# i2: the response echoes the WRONG pullRequest.number (url stays canonical).
 d="$(new_case)"
-threads_one_page "$NODES_I" 999 >"$d/threads-1"
-threads_one_page "$NODES_I" 999 >"$d/threads-2"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-1"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
 run "$d" --repo acme/widgets 12
 assert_eq "i2: wrong PR number fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "i2: no stdout emitted" "$RUN_OUT" ""

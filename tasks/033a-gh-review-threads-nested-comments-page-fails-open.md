@@ -33,7 +33,7 @@ Included — in this repo (only after the above merges to agent-skills main):
 
 Out of scope:
 
-- The threads-page parser and identity guards (agent-skills task 013 / powbox task 033 — both landed).
+- The threads-page parser and identity guards: agent-skills task 013 (merged 2026-07-31) and powbox task 033 (the PR that spawned this follow-up).
 - The nested-page **scope** check (already correct, and pinned by case (e2)).
 
 ## Ordering (important)

@@ -461,22 +461,27 @@ To apply a ctx change, omit `--resume` and let the script auto-detect and recrea
 
 ## Workspace Shadow Mounts
 
-When the host OS differs from the container OS (e.g. Windows host, Linux container), Node.js native binaries compiled for one platform break on the other.
+When the host OS differs from the container OS (e.g. Windows host, Linux container), build output produced for one platform breaks on the other.
 The root `node_modules` is already handled by a per-container Docker volume, but monorepo subpackages each have their own `node_modules` that would otherwise be shared through the bind mount.
+.NET projects have the same problem for a different reason: MSBuild bakes **absolute** paths into `obj/`, so a container restore writes `/home/node/.nuget/packages/` into `obj/project.assets.json` while a host Visual Studio build writes `C:\Users\<user>\.nuget\packages\` — each silently clobbering the other's restore graph.
 
-At container start, the entrypoint auto-detects workspace subpackages and mounts tmpfs over each nested `node_modules` directory.
-This shadows the host content inside the container so that `pnpm install` (or `npm install`) writes Linux-native binaries into an ephemeral filesystem that never touches the host.
+At container start, the entrypoint auto-detects these directories and mounts tmpfs over each one.
+This shadows the host content inside the container so that `pnpm install` (or `dotnet build`) writes Linux-native output into an ephemeral filesystem that never touches the host.
 
 ### Auto-Detection
 
-The entrypoint scans for workspace declarations in this order:
+The entrypoint scans for project declarations in this order:
 
-1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs
-2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`)
-3. **`.powbox.yml` / `.powbox.local.yml` with `shadow:`** — reads custom `shadow` glob patterns (see below)
+1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs → each package's `node_modules`
+2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`) → each package's `node_modules`
+3. **.NET** — finds `*.csproj` / `*.fsproj` / `*.vbproj` → each project's `bin` and `obj`
+4. **`.powbox.yml` / `.powbox.local.yml` with `shadow:`** — reads custom `shadow` glob patterns (see below)
 
 All matched directories get a tmpfs overlay.
 If none of these declarations exist, the feature is a no-op.
+
+The .NET scan prunes `node_modules`, `.git`, `.worktrees`, and `bin`/`obj` themselves, so it stays cheap (~0.16s on a 1700-directory monorepo) and skips worktree checkouts — those live in a container-local volume with no host counterpart to collide with.
+Unlike the workspace globs, `bin`/`obj` are emitted as **literal** paths, so they are created and shadowed even on a fresh clone where no build has run yet; the cost is an empty `bin`/`obj` mountpoint dir appearing for a project that has never been built (or one that redirects output via `ArtifactsPath`), which every standard .NET template already gitignores.
 
 ### Mid-Session Packages
 

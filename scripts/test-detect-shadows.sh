@@ -322,6 +322,77 @@ echo "Test: a bare workspace with no declarations emits nothing"
 ws="$(new_ws empty)"
 assert_no_output "$ws" "no .powbox.yml and no workspaces → no output"
 
+# --- .NET project detection (*.csproj / *.fsproj / *.vbproj -> bin + obj) ---
+#
+# The key property: bin/obj are emitted as LITERALS, so they appear even though
+# they do not exist yet.  Build output is absent on a fresh clone, which is
+# exactly when the shadow has to be established.
+
+echo "Test: a .csproj emits its sibling bin and obj though neither exists"
+ws="$(new_ws dotnet-basic)"
+mkdir -p "$ws/agents/svc"
+touch "$ws/agents/svc/Svc.csproj"
+assert_emits "$ws" "$ws/agents/svc/bin" "csproj → bin emitted though absent"
+assert_emits "$ws" "$ws/agents/svc/obj" "csproj → obj emitted though absent"
+
+echo "Test: .fsproj and .vbproj are detected too"
+ws="$(new_ws dotnet-langs)"
+mkdir -p "$ws/f" "$ws/v"
+touch "$ws/f/App.fsproj" "$ws/v/App.vbproj"
+assert_emits "$ws" "$ws/f/obj" "fsproj → obj emitted"
+assert_emits "$ws" "$ws/v/obj" "vbproj → obj emitted"
+
+echo "Test: a project at the workspace root emits root bin/obj, not the root itself"
+ws="$(new_ws dotnet-root)"
+touch "$ws/Root.csproj"
+assert_emits "$ws" "$ws/bin" "root csproj → bin emitted"
+assert_emits "$ws" "$ws/obj" "root csproj → obj emitted"
+assert_absent "$ws" "$ws" "workspace root itself never emitted"
+
+echo "Test: two project files in one directory collapse to a single bin/obj pair"
+ws="$(new_ws dotnet-dedup)"
+mkdir -p "$ws/multi"
+touch "$ws/multi/A.csproj" "$ws/multi/B.fsproj"
+count="$(run_out "$ws" | grep -cxF "$ws/multi/obj" || true)"
+if [ "$count" -eq 1 ]; then
+	ok "duplicate project dir collapsed to one obj line"
+else
+	ko "dotnet dedup failed (count=$count)"
+fi
+
+echo "Test: projects under node_modules / .git / .worktrees are pruned"
+ws="$(new_ws dotnet-pruned)"
+mkdir -p "$ws/node_modules/pkg" "$ws/.git/tmpl" "$ws/.worktrees/task/proj"
+touch "$ws/node_modules/pkg/Vendored.csproj" \
+	"$ws/.git/tmpl/Hook.csproj" \
+	"$ws/.worktrees/task/proj/Wt.csproj"
+assert_absent "$ws" "$ws/node_modules/pkg/obj" "csproj under node_modules pruned"
+assert_absent "$ws" "$ws/.git/tmpl/obj" "csproj under .git pruned"
+assert_absent "$ws" "$ws/.worktrees/task/proj/obj" "csproj under .worktrees pruned"
+assert_no_output "$ws" "pruned-only tree emits nothing"
+
+echo "Test: a project file copied under bin/ or obj/ does not seed a nested scan"
+ws="$(new_ws dotnet-nested-artifacts)"
+mkdir -p "$ws/app/bin/Release/net8.0" "$ws/app/obj/Debug"
+touch "$ws/app/App.csproj" \
+	"$ws/app/bin/Release/net8.0/Copied.csproj" \
+	"$ws/app/obj/Debug/Stale.csproj"
+assert_emits "$ws" "$ws/app/bin" "the project's own bin still emitted"
+assert_absent "$ws" "$ws/app/bin/Release/net8.0/bin" "csproj under bin/ pruned"
+assert_absent "$ws" "$ws/app/obj/Debug/obj" "csproj under obj/ pruned"
+
+echo "Test: project directories containing spaces are handled"
+ws="$(new_ws dotnet-spaces)"
+mkdir -p "$ws/my project"
+touch "$ws/my project/My App.csproj"
+assert_emits "$ws" "$ws/my project/obj" "space-containing project dir → obj emitted"
+
+echo "Test: a repo with no .NET projects emits nothing from the .NET scan"
+ws="$(new_ws dotnet-none)"
+mkdir -p "$ws/src"
+touch "$ws/src/main.go" "$ws/src/notes.csproj.md"
+assert_no_output "$ws" "no project file → no .NET output"
+
 echo ""
 echo "Results: $pass passed, $fail failed."
 if [ "$fail" -gt 0 ]; then

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Detect workspace subpackage directories that need node_modules shadowing.
+# Detect workspace directories that need tmpfs shadowing.
 #
-# Scans for pnpm, npm, and yarn workspace declarations plus optional
+# Scans for pnpm, npm, and yarn workspace declarations (-> per-package
+# node_modules), .NET project files (-> per-project bin/obj), plus optional
 # .powbox.yml / .powbox.local.yml override files.  Outputs one absolute path per line — each
-# path is a directory to shadow with tmpfs so that host-native binaries
-# (e.g. Windows) never mix with container-native (Linux) binaries.
+# path is a directory to shadow with tmpfs so that host-native build output
+# (e.g. Windows) never mixes with container-native (Linux) output.
 #
 # Usage: detect-shadows.sh <workspace-dir>
 set -euo pipefail
@@ -17,6 +18,27 @@ if [ ! -d "$WORKSPACE_DIR" ]; then
 fi
 
 shadows=()
+workspace_resolved="$(realpath -- "$WORKSPACE_DIR")"
+
+# Append a resolved path to the shadow list iff it stays strictly under
+# the workspace root; otherwise reject it.  The second argument is the
+# original (pre-resolution) path used only for the diagnostic message.
+add_shadow_path() {
+	local resolved="$1" original="$2"
+	if [ "$resolved" = "$workspace_resolved" ]; then
+		# e.g. pattern '.' — shadowing the root would mask the whole repo.
+		echo "detect-shadows: skipping '$original' — refusing to shadow the workspace root itself." >&2
+		return
+	fi
+	case "$resolved" in
+	"$workspace_resolved"/*)
+		shadows+=("$resolved")
+		;;
+	*)
+		echo "detect-shadows: skipping '$original' — resolves outside workspace root." >&2
+		;;
+	esac
+}
 
 # Expand workspace glob patterns into node_modules paths.
 # Each pattern is resolved relative to WORKSPACE_DIR; only directories
@@ -56,6 +78,43 @@ if [ -f "$PKG_JSON" ]; then
 	' "$PKG_JSON" 2>/dev/null || true)
 fi
 
+# --- .NET projects (*.csproj / *.fsproj / *.vbproj) -> bin + obj ---
+#
+# Same derivation shape as the workspace globs above (a project manifest implies
+# an artifact directory beside it), and the same reason: MSBuild bakes ABSOLUTE
+# paths into obj/.  A container restore writes `/home/node/.nuget/packages/`
+# into obj/project.assets.json and obj/*.nuget.g.props, while the same project
+# built on a Windows host writes `C:\Users\<user>\.nuget\packages\`.  Sharing
+# those directories over the bind mount makes a container build and a host
+# Visual Studio build silently clobber each other's restore graph — exactly the
+# host-vs-container mixing that node_modules shadowing already prevents.
+#
+# Emitted as LITERAL paths (not a glob like `*/bin`) on purpose: build output
+# does not exist on a fresh clone or after a clean, and the glob branch below is
+# existence-gated, so a glob would silently shadow nothing in precisely the
+# situation this exists for.  Literals are mkdir -p'd by shadow-mounts.sh.  The
+# cost is an empty bin/obj mountpoint dir appearing for a project that has never
+# been built (and for one that redirects output via ArtifactsPath); both are
+# gitignored by every standard .NET template, and it is the same accepted
+# trade-off as the empty node_modules/.worktrees mountpoint dirs.
+#
+# node_modules/.git/.worktrees are pruned so the walk stays cheap (~0.16s on a
+# 1700-directory monorepo, hence no depth bound) and so worktree checkouts are
+# skipped: those live in a container-local volume with no host counterpart, so
+# they have nothing to collide with and shadowing them would only cost RAM and
+# discard build state.  bin/obj themselves are pruned so a copied-out project
+# file under bin/ cannot seed a nested scan.
+while IFS= read -r -d '' proj_dir; do
+	add_shadow_path "$(realpath -m -- "$proj_dir/bin")" "$proj_dir/bin"
+	add_shadow_path "$(realpath -m -- "$proj_dir/obj")" "$proj_dir/obj"
+done < <(
+	find "$WORKSPACE_DIR" \
+		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \
+		-o -name bin -o -name obj \) -prune \) -o \
+		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
+		-printf '%h\0' \) 2>/dev/null | sort -zu
+)
+
 # --- .powbox.yml / .powbox.local.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"
 POWBOX_LOCAL_YML="$WORKSPACE_DIR/.powbox.local.yml"
@@ -68,28 +127,6 @@ elif [ -f "$POWBOX_YML" ]; then
 fi
 
 if [ -n "$SHADOW_YML" ]; then
-	workspace_resolved="$(realpath -- "$WORKSPACE_DIR")"
-
-	# Append a resolved path to the shadow list iff it stays strictly under
-	# the workspace root; otherwise reject it.  The second argument is the
-	# original (pre-resolution) path used only for the diagnostic message.
-	add_shadow_path() {
-		local resolved="$1" original="$2"
-		if [ "$resolved" = "$workspace_resolved" ]; then
-			# e.g. pattern '.' — shadowing the root would mask the whole repo.
-			echo "detect-shadows: skipping '$original' — refusing to shadow the workspace root itself." >&2
-			return
-		fi
-		case "$resolved" in
-		"$workspace_resolved"/*)
-			shadows+=("$resolved")
-			;;
-		*)
-			echo "detect-shadows: skipping '$original' — resolves outside workspace root." >&2
-			;;
-		esac
-	}
-
 	while IFS= read -r pattern; do
 		[ -z "$pattern" ] && continue
 		case "$pattern" in

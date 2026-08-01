@@ -30,7 +30,8 @@ set -euo pipefail
 #   (h) malformed thread shapes (comments null / {} / absent) — the url PARSER
 #       fails, and the helper must still fail closed
 #   (i) response-identity mismatch (wrong nameWithOwner / wrong PR number) —
-#       fail closed after the single whole-fetch retry
+#       fail closed after the single whole-fetch retry, both on the first page
+#       and on a later page reached via endCursor
 #
 # Every threads-page fixture echoes the positive response identity the helper
 # asserts since agent-skills task 013: repository.nameWithOwner plus
@@ -193,6 +194,18 @@ threads_one_page() {
 	url="${4:-https://github.com/$nwo/pull/$pr}"
 	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
 		"$nwo" "$pr" "$url" "$nodes"
+}
+
+# The FIRST of two thread pages: same identity echo as threads_one_page, but it
+# advertises a further page under the given cursor, so the helper must issue a
+# second call with `after=<cursor>` — which threads_one_page then serves as the
+# final page. threads_first_of_two <nodes> <cursor> [<pr-number>]
+# [<nameWithOwner>] [<pr-url>]; defaults match threads_one_page.
+threads_first_of_two() {
+	local nodes="$1" cursor="$2" pr="${3:-12}" nwo="${4:-acme/widgets}" url
+	url="${5:-https://github.com/$nwo/pull/$pr}"
+	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":2,"nodes":%s,"pageInfo":{"hasNextPage":true,"endCursor":"%s"}}}}}}\n' \
+		"$nwo" "$pr" "$url" "$nodes" "$cursor"
 }
 
 # ============================================================================
@@ -481,6 +494,48 @@ assert_eq "i2: wrong PR number fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "i2: no stdout emitted" "$RUN_OUT" ""
 assert_contains "i2: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
 assert_eq "i2: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# i3/i4: the identity gate must run on EVERY page, not just the first. Both
+# cases above mismatch on a single page, and (b) — the only multi-page case —
+# has matching identities throughout, so together they would still pass a helper
+# that asserted identity once before the paging loop. Here page one is clean and
+# advertises more, and only the page reached via endCursor mismatches: a
+# first-page-only check would merge that cross-PR page and emit it with exit 0.
+# One case per asserted field, since a helper could also page-check one field
+# and first-page-check the other. The whole-fetch retry restarts from page one
+# (no cursor), so each case makes four thread-list calls across two attempts.
+NODES_I_P1='[
+  {"id":"T_i_p1","isResolved":false,"isOutdated":false,"path":"i-page1.js","line":1,
+   "comments":{"nodes":[{"databaseId":841,"author":{"login":"codex","__typename":"Bot"},"body":"clean first page","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r841"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+]'
+
+# i3: page two echoes the WRONG nameWithOwner (url stays canonical).
+d="$(new_case)"
+threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-1"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
+threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-3"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-4"
+run "$d" --repo acme/widgets 12
+assert_eq "i3: later-page wrong nameWithOwner fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "i3: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
+assert_contains "i3: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
+assert_eq "i3: whole fetch retried (four thread-list calls)" "$(count_matches "$d/log" '[owner=')" 4
+assert_contains "i3: second call follows the cursor" "$(nth_match 2 "$d/log" '[owner=')" "[after=CURSOR_I]"
+assert_not_contains "i3: retry restarts at page one" "$(nth_match 3 "$d/log" '[owner=')" "[after="
+
+# i4: page two echoes the WRONG pullRequest.number (url stays canonical).
+d="$(new_case)"
+threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-1"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
+threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-3"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-4"
+run "$d" --repo acme/widgets 12
+assert_eq "i4: later-page wrong PR number fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "i4: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
+assert_contains "i4: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
+assert_eq "i4: whole fetch retried (four thread-list calls)" "$(count_matches "$d/log" '[owner=')" 4
+assert_contains "i4: second call follows the cursor" "$(nth_match 2 "$d/log" '[owner=')" "[after=CURSOR_I]"
+assert_not_contains "i4: retry restarts at page one" "$(nth_match 3 "$d/log" '[owner=')" "[after="
 
 # ============================================================================
 # usage / arg handling

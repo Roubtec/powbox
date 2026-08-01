@@ -104,9 +104,24 @@ fi
 # they have nothing to collide with and shadowing them would only cost RAM and
 # discard build state.  bin/obj themselves are pruned so a copied-out project
 # file under bin/ cannot seed a nested scan.
+#
+# An existing bin/obj that is itself a SYMLINK is skipped rather than resolved.
+# This scan is automatic — no config declares it — so it must never let repo
+# content decide what gets masked: `realpath` on `app/bin -> ../src` yields
+# `<ws>/src`, which passes the under-workspace-root check, and shadow-mounts.sh
+# would then tmpfs over real source for the whole session.  (The .powbox.yml
+# branches below deliberately still resolve symlinks: those paths are an
+# explicit operator declaration, not something inferred from the tree.)
+# find(1) does not follow symlinks (-P), so proj_dir itself can contain no
+# symlinked component and checking the final bin/obj component is sufficient.
 while IFS= read -r -d '' proj_dir; do
-	add_shadow_path "$(realpath -m -- "$proj_dir/bin")" "$proj_dir/bin"
-	add_shadow_path "$(realpath -m -- "$proj_dir/obj")" "$proj_dir/obj"
+	for artifact_dir in "$proj_dir/bin" "$proj_dir/obj"; do
+		if [ -L "$artifact_dir" ]; then
+			echo "detect-shadows: skipping '$artifact_dir' — symlink; refusing to shadow its target." >&2
+			continue
+		fi
+		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
+	done
 done < <(
 	find "$WORKSPACE_DIR" \
 		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \

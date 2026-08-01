@@ -183,12 +183,26 @@ else {
 # test and runs `opa test`, exercising the exact `opa test policy/...` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
 # The dotnet probes pin the two pieces of the SDK layer that can regress
-# silently. The sentinel probe re-derives the SDK version the way the
-# Dockerfile's warm-up RUN does and asserts both marker files exist under
-# $HOME/.dotnet - which pins that the warm-up ran at all, that it wrote into the
-# HOME the container actually uses (moving the RUN above `USER node`, or changing
-# HOME, fails here), and that the build-time and runtime versions agree (a bumped
-# SDK against a cached sentinel layer leaves stale names and fails).
+# silently. Both end in `|| { echo "SMOKE PROBE FAILED: ..." >&2; exit 1; }`, and
+# that tail is load-bearing rather than decorative: the driver concatenates every
+# probe into ONE `set -e` script (scripts/smoke-test-image.ps1), and POSIX `set -e`
+# exempts a failing element of an `&&` list that is not the final element. A
+# multi-clause `&&` chain on a non-final line therefore fails, is not exited on,
+# and is discarded when the shell moves to the next probe - every clause but the
+# last becomes unenforced. The explicit `exit 1` makes all of them binding, and
+# the message names the failing probe, which the driver cannot otherwise report.
+# Do not "simplify" the tail away. (Other multi-clause probes above predate this
+# and share the flaw; a central fix in the driver is tracked in tasks/002d.)
+# The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up
+# RUN does and asserts both marker files exist under $HOME/.dotnet, are owned by
+# the runtime user, and that $HOME/.dotnet is writable by it - which pins that
+# the warm-up ran at all, and that it ran as `node` into the HOME the container
+# actually uses (moving the RUN above `USER node` leaves root-owned markers, and
+# a root-created dir `node` cannot write, so it fails here; so does changing
+# HOME), and that the build-time and runtime versions agree (a bumped SDK against
+# a cached sentinel layer leaves stale names and fails). Bare existence checks
+# would not catch the `USER node` case at all - the Dockerfile touches the
+# absolute /home/node/.dotnet path, so the files land there either way.
 # Re-deriving on its own would be a tautology - whatever `dotnet --version`
 # prints, both sides build the same string - so the probe also asserts the
 # derived value is one well-formed version token. Without that assertion, a
@@ -265,8 +279,8 @@ else {
     'opa version >/dev/null'
     'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"'
     'dotnet --version >/dev/null'
-    'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ]'
-    '[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]'
+    'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ] || { echo "SMOKE PROBE FAILED: .NET first-use sentinels for SDK [$sdk] under $HOME/.dotnet" >&2; exit 1; }'
+    '[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ] || { echo "SMOKE PROBE FAILED: .NET env opt-outs [$DOTNET_CLI_TELEMETRY_OPTOUT|$DOTNET_NOLOGO|$DOTNET_GENERATE_ASPNET_CERTIFICATE|$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE]" >&2; exit 1; }'
     'file --version >/dev/null'
     'printf test | xxd >/dev/null'
     'envsubst --version >/dev/null'

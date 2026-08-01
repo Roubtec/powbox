@@ -417,9 +417,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the SDK feature band. `dotnet-sdk-8.0` pulls its own runtime, the ASP.NET
 # runtime, and the targeting/apphost packs, so `dotnet test -f net8.0` works
 # with nothing else installed. Because the Microsoft repo is already wired, a
-# project needing a different band is one `sudo apt-get install -y
-# dotnet-sdk-N.0` away in-session — the same escape hatch GOTOOLCHAIN=auto gives
-# Go projects. Baking a second SDK is deliberately avoided: each one is ~575 MB.
+# project needing a different band is one `sudo apt-get update && sudo apt-get
+# install -y dotnet-sdk-N.0` away in-session — the same escape hatch
+# GOTOOLCHAIN=auto gives Go projects. The `update` is not optional: this layer
+# ends by clearing /var/lib/apt/lists and no later layer repopulates it, so a
+# bare `apt-get install` in a fresh container fails with "Unable to locate
+# package" even though the source is configured.
+# Baking a second SDK is deliberately avoided: each one is ~575 MB.
 #
 # `dotnet format` and `dotnet test` ship inside the SDK, so no companion lint or
 # test-runner package is installed (contrast golangci-lint, which Go needs
@@ -517,19 +521,16 @@ ENV CHROME_NO_SANDBOX=true
 # checklist; an agent parsing build output should see compiler diagnostics and
 # nothing else. No PATH entry is needed — the apt package symlinks
 # /usr/bin/dotnet, so login shells that reset PATH from /etc/profile keep it.
-#   TELEMETRY_OPTOUT             - no usage telemetry from a sandbox.
-#   NOLOGO                       - drops the multi-line first-run "Welcome to
-#                                  .NET" banner that otherwise prefixes the
-#                                  first build's output.
-#   GENERATE_ASPNET_CERTIFICATE  - the CLI otherwise SILENTLY generates and
-#                                  installs an ASP.NET Core HTTPS development
-#                                  certificate on first run. Nothing in a
-#                                  headless agent container terminates TLS
-#                                  locally, so this is pure surprise state.
-#   WORKLOAD_UPDATE_NOTIFY_DISABLE - suppresses the periodic workload update
-#                                  advertisement. Note this does NOT cover the
-#                                  separate first-use workload-verification
-#                                  warning; the sentinel warm-up below does.
+#   DOTNET_CLI_TELEMETRY_OPTOUT - no usage telemetry from a sandbox.
+#   DOTNET_NOLOGO - drops the multi-line first-run "Welcome to .NET" banner that
+#     otherwise prefixes the first build's output.
+#   DOTNET_GENERATE_ASPNET_CERTIFICATE - the CLI otherwise SILENTLY generates and
+#     installs an ASP.NET Core HTTPS development certificate on first run.
+#     Nothing in a headless agent container terminates TLS locally, so this is
+#     pure surprise state.
+#   DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE - suppresses the periodic workload
+#     update advertisement. Note this does NOT cover the separate first-use
+#     workload-verification warning; the sentinel warm-up below does.
 # DOTNET_SKIP_FIRST_TIME_EXPERIENCE is deliberately NOT set: it has been a no-op
 # since .NET 5, and NOLOGO covers what it used to.
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1

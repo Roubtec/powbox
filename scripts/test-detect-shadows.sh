@@ -481,9 +481,7 @@ assert_emits "$ws" "$ws/app/bin" "untracked build output does not veto the bin s
 assert_emits "$ws" "$ws/app/obj" "untracked build output does not veto the obj shadow"
 
 echo "Test: tracked content in a NESTED repo at bin/ still vetoes the shadow"
-# The probe asks the repo that owns the directory (`git -C <dir>`), so a nested
-# checkout — or an initialized submodule, whose working tree is its own repo —
-# answers for itself instead of being invisible to the outer index.
+# A checkout AT bin/ is caught by the .git stat before any query runs.
 ws="$(git_ws dotnet-nested-repo)"
 mkdir -p "$ws/app/bin"
 touch "$ws/app/App.csproj" "$ws/app/bin/tool.sh"
@@ -492,9 +490,29 @@ git -C "$ws/app/bin" add -f tool.sh
 assert_absent "$ws" "$ws/app/bin" "a nested repo's tracked content vetoes the shadow"
 assert_emits "$ws" "$ws/app/obj" "the untracked sibling obj is still shadowed"
 
+echo "Test: a repo nested ABOVE the candidate owns the tracked-ness question"
+# The workspace's own index cannot see inside an initialized submodule or a
+# nested clone, so batching such a candidate into the outer query would answer
+# "untracked" for genuinely tracked content. Those few are asked separately.
+ws="$(git_ws dotnet-nested-above)"
+mkdir -p "$ws/vendor/lib/app/bin"
+touch "$ws/vendor/lib/app/App.csproj" "$ws/vendor/lib/app/bin/tool.sh"
+git -c init.defaultBranch=main init -q "$ws/vendor/lib"
+git -C "$ws/vendor/lib" add -f app/bin/tool.sh
+assert_absent "$ws" "$ws/vendor/lib/app/bin" "tracked content in a repo nested above bin/ vetoes the shadow"
+assert_emits "$ws" "$ws/vendor/lib/app/obj" "the untracked sibling obj is still shadowed"
+
+echo "Test: an unreadable index in a repo nested above the candidate fails closed"
+ws="$(git_ws dotnet-nested-above-broken)"
+mkdir -p "$ws/vendor/lib/app/bin"
+touch "$ws/vendor/lib/app/App.csproj" "$ws/vendor/lib/app/bin/tool.sh"
+git -c init.defaultBranch=main init -q "$ws/vendor/lib"
+git -C "$ws/vendor/lib" add -f app/bin/tool.sh
+printf 'not an index' >"$ws/vendor/lib/.git/index"
+assert_absent "$ws" "$ws/vendor/lib/app/bin" "an unreadable nested index preserves the directory"
+
 echo "Test: a project path with glob metacharacters is probed literally"
-# The directory name is never handed to git as a pathspec, so `[`/`*`/`?` in the
-# path cannot make the tracked-content probe silently miss.
+# --literal-pathspecs keeps `app[1]` from being read as a character class.
 ws="$(git_ws dotnet-metachars)"
 mkdir -p "$ws/app[1]/bin"
 touch "$ws/app[1]/App.csproj" "$ws/app[1]/bin/publish.sh"
@@ -502,7 +520,7 @@ git -C "$ws" add -f 'app[1]/bin/publish.sh'
 assert_absent "$ws" "$ws/app[1]/bin" "tracked bin under a bracketed path is not shadowed"
 assert_emits "$ws" "$ws/app[1]/obj" "the untracked sibling obj is still shadowed"
 
-echo "Test: a trailing slash on the workspace argument changes nothing"
+echo "Test: trailing slashes on the workspace argument change nothing"
 # shadow-refresh.sh passes its argument through verbatim, and tab completion
 # produces `/workspace/<slug>/`.
 ws="$(git_ws dotnet-trailing-slash)"
@@ -511,6 +529,38 @@ touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
 git -C "$ws" add -f app/bin/publish.sh
 assert_absent "$ws/" "$ws/app/bin" "tracked bin is vetoed with a trailing-slash workspace too"
 assert_emits "$ws/" "$ws/app/obj" "obj still emitted (and normalized) with a trailing slash"
+assert_absent "$ws//" "$ws/app/bin" "tracked bin is vetoed with a doubled trailing slash too"
+assert_emits "$ws//" "$ws/app/obj" "obj still emitted with a doubled trailing slash"
+
+echo "Test: an unreadable .git fails CLOSED rather than reading as a non-repo"
+# `rev-parse` reports "not a git repository" for an unreadable .git, so the
+# existence of the entry — not that probe alone — is what withholds the shadow.
+ws="$(git_ws dotnet-unreadable-gitdir)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+git -C "$ws" add -f app/bin/publish.sh
+chmod 000 "$ws/.git"
+assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when .git is unreadable"
+chmod 755 "$ws/.git"
+
+echo "Test: ambient pathspec-mode variables do not disable the scan"
+# Any of GIT_*_PATHSPECS makes the explicit --literal-pathspecs fatal, which
+# would fail the whole probe closed and silently switch the feature off.
+ws="$(git_ws dotnet-pathspec-env)"
+mkdir -p "$ws/app/bin" "$ws/other/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh" "$ws/other/Other.csproj" "$ws/other/bin/out.dll"
+git -C "$ws" add -f app/bin/publish.sh
+glob_out="$(GIT_GLOB_PATHSPECS=1 GIT_ICASE_PATHSPECS=1 run_out "$ws")"
+if grep -qxF "$ws/app/bin" <<<"$glob_out"; then
+	ko "tracked bin was shadowed under GIT_GLOB_PATHSPECS"
+else
+	ok "tracked bin still vetoed under ambient pathspec-mode variables"
+fi
+if grep -qxF "$ws/other/bin" <<<"$glob_out"; then
+	ok "an untracked bin is still shadowed under ambient pathspec-mode variables"
+else
+	ko "the scan failed closed under GIT_GLOB_PATHSPECS instead of working"
+fi
 
 echo "Test: a bin/ that is itself a repository checkout is never shadowed"
 # An initialized submodule or a nested clone at app/bin holds files the

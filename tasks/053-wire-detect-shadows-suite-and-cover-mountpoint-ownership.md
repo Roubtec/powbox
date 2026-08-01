@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-`scripts/test-detect-shadows.sh` is now the largest pure-shell unit suite in the repo (93 assertions after PR #121) and it guards genuinely load-bearing security properties: the under-workspace-root validation, the symlink skip, the Git-tracked-content veto, the newline rejection, and the workspace-glob containment.
+`scripts/test-detect-shadows.sh` is now the largest pure-shell unit suite in the repo (112 assertions after PR #121) and it guards genuinely load-bearing security properties: the under-workspace-root validation, the symlink skip, the Git-tracked-content veto and its fail-closed paths, the newline rejection, and the workspace-glob containment.
 Every one of those cases was verified to fail against the pre-fix script — they are real regression tests.
 And **nothing runs them**: Tier 0 CI (`.github/workflows/native-linux-ci.yml`) runs only exec-bits, shellcheck, shfmt, and PSScriptAnalyzer, and `commands/smoke-test.sh` does not invoke the suite the way it invokes `test-sensitive-host-path.sh` (Stage 0/0a), `test-gh-review-threads.sh` (Stage 0b), `test-wt-orphan-safety.sh` (Stage 0c/0d), and `test-peer-review-run.sh`.
 So a future edit to `detect-shadows.sh` can silently reopen any of those holes, and only a reviewer who happens to run the script by hand would notice.
@@ -22,7 +22,9 @@ Raised by the independent reviewer during the PR #121 review round; deferred out
 2. **Cover the mountpoint-ownership chown** in the smoke tier. `scripts/smoke-test-worktree-metadata.sh` already invokes `/usr/local/bin/shadow-mounts.sh` directly against a real workspace, so it is the natural host: after a mount whose target did **not** exist beforehand, assert the underlying mountpoint directory is owned by the workspace tree's owner and not root.
    Asserting on the *underlying* directory means checking it before the mount, or unmounting and re-`stat`ing — pick whichever keeps that script's existing flow simplest and say which in the PR.
    At minimum cover: a single created component (`<proj>/bin`, parent exists), and a multi-component creation (`<ws>/.claude/worktrees`, where two levels are created).
-3. Decide whether the detect-shadows suite also belongs in **Tier 0 CI** (`native-linux-ci.yml`) rather than only the smoke tier. It is hermetic apart from `yq`/`jq`/`git`, and Tier 0 already installs tools it needs — a Tier 0 run would give the fastest feedback on a `detect-shadows.sh` edit. State the choice either way.
+3. Decide whether the detect-shadows suite also belongs in **Tier 0 CI** (`native-linux-ci.yml`) rather than only the smoke tier. A Tier 0 run gives the fastest feedback on a `detect-shadows.sh` edit and is self-validating (the PR that adds the step exercises it).
+   Do this item **first** — but it is not the one-line step it looks like: the suite exercises the `.powbox.yml` branches, so the runner needs **`yq`** (mikefarah) as well as `jq` and `git`. Confirm whether `ubuntu-latest` still ships `yq`; if not, install it with a pinned version + upstream SHA256 exactly as the existing `Install shfmt` step does, and say which in the PR.
+   Consider also making `scripts/test-detect-shadows.sh` fail fast with a clear message when `yq`/`jq` are missing, so a bare host run diagnoses itself instead of producing confusing assertion failures.
 
 Out of scope:
 

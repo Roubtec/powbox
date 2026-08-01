@@ -13,16 +13,19 @@ shopt -s nullglob globstar
 
 WORKSPACE_DIR="${1:?usage: detect-shadows.sh <workspace-dir>}"
 
-# Normalize away a trailing slash before anything derives a path from it.
+# Normalize away trailing slashes before anything derives a path from it.
 # entrypoint-core.sh strips one, but shadow-refresh.sh passes its argument
 # through verbatim and `shadow-refresh.sh /workspace/<slug>/` is exactly what
-# shell tab completion produces — leaving it on would spell every derived path
-# with a `//` that some comparisons see and others do not.  Guarded so a lone
-# "/" cannot normalize to the empty string.
-case "$WORKSPACE_DIR" in
-/) ;;
-*/) WORKSPACE_DIR="${WORKSPACE_DIR%/}" ;;
-esac
+# shell tab completion produces — leaving one on would spell every derived path
+# with a `//` that some comparisons see and others do not.  Looped, so `<ws>//`
+# normalizes too, and guarded so a lone "/" cannot become the empty string.
+while :; do
+	case "$WORKSPACE_DIR" in
+	/) break ;;
+	*/) WORKSPACE_DIR="${WORKSPACE_DIR%/}" ;;
+	*) break ;;
+	esac
+done
 
 if [ ! -d "$WORKSPACE_DIR" ]; then
 	exit 0
@@ -58,9 +61,42 @@ add_shadow_path() {
 # have it answer for a tree that is not this one, in either direction.
 # `safe.directory=*` keeps the reads working when the checkout's host uid differs
 # from node's; this script is unprivileged and only ever reads.
+# The pathspec-mode variables are scrubbed for a different reason: any of them
+# makes the explicit --literal-pathspecs below a fatal "incompatible with all
+# other global pathspec settings", which would fail the whole probe closed and
+# silently switch the .NET scan off in a hook environment that sets them.
 git_scrubbed() {
 	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
-		-u GIT_OBJECT_DIRECTORY git -c safe.directory='*' "$@"
+		-u GIT_OBJECT_DIRECTORY -u GIT_GLOB_PATHSPECS -u GIT_NOGLOB_PATHSPECS \
+		-u GIT_ICASE_PATHSPECS -u GIT_LITERAL_PATHSPECS \
+		git -c safe.directory='*' "$@"
+}
+
+# True when <dir> lies inside a repository NESTED under the workspace — some
+# ancestor strictly below WORKSPACE_DIR carries a .git (an initialized submodule
+# at libs/sub, a nested clone at vendor/lib).  The workspace's own index cannot
+# see such a directory's files at all, so folding it into the batched query below
+# would answer "untracked" for genuinely tracked content.  Pure stats, no git.
+nested_repo_owns() {
+	local dir="${1%/*}"
+	while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$WORKSPACE_DIR" ]; do
+		if [ -e "$dir/.git" ]; then
+			return 0
+		fi
+		dir="${dir%/*}"
+	done
+	return 1
+}
+
+# For those few directories, ask their own repository directly.  Vetoes unless
+# that repository POSITIVELY reports no tracked content, so an unreadable index
+# preserves the directory rather than masking it.
+nested_dir_holds_content() {
+	local tracked
+	if ! tracked="$(git_scrubbed -C "$1" ls-files --cached -- . 2>/dev/null)"; then
+		return 0
+	fi
+	[ -n "$tracked" ]
 }
 
 # Expand workspace glob patterns into node_modules paths.
@@ -197,11 +233,21 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 	declare -A tracked_artifact_dir=()
 	existing_rel=()
 	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
-		if [ -d "$artifact_dir" ]; then
-			# Compare workspace-RELATIVE, the same form `git -C` prints, so no
-			# absolute-path arithmetic can disagree with git's own spelling.
-			existing_rel+=("${artifact_dir#"$WORKSPACE_DIR"/}")
+		if [ ! -d "$artifact_dir" ]; then
+			continue
 		fi
+		if nested_repo_owns "$artifact_dir"; then
+			# Owned by a repository nested under the workspace: one git call for
+			# this directory alone.  Rare enough not to matter for the scan's
+			# budget, and the batched query below still covers everything else.
+			if nested_dir_holds_content "$artifact_dir"; then
+				tracked_artifact_dir["${artifact_dir#"$WORKSPACE_DIR"/}"]=1
+			fi
+			continue
+		fi
+		# Compare workspace-RELATIVE, the same form `git -C` prints, so no
+		# absolute-path arithmetic can disagree with git's own spelling.
+		existing_rel+=("${artifact_dir#"$WORKSPACE_DIR"/}")
 	done
 	probe_failed=0
 	if [ ${#existing_rel[@]} -gt 0 ]; then
@@ -225,12 +271,21 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 			ls-files -z --cached -- "${existing_rel[@]}" 2>/dev/null &&
 			printf '%s\0' "$probe_sentinel")
 		if [ "$probe_ok" = 0 ] &&
-			git_scrubbed -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+			{
+				git_scrubbed -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1 ||
+					[ -e "$WORKSPACE_DIR/.git" ]
+			}; then
 			# It IS a repository, so the failure is a real one (unreadable or
 			# corrupt index, git too old for a flag, ...) and we cannot tell
 			# disposable output from tracked content.  Fail CLOSED for the
 			# directories that exist: not shadowing them costs a host/container
 			# obj collision, while shadowing tracked files loses edits.
+			#
+			# `rev-parse` alone is not the oracle: it fails for the very reasons
+			# ls-files did, and an unreadable .git (mode 000, or a linked
+			# worktree's .git file pointing at a missing gitdir) reports "not a
+			# git repository" — which would fail OPEN and mask tracked files. So
+			# a .git entry that merely EXISTS is enough to withhold the shadow.
 			probe_failed=1
 			echo "detect-shadows: could not read the Git index for '$WORKSPACE_DIR'; leaving every existing .NET bin/obj un-shadowed rather than risk masking tracked files." >&2
 		fi

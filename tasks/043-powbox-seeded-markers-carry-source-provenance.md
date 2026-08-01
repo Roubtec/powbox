@@ -1,5 +1,7 @@
 # Task 043 — Record upstream source in .powbox-seeded markers (source=<repo>#<path>)
 
+> **Relocation note (2026-07-30):** the example paths below predate the forfeit (task 051): `docker/claude/agent-container/{skills,workflows}` no longer exist — every skill and workflow's canonical source is now `Roubtec/agent-skills`, and the only remaining marker producers are the Codex bake seed, the plugin-clone sync, and the updater. The task's core idea (record the upstream repo#path in the marker) stands; adjust the example `source=` values to agent-skills paths when implementing.
+
 ## Why this task exists
 
 Seeded skills and workflows carry a `.powbox-seeded` marker with `epoch=` and `commit=` lines (`docker/shared/seed-skills.sh`, `seed_marker_content`).

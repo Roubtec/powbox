@@ -46,30 +46,18 @@ RUN rm -rf /home/node/.claude/downloads
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/claude/agent.md.tmpl
 COPY --chown=node:node docker/claude/agent-container/ /home/node/.agent-container/claude/
 COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/codex/agent.md.tmpl
-COPY --chown=node:node docker/codex/agent-container/ /home/node/.agent-container/codex/
 
-# The Codex seed dir is the UNION of the in-tree powbox-specific Codex skills
-# COPYed just above (enable-worktrees, session-learnings) and the shared
-# dev-workflow skills that live in Roubtec/agent-skills. The agent-skills tree is
-# fetched host-side by scripts/build-image.{sh,ps1} into the gitignored
-# .agent-skills-src staging dir (credentials never enter the image; the HTTPS
-# clone URL keeps working unchanged when that repo flips public) and COPYed to a
-# scratch dir here. The RUN then merges the two sets and FAILS THE BUILD LOUDLY
-# on any name collision — after task 015a there must be none. A standalone
+# The Codex seed dir's skills come ENTIRELY from Roubtec/agent-skills
+# (codex/dev-skills/skills/ — the shared dev-workflow skills plus the relocated
+# enable-worktrees and session-learnings; powbox keeps no in-tree skills of its
+# own, and Claude's skills and workflows all arrive via the dev-skills@roubtec
+# plugin channel instead of the bake). The agent-skills tree is fetched
+# host-side by scripts/build-image.{sh,ps1} into the gitignored
+# .agent-skills-src staging dir (that repo is public, so the fetch is an
+# anonymous HTTPS clone and no credential can enter the image). A standalone
 # `docker build` without a populated .agent-skills-src will fail at this COPY,
 # which is intentional: the documented build path is `./build.sh agent`.
-COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /tmp/agent-skills-codex/
-RUN set -eu; \
-    dest=/home/node/.agent-container/codex/skills; \
-    for d in /tmp/agent-skills-codex/*/; do \
-        name="$(basename "$d")"; \
-        if [ -e "$dest/$name" ]; then \
-            echo "FATAL: agent-skills Codex skill '$name' collides with an in-tree powbox Codex skill of the same name; resolve the duplicate before baking." >&2; \
-            exit 1; \
-        fi; \
-        cp -a "$d" "$dest/$name"; \
-    done; \
-    rm -rf /tmp/agent-skills-codex
+COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.agent-container/codex/skills/
 # build-epoch is a monotonic stamp that gates instruction/skill re-seeding.
 # build-commit records the powbox commit that built these top (asset/claude)
 # layers; the .powbox-seeded skill marker copies it so a seeded skill can be
@@ -106,8 +94,9 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
 # The wt-* worktree helpers (plus the gitcat cross-branch reader and the
 # peer-review-run bidirectional peer-review runner) are baked here too — not in
 # the base image — because they evolve in lockstep with the
-# agent-layer assets that reference them (the worktree-running skills, the
-# address-review skills, and the Claude workflows). Keeping them in this layer
+# agent-layer assets that reference them (the worktree-running skills and the
+# dev-skills wf-* workflows, both sourced from Roubtec/agent-skills). Keeping
+# them in this layer
 # means the documented `agent-update` / `build.sh agent` path (which reuses an
 # existing base image unless --pull) refreshes the helpers along with the
 # skills/workflows, instead of leaving stale /usr/local/bin copies behind a base
@@ -129,7 +118,8 @@ COPY --chmod=755 \
     /usr/local/bin/
 
 # gh-review-threads (the safe PR review-thread fetcher used by both agents'
-# address-review skills and the wf-address-review workflow) is NOT kept in-tree:
+# address-review skills and the dev-skills wf-address-review workflow) is NOT
+# kept in-tree:
 # it is vendored in Roubtec/agent-skills (plugins/dev-skills/bin/) as the single
 # source of truth — the very file the dev-skills plugin ships to non-powbox users
 # — and baked here from the same pinned agent-skills clone that feeds the Codex

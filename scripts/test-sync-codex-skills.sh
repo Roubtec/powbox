@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Unit tests for docker/shared/sync-codex-skills.sh — the start-time refresh that
-# brings Codex's copies of the 8 shared dev-skills to the same agent-skills commit
-# the Claude plugin serves, synced LOCALLY from the plugin's marketplace clone.
+# brings Codex's copies of the shared dev-skills palette to the same agent-skills
+# commit the Claude plugin serves, synced LOCALLY from the plugin's marketplace clone.
 #
 # Focus: the marker-gated overwrite (only powbox-owned copies), the SHA-gated
-# no-op (unchanged palette writes nothing), user-adopted / powbox-specific skills
+# no-op (unchanged palette writes nothing), user-adopted / not-in-clone skills
 # left untouched, absent-skill placement, and the cold-clone skip.
 #
 # Runs directly against the repo copies of sync-codex-skills.sh + seed-skills.sh —
@@ -141,19 +141,21 @@ else
 fi
 
 # ================================================================================
-# Test 4: a powbox-specific Codex skill (NOT in the clone) is never a candidate.
+# Test 4: a dest skill NOT in the clone is never a candidate — the sync iterates
+#         the clone's names only, so an on-volume skill the clone does not carry
+#         (e.g. a leftover from an older bake) is untouched even when marked.
 # ================================================================================
 R="$(new_case t4)"
-make_skill "$R/dest/session-learnings" "powbox-specific v1"
-printf 'epoch=1\ncommit=baked\n' >"$R/dest/session-learnings/.powbox-seeded"
-before="$(stat -c %Y "$R/dest/session-learnings/SKILL.md")"
+make_skill "$R/dest/legacy-baked" "legacy baked v1"
+printf 'epoch=1\ncommit=baked\n' >"$R/dest/legacy-baked/.powbox-seeded"
+before="$(stat -c %Y "$R/dest/legacy-baked/SKILL.md")"
 sleep 1.1
 run_sync "$R/clone" "$R/dest" "NEWSHA333"
-after="$(stat -c %Y "$R/dest/session-learnings/SKILL.md")"
-if [ "$before" = "$after" ] && [ "$(cat "$R/dest/session-learnings/SKILL.md")" = "powbox-specific v1" ]; then
-	ok "powbox-specific skill (absent from clone) never touched"
+after="$(stat -c %Y "$R/dest/legacy-baked/SKILL.md")"
+if [ "$before" = "$after" ] && [ "$(cat "$R/dest/legacy-baked/SKILL.md")" = "legacy baked v1" ]; then
+	ok "skill absent from clone never touched"
 else
-	no "powbox-specific skill (absent from clone) never touched"
+	no "skill absent from clone never touched"
 fi
 
 # ================================================================================
@@ -280,34 +282,33 @@ else
 fi
 
 # ================================================================================
-# Test 10: bake-owned denylist — a clone that carries a COLLIDING dir named after a
-#          Codex-specific bake-only skill (enable-worktrees) must NOT overwrite the
-#          bake-owned copy, even though that copy carries our marker at a stale sha.
-#          Defense in depth against a future upstream name collision. The sibling
-#          shared skill in the same clone still refreshes, proving the denylist is
-#          name-scoped, not a whole-pass abort.
+# Test 10: forfeited-skill regression guard — enable-worktrees and
+#          session-learnings used to be protected by a bake-owned denylist while
+#          they were baked exclusively from this repo. They now live in
+#          agent-skills and arrive via the clone, so a marked stale copy of them
+#          must be refreshed like ANY other shared skill (no denylist remains),
+#          while a user-adopted (unmarked) copy stays protected by the marker gate.
 # ================================================================================
 R="$(new_case t10)"
-# Inject an upstream collision into the clone.
-make_skill "$R/clone/codex/dev-skills/skills/enable-worktrees" "UPSTREAM COLLISION"
-# Bake-owned dest copy: marked (powbox-owned) and at a stale sha, so absent the
-# denylist it WOULD be refreshed.
-make_skill "$R/dest/enable-worktrees" "BAKE-OWNED enable-worktrees"
+make_skill "$R/clone/codex/dev-skills/skills/enable-worktrees" "clone enable-worktrees v2"
+make_skill "$R/clone/codex/dev-skills/skills/session-learnings" "clone session-learnings v2"
+# Marked stale copy (e.g. from an older bake) → must refresh.
+make_skill "$R/dest/enable-worktrees" "STALE bake-era enable-worktrees"
 printf 'epoch=1\ncommit=baked\nagent_skills_commit=OLDSHA\nsource=bake\n' >"$R/dest/enable-worktrees/.powbox-seeded"
-# A normal shared skill, also marked+stale, to confirm the pass still converges it.
-make_skill "$R/dest/a" "STALE a"
-printf 'epoch=1\ncommit=old\nagent_skills_commit=OLDSHA\nsource=plugin-clone\n' >"$R/dest/a/.powbox-seeded"
+# User-adopted copy (marker deleted) → must stay untouched.
+make_skill "$R/dest/session-learnings" "USER FORK session-learnings"
 run_sync "$R/clone" "$R/dest" "NEWSHAB11"
-if [ "$(cat "$R/dest/enable-worktrees/SKILL.md")" = "BAKE-OWNED enable-worktrees" ] &&
-	[ "$(marker_sha "$R/dest/enable-worktrees")" = "OLDSHA" ]; then
-	ok "bake-only skill (upstream name collision in clone) never overwritten"
+if [ "$(cat "$R/dest/enable-worktrees/SKILL.md")" = "clone enable-worktrees v2" ] &&
+	[ "$(marker_sha "$R/dest/enable-worktrees")" = "NEWSHAB11" ]; then
+	ok "forfeited skill (now in clone): marked stale copy refreshed like any other"
 else
-	no "bake-only skill (upstream name collision in clone) never overwritten"
+	no "forfeited skill (now in clone): marked stale copy refreshed like any other"
 fi
-if [ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] && [ "$(marker_sha "$R/dest/a")" = "NEWSHAB11" ]; then
-	ok "sibling shared skill still refreshed alongside a denylisted collision"
+if [ "$(cat "$R/dest/session-learnings/SKILL.md")" = "USER FORK session-learnings" ] &&
+	[ ! -f "$R/dest/session-learnings/.powbox-seeded" ]; then
+	ok "forfeited skill (now in clone): user-adopted copy still never touched"
 else
-	no "sibling shared skill still refreshed alongside a denylisted collision"
+	no "forfeited skill (now in clone): user-adopted copy still never touched"
 fi
 
 # ================================================================================

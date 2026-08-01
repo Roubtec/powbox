@@ -2,9 +2,12 @@
 # Runs INSIDE a throwaway powbox-agent container (see update-skills.sh /
 # update-skills.ps1, which bind-mount this file and the config volumes).
 #
-# Force-refreshes the image-baked skills (folders) and Claude dynamic workflows
-# (flat `.js` files) onto the persistent agent-config volumes, deliberately
-# overriding the startup seeding's no-clobber. The copy logic and the
+# Force-refreshes the image-baked skills (folders) onto the persistent
+# agent-config volumes, deliberately overriding the startup seeding's
+# no-clobber — today that is the Codex palette only; Claude has no baked skills
+# or workflows left (they arrive via the dev-skills@roubtec plugin), so the
+# claude targets exist purely to classify and prune legacy seeded copies
+# (skills and wf-*.js workflows) from older volumes. The copy logic and the
 # .powbox-seeded ownership marker live in the shared /usr/local/bin/seed-skills.sh
 # (baked into the image, also sourced by the entrypoint hooks) so the two never
 # drift. This worker adds the refresh-only concerns: classifying each item,
@@ -94,11 +97,19 @@ item_prune() {
 # against its on-volume dir. Returns nonzero if any copy/delete failed.
 process_items() {
 	local agent="$1" kind="$2" src="$3" dest="$4" meta="$5"
-	[ -d "$src" ] || return 0
 
+	# NOTE: an absent baked source dir is NOT an early exit. When powbox stops
+	# baking a whole kind (e.g. Claude skills and workflows moved to the
+	# dev-skills@roubtec plugin), $src no longer exists in the image — but the
+	# config volume can still carry previously-seeded, marked copies. The baked
+	# set is then simply empty, the seed/refresh loop below iterates nothing, and
+	# the orphan sweep still classifies every marked on-volume item as an orphan
+	# so --prune retires it.
 	local marker rc=0 name target
 	marker="$(seed_marker_content "$meta")"
-	[ "$MODE" = apply ] && mkdir -p "$dest"
+	if [ "$MODE" = apply ] && [ -d "$src" ]; then
+		mkdir -p "$dest"
+	fi
 
 	# Set of baked item names, for the orphan membership test below.
 	local -A baked=()
@@ -203,9 +214,13 @@ process_items() {
 
 # --- Driver -------------------------------------------------------------------
 # agent | kind | baked source dir | on-volume destination dir | seed meta dir.
-# Mirrors the entrypoint hooks: claude seeds skills into $CONFIG/skills and
-# workflows into $CONFIG/workflows; codex seeds skills into $CONFIG/agents/skills
-# (the ~/.agents symlink target) and has no workflow runtime.
+# Codex seeds skills into $CONFIG/agents/skills (the ~/.agents symlink target)
+# and has no workflow runtime. The two claude rows point at baked source dirs
+# that NO LONGER EXIST in the image (powbox forfeited its Claude skills and
+# wf-* workflows to the dev-skills@roubtec plugin channel); they are kept
+# deliberately so the orphan sweep in process_items classifies the
+# previously-seeded marked copies on older claude-config volumes and --prune
+# retires them (skills and workflow .js files plus their sidecar markers).
 seed_targets() {
 	cat <<'EOF'
 claude skill    /home/node/.agent-container/claude/skills    /home/node/.claude/skills       /home/node/.agent-container/claude

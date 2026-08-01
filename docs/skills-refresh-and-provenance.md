@@ -330,12 +330,13 @@ process ordered after the clone refresh; see
 [entrypoint-and-runtime.md](entrypoint-and-runtime.md) for the detach / done-marker /
 flock details.
 
-It reuses this document's ownership model: it iterates the *clone's* skill names (so it
-can only touch the 8 shared skills — the 2 powbox-specific Codex skills, `enable-worktrees`
-and `session-learnings`, are absent from the clone and remain exclusively bake-owned), and
-as defense in depth it additionally carries an explicit bake-owned **denylist** of those two
-names, so even a future *upstream* name collision (a clone dir of the same name) could never
-overwrite the bake-owned copy. It overwrites only a `.powbox-seeded`-marked (powbox-owned)
+It reuses this document's ownership model: it iterates the *clone's* skill names, so it
+only ever touches skills the clone carries. (Historical note: while `enable-worktrees` and
+`session-learnings` were powbox-specific bake-only skills absent from the clone, the sync
+carried an explicit bake-owned denylist of those two names as defense in depth against an
+upstream name collision. The forfeit moved both skills into `agent-skills`, so they now
+arrive via the clone and are refreshed like any other shared skill — the denylist was
+removed with it.) It overwrites only a `.powbox-seeded`-marked (powbox-owned)
 copy via an atomic stage+rename, and never touches a marker-less user-adopted copy. It is **SHA-gated** to a byte-for-byte no-op when unchanged, and
 stamps each refreshed marker with two extra provenance lines beyond the D2 baseline:
 
@@ -408,6 +409,28 @@ cache) fails — then Codex, syncing off the advanced clone HEAD, can briefly tr
 **ahead** of the Claude plugin until the next start re-runs both and re-converges them. This
 is the plugin channel's own best-effort behavior surfacing through the piggybacked sync, not
 a new failure mode; it self-heals on the next online start.
+
+## Forfeit update (2026-07-30): no baked Claude items; prune covers whole-kind removal
+
+Powbox forfeited its remaining in-tree skills (`enable-worktrees`, `session-learnings`, both
+harnesses) and the Claude `wf-*` dynamic workflows to `Roubtec/agent-skills`. Consequences
+for the machinery this document specifies:
+
+- The bake+seed channel now carries the **Codex palette only**, copied in full from the
+  agent-skills staging clone at build time. The Claude seed dirs
+  (`/home/node/.agent-container/claude/{skills,workflows}`) no longer exist in the image and
+  the Claude hook seeds nothing; Claude's skills and workflows all arrive via the
+  `dev-skills@roubtec` plugin (workflows invoked `/dev-skills:wf-<name>`).
+- **The D4 prune flow covers the whole-kind case.** `update-skills-incontainer.sh` keeps its
+  claude skill and claude workflow targets, and `process_items` deliberately does NOT
+  early-return when the baked source dir is absent: the baked set is then empty, so every
+  marked on-volume item of that kind — the previously-seeded `enable-worktrees` /
+  `session-learnings` folders, the `wf-*.js` workflows, and any stranded workflow sidecar
+  marker — is classified as an `orphan` and retired by `agent-update-skills --prune`. No
+  manual cleanup step is needed; unmarked (user-adopted) copies are, as always, untouched.
+- The plugin-clone sync's bake-owned denylist is gone (see the historical note in the
+  task 021 section above): the two forfeited skills now sync from the clone like every
+  other shared skill.
 
 ## Open / deferred
 

@@ -1,5 +1,7 @@
 # 029a — Let a peer `VERDICT: PASS` carry brief, optionally-actionable notes without context sprawl
 
+> **Relocation note (2026-07-30):** the `wf-*` workflow files named below moved to `Roubtec/agent-skills` (`plugins/dev-skills/workflows/`; see task 051), so the workflow-side prompt changes of this task now land there; the powbox side keeps only any caller of `peer-review-run` that remains in this repo.
+
 ## Why this task exists
 
 `peer-review-run` (task 029) reduces a peer reviewer's output to a coarse `verdict` (`pass | issues | none`) plus an `artifactDir` pointer; the full review prose stays on disk and is not surfaced by default. Today's peer-prompt convention only asks for findings on `ISSUES`, so a `VERDICT: PASS` is a dead end — any nits the reviewer noticed are generated and then discarded. That wastes the tokens already spent and is mildly lossy: a "pass, but consider X" is more useful to a maintainer than a blunt pass.

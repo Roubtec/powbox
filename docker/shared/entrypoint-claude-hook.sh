@@ -86,35 +86,22 @@ if [ -f "$AGENT_TMPL" ]; then
 			fi
 		fi
 
-		# Seed image-baked skills (no-clobber at the skill-directory level:
-		# preserves user-modified versions; delete the skill folder to pick up the
-		# latest image version on next container start, or run `agent-update-skills`
-		# to force a refresh). Per-repo .claude/skills/ still takes precedence at
-		# invoke time. The copy logic and the .powbox-seeded ownership marker live
-		# in the shared seed-skills.sh so this and the updater never drift.
-		# shellcheck source=docker/shared/seed-skills.sh
-		. /usr/local/bin/seed-skills.sh
-		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/skills" noclobber "$AGENT_SEED_DIR" ||
-			echo "Warning: one or more Claude skills failed to seed; continuing." >&2
-
-		# Seed image-baked dynamic workflows (Claude-only — Codex has no workflow
-		# runtime). Workflows are flat `.js` files under ~/.claude/workflows/, so
-		# seed_workflows records provenance with a hidden per-file sidecar marker
-		# (`.<name>.powbox-seeded`) instead of the in-folder marker skills use, but
-		# the no-clobber semantics are identical: an existing file on the volume is
-		# preserved (user edits survive), delete it to pick up the image version on
-		# the next container start, and per-repo `.claude/workflows/` still wins at
-		# invoke time. The marker is what lets a future `agent-update-skills`
-		# refresh/prune workflows the same way it does skills.
-		seed_workflows "$AGENT_SEED_DIR/workflows" "$AGENT_CONFIG_DIR/workflows" noclobber "$AGENT_SEED_DIR" ||
-			echo "Warning: one or more Claude workflows failed to seed; continuing." >&2
-
+		# No baked Claude skills or workflows are seeded here anymore: powbox
+		# forfeited its Claude skills (enable-worktrees, session-learnings) and the
+		# wf-* dynamic workflows to Roubtec/agent-skills, so every Claude skill and
+		# workflow now arrives through the dev-skills@roubtec plugin channel
+		# (namespaced, e.g. /dev-skills:session-learnings, /dev-skills:wf-address-tasks;
+		# see seed-claude-plugins.sh below). Previously-seeded copies on the volume
+		# (marked .powbox-seeded, in-folder for skills / sidecar for workflows) are
+		# classified as orphans and retired by `agent-update-skills --prune` — the
+		# updater's orphan sweep runs even though the baked source dirs are gone.
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
 
-# The dev-skills@roubtec plugin (the 8 shared Claude skills; task 015b stopped
-# baking them) is deliberately NOT converged here on current images.
+# The dev-skills@roubtec plugin (every Claude skill and wf-* workflow; task 015b
+# stopped baking the shared skills and the forfeit moved the rest) is
+# deliberately NOT converged here on current images.
 # entrypoint-core.sh does it for EVERY launch — after init-firewall.sh (network
 # ordering) and fully DETACHED, because the claude CLI hangs (SIGTERM-immune)
 # when invoked with the container TTY as stdin, so no `claude plugin …` call may

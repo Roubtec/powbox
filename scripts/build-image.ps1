@@ -49,16 +49,20 @@ try {
   }
 
   # --- agent-skills fetch (host-side, credentials never enter the image) ------
-  # The Codex skill palette baked into the agent image is the UNION of the two
-  # in-tree powbox-specific Codex skills and the shared dev-workflow skills that
-  # now live in Roubtec/agent-skills (task 015b). Fetch that repo HERE, on the
-  # host where the gh credential helper is configured - never with a
-  # `RUN git clone` inside the Dockerfile. The repo is currently PRIVATE, so an
-  # in-Dockerfile clone would need a token plumbed into the build (risking it
-  # landing in a layer/cache). Cloning host-side into a gitignored staging dir
-  # under the build context, which the Dockerfile COPYs, keeps every credential
-  # out of the image. The HTTPS clone URL keeps working unchanged when the repo
-  # later flips public - no edit needed.
+  # The Codex skill palette baked into the agent image comes ENTIRELY from
+  # Roubtec/agent-skills (task 015b moved the shared skills there; the forfeit
+  # moved the last powbox-specific ones too). Fetch that repo HERE, on the
+  # host - never with a `RUN git clone` inside the Dockerfile. The repo is
+  # PUBLIC (it started out private and was flipped in task 015e), so the clone
+  # below needs no credentials at all; the container-side plugin channel relies
+  # on that same public visibility to clone the marketplace anonymously.
+  # Fetching host-side into a gitignored staging dir under the build context,
+  # which the Dockerfile COPYs, is still what we want: the fetch runs on every
+  # AGENT build (never the base-only target - see the dispatch below) and
+  # records the resulting HEAD SHA as AgentSkillsCommit (stamped on the image),
+  # so a moved agent-skills tip is always picked up and provenanced instead of
+  # being hidden behind a cached `RUN git clone` layer - and no GitHub token
+  # can ever land in a layer/cache should the repo be re-privatized.
   $script:AgentSkillsRepoUrl = "https://github.com/Roubtec/agent-skills.git"
   $script:AgentSkillsRef = "main"
   $script:AgentSkillsStaging = Join-Path $rootDir ".agent-skills-src"
@@ -70,8 +74,10 @@ try {
     # error aborts the build rather than baking a stale/empty seed dir.
     $err = @"
 agent-skills fetch failed; cannot build the Codex skill palette.
-Ensure this host is authenticated to GitHub (gh auth status) and can reach
-$($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
+Ensure this host can reach $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)).
+The repo is public, so the clone is anonymous and needs no GitHub auth - check
+the network/proxy first (auth would only matter if the repo were re-privatized).
+No image was built.
 "@
     Write-Host "Fetching Roubtec/agent-skills ($($script:AgentSkillsRef)) for the Codex skill bake..."
     $gitDir = Join-Path $script:AgentSkillsStaging ".git"
@@ -279,8 +285,8 @@ $($script:AgentSkillsRepoUrl) ($($script:AgentSkillsRef)). No image was built.
   # user requests -Pull on the agent target we refresh the base first (cascading
   # any digest change into the agent layers automatically) and then build the
   # agent.
-  # The agent image bakes the union of the in-tree Codex skills and the
-  # agent-skills Codex skills, so fetch the latter before any agent bake. Done
+  # The agent image bakes its whole Codex skill palette from the fetched
+  # agent-skills clone, so fetch it before any agent bake. Done
   # here (not for the base-only target) so `build.ps1 base` never needs network
   # access to agent-skills, and so the fetch fails the build BEFORE the base
   # build when it is going to fail at all.

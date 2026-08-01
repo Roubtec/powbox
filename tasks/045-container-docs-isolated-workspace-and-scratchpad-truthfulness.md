@@ -23,7 +23,7 @@ Out of scope:
 ## Context and references
 
 - `docker/shared/container-agent.md.tmpl:3` (intro), `:67` (layout table) — the unconditional bind-mount claims.
-- `docker/claude/agent-container/skills/session-learnings/SKILL.md` step 3 — the env-var check the prose should point at (the skill is already correct; the docs contradict it).
+- The `session-learnings` skill's step 3 — the env-var check the prose should point at (the skill is already correct; the docs contradict it). Since the forfeit (task 051) the skill source lives in `Roubtec/agent-skills`, not in this repo.
 - README "Self-Hosted Mode" — the isolated-mode reference to link.
 
 ## Target files or areas

@@ -15,7 +15,7 @@ powbox bakes that file verbatim (`docker/agent/Dockerfile:139` copies `.agent-sk
 
 ## Scope
 
-**Widened 2026-08-01:** the paired agent-skills fix (task 013) merged to agent-skills main on 2026-07-31 (commits b5499b8b3f, 451f7e8b09, abbfcfeccd; merge 289c2dc4d25f), so the ordering prerequisite is satisfied — and the post-013 helper's positive identity assertion made updating the existing fixtures REQUIRED, not out of scope.
+**Widened 2026-08-01:** the paired agent-skills fix (task 013) merged to agent-skills main on 2026-07-31 (commits b5499b8b3f, 451f7e8b09, abbfcfeccd; merge 5cfe5c29a285, agent-skills PR #28), so the ordering prerequisite is satisfied — and the post-013 helper's positive identity assertion made updating the existing fixtures REQUIRED, not out of scope.
 
 Evidence: powbox Tier 1 run 30568178025 went red (38/56 checks failed) because every pre-widening threads-page fixture lacked the identity fields the helper now asserts before any case logic runs.
 
@@ -29,7 +29,8 @@ Included:
 - A short comment in the suite recording the general principle: every fail-closed guard needs at least one case where the input **parser** fails, not only where the **validation** fails.
 - (Widened) Update ALL existing threads-page fixtures to the post-013 identity contract: echo `repository.nameWithOwner` (matched case-insensitively against the requested owner/repo) and the exact `pullRequest.number` (plus a plausible `url`); nested comments-page responses (`.data.node...`) are not identity-asserted and stay bare.
 - (Widened) Identity-mismatch fail-closed cases: a response echoing a wrong `nameWithOwner` and one echoing a wrong `pullRequest.number`, each served twice (whole-fetch retry) and asserting exit 3, empty stdout, and the generic "response identity does not match" stderr diagnosis — distinct from the offender-listing scope diagnosis and the "malformed response — could not extract comment urls" extraction diagnosis.
-- (Added in review) The identity gate is asserted per PAGE, not just on the first one: for each asserted field, a two-page case whose clean first page advertises `hasNextPage` and whose cursor-reached second page carries the mismatch, asserting the same fail-closed trio plus that the clean first page never leaks to stdout and that the retry restarts from page one (four thread-list calls, the second following `after=<cursor>`). Single-page mismatches alone would pass a helper that validated identity once before the paging loop — verified by mutation: such a helper passes the suite without these cases and fails it with them.
+- (Added in review) The per-page guards are asserted on a LATER page too, not just the first — for the identity gate: for each asserted field, a two-page case whose clean first page advertises `hasNextPage` and whose cursor-reached second page carries the mismatch, asserting the same fail-closed trio plus that the clean first page never leaks to stdout and that the retry restarts from page one (four thread-list calls, the second following `after=<cursor>`). Single-page mismatches alone would pass a helper that validated identity once before the paging loop — verified by mutation: such a helper passes the suite without these cases and fails it with them.
+- (Added in review) The same later-page case for the comment-url scope guard: a clean cursor-advertising first page followed by a contaminated second page. The helper checks the fully merged nodes today, so page position cannot matter to it — this pins the contract instead, so a future fail-fast refactor that validated urls per page could not regress to checking only the first. Also mutation-verified.
 
 Out of scope:
 

@@ -7,13 +7,17 @@ Its scope check has a shape blind spot: `scope_offenders()` extracts comment URL
 With a thread whose `comments` is `null`, `{}`, or absent, `jq` errors, prints nothing, the offender list comes back empty, and the helper emits its payload with exit 0 — the guard fails **open** on exactly the malformed shapes a crossed or truncated response can produce.
 This was reproduced deterministically during a kalm2 review batch, in the same session where a live `gh-review-threads 142` call returned PR #143's comments at exit 0.
 
-The hermetic suite `scripts/test-gh-review-threads.sh` (396 lines, cases (a)–(g)) tests contamination only with **well-formed** JSON carrying wrong URLs — the one contamination shape the guard survives.
-It never feeds the shape that fails open, so powbox Stage 0b validates the blind spot into the image.
+When this task was written, the hermetic suite `scripts/test-gh-review-threads.sh` (then 396 lines, cases (a)–(g)) tested contamination only with **well-formed** JSON carrying wrong URLs — the one contamination shape the guard survived.
+It never fed the shape that fails open, so powbox Stage 0b validated the blind spot into the image.
 
-The helper source itself is canonical in `Roubtec/agent-skills` (`plugins/dev-skills/bin/gh-review-threads`); the fix to the helper is tasked there (agent-skills task 013: replace the process substitution with a checked command substitution, and add a positive identity assertion via `repository { nameWithOwner }` / `pullRequest { number url }` in the same query).
+The helper source itself is canonical in `Roubtec/agent-skills` (`plugins/dev-skills/bin/gh-review-threads`); the helper fix was tasked and delivered there (agent-skills task 013, merged 2026-07-31: replace the process substitution with a checked command substitution, and add a positive identity assertion via `repository { nameWithOwner }` / `pullRequest { number url }` in the same query).
 powbox bakes that file verbatim (`docker/agent/Dockerfile:139` copies `.agent-skills-src/plugins/dev-skills/bin/gh-review-threads`; `scripts/build-image.sh:177-183` stages the clone), and this repo owns the test suite — so the **test-side** coverage lands here.
 
 ## Scope
+
+**Widened 2026-08-01:** the paired agent-skills fix (task 013) merged to agent-skills main on 2026-07-31 (commits b5499b8b3f, 451f7e8b09, abbfcfeccd; merge 5cfe5c29a285, agent-skills PR #28), so the ordering prerequisite is satisfied — and the post-013 helper's positive identity assertion made updating the existing fixtures REQUIRED, not out of scope.
+
+Evidence: powbox Tier 1 run 30568178025 went red (38/56 checks failed) because every pre-widening threads-page fixture lacked the identity fields the helper now asserts before any case logic runs.
 
 Included:
 
@@ -23,11 +27,15 @@ Included:
   - a thread with `comments` absent entirely.
 - Each case asserts the helper fails closed: exit code 3 (or the helper's documented fatal exit for extraction failure), **empty stdout**, and a diagnostic on stderr.
 - A short comment in the suite recording the general principle: every fail-closed guard needs at least one case where the input **parser** fails, not only where the **validation** fails.
+- (Widened) Update ALL existing threads-page fixtures to the post-013 identity contract: echo `repository.nameWithOwner` (matched case-insensitively against the requested owner/repo) and the exact `pullRequest.number` (plus a plausible `url`); nested comments-page responses (`.data.node...`) are not identity-asserted and stay bare.
+- (Widened) Identity-mismatch fail-closed cases: a response echoing a wrong `nameWithOwner` and one echoing a wrong `pullRequest.number`, each served twice (whole-fetch retry) and asserting exit 3, empty stdout, and the generic "response identity does not match" stderr diagnosis — distinct from the offender-listing scope diagnosis and the "malformed response — could not extract comment urls" extraction diagnosis.
+- (Added in review) The per-page guards are asserted on a LATER page too, not just the first — for the identity gate: for each asserted field, a two-page case whose clean first page advertises `hasNextPage` and whose cursor-reached second page carries the mismatch, asserting the same fail-closed trio plus that the clean first page never leaks to stdout and that the retry restarts from page one (four thread-list calls, the second following `after=<cursor>`). Single-page mismatches alone would pass a helper that validated identity once before the paging loop — verified by mutation: such a helper passes the suite without these cases and fails it with them.
+- (Added in review) A cross-PR url arriving on a nested COMMENTS page, not a threads page: case (e) already merged an in-scope nested url, but no case fed a cross-PR one, so a helper validating the threads-page urls before merging the fetched-up comments would still have passed. Nested pages carry no identity fields, so this scope check is the only guard between them and stdout. Also mutation-verified. The malformed-shape half of that path still fails open in the helper itself — see `tasks/033a-gh-review-threads-nested-comments-page-fails-open.md`.
+- (Added in review) The same later-page case for the comment-url scope guard: a clean cursor-advertising first page followed by a contaminated second page. The helper checks the fully merged nodes today, so page position cannot matter to it — this pins the contract instead, so a future fail-fast refactor that validated urls per page could not regress to checking only the first. Also mutation-verified.
 
 Out of scope:
 
-- The helper fix itself (agent-skills task 013).
-- Changing the well-formed contamination cases.
+- The helper fix itself (agent-skills task 013 — landed 2026-07-31, see above).
 
 ## Context and references
 
@@ -41,9 +49,8 @@ Out of scope:
 
 ## Implementation notes
 
-- **Ordering:** against the current (unfixed) helper these cases FAIL — that is the point.
-  Land this task together with (or after) the agent-skills helper fix being consumed by the image build; coordinate so Stage 0b does not go red on main in between.
-  If the agent-skills fix is not yet merged when this is implemented, verify the new cases against a locally patched helper copy and note the dependency in the PR body.
+- **Ordering (resolved):** the paired helper fix landed first — agent-skills task 013 merged to agent-skills main on 2026-07-31, and `scripts/build-image.sh` stages a fresh clone of agent-skills main on every build, so image builds consume the fixed helper with no coordination window left.
+  Against the pre-fix helper these cases FAIL — that was the point, and it was verified once during development (at pre-fix agent-skills commit 22e1c76dd0 the new (h)/(i) cases fail; against the post-fix helper the whole suite passes).
 - Follow the suite's existing case-naming and `assert_eq`-style conventions; keep fixtures small and inline like the existing ones.
 - The malformed shape must appear in a response that would otherwise pass (correct URLs elsewhere), so the case proves the parser path alone forces fail-closed.
 

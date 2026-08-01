@@ -131,12 +131,45 @@ for target in "$@"; do
 		continue
 	fi
 
+	# Remember which components mkdir -p is about to create, plus the deepest
+	# ancestor that already exists, so the new ones can inherit its ownership
+	# (see the chown below).  Computed BEFORE the mkdir, while they are absent.
+	new_dirs=()
+	deepest_existing="$resolved_target"
+	while [ ! -e "$deepest_existing" ] && [ "$deepest_existing" != "/" ]; do
+		new_dirs+=("$deepest_existing")
+		deepest_existing="$(dirname "$deepest_existing")"
+	done
+
 	# Non-fatal under set -e: a path whose parent is a file (e.g. a literal
 	# under a .git that is itself a file in a linked worktree) must not abort
 	# the whole loop and leave the remaining directories unshadowed.
 	if ! mkdir -p "$resolved_target" 2>/dev/null; then
 		echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
 		continue
+	fi
+
+	# A mountpoint we had to create is created by ROOT (this helper only ever runs
+	# via sudo), so on a native-Linux bind mount it outlives the container as a
+	# root-owned mode-755 directory once the tmpfs goes away — and the host user
+	# can then neither populate nor remove it (e.g. a subsequent host `dotnet
+	# build` writing into bin/obj). Only the tmpfs itself was ever node-owned, and
+	# it exists only while the container runs. So hand every component we just
+	# created the uid/gid of the deepest ancestor that already existed: for a
+	# bind-mounted checkout that is the tree's host owner, and for a container-local
+	# volume it is node either way. heal-workspace-perms.sh has already run by this
+	# point in entrypoint-core.sh, so a root-owned checkout is node-owned here
+	# rather than inheriting root. Pre-existing for .powbox.yml literals; the .NET
+	# scan is what makes it automatic and per-project, hence the fix. Must happen
+	# BEFORE the mount below, or it would chown the tmpfs root instead of the
+	# directory underneath it. Never fatal: a failed chown leaves today's behaviour.
+	if [ "${#new_dirs[@]}" -gt 0 ]; then
+		if owner="$(stat -c '%u:%g' "$deepest_existing" 2>/dev/null)"; then
+			chown -h "$owner" "${new_dirs[@]}" 2>/dev/null ||
+				echo "shadow-mounts: warning: could not give '$resolved_target' the host ownership ($owner) of '$deepest_existing'; it may be left root-owned on the host after the container stops." >&2
+		else
+			echo "shadow-mounts: warning: could not read the ownership of '$deepest_existing'; '$resolved_target' may be left root-owned on the host after the container stops." >&2
+		fi
 	fi
 
 	# .git/worktrees gets a durable bind from the persistent .worktrees volume

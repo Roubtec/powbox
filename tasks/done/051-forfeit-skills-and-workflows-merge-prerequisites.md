@@ -1,5 +1,7 @@
 # Task 051 — Merge prerequisites for forfeiting skills and workflows to agent-skills
 
+> **Satisfied 2026-08-01:** PR #117 merged after the prerequisites landed on agent-skills `main`; the post-merge rebuild evidence is in https://github.com/Roubtec/powbox/pull/117#issuecomment-5151685268 — a build at 527182f whose Codex palette carries `enable-worktrees` and `session-learnings`, and which pruned the four now-obsolete seeded Claude items. The re-homing of tasks 041 and 029a to agent-skills 014a and 015a discharged the last coupling.
+
 ## Why this task exists
 
 Branch `forfeit-skills-and-workflows-to-agent-skills` removes powbox's last in-tree skills (`enable-worktrees`, `session-learnings`, for both harnesses) and the Claude dynamic workflows (`wf-address-review.js`, `wf-address-tasks.js`), making `Roubtec/agent-skills` the single source of truth for all of them.

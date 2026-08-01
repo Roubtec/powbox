@@ -114,13 +114,25 @@ fi
 # explicit operator declaration, not something inferred from the tree.)
 # find(1) does not follow symlinks (-P), so proj_dir itself can contain no
 # symlinked component and checking the final bin/obj component is sufficient.
+#
+# An existing bin/obj holding GIT-TRACKED content is skipped for that same
+# reason.  A project that redirects its output (MSBuild `ArtifactsPath` /
+# `OutputPath`) can legitimately keep tracked scripts or fixtures in a sibling
+# bin/obj; a tmpfs over one would make those files read as deleted for the whole
+# session and send any edit to an overlay that dies with the container.  Real
+# build output is gitignored by every standard .NET template, so "tracked" is a
+# reliable signal that a directory is NOT disposable.  The probe is ONE
+# `git ls-files` over the candidates that exist (not one call per directory), so
+# the scan keeps its ~0.16s budget; any git failure — not a repo, git absent,
+# unreadable index — vetoes nothing and the default shadow stands.
+dotnet_artifact_dirs=()
 while IFS= read -r -d '' proj_dir; do
 	for artifact_dir in "$proj_dir/bin" "$proj_dir/obj"; do
 		if [ -L "$artifact_dir" ]; then
 			echo "detect-shadows: skipping '$artifact_dir' — symlink; refusing to shadow its target." >&2
 			continue
 		fi
-		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
+		dotnet_artifact_dirs+=("$artifact_dir")
 	done
 done < <(
 	find "$WORKSPACE_DIR" \
@@ -129,6 +141,39 @@ done < <(
 		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
 		-printf '%h\0' \) 2>/dev/null | sort -zu
 )
+
+if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
+	# A path that does not exist cannot hold tracked content, so only existing
+	# candidates are worth asking git about — on a fresh clone that is none of
+	# them.  `safe.directory=*` keeps the probe working on a checkout whose host
+	# uid differs from node's (this runs unprivileged and only reads).  -z so a
+	# tracked path containing a newline cannot skew the attribution below.
+	declare -A tracked_artifact_dir=()
+	existing_artifact_dirs=()
+	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
+		if [ -d "$artifact_dir" ]; then
+			existing_artifact_dirs+=("$artifact_dir")
+		fi
+	done
+	if [ ${#existing_artifact_dirs[@]} -gt 0 ]; then
+		while IFS= read -r -d '' tracked_file; do
+			for artifact_dir in "${existing_artifact_dirs[@]}"; do
+				case "$WORKSPACE_DIR/$tracked_file" in
+				"$artifact_dir"/*) tracked_artifact_dir["$artifact_dir"]=1 ;;
+				esac
+			done
+		done < <(git -c safe.directory='*' -C "$WORKSPACE_DIR" \
+			ls-files -z --cached -- "${existing_artifact_dirs[@]}" 2>/dev/null || true)
+	fi
+
+	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
+		if [ -n "${tracked_artifact_dir["$artifact_dir"]:-}" ]; then
+			echo "detect-shadows: skipping '$artifact_dir' — contains Git-tracked files; refusing to mask them with a tmpfs." >&2
+			continue
+		fi
+		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
+	done
+fi
 
 # --- .powbox.yml / .powbox.local.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"
@@ -189,6 +234,31 @@ if [ -n "$SHADOW_YML" ]; then
 fi
 
 # Deduplicate and output.
+#
+# The output protocol is newline-delimited — entrypoint-core.sh reads it with
+# `mapfile -t`, shadow-refresh.sh with `read -r` — so a path that itself contains
+# a newline would reach the privileged shadow-mounts.sh as TWO arguments, and the
+# fragment before the newline is a truncated ANCESTOR of the intended target.  A
+# project beside a directory literally named $'\nfoo' emits `<ws>/`, which still
+# satisfies shadow-mounts.sh's under-/workspace check, so the whole checkout would
+# be tmpfs-masked for the session.  The .NET scan makes that reachable from repo
+# CONTENT alone (no declaration), so reject such paths at the one point every
+# producer funnels through rather than trusting each call site.  Carrying NUL
+# end to end would be the alternative, but it would have to change both consumers
+# and the .powbox.yml branches too, for paths no real project has.
 if [ ${#shadows[@]} -gt 0 ]; then
-	printf '%s\n' "${shadows[@]}" | sort -u
+	emit=()
+	for shadow in "${shadows[@]}"; do
+		case "$shadow" in
+		*$'\n'*)
+			# %q so the diagnostic stays one line despite the embedded newline.
+			printf 'detect-shadows: skipping %q — path contains a newline; the output is newline-delimited, so emitting it would hand a truncated ancestor to shadow-mounts.sh.\n' "$shadow" >&2
+			continue
+			;;
+		esac
+		emit+=("$shadow")
+	done
+	if [ ${#emit[@]} -gt 0 ]; then
+		printf '%s\n' "${emit[@]}" | sort -u
+	fi
 fi

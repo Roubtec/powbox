@@ -99,9 +99,20 @@ ko() {
 	printf '  FAIL %s\n' "$1"
 }
 
+# The assertions below capture the run first and match against a HERE-STRING
+# rather than piping the run straight into `grep -q`.  With `set -o pipefail`, a
+# `grep -q` that matches exits immediately, the producer's next write gets
+# SIGPIPE, and the pipeline's status becomes 141 — so a genuine match would be
+# reported as a failure whenever the sought line is not the producer's last
+# write.  That is a race (it depends on whether the producer finished first), and
+# it fires for real: detect-shadows emits two symlink diagnostics, and its stdout
+# comes from a `printf | sort -u` whose `sort` is what takes the SIGPIPE.
+
 # assert_emits <ws> <abs-path> <msg>
 assert_emits() {
-	if run_out "$1" | grep -qxF "$2"; then
+	local out
+	out="$(run_out "$1")"
+	if grep -qxF "$2" <<<"$out"; then
 		ok "$3"
 	else
 		ko "$3 (expected '$2' in output)"
@@ -110,7 +121,9 @@ assert_emits() {
 
 # assert_absent <ws> <abs-path> <msg>
 assert_absent() {
-	if run_out "$1" | grep -qxF "$2"; then
+	local out
+	out="$(run_out "$1")"
+	if grep -qxF "$2" <<<"$out"; then
 		ko "$3 (did not expect '$2' in output)"
 	else
 		ok "$3"
@@ -141,7 +154,9 @@ assert_output_exact() {
 
 # assert_stderr <ws> <substring> <msg>
 assert_stderr() {
-	if run_err "$1" | grep -qF "$2"; then
+	local err
+	err="$(run_err "$1")"
+	if grep -qF "$2" <<<"$err"; then
 		ok "$3"
 	else
 		ko "$3 (expected stderr to contain '$2')"
@@ -149,7 +164,9 @@ assert_stderr() {
 }
 
 assert_stderr_absent() {
-	if run_err "$1" | grep -qF "$2"; then
+	local err
+	err="$(run_err "$1")"
+	if grep -qF "$2" <<<"$err"; then
 		ko "$3 (did not expect stderr to contain '$2')"
 	else
 		ok "$3"
@@ -273,12 +290,12 @@ cat >"$ws/package.json" <<'JSON'
 JSON
 write_powbox_local "$ws" '../evil'
 doctor_err="$(run_doctor_err "$ws")"
-if printf '%s\n' "$doctor_err" | grep -qxF "detect-shadows: shadow list overridden by .powbox.local.yml"; then
+if grep -qxF "detect-shadows: shadow list overridden by .powbox.local.yml" <<<"$doctor_err"; then
 	ok "doctor forwards the local override diagnostic"
 else
 	ko "doctor did not forward the local override diagnostic"
 fi
-if printf '%s\n' "$doctor_err" | grep -qF "resolves outside workspace root"; then
+if grep -qF "resolves outside workspace root" <<<"$doctor_err"; then
 	ko "doctor leaked ordinary validation noise"
 else
 	ok "doctor suppresses ordinary validation noise"
@@ -397,6 +414,100 @@ assert_absent "$ws" "$ws/src" "symlinked bin never resolves to its in-workspace 
 assert_absent "$ws" "$ws/app/bin" "symlinked bin not emitted as itself either"
 assert_absent "$ws" "/etc" "symlinked obj never resolves outside the workspace"
 assert_no_output "$ws" "a project whose bin and obj are both symlinks emits nothing"
+assert_stderr "$ws" "symlink; refusing to shadow its target" "symlink skip is announced on stderr"
+
+echo "Test: a symlinked bin does not suppress the same project's real obj"
+ws="$(new_ws dotnet-symlink-partial)"
+mkdir -p "$ws/app" "$ws/src"
+touch "$ws/app/App.csproj"
+ln -s ../src "$ws/app/bin"
+assert_absent "$ws" "$ws/app/bin" "symlinked bin still skipped"
+assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected by the symlinked bin"
+
+# --- .NET: an existing bin/obj holding tracked content is never masked ---
+#
+# A project redirecting its output (ArtifactsPath/OutputPath) can keep tracked
+# scripts or fixtures in a sibling bin/obj.  Shadowing one would make them read
+# as deleted for the session and send edits to a tmpfs that dies with the
+# container, so tracked content vetoes the shadow.  `git add -f` mirrors the
+# real situation (the file IS in the index) regardless of any ignore rules.
+
+# git_ws <name> — a workspace that is also a fresh git repo.
+git_ws() {
+	local ws
+	ws="$(new_ws "$1")"
+	git -c init.defaultBranch=main init -q "$ws"
+	printf '%s' "$ws"
+}
+
+echo "Test: a bin/obj containing Git-tracked files is not shadowed"
+ws="$(git_ws dotnet-tracked)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+git -C "$ws" add -f app/bin/publish.sh
+assert_absent "$ws" "$ws/app/bin" "bin holding a tracked file is not shadowed"
+assert_emits "$ws" "$ws/app/obj" "the untracked sibling obj is still shadowed"
+assert_stderr "$ws" "contains Git-tracked files" "tracked-content skip is announced on stderr"
+
+echo "Test: tracked content nested deeper in bin/ still vetoes the shadow"
+ws="$(git_ws dotnet-tracked-nested)"
+mkdir -p "$ws/app/obj/fixtures"
+touch "$ws/app/App.csproj" "$ws/app/obj/fixtures/golden.json"
+git -C "$ws" add -f app/obj/fixtures/golden.json
+assert_absent "$ws" "$ws/app/obj" "obj holding tracked content at depth is not shadowed"
+assert_emits "$ws" "$ws/app/bin" "the untracked sibling bin is still shadowed"
+
+echo "Test: real build output (untracked) in bin/obj is still shadowed"
+ws="$(git_ws dotnet-untracked)"
+mkdir -p "$ws/app/bin/Debug" "$ws/app/obj"
+touch "$ws/app/App.csproj" "$ws/app/bin/Debug/App.dll" "$ws/app/obj/project.assets.json"
+git -C "$ws" add -f app/App.csproj
+assert_emits "$ws" "$ws/app/bin" "untracked build output does not veto the bin shadow"
+assert_emits "$ws" "$ws/app/obj" "untracked build output does not veto the obj shadow"
+
+echo "Test: a non-git workspace keeps the default shadow (probe fails open)"
+ws="$(new_ws dotnet-nongit)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/leftover.dll"
+assert_emits "$ws" "$ws/app/bin" "existing bin outside a git repo is still shadowed"
+
+# --- newline-containing paths are never emitted ---
+#
+# The output protocol is newline-delimited (mapfile -t in entrypoint-core.sh,
+# read -r in shadow-refresh.sh), so an emitted path containing a newline would
+# arrive at the privileged shadow-mounts.sh as two arguments — the first being a
+# truncated ANCESTOR of the target.  With a leading newline that ancestor is the
+# workspace root itself, which would tmpfs-mask the whole checkout.
+nl="$(printf '\nx')" # a directory name whose first character is a newline
+
+echo "Test: a project under a newline-named directory emits nothing for it"
+ws="$(new_ws dotnet-newline)"
+mkdir -p "$ws/$nl"
+touch "$ws/$nl/App.csproj"
+assert_absent "$ws" "$ws/" "the truncated workspace-root fragment is never emitted"
+assert_absent "$ws" "$ws" "the workspace root is never emitted"
+assert_no_output "$ws" "a newline-named project dir emits nothing at all"
+assert_stderr "$ws" "path contains a newline" "newline rejection is announced on stderr"
+
+echo "Test: a newline-named sibling does not suppress a normal project"
+ws="$(new_ws dotnet-newline-sibling)"
+mkdir -p "$ws/$nl" "$ws/ok"
+touch "$ws/$nl/App.csproj" "$ws/ok/Ok.csproj"
+assert_absent "$ws" "$ws/" "truncated fragment still absent alongside a valid project"
+assert_emits "$ws" "$ws/ok/bin" "the well-named project is still shadowed"
+assert_emits "$ws" "$ws/ok/obj" "the well-named project's obj is still shadowed"
+
+# The guard sits at the single emit point rather than in the .NET branch, so it
+# also covers the other producer that can pick a newline up from the filesystem:
+# a .powbox.yml glob whose expansion matches a newline-named directory.  (The
+# literal branch cannot carry one — yq output is itself read line by line.)
+echo "Test: a .powbox.yml glob matching a newline-named directory is rejected too"
+ws="$(new_ws newline-glob)"
+mkdir -p "$ws/$nl/cache" "$ws/ok/cache"
+write_powbox "$ws" '*/cache'
+assert_absent "$ws" "$ws/" "newline glob match does not emit a truncated ancestor"
+assert_emits "$ws" "$ws/ok/cache" "the well-named glob match is still shadowed"
+assert_stderr "$ws" "path contains a newline" "newline glob rejection announced on stderr"
 
 echo "Test: a repo with no .NET projects emits nothing from the .NET scan"
 ws="$(new_ws dotnet-none)"

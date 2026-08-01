@@ -40,7 +40,7 @@ Out of scope: network policy changes, provider CLI changes, per-repo cache reloc
 - `docker/shared/peer-review-run` — the runner this extends; its header documents the current isolation posture and the same-UID traversal residual (the overlay improves on both for the worktree surface).
 - `docs/architecture.md` peer-review-run bullet — the result contract to extend (`executedTests` field) and where the mode gets documented.
 - `docs/rootless-podman.md` — the existing `/dev/fuse`-vs-`vfs` detection precedent for mechanism 2.
-- Task 029/`tasks/029a-peer-verdict-pass-notes.md` — the family this belongs to.
+- Task 029 (`tasks/done/`) — the runner this family extends. Its sibling 029a (peer `VERDICT: PASS` notes) was re-homed to `Roubtec/agent-skills` as its task 015a when powbox forfeited the workflows (see task 051), since every peer-prompt constructor now lives there.
 - The agent-skills peer-protocol task (015 there) — its executed-vs-static honesty rule is what the new result field feeds.
 
 ## Implementation notes

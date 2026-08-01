@@ -1,5 +1,7 @@
 # Task 051 — Merge prerequisites for forfeiting skills and workflows to agent-skills
 
+> **Satisfied 2026-08-01:** PR #117 merged after the prerequisites landed on agent-skills `main`; the post-merge rebuild evidence is in https://github.com/Roubtec/powbox/pull/117#issuecomment-5151685268 — a build at 527182f whose Codex palette carries `enable-worktrees` and `session-learnings`, and which pruned the four now-obsolete seeded Claude items. The re-homing of tasks 041 and 029a to agent-skills 014a and 015a discharged the last coupling.
+
 ## Why this task exists
 
 Branch `forfeit-skills-and-workflows-to-agent-skills` removes powbox's last in-tree skills (`enable-worktrees`, `session-learnings`, for both harnesses) and the Claude dynamic workflows (`wf-address-review.js`, `wf-address-tasks.js`), making `Roubtec/agent-skills` the single source of truth for all of them.
@@ -18,7 +20,7 @@ See agent-skills tasks 012 (the relocation of these skills/workflows into agent-
 
 - **Workflow unit-test coverage moved with the source:** powbox deleted `scripts/test-checkout-cleanliness-report.mjs`, the focused unit test for `wf-address-tasks.js`'s `mainCheckoutSummary` (the non-destructive shared-main-checkout cleanliness report). Agent-skills should adopt an equivalent test next to the workflow it exercises, or that regression guard is lost.
 - **The workflows depend on powbox-baked helpers:** `wt-bootstrap`/`wt-enter`/`wt-remove`, `gitcat`, `peer-review-run`, and `gh-review-threads` remain powbox-owned (agent-layer bakes; `gh-review-threads` is itself vendored in agent-skills `plugins/dev-skills/bin/`). The workflow prompts must keep calling these helpers by name rather than restating the mechanics, and a non-powbox plugin consumer without them gets the workflows' documented blocker behavior, not silent fallback.
-- **Open powbox tasks re-homed or split:** task 041 (peer-review stage in the `wf-*` workflows) now executes in agent-skills; task 047's `wf-check` fixtures must come from the agent-skills copies; tasks 029a and 043 carry relocation notes adjusting their powbox scope.
+- **Open powbox tasks re-homed or split:** tasks 041 (peer-review stage in the `wf-*` workflows) and 029a (peer `VERDICT: PASS` notes) had no powbox-side surface left once the workflows moved — every peer-prompt constructor and every `wf-*` edit site is now in agent-skills — so both were deleted here and re-homed there: 041 as agent-skills 014a (the workflow-rendering residue that its 014/015 do not state) and 029a verbatim as agent-skills 015a. Task 047's `wf-check` fixtures must come from the agent-skills copies, and task 043 carries a relocation note adjusting its powbox scope; both stay here because their deliverables (baked helpers, seed markers) remain powbox-owned.
 
 ## What needs no coordination
 

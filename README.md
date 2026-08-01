@@ -483,6 +483,7 @@ If none of these declarations exist, the feature is a no-op.
 The .NET scan prunes `node_modules`, `.git`, `.worktrees`, and `bin`/`obj` themselves, so it stays cheap (~0.16s on a 1700-directory monorepo) and skips worktree checkouts — those live in a container-local volume with no host counterpart to collide with.
 Unlike the workspace globs, `bin`/`obj` are emitted as **literal** paths, so they are created and shadowed even on a fresh clone where no build has run yet; the cost is an empty `bin`/`obj` mountpoint dir appearing for a project that has never been built (or one that redirects output via `ArtifactsPath`), which every standard .NET template already gitignores.
 An existing `bin`/`obj` that is a **symlink** is skipped rather than followed — this scan is derived from repo content rather than declared by you, so resolving `app/bin -> ../src` would let the tree itself decide to mask real source for the whole session. Declare such a path in `.powbox.yml` if you genuinely want its target shadowed.
+For the same reason an existing `bin`/`obj` holding **Git-tracked** files is left alone: a project that redirects its output (`ArtifactsPath`, `OutputPath`) can legitimately keep tracked scripts or fixtures there, and masking them would make them read as deleted for the session while any edit landed in a tmpfs that dies with the container. Real build output is gitignored by every standard .NET template, so only genuinely disposable directories are shadowed. (Declare the path in `.powbox.yml` if you want it shadowed anyway.)
 A .NET project added mid-session is picked up by re-running `shadow-refresh.sh` (there is no `dotnet` wrapper equivalent to the `pnpm` one below), so run it before your first build of a new project.
 
 ### Mid-Session Packages
@@ -557,6 +558,10 @@ After restarting (or resuming) a container, run `pnpm install` to repopulate sub
 With a warm store this typically takes only a few seconds.
 
 The root `node_modules` (`agent-nm-<agent>-<project>`) and the `.worktrees` tree with its pnpm store (`agent-wt-<agent>-<project>`) are **Docker volumes**, not tmpfs — they persist across restarts, so the store stays warm and worktree installs stay cheap.
+
+A shadow whose target does not exist yet (a `.powbox.yml` literal, or any `bin`/`obj` on a never-built .NET project) needs a **mountpoint directory** underneath the tmpfs, and only that directory outlives the container.
+`shadow-mounts.sh` runs as root, so it hands each directory it creates the uid/gid of the nearest existing ancestor — the host owner of the checkout on a bind mount.
+Without that, a native-Linux host would be left with empty root-owned `bin`/`obj` directories it could neither populate nor delete after the container stopped, breaking the next host-side `dotnet build`.
 
 Because those subpackage shadows come back **empty** after a restart while the persistent root `node_modules` still carries pnpm's workspace-state cache (`.pnpm-workspace-state-v1.json`), pnpm would otherwise report "Already up to date" and skip relinking them — leaving `vitest`/`tsc`/`eslint` and other per-package `.bin` entries unresolvable until a manual fix. To avoid this **empty-shadow trap**, the entrypoint drops that cache file at container start, so the first `pnpm install` after a restart does a real, relinking install and self-heals automatically. If subpackage binaries are ever still missing — a `pnpm install` reports "Already up to date" yet the per-package `.bin` entries don't resolve, e.g. because something repopulated the cache mid-session — run `pnpm-shadow-doctor` to detect the trap and `pnpm-shadow-doctor --fix` to repair it (it removes the stale cache file and reinstalls to relink the shadows).
 

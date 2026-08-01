@@ -391,6 +391,91 @@ assert_eq "g: emits the in-scope thread" "$(jqr '.[0].id' "$RUN_OUT")" T_case
 assert_eq "g: preserves canonical url casing" "$(jqr '.[0].comments[0].url' "$RUN_OUT")" "https://github.com/acme/widgets/pull/12#discussion_r811"
 
 # ============================================================================
+# (h) malformed thread shapes — the url PARSER fails, and that must fail closed
+# ============================================================================
+# Principle: every fail-closed guard needs at least one case where the input
+# PARSER fails, not only where the VALIDATION fails. The pre-013 helper passed
+# every wrong-URL (validation) case above yet failed OPEN on these shapes: its
+# url extraction ran in a process substitution, where a jq error under
+# `set -euo pipefail` went unnoticed, so an empty offender list read as "all
+# clean" and the contaminated payload was emitted with exit 0. Each fixture is
+# a response that would OTHERWISE pass — correct identity and a well-formed
+# in-scope thread — plus one thread whose `comments` shape breaks extraction,
+# proving the parser path alone forces exit 3 / empty stdout / a diagnosis.
+WELLFORMED_H='{"id":"T_good","isResolved":false,"isOutdated":false,"path":"h.js","line":1,
+   "comments":{"nodes":[{"databaseId":821,"author":{"login":"codex","__typename":"Bot"},"body":"fine","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r821"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}'
+
+# h1: a thread with "comments": null.
+MALFORMED_NULL="[$WELLFORMED_H,
+  {\"id\":\"T_null\",\"isResolved\":false,\"isOutdated\":false,\"path\":\"h1.js\",\"line\":2,\"comments\":null}]"
+d="$(new_case)"
+threads_one_page "$MALFORMED_NULL" >"$d/threads-1"
+threads_one_page "$MALFORMED_NULL" >"$d/threads-2"
+run "$d" --repo acme/widgets 12
+assert_eq "h1: comments:null fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "h1: no stdout emitted" "$RUN_OUT" ""
+assert_contains "h1: extraction diagnosis on stderr" "$RUN_ERR" "malformed response — could not extract comment urls"
+assert_eq "h1: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# h2: a thread with "comments": {} (no nodes).
+MALFORMED_EMPTY="[$WELLFORMED_H,
+  {\"id\":\"T_empty\",\"isResolved\":false,\"isOutdated\":false,\"path\":\"h2.js\",\"line\":3,\"comments\":{}}]"
+d="$(new_case)"
+threads_one_page "$MALFORMED_EMPTY" >"$d/threads-1"
+threads_one_page "$MALFORMED_EMPTY" >"$d/threads-2"
+run "$d" --repo acme/widgets 12
+assert_eq "h2: comments:{} fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "h2: no stdout emitted" "$RUN_OUT" ""
+assert_contains "h2: extraction diagnosis on stderr" "$RUN_ERR" "malformed response — could not extract comment urls"
+assert_eq "h2: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# h3: a thread with comments absent entirely.
+MALFORMED_ABSENT="[$WELLFORMED_H,
+  {\"id\":\"T_absent\",\"isResolved\":false,\"isOutdated\":false,\"path\":\"h3.js\",\"line\":4}]"
+d="$(new_case)"
+threads_one_page "$MALFORMED_ABSENT" >"$d/threads-1"
+threads_one_page "$MALFORMED_ABSENT" >"$d/threads-2"
+run "$d" --repo acme/widgets 12
+assert_eq "h3: absent comments fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "h3: no stdout emitted" "$RUN_OUT" ""
+assert_contains "h3: extraction diagnosis on stderr" "$RUN_ERR" "malformed response — could not extract comment urls"
+assert_eq "h3: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# ============================================================================
+# (i) response-identity mismatch — fail closed after the single whole-fetch retry
+# ============================================================================
+# Post-013 the helper asserts the identity echoed by every threads page BEFORE
+# looking at any comment url. The nodes here are well-formed and in scope, so
+# only the identity gate can reject them; its stderr diagnosis is the generic
+# "response identity does not match" line (no urls are named — the whole page
+# is untrusted), distinct from the offender-listing scope diagnosis (c1/d1/d4)
+# and the extraction diagnosis (h1–h3).
+NODES_I='[
+  {"id":"T_id","isResolved":false,"isOutdated":false,"path":"i.js","line":1,
+   "comments":{"nodes":[{"databaseId":831,"author":{"login":"codex","__typename":"Bot"},"body":"in scope","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r831"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+]'
+
+# i1: the response echoes the WRONG nameWithOwner.
+d="$(new_case)"
+threads_one_page "$NODES_I" 12 other/widgets >"$d/threads-1"
+threads_one_page "$NODES_I" 12 other/widgets >"$d/threads-2"
+run "$d" --repo acme/widgets 12
+assert_eq "i1: wrong nameWithOwner fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "i1: no stdout emitted" "$RUN_OUT" ""
+assert_contains "i1: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
+assert_eq "i1: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# i2: the response echoes the WRONG pullRequest.number.
+d="$(new_case)"
+threads_one_page "$NODES_I" 999 >"$d/threads-1"
+threads_one_page "$NODES_I" 999 >"$d/threads-2"
+run "$d" --repo acme/widgets 12
+assert_eq "i2: wrong PR number fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "i2: no stdout emitted" "$RUN_OUT" ""
+assert_contains "i2: identity diagnosis on stderr" "$RUN_ERR" "response identity does not match"
+assert_eq "i2: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+
+# ============================================================================
 # usage / arg handling
 # ============================================================================
 d="$(new_case)"

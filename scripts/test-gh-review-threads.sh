@@ -216,9 +216,11 @@ threads_first_of_two() {
 		"$nwo" "$pr" "$url" "$nodes" "$cursor"
 }
 
-# The canonical PR url for the test repo/PR. Passed explicitly wherever a case
-# varies another identity field, so the url stays pinned and exactly one
-# asserted field differs.
+# The canonical PR url for the test repo/PR — the value threads_one_page would
+# derive anyway for the default repo/PR. Passed explicitly where a case varies
+# another identity field, so the url stays pinned and exactly one asserted field
+# differs (the (i) cases), and where a case just needs to reach the trailing
+# <total-count> argument past it (c3).
 CANONICAL_PR_URL='https://github.com/acme/widgets/pull/12'
 
 # ============================================================================

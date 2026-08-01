@@ -399,6 +399,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ccache \
     && rm -rf /var/lib/apt/lists/*
 
+# Install the .NET SDK so a session touching C#/F# projects can run the same
+# `dotnet build` / `dotnet test` its CI does, instead of pushing and waiting for
+# the pipeline to tell it the solution does not compile — general-purpose
+# tooling on the same footing as the Go/OPA binaries above.
+#
+# No new apt source is needed: the Microsoft `packages-microsoft-prod` repo (and
+# its rotated trixie keyring) is already configured far above for pwsh and
+# mssql-tools18, and it carries the SDK packages too. That layer ends with an
+# `rm -rf /var/lib/apt/lists/*`, hence the `apt-get update` here.
+#
+# Version choice: the 8.0 LTS band, pinned only to major.minor (the
+# postgresql-16 / mssql-tools18 precedent, NOT the sha256-pinned tarball
+# treatment Go and OPA need — this is a signed distro repo). It is the band
+# projects currently pin in CI (`actions/setup-dotnet` with `8.0.4xx`), and the
+# apt candidate resolves inside that band, so a local run and a CI run agree on
+# the SDK feature band. `dotnet-sdk-8.0` pulls its own runtime, the ASP.NET
+# runtime, and the targeting/apphost packs, so `dotnet test -f net8.0` works
+# with nothing else installed. Because the Microsoft repo is already wired, a
+# project needing a different band is one `sudo apt-get install -y
+# dotnet-sdk-N.0` away in-session — the same escape hatch GOTOOLCHAIN=auto gives
+# Go projects. Baking a second SDK is deliberately avoided: each one is ~575 MB.
+#
+# `dotnet format` and `dotnet test` ship inside the SDK, so no companion lint or
+# test-runner package is installed (contrast golangci-lint, which Go needs
+# separately). Targeting .NET Framework (`net48`) from Linux also needs nothing
+# extra — projects reference the Microsoft.NETFramework.ReferenceAssemblies
+# NuGet package and compile with only this SDK present.
+#
+# Placed low, beside the other late tool layers, so an SDK bump never busts the
+# expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers above it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    dotnet-sdk-8.0 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
 # helpers are intentionally NOT baked here; the agent image
@@ -477,6 +511,51 @@ ENV CHROME_PATH=/usr/bin/chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV CHROME_NO_SANDBOX=true
+
+# Keep `dotnet` output clean and its side effects predictable. Each of these was
+# observed on a real first build in a fresh container, not copied from a
+# checklist; an agent parsing build output should see compiler diagnostics and
+# nothing else. No PATH entry is needed — the apt package symlinks
+# /usr/bin/dotnet, so login shells that reset PATH from /etc/profile keep it.
+#   TELEMETRY_OPTOUT             - no usage telemetry from a sandbox.
+#   NOLOGO                       - drops the multi-line first-run "Welcome to
+#                                  .NET" banner that otherwise prefixes the
+#                                  first build's output.
+#   GENERATE_ASPNET_CERTIFICATE  - the CLI otherwise SILENTLY generates and
+#                                  installs an ASP.NET Core HTTPS development
+#                                  certificate on first run. Nothing in a
+#                                  headless agent container terminates TLS
+#                                  locally, so this is pure surprise state.
+#   WORKLOAD_UPDATE_NOTIFY_DISABLE - suppresses the periodic workload update
+#                                  advertisement. Note this does NOT cover the
+#                                  separate first-use workload-verification
+#                                  warning; the sentinel warm-up below does.
+# DOTNET_SKIP_FIRST_TIME_EXPERIENCE is deliberately NOT set: it has been a no-op
+# since .NET 5, and NOLOGO covers what it used to.
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_NOLOGO=1
+ENV DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+ENV DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1
+
+# Pre-create the .NET CLI first-use sentinels so the very first `dotnet build`
+# in a container is silent. Without them it emits "An issue was encountered
+# verifying workloads. For more information, run 'dotnet workload update'" —
+# which is unactionable here: workload manifests live under the root-owned
+# /usr/share/dotnet, `node` cannot write them ("Inadequate permissions"), and
+# that is the permanent, intended state of this image. The warning is emitted
+# once per HOME per SDK version and then self-silences, so an agent's first
+# build was the one that got the noise.
+#
+# Two empty marker files are enough, and the version is derived from the
+# installed SDK rather than hardcoded, so an SDK bump above needs no edit here.
+# Deliberately NOT warmed by running a throwaway `dotnet new` + build: that
+# would pull NuGet packages into the image for no benefit. Must run after
+# USER node — the sentinels are per-HOME, and /home/node is image content (only
+# .claude / .config/gh are volumes), so they persist into every container.
+RUN mkdir -p /home/node/.dotnet \
+    && _sdk="$(dotnet --version)" \
+    && touch "/home/node/.dotnet/${_sdk}.dotnetFirstUseSentinel" \
+        "/home/node/.dotnet/${_sdk}.toolpath.sentinel"
 
 # Default pnpm store location and import method. `auto` lets pnpm hardlink (or
 # reflink-clone) package files from the store into node_modules when the store

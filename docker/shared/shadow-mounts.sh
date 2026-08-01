@@ -125,6 +125,23 @@ for target in "$@"; do
 		;;
 	esac
 
+	# ... and must be NESTED inside a workspace, never a workspace itself. Every
+	# legitimate shadow (a package's node_modules, a project's bin/obj, .worktrees,
+	# .git/worktrees) lives below /workspace/<slug>, so a depth-1 target can only
+	# be a mistake — and tmpfs over it masks an entire checkout for the session.
+	# The producers already refuse to emit one (detect-shadows.sh rejects the
+	# workspace root and any path whose newline would split into a truncated
+	# ancestor), but this is the privileged end: the invariant should hold no
+	# matter who calls, since a caller passes arbitrary argv and the damage is
+	# whole-checkout.
+	case "${resolved_target#"$workspace_root"/}" in
+	*/*) ;;
+	*)
+		echo "shadow-mounts: refusing to shadow '$target' (resolves to the workspace '$resolved_target' itself, not a directory inside it)." >&2
+		continue
+		;;
+	esac
+
 	# Skip if already a mountpoint (handles re-runs and shadow-refresh.sh) — this
 	# covers both a prior tmpfs shadow and a prior durable .git/worktrees bind.
 	if mountpoint -q "$resolved_target" 2>/dev/null; then
@@ -164,11 +181,37 @@ for target in "$@"; do
 	# BEFORE the mount below, or it would chown the tmpfs root instead of the
 	# directory underneath it. Never fatal: a failed chown leaves today's behaviour.
 	if [ "${#new_dirs[@]}" -gt 0 ]; then
+		chown_failed=0
 		if owner="$(stat -c '%u:%g' "$deepest_existing" 2>/dev/null)"; then
-			chown -h "$owner" "${new_dirs[@]}" 2>/dev/null ||
-				echo "shadow-mounts: warning: could not give '$resolved_target' the host ownership ($owner) of '$deepest_existing'; it may be left root-owned on the host after the container stops." >&2
+			for new_dir in "${new_dirs[@]}"; do
+				# Re-validate each directory AFTER the mkdir. `chown -h` only refuses to
+				# dereference the FINAL component, so an unprivileged workspace process
+				# that swapped an intermediate component for a symlink in the window
+				# between mkdir and chown could otherwise walk root out of /workspace.
+				# Skip anything that is now a symlink, and require the resolved path to
+				# still land under /workspace — the same containment the target itself
+				# was validated against above.
+				if [ -L "$new_dir" ]; then
+					continue
+				fi
+				if ! resolved_new="$(realpath -e -- "$new_dir" 2>/dev/null)"; then
+					continue
+				fi
+				case "$resolved_new" in
+				"$workspace_root"/*) ;;
+				*) continue ;;
+				esac
+				chown -h "$owner" "$resolved_new" 2>/dev/null || chown_failed=1
+			done
 		else
-			echo "shadow-mounts: warning: could not read the ownership of '$deepest_existing'; '$resolved_target' may be left root-owned on the host after the container stops." >&2
+			chown_failed=1
+		fi
+		# One warning per run, not per directory: on a Windows/FUSE bind mount chown
+		# is expected to be a no-op or EPERM, and a repo full of never-built projects
+		# would otherwise print dozens of identical lines at every container start.
+		if [ "${chown_failed:-0}" = 1 ] && [ "${chown_warned:-0}" != 1 ]; then
+			chown_warned=1
+			echo "shadow-mounts: warning: could not give one or more created mountpoint directories the host ownership of their parent tree; on a native-Linux bind mount they may be left root-owned on the host after the container stops." >&2
 		fi
 	fi
 

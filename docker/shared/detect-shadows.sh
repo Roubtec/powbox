@@ -40,6 +40,27 @@ add_shadow_path() {
 	esac
 }
 
+# True when <dir> — which must exist and not be a symlink — holds Git-tracked
+# content.  Used by the automatic .NET scan to keep an inferred shadow from
+# masking real files (see the bin/obj block below for why).
+#
+# `-C <dir>` with the `.` pathspec asks whichever repository actually OWNS the
+# directory, which matters three ways: an initialized submodule or a nested
+# checkout answers for itself instead of being invisible to the outer index; the
+# directory name is never interpreted as a pathspec, so a project path containing
+# `[`, `*` or `?` cannot silently miss; and no workspace-relative path arithmetic
+# is involved, so how WORKSPACE_DIR was spelled (trailing slash, `..`) cannot
+# change the answer.  `safe.directory=*` keeps the probe working when the
+# checkout's host uid differs from node's — this runs unprivileged and only
+# reads.  It costs one `git ls-files` per EXISTING bin/obj (a fresh clone, the
+# case the shadow exists for, has none), and it fails OPEN: not a repo, no git,
+# or an unreadable index vetoes nothing and the default shadow stands.
+dir_has_tracked_content() {
+	local tracked
+	tracked="$(git -c safe.directory='*' -C "$1" ls-files --cached -- . 2>/dev/null || true)"
+	[ -n "$tracked" ]
+}
+
 # Expand workspace glob patterns into node_modules paths.
 # Each pattern is resolved relative to WORKSPACE_DIR; only directories
 # that actually exist produce output (nullglob handles the rest).
@@ -55,7 +76,10 @@ expand_workspace_patterns() {
 		# shellcheck disable=SC2086
 		for pkg_dir in $WORKSPACE_DIR/$pattern; do
 			[ -d "$pkg_dir" ] || continue
-			shadows+=("$pkg_dir/node_modules")
+			# Via add_shadow_path like every other producer: a manifest is repo
+			# content, so `packages: ["../other/src"]` must not be able to point
+			# the shadow at a sibling project's tree.
+			add_shadow_path "$(realpath -m -- "$pkg_dir/node_modules")" "$pkg_dir/node_modules"
 		done
 	done
 }
@@ -98,12 +122,14 @@ fi
 # gitignored by every standard .NET template, and it is the same accepted
 # trade-off as the empty node_modules/.worktrees mountpoint dirs.
 #
-# node_modules/.git/.worktrees are pruned so the walk stays cheap (~0.16s on a
-# 1700-directory monorepo, hence no depth bound) and so worktree checkouts are
-# skipped: those live in a container-local volume with no host counterpart, so
-# they have nothing to collide with and shadowing them would only cost RAM and
-# discard build state.  bin/obj themselves are pruned so a copied-out project
-# file under bin/ cannot seed a nested scan.
+# node_modules/.git/.worktrees/.claude are pruned so the walk stays cheap (~0.16s
+# on a 1700-directory monorepo, hence no depth bound) and so worktree checkouts
+# are skipped — BOTH roots: `.worktrees` (the persistent volume) and
+# `.claude/worktrees` (the harness-native tmpfs shadow).  Those live in
+# container-local mounts with no host counterpart, so they have nothing to
+# collide with, and shadowing them would only cost RAM, discard build state, and
+# nest a tmpfs inside a tmpfs.  bin/obj themselves are pruned so a copied-out
+# project file under bin/ cannot seed a nested scan.
 #
 # An existing bin/obj that is itself a SYMLINK is skipped rather than resolved.
 # This scan is automatic — no config declares it — so it must never let repo
@@ -121,59 +147,27 @@ fi
 # bin/obj; a tmpfs over one would make those files read as deleted for the whole
 # session and send any edit to an overlay that dies with the container.  Real
 # build output is gitignored by every standard .NET template, so "tracked" is a
-# reliable signal that a directory is NOT disposable.  The probe is ONE
-# `git ls-files` over the candidates that exist (not one call per directory), so
-# the scan keeps its ~0.16s budget; any git failure — not a repo, git absent,
-# unreadable index — vetoes nothing and the default shadow stands.
-dotnet_artifact_dirs=()
+# reliable signal that a directory is NOT disposable.  See
+# dir_has_tracked_content above for the probe and its costs.
 while IFS= read -r -d '' proj_dir; do
 	for artifact_dir in "$proj_dir/bin" "$proj_dir/obj"; do
 		if [ -L "$artifact_dir" ]; then
 			echo "detect-shadows: skipping '$artifact_dir' — symlink; refusing to shadow its target." >&2
 			continue
 		fi
-		dotnet_artifact_dirs+=("$artifact_dir")
-	done
-done < <(
-	find "$WORKSPACE_DIR" \
-		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \
-		-o -name bin -o -name obj \) -prune \) -o \
-		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
-		-printf '%h\0' \) 2>/dev/null | sort -zu
-)
-
-if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
-	# A path that does not exist cannot hold tracked content, so only existing
-	# candidates are worth asking git about — on a fresh clone that is none of
-	# them.  `safe.directory=*` keeps the probe working on a checkout whose host
-	# uid differs from node's (this runs unprivileged and only reads).  -z so a
-	# tracked path containing a newline cannot skew the attribution below.
-	declare -A tracked_artifact_dir=()
-	existing_artifact_dirs=()
-	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
-		if [ -d "$artifact_dir" ]; then
-			existing_artifact_dirs+=("$artifact_dir")
-		fi
-	done
-	if [ ${#existing_artifact_dirs[@]} -gt 0 ]; then
-		while IFS= read -r -d '' tracked_file; do
-			for artifact_dir in "${existing_artifact_dirs[@]}"; do
-				case "$WORKSPACE_DIR/$tracked_file" in
-				"$artifact_dir"/*) tracked_artifact_dir["$artifact_dir"]=1 ;;
-				esac
-			done
-		done < <(git -c safe.directory='*' -C "$WORKSPACE_DIR" \
-			ls-files -z --cached -- "${existing_artifact_dirs[@]}" 2>/dev/null || true)
-	fi
-
-	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
-		if [ -n "${tracked_artifact_dir["$artifact_dir"]:-}" ]; then
+		if [ -d "$artifact_dir" ] && dir_has_tracked_content "$artifact_dir"; then
 			echo "detect-shadows: skipping '$artifact_dir' — contains Git-tracked files; refusing to mask them with a tmpfs." >&2
 			continue
 		fi
 		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
 	done
-fi
+done < <(
+	find "$WORKSPACE_DIR" \
+		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \
+		-o -name .claude -o -name bin -o -name obj \) -prune \) -o \
+		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
+		-printf '%h\0' \) 2>/dev/null | sort -zu
+)
 
 # --- .powbox.yml / .powbox.local.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"

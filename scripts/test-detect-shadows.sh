@@ -320,6 +320,18 @@ cat >"$ws/package.json" <<'JSON'
 JSON
 assert_emits "$ws" "$ws/apps/web/node_modules" "npm workspace apps/web → node_modules emitted"
 
+echo "Test: a workspace pattern escaping the workspace root is rejected"
+ws="$(new_ws pnpm-escape)"
+mkdir -p "$ws/pkgs/x" "$WORK_ROOT/other/src"
+cat >"$ws/pnpm-workspace.yaml" <<'YAML'
+packages:
+  - "pkgs/*"
+  - "../other/src"
+YAML
+assert_emits "$ws" "$ws/pkgs/x/node_modules" "the in-workspace package is still emitted"
+assert_absent "$ws" "$WORK_ROOT/other/src/node_modules" "a manifest cannot point the shadow outside the workspace"
+assert_stderr "$ws" "resolves outside workspace root" "escaping workspace pattern rejected to stderr"
+
 echo "Test: a path emitted via both workspace and .powbox.yml is deduplicated"
 ws="$(new_ws dedup)"
 mkdir -p "$ws/pkgs/x/node_modules"
@@ -377,15 +389,18 @@ else
 	ko "dotnet dedup failed (count=$count)"
 fi
 
-echo "Test: projects under node_modules / .git / .worktrees are pruned"
+echo "Test: projects under node_modules / .git / .worktrees / .claude are pruned"
 ws="$(new_ws dotnet-pruned)"
-mkdir -p "$ws/node_modules/pkg" "$ws/.git/tmpl" "$ws/.worktrees/task/proj"
+mkdir -p "$ws/node_modules/pkg" "$ws/.git/tmpl" "$ws/.worktrees/task/proj" \
+	"$ws/.claude/worktrees/task/proj"
 touch "$ws/node_modules/pkg/Vendored.csproj" \
 	"$ws/.git/tmpl/Hook.csproj" \
-	"$ws/.worktrees/task/proj/Wt.csproj"
+	"$ws/.worktrees/task/proj/Wt.csproj" \
+	"$ws/.claude/worktrees/task/proj/Wt.csproj"
 assert_absent "$ws" "$ws/node_modules/pkg/obj" "csproj under node_modules pruned"
 assert_absent "$ws" "$ws/.git/tmpl/obj" "csproj under .git pruned"
 assert_absent "$ws" "$ws/.worktrees/task/proj/obj" "csproj under .worktrees pruned"
+assert_absent "$ws" "$ws/.claude/worktrees/task/proj/obj" "csproj under .claude/worktrees pruned"
 assert_no_output "$ws" "pruned-only tree emits nothing"
 
 echo "Test: a project file copied under bin/ or obj/ does not seed a nested scan"
@@ -464,6 +479,38 @@ touch "$ws/app/App.csproj" "$ws/app/bin/Debug/App.dll" "$ws/app/obj/project.asse
 git -C "$ws" add -f app/App.csproj
 assert_emits "$ws" "$ws/app/bin" "untracked build output does not veto the bin shadow"
 assert_emits "$ws" "$ws/app/obj" "untracked build output does not veto the obj shadow"
+
+echo "Test: tracked content in a NESTED repo at bin/ still vetoes the shadow"
+# The probe asks the repo that owns the directory (`git -C <dir>`), so a nested
+# checkout — or an initialized submodule, whose working tree is its own repo —
+# answers for itself instead of being invisible to the outer index.
+ws="$(git_ws dotnet-nested-repo)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/tool.sh"
+git -c init.defaultBranch=main init -q "$ws/app/bin"
+git -C "$ws/app/bin" add -f tool.sh
+assert_absent "$ws" "$ws/app/bin" "a nested repo's tracked content vetoes the shadow"
+assert_emits "$ws" "$ws/app/obj" "the untracked sibling obj is still shadowed"
+
+echo "Test: a project path with glob metacharacters is probed literally"
+# The directory name is never handed to git as a pathspec, so `[`/`*`/`?` in the
+# path cannot make the tracked-content probe silently miss.
+ws="$(git_ws dotnet-metachars)"
+mkdir -p "$ws/app[1]/bin"
+touch "$ws/app[1]/App.csproj" "$ws/app[1]/bin/publish.sh"
+git -C "$ws" add -f 'app[1]/bin/publish.sh'
+assert_absent "$ws" "$ws/app[1]/bin" "tracked bin under a bracketed path is not shadowed"
+assert_emits "$ws" "$ws/app[1]/obj" "the untracked sibling obj is still shadowed"
+
+echo "Test: a trailing slash on the workspace argument changes nothing"
+# shadow-refresh.sh passes its argument through verbatim, and tab completion
+# produces `/workspace/<slug>/`.
+ws="$(git_ws dotnet-trailing-slash)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+git -C "$ws" add -f app/bin/publish.sh
+assert_absent "$ws/" "$ws/app/bin" "tracked bin is vetoed with a trailing-slash workspace too"
+assert_emits "$ws/" "$ws/app/obj" "obj still emitted (and normalized) with a trailing slash"
 
 echo "Test: a non-git workspace keeps the default shadow (probe fails open)"
 ws="$(new_ws dotnet-nongit)"

@@ -187,10 +187,10 @@ nth_match() {
 # A single-page reviewThreads response wrapping the given nodes JSON, echoing
 # the response identity the helper asserts (nameWithOwner + PR number/url).
 # threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] [<pr-url>]
-# [<total-count>] — defaults
-# match the canonical test repo/PR (acme/widgets, PR 12); the url derives from
-# the other two unless overridden. The (i) cases override it back to canonical
-# so each presents exactly ONE wrong asserted identity field.
+# [<total-count>]
+# Defaults match the canonical test repo/PR (acme/widgets, PR 12); the url
+# derives from the other two unless overridden. The (i) cases override it back
+# to canonical so each presents exactly ONE wrong asserted identity field.
 # The trailing <total-count> defaults to 1 and exists so a page serving as the
 # LAST of two can report the same connection total as its first page; the helper
 # never reads totalCount (it pages on pageInfo.hasNextPage), so it is purely
@@ -215,6 +215,11 @@ threads_first_of_two() {
 	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":2,"nodes":%s,"pageInfo":{"hasNextPage":true,"endCursor":"%s"}}}}}}\n' \
 		"$nwo" "$pr" "$url" "$nodes" "$cursor"
 }
+
+# The canonical PR url for the test repo/PR. Passed explicitly wherever a case
+# varies another identity field, so the url stays pinned and exactly one
+# asserted field differs.
+CANONICAL_PR_URL='https://github.com/acme/widgets/pull/12'
 
 # ============================================================================
 # (a) unresolved-only filtering, and --all
@@ -309,9 +314,9 @@ assert_eq "c2: clean comment url" "$(jqr '.[0].comments[0].url' "$RUN_OUT")" "ht
 # checking only the first and would be caught here rather than in production.
 d="$(new_case)"
 threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-1"
-threads_one_page "$CONTAMINATED" 12 acme/widgets '' 2 >"$d/threads-2"
+threads_one_page "$CONTAMINATED" 12 acme/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-2"
 threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-3"
-threads_one_page "$CONTAMINATED" 12 acme/widgets '' 2 >"$d/threads-4"
+threads_one_page "$CONTAMINATED" 12 acme/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-4"
 run "$d" --repo acme/widgets 12
 assert_eq "c3: later-page contamination fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "c3: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
@@ -390,11 +395,13 @@ assert_contains "e: nested call targets the thread" "$cline1" "[threadId=T_neste
 assert_contains "e: nested call uses the comment endCursor" "$cline1" "[after=CCUR1]"
 assert_not_contains "e: never --paginate" "$RUN_LOG" "[--paginate]"
 
-# e2: comments merged UP from a nested page are in scope too. Every case above
-# feeds the scope check only urls that arrived on a threads page, so a helper
-# that validated those before merging the nested comments would pass — yet a
-# nested page is a separate response and can be crossed just like a threads one.
-# Here the threads page is clean and only the fetched-up comment is cross-PR.
+# e2: comments merged UP from a nested page are scope-checked too. Case (e)
+# already carries a nested-page url, but only a POSITIVE one, and every negative
+# case feeds the check a url that arrived on a threads page — so nothing here
+# would notice a helper that validated the threads-page urls before merging the
+# fetched-up comments, even though a nested page is a separate response that can
+# be crossed just like a threads one. Here the threads page is clean and only
+# the fetched-up comment is cross-PR.
 # Nested pages carry no identity fields to assert (they are `.data.node...`), so
 # this url scope check is the ONLY guard standing between them and stdout.
 d="$(new_case)"
@@ -522,7 +529,6 @@ assert_eq "h3: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')"
 # to the CANONICAL value so exactly one asserted identity field is wrong — a
 # helper that skipped the nameWithOwner/number checks could not pass these by
 # validating the (unasserted) url instead.
-CANONICAL_PR_URL='https://github.com/acme/widgets/pull/12'
 NODES_I='[
   {"id":"T_id","isResolved":false,"isOutdated":false,"path":"i.js","line":1,
    "comments":{"nodes":[{"databaseId":831,"author":{"login":"codex","__typename":"Bot"},"body":"in scope","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r831"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}

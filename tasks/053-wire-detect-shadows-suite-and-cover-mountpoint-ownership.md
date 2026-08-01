@@ -8,8 +8,9 @@ And **nothing runs them**: Tier 0 CI (`.github/workflows/native-linux-ci.yml`) r
 So a future edit to `detect-shadows.sh` can silently reopen any of those holes, and only a reviewer who happens to run the script by hand would notice.
 
 Separately, the mountpoint-ownership `chown` added to `docker/shared/shadow-mounts.sh` in PR #121 (see its thread on "Create absent artifact mountpoints as the workspace owner") has **no automated coverage at all**.
-It cannot be unit-tested from inside an agent container — the script must run as root and mount tmpfs, and the container's scoped sudoers only permits the *baked* `/usr/local/bin/shadow-mounts.sh`, not a repo copy — so the coverage has to live in the host/CI smoke tier, where a real image and root are available.
+The *real* privileged path cannot be exercised from inside an agent container — the script must run as root and mount tmpfs, and the container's scoped sudoers only permits the *baked* `/usr/local/bin/shadow-mounts.sh`, not a repo copy — so end-to-end coverage has to live in the host/CI smoke tier, where a real image and root are available.
 It was reviewed by hand (with instrumented `chown`/`mount` shims) rather than by a test, which is exactly the state this task ends.
+Note that a **hermetic, root-free unit test of the decision logic is possible** and is a cheap interim guard: relocate the `/workspace` literal, PATH-shim `mount`/`mountpoint`/`chown`/`id`, and assert the emitted `chown`/`mount` sequence, the deepest-existing-ancestor ownership, and the warn-once behaviour. An independent reviewer built one in ~15 lines during the PR #121 review. Do that first if the smoke-tier work slips.
 
 Raised by the independent reviewer during the PR #121 review round; deferred out of that PR because wiring a new smoke stage cannot be executed or validated from inside an agent container, and shipping an unrunnable harness edit blind is worse than queueing it.
 

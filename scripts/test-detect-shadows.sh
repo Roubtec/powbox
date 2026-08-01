@@ -512,6 +512,59 @@ git -C "$ws" add -f app/bin/publish.sh
 assert_absent "$ws/" "$ws/app/bin" "tracked bin is vetoed with a trailing-slash workspace too"
 assert_emits "$ws/" "$ws/app/obj" "obj still emitted (and normalized) with a trailing slash"
 
+echo "Test: a bin/ that is itself a repository checkout is never shadowed"
+# An initialized submodule or a nested clone at app/bin holds files the
+# workspace's own index cannot see, so a .git inside the candidate settles it
+# without asking git anything.
+ws="$(git_ws dotnet-repo-in-bin)"
+mkdir -p "$ws/app"
+touch "$ws/app/App.csproj"
+git -c init.defaultBranch=main init -q "$ws/app/bin"
+assert_absent "$ws" "$ws/app/bin" "a bin/ containing .git is not shadowed"
+assert_stderr "$ws" "Git repository or submodule checkout" "repo-in-bin skip is announced on stderr"
+assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected"
+
+echo "Test: a plain FILE named bin/obj is skipped, not emitted"
+ws="$(new_ws dotnet-file-named-bin)"
+mkdir -p "$ws/app"
+touch "$ws/app/App.csproj" "$ws/app/bin"
+assert_absent "$ws" "$ws/app/bin" "a regular file named bin is not emitted"
+assert_stderr "$ws" "not a directory" "non-directory skip is announced on stderr"
+assert_emits "$ws" "$ws/app/obj" "the sibling obj is still emitted"
+
+echo "Test: an inherited GIT_DIR cannot redirect the tracked-content probe"
+# shadow-refresh.sh runs from whatever environment invoked it — a Git hook has
+# GIT_DIR/GIT_INDEX_FILE set, and `git -C` does not override them.
+ws="$(git_ws dotnet-hostile-gitdir)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+git -C "$ws" add -f app/bin/publish.sh
+decoy="$(new_ws gitdir-decoy)"
+git -c init.defaultBranch=main init -q "$decoy"
+hostile_out="$(GIT_DIR="$decoy/.git" GIT_INDEX_FILE="$decoy/.git/index" run_out "$ws")"
+if grep -qxF "$ws/app/bin" <<<"$hostile_out"; then
+	ko "an inherited GIT_DIR redirected the probe and the tracked bin was shadowed"
+else
+	ok "tracked bin still vetoed under a hostile GIT_DIR"
+fi
+if grep -qxF "$ws/app/obj" <<<"$hostile_out"; then
+	ok "the untracked sibling obj is still emitted under a hostile GIT_DIR"
+else
+	ko "obj went missing under a hostile GIT_DIR"
+fi
+
+echo "Test: an unreadable index fails CLOSED for directories that exist"
+# Cannot tell disposable output from tracked content, and masking tracked files
+# loses edits — so leave the existing ones alone rather than guess.
+ws="$(git_ws dotnet-broken-index)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+git -C "$ws" add -f app/bin/publish.sh
+printf 'not an index' >"$ws/.git/index"
+assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when the index is unreadable"
+assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed (it cannot hold tracked content)"
+assert_stderr "$ws" "could not read the Git index" "the fail-closed decision is announced on stderr"
+
 echo "Test: a non-git workspace keeps the default shadow (probe fails open)"
 ws="$(new_ws dotnet-nongit)"
 mkdir -p "$ws/app/bin"

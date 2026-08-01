@@ -184,22 +184,31 @@ for target in "$@"; do
 		chown_failed=0
 		if owner="$(stat -c '%u:%g' "$deepest_existing" 2>/dev/null)"; then
 			for new_dir in "${new_dirs[@]}"; do
-				# Re-validate each directory AFTER the mkdir. `chown -h` only refuses to
-				# dereference the FINAL component, so an unprivileged workspace process
-				# that swapped an intermediate component for a symlink in the window
-				# between mkdir and chown could otherwise walk root out of /workspace.
-				# Skip anything that is now a symlink, and require the resolved path to
-				# still land under /workspace — the same containment the target itself
-				# was validated against above.
+				# Re-validate each directory AFTER the mkdir: skip one that is now a
+				# symlink, and require the resolved path to still land under /workspace
+				# — the same containment the target itself was validated against above.
+				# This NARROWS the mkdir→chown window rather than closing it: `chown -h`
+				# declines to dereference only the FINAL component, so a swap of an
+				# intermediate one between this check and the chown would still be
+				# followed. That residue is not a privilege boundary here — the node user
+				# already reaches root through the sudoers-allowed apt-get, and the
+				# mkdir and mount below traverse the very same attacker-mutable path —
+				# so the cheap check is worth having and the race is not worth the
+				# create-as-the-target-user machinery it would take to remove.
 				if [ -L "$new_dir" ]; then
+					chown_failed=1
 					continue
 				fi
 				if ! resolved_new="$(realpath -e -- "$new_dir" 2>/dev/null)"; then
+					chown_failed=1
 					continue
 				fi
 				case "$resolved_new" in
 				"$workspace_root"/*) ;;
-				*) continue ;;
+				*)
+					chown_failed=1
+					continue
+					;;
 				esac
 				chown -h "$owner" "$resolved_new" 2>/dev/null || chown_failed=1
 			done

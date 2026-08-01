@@ -13,6 +13,17 @@ shopt -s nullglob globstar
 
 WORKSPACE_DIR="${1:?usage: detect-shadows.sh <workspace-dir>}"
 
+# Normalize away a trailing slash before anything derives a path from it.
+# entrypoint-core.sh strips one, but shadow-refresh.sh passes its argument
+# through verbatim and `shadow-refresh.sh /workspace/<slug>/` is exactly what
+# shell tab completion produces — leaving it on would spell every derived path
+# with a `//` that some comparisons see and others do not.  Guarded so a lone
+# "/" cannot normalize to the empty string.
+case "$WORKSPACE_DIR" in
+/) ;;
+*/) WORKSPACE_DIR="${WORKSPACE_DIR%/}" ;;
+esac
+
 if [ ! -d "$WORKSPACE_DIR" ]; then
 	exit 0
 fi
@@ -40,25 +51,16 @@ add_shadow_path() {
 	esac
 }
 
-# True when <dir> — which must exist and not be a symlink — holds Git-tracked
-# content.  Used by the automatic .NET scan to keep an inferred shadow from
-# masking real files (see the bin/obj block below for why).
-#
-# `-C <dir>` with the `.` pathspec asks whichever repository actually OWNS the
-# directory, which matters three ways: an initialized submodule or a nested
-# checkout answers for itself instead of being invisible to the outer index; the
-# directory name is never interpreted as a pathspec, so a project path containing
-# `[`, `*` or `?` cannot silently miss; and no workspace-relative path arithmetic
-# is involved, so how WORKSPACE_DIR was spelled (trailing slash, `..`) cannot
-# change the answer.  `safe.directory=*` keeps the probe working when the
-# checkout's host uid differs from node's — this runs unprivileged and only
-# reads.  It costs one `git ls-files` per EXISTING bin/obj (a fresh clone, the
-# case the shadow exists for, has none), and it fails OPEN: not a repo, no git,
-# or an unreadable index vetoes nothing and the default shadow stands.
-dir_has_tracked_content() {
-	local tracked
-	tracked="$(git -c safe.directory='*' -C "$1" ls-files --cached -- . 2>/dev/null || true)"
-	[ -n "$tracked" ]
+# git, with the ambient GIT_* redirection variables scrubbed.  `git -C <dir>` does
+# NOT override them, and shadow-refresh.sh runs from whatever environment invoked
+# it — the pnpm wrapper, or a Git hook, where GIT_DIR and GIT_INDEX_FILE are set
+# — so an inherited value would silently point a read at another repository and
+# have it answer for a tree that is not this one, in either direction.
+# `safe.directory=*` keeps the reads working when the checkout's host uid differs
+# from node's; this script is unprivileged and only ever reads.
+git_scrubbed() {
+	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+		-u GIT_OBJECT_DIRECTORY git -c safe.directory='*' "$@"
 }
 
 # Expand workspace glob patterns into node_modules paths.
@@ -78,7 +80,11 @@ expand_workspace_patterns() {
 			[ -d "$pkg_dir" ] || continue
 			# Via add_shadow_path like every other producer: a manifest is repo
 			# content, so `packages: ["../other/src"]` must not be able to point
-			# the shadow at a sibling project's tree.
+			# the shadow at a sibling project's tree.  This adds the containment
+			# check only — deliberately NOT the .NET branch's symlink refusal:
+			# this branch is existence-gated and its symlink resolution is
+			# long-standing behaviour on main that a committed workspace layout
+			# may rely on, the same scoping call already made for .powbox.yml.
 			add_shadow_path "$(realpath -m -- "$pkg_dir/node_modules")" "$pkg_dir/node_modules"
 		done
 	done
@@ -141,25 +147,36 @@ fi
 # find(1) does not follow symlinks (-P), so proj_dir itself can contain no
 # symlinked component and checking the final bin/obj component is sufficient.
 #
-# An existing bin/obj holding GIT-TRACKED content is skipped for that same
-# reason.  A project that redirects its output (MSBuild `ArtifactsPath` /
-# `OutputPath`) can legitimately keep tracked scripts or fixtures in a sibling
-# bin/obj; a tmpfs over one would make those files read as deleted for the whole
-# session and send any edit to an overlay that dies with the container.  Real
-# build output is gitignored by every standard .NET template, so "tracked" is a
-# reliable signal that a directory is NOT disposable.  See
-# dir_has_tracked_content above for the probe and its costs.
+# An existing bin/obj that is a REPOSITORY CHECKOUT (it contains a .git) or that
+# holds GIT-TRACKED content is skipped for that same reason.  A project that
+# redirects its output (MSBuild `ArtifactsPath` / `OutputPath`) can legitimately
+# keep tracked scripts or fixtures — or a submodule — in a sibling bin/obj; a
+# tmpfs over one would make those files read as deleted for the whole session and
+# send any edit to an overlay that dies with the container.  Real build output is
+# gitignored by every standard .NET template, so "tracked" is a reliable signal
+# that a directory is NOT disposable, and a .git inside one settles it outright.
+# The two checks are complementary: the .git test catches an initialized
+# submodule or nested checkout, whose files the WORKSPACE's index cannot see at
+# all, and costs a single stat; the tracked-content probe below is one batched
+# `git ls-files` for the whole scan.
+dotnet_artifact_dirs=()
 while IFS= read -r -d '' proj_dir; do
 	for artifact_dir in "$proj_dir/bin" "$proj_dir/obj"; do
 		if [ -L "$artifact_dir" ]; then
 			echo "detect-shadows: skipping '$artifact_dir' — symlink; refusing to shadow its target." >&2
 			continue
 		fi
-		if [ -d "$artifact_dir" ] && dir_has_tracked_content "$artifact_dir"; then
-			echo "detect-shadows: skipping '$artifact_dir' — contains Git-tracked files; refusing to mask them with a tmpfs." >&2
+		if [ -e "$artifact_dir" ] && [ ! -d "$artifact_dir" ]; then
+			# A plain file named bin/obj: nothing to shadow, and emitting it would
+			# make shadow-mounts.sh complain at every container start.
+			echo "detect-shadows: skipping '$artifact_dir' — not a directory." >&2
 			continue
 		fi
-		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
+		if [ -e "$artifact_dir/.git" ]; then
+			echo "detect-shadows: skipping '$artifact_dir' — Git repository or submodule checkout, not build output." >&2
+			continue
+		fi
+		dotnet_artifact_dirs+=("$artifact_dir")
 	done
 done < <(
 	find "$WORKSPACE_DIR" \
@@ -168,6 +185,71 @@ done < <(
 		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
 		-printf '%h\0' \) 2>/dev/null | sort -zu
 )
+
+if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
+	# One `git ls-files` for the whole scan, restricted to the candidates that
+	# actually exist: a path that is not there cannot hold tracked content, and on
+	# a fresh clone — the case the shadow exists for — that is all of them.
+	#
+	# `--literal-pathspecs` so a project directory named `app[1]` is matched as
+	# itself rather than as a character class; git_scrubbed for the GIT_* and
+	# safe.directory handling described at its definition.
+	declare -A tracked_artifact_dir=()
+	existing_rel=()
+	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
+		if [ -d "$artifact_dir" ]; then
+			# Compare workspace-RELATIVE, the same form `git -C` prints, so no
+			# absolute-path arithmetic can disagree with git's own spelling.
+			existing_rel+=("${artifact_dir#"$WORKSPACE_DIR"/}")
+		fi
+	done
+	probe_failed=0
+	if [ ${#existing_rel[@]} -gt 0 ]; then
+		# The output is NUL-delimited (a tracked path may contain anything, and
+		# command substitution cannot carry NULs), so the exit status is smuggled
+		# out as a trailing sentinel rather than captured: every real record starts
+		# with one of the candidate prefixes, so it cannot collide with a path.
+		probe_ok=0
+		probe_sentinel='//detect-shadows-probe-ok//'
+		while IFS= read -r -d '' tracked_file; do
+			if [ "$tracked_file" = "$probe_sentinel" ]; then
+				probe_ok=1
+				continue
+			fi
+			for rel in "${existing_rel[@]}"; do
+				case "$tracked_file" in
+				"$rel" | "$rel"/*) tracked_artifact_dir["$rel"]=1 ;;
+				esac
+			done
+		done < <(git_scrubbed --literal-pathspecs -C "$WORKSPACE_DIR" \
+			ls-files -z --cached -- "${existing_rel[@]}" 2>/dev/null &&
+			printf '%s\0' "$probe_sentinel")
+		if [ "$probe_ok" = 0 ] &&
+			git_scrubbed -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+			# It IS a repository, so the failure is a real one (unreadable or
+			# corrupt index, git too old for a flag, ...) and we cannot tell
+			# disposable output from tracked content.  Fail CLOSED for the
+			# directories that exist: not shadowing them costs a host/container
+			# obj collision, while shadowing tracked files loses edits.
+			probe_failed=1
+			echo "detect-shadows: could not read the Git index for '$WORKSPACE_DIR'; leaving every existing .NET bin/obj un-shadowed rather than risk masking tracked files." >&2
+		fi
+		# Otherwise it is simply not a Git repository (a non-git folder launched as
+		# a workspace) — nothing can be tracked, so shadow as usual.
+	fi
+
+	for artifact_dir in "${dotnet_artifact_dirs[@]}"; do
+		rel="${artifact_dir#"$WORKSPACE_DIR"/}"
+		if [ -n "${tracked_artifact_dir["$rel"]:-}" ]; then
+			echo "detect-shadows: skipping '$artifact_dir' — contains Git-tracked files; refusing to mask them with a tmpfs." >&2
+			continue
+		fi
+		if [ "$probe_failed" = 1 ] && [ -d "$artifact_dir" ]; then
+			continue
+		fi
+		add_shadow_path "$(realpath -m -- "$artifact_dir")" "$artifact_dir"
+	done
+fi
 
 # --- .powbox.yml / .powbox.local.yml custom shadow paths ---
 POWBOX_YML="$WORKSPACE_DIR/.powbox.yml"

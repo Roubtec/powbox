@@ -549,12 +549,21 @@ ENV DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1
 #
 # Two empty marker files are enough, and the version is derived from the
 # installed SDK rather than hardcoded, so an SDK bump above needs no edit here.
+# The derived value is validated to be one well-formed version token before
+# anything is touched: `$(...)` strips only trailing newlines, so a
+# `dotnet --version` that ever grew a second stdout line would otherwise `touch`
+# a newline-bearing garbage filename, suppress nothing, and still succeed —
+# failing the build loudly is the only safe outcome. Stage 1 of the smoke test
+# applies the same guard (see commands/smoke-test.sh) so a stale cached copy of
+# this layer cannot ship one either.
 # Deliberately NOT warmed by running a throwaway `dotnet new` + build: that
 # would pull NuGet packages into the image for no benefit. Must run after
 # USER node — the sentinels are per-HOME, and /home/node is image content (only
 # .claude / .config/gh are volumes), so they persist into every container.
 RUN mkdir -p /home/node/.dotnet \
     && _sdk="$(dotnet --version)" \
+    && [ -n "$_sdk" ] \
+    && [ "$_sdk" = "${_sdk%%[!0-9A-Za-z.-]*}" ] \
     && touch "/home/node/.dotnet/${_sdk}.dotnetFirstUseSentinel" \
         "/home/node/.dotnet/${_sdk}.toolpath.sentinel"
 

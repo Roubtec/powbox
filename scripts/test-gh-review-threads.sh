@@ -3,9 +3,11 @@ set -euo pipefail
 
 # Offline unit test for the gh-review-threads helper — vendored in
 # Roubtec/agent-skills and baked into the powbox agent image — that
-# fetches a PR's review threads safely (manual pagination, never --paginate) and
+# fetches a PR's review threads safely (manual pagination, never --paginate),
+# asserts the repository/PR identity echoed by every threads page
+# (repository.nameWithOwner case-insensitively, pullRequest.number exactly), and
 # asserts every returned comment url belongs to the requested PR, failing closed
-# with exit 3 on a persistently contaminated response.
+# with exit 3 on a persistently contaminated or malformed response.
 #
 # Hermetic and host-independent: no live GitHub. `gh` is replaced by a PATH shim
 # that serves canned JSON fixtures per invocation and records every argv, so the
@@ -15,8 +17,8 @@ set -euo pipefail
 # nested comment fetch-up. Runnable on its own and wired into
 # commands/smoke-test.{sh,ps1}.
 #
-# Covers cases (a)–(g) — (a)–(e) from the task Implementation notes, (f)–(g) added
-# in review:
+# Covers cases (a)–(i) — (a)–(e) from the task Implementation notes, (f)–(g) added
+# in review, (h)–(i) added for the fail-closed parser/identity guards (task 033):
 #   (a) unresolved-only filtering, and --all
 #   (b) a two-page thread list followed via endCursor (two separate gh calls,
 #       right `after` values, no --paginate)
@@ -25,6 +27,15 @@ set -euo pipefail
 #   (e) nested comment-page fetch-up
 #   (f) default repo resolution via `gh repo view` when --repo is omitted
 #   (g) case-insensitive owner/repo scope match (non-canonical --repo casing)
+#   (h) malformed thread shapes (comments null / {} / absent) — the url PARSER
+#       fails, and the helper must still fail closed
+#   (i) response-identity mismatch (wrong nameWithOwner / wrong PR number) —
+#       fail closed after the single whole-fetch retry
+#
+# Every threads-page fixture echoes the positive response identity the helper
+# asserts since agent-skills task 013: repository.nameWithOwner plus
+# pullRequest.number (and url). Nested comments pages (.data.node...) are not
+# identity-asserted and carry no identity fields.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -171,9 +182,14 @@ nth_match() {
 	grep -F "$3" "$2" | sed -n "${1}p" || true
 }
 
-# A single-page reviewThreads response wrapping the given nodes JSON.
+# A single-page reviewThreads response wrapping the given nodes JSON, echoing
+# the response identity the helper asserts (nameWithOwner + PR number/url).
+# threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] — defaults match the
+# canonical test repo/PR (acme/widgets, PR 12).
 threads_one_page() {
-	printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' "$1"
+	local nodes="$1" pr="${2:-12}" nwo="${3:-acme/widgets}"
+	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"https://github.com/%s/pull/%s","reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+		"$nwo" "$pr" "$nwo" "$pr" "$nodes"
 }
 
 # ============================================================================
@@ -210,13 +226,13 @@ assert_eq "a: --all sorted ids" "$(jqr '[.[].id]|sort|join(",")' "$RUN_OUT")" T_
 # ============================================================================
 d="$(new_case)"
 cat >"$d/threads-1" <<'JSON'
-{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":2,"nodes":[
+{"data":{"repository":{"nameWithOwner":"acme/widgets","pullRequest":{"number":12,"url":"https://github.com/acme/widgets/pull/12","reviewThreads":{"totalCount":2,"nodes":[
   {"id":"T_p1","isResolved":false,"isOutdated":false,"path":"p1.js","line":1,
    "comments":{"nodes":[{"databaseId":301,"author":{"login":"codex","__typename":"Bot"},"body":"page1","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r301"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
 ],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR_ONE"}}}}}}
 JSON
 cat >"$d/threads-2" <<'JSON'
-{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":2,"nodes":[
+{"data":{"repository":{"nameWithOwner":"acme/widgets","pullRequest":{"number":12,"url":"https://github.com/acme/widgets/pull/12","reviewThreads":{"totalCount":2,"nodes":[
   {"id":"T_p2","isResolved":false,"isOutdated":false,"path":"p2.js","line":2,
    "comments":{"nodes":[{"databaseId":302,"author":{"login":"codex","__typename":"Bot"},"body":"page2","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r302"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
 ],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}
@@ -279,7 +295,7 @@ assert_contains "d1: names /pull/123" "$RUN_ERR" "https://github.com/acme/widget
 
 # d2: querying PR 123, that same /pull/123 comment IS in scope (exact number, `#` boundary).
 d="$(new_case)"
-threads_one_page "$BOUNDARY_123" >"$d/threads-1"
+threads_one_page "$BOUNDARY_123" 123 >"$d/threads-1"
 run "$d" --repo acme/widgets 123
 assert_eq "d2: /pull/123 accepted for PR 123 (exit 0)" "$RUN_RC" 0
 assert_eq "d2: emits the thread" "$(jqr 'length' "$RUN_OUT")" 1
@@ -312,7 +328,7 @@ assert_contains "d4: names the other-repo url" "$RUN_ERR" "https://github.com/ot
 # ============================================================================
 d="$(new_case)"
 cat >"$d/threads-1" <<'JSON'
-{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":[
+{"data":{"repository":{"nameWithOwner":"acme/widgets","pullRequest":{"number":12,"url":"https://github.com/acme/widgets/pull/12","reviewThreads":{"totalCount":1,"nodes":[
   {"id":"T_nested","isResolved":false,"isOutdated":false,"path":"n.js","line":7,
    "comments":{"nodes":[{"databaseId":311,"author":{"login":"codex","__typename":"Bot"},"body":"comment A","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r311"}],"pageInfo":{"hasNextPage":true,"endCursor":"CCUR1"}}}
 ],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}
@@ -360,6 +376,8 @@ assert_not_contains "f: never --paginate" "$RUN_LOG" "[--paginate]"
 # A --repo passed in non-canonical casing (Acme/Widgets) must still scope-match the
 # canonical urls (acme/widgets) and emit them, rather than read as contamination and
 # fail closed with exit 3 (which is what a case-sensitive prefix check would do).
+# The fixture echoes the CANONICAL-cased nameWithOwner (acme/widgets), so exit 0
+# also proves the response-identity compare is case-insensitive.
 NODES_G='[
   {"id":"T_case","isResolved":false,"isOutdated":false,"path":"g.js","line":1,
    "comments":{"nodes":[{"databaseId":811,"author":{"login":"codex","__typename":"Bot"},"body":"canonical-cased url","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r811"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}

@@ -25,7 +25,7 @@ set -euo pipefail
 #   (c) a contaminated response — fail closed on repeat, succeed on a clean
 #       retry, including contamination that only arrives on a later page
 #   (d) the /pull/12 vs /pull/123 boundary (and end/`#` acceptance)
-#   (e) nested comment-page fetch-up
+#   (e) nested comment-page fetch-up, and a cross-PR url arriving on one
 #   (f) default repo resolution via `gh repo view` when --repo is omitted
 #   (g) case-insensitive owner/repo scope match (non-canonical --repo casing)
 #   (h) malformed thread shapes (comments null / {} / absent) — the url PARSER
@@ -186,22 +186,29 @@ nth_match() {
 
 # A single-page reviewThreads response wrapping the given nodes JSON, echoing
 # the response identity the helper asserts (nameWithOwner + PR number/url).
-# threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] [<pr-url>] — defaults
+# threads_one_page <nodes> [<pr-number>] [<nameWithOwner>] [<pr-url>]
+# [<total-count>] — defaults
 # match the canonical test repo/PR (acme/widgets, PR 12); the url derives from
 # the other two unless overridden. The (i) cases override it back to canonical
 # so each presents exactly ONE wrong asserted identity field.
+# The trailing <total-count> defaults to 1 and exists so a page serving as the
+# LAST of two can report the same connection total as its first page; the helper
+# never reads totalCount (it pages on pageInfo.hasNextPage), so it is purely
+# there to keep multi-page fixtures self-consistent for the next reader.
 threads_one_page() {
-	local nodes="$1" pr="${2:-12}" nwo="${3:-acme/widgets}" url
+	local nodes="$1" pr="${2:-12}" nwo="${3:-acme/widgets}" total="${5:-1}" url
 	url="${4:-https://github.com/$nwo/pull/$pr}"
-	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":1,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
-		"$nwo" "$pr" "$url" "$nodes"
+	printf '{"data":{"repository":{"nameWithOwner":"%s","pullRequest":{"number":%s,"url":"%s","reviewThreads":{"totalCount":%s,"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+		"$nwo" "$pr" "$url" "$total" "$nodes"
 }
 
 # The FIRST of two thread pages: same identity echo as threads_one_page, but it
 # advertises a further page under the given cursor, so the helper must issue a
 # second call with `after=<cursor>` — which threads_one_page then serves as the
-# final page. threads_first_of_two <nodes> <cursor> [<pr-number>]
-# [<nameWithOwner>] [<pr-url>]; defaults match threads_one_page.
+# final page, passed `2` as its <total-count> so both pages agree.
+# threads_first_of_two <nodes> <cursor> [<pr-number>] [<nameWithOwner>]
+# [<pr-url>]; the optional args and their defaults match threads_one_page, but
+# note the REQUIRED <cursor> sits at $2, shifting them one place right.
 threads_first_of_two() {
 	local nodes="$1" cursor="$2" pr="${3:-12}" nwo="${4:-acme/widgets}" url
 	url="${5:-https://github.com/$nwo/pull/$pr}"
@@ -302,9 +309,9 @@ assert_eq "c2: clean comment url" "$(jqr '.[0].comments[0].url' "$RUN_OUT")" "ht
 # checking only the first and would be caught here rather than in production.
 d="$(new_case)"
 threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-1"
-threads_one_page "$CONTAMINATED" >"$d/threads-2"
+threads_one_page "$CONTAMINATED" 12 acme/widgets '' 2 >"$d/threads-2"
 threads_first_of_two "$CLEAN" CURSOR_C >"$d/threads-3"
-threads_one_page "$CONTAMINATED" >"$d/threads-4"
+threads_one_page "$CONTAMINATED" 12 acme/widgets '' 2 >"$d/threads-4"
 run "$d" --repo acme/widgets 12
 assert_eq "c3: later-page contamination fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "c3: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
@@ -382,6 +389,32 @@ cline1="$(nth_match 1 "$d/log" '[threadId=')"
 assert_contains "e: nested call targets the thread" "$cline1" "[threadId=T_nested]"
 assert_contains "e: nested call uses the comment endCursor" "$cline1" "[after=CCUR1]"
 assert_not_contains "e: never --paginate" "$RUN_LOG" "[--paginate]"
+
+# e2: comments merged UP from a nested page are in scope too. Every case above
+# feeds the scope check only urls that arrived on a threads page, so a helper
+# that validated those before merging the nested comments would pass — yet a
+# nested page is a separate response and can be crossed just like a threads one.
+# Here the threads page is clean and only the fetched-up comment is cross-PR.
+# Nested pages carry no identity fields to assert (they are `.data.node...`), so
+# this url scope check is the ONLY guard standing between them and stdout.
+d="$(new_case)"
+cat >"$d/threads-1" <<'JSON'
+{"data":{"repository":{"nameWithOwner":"acme/widgets","pullRequest":{"number":12,"url":"https://github.com/acme/widgets/pull/12","reviewThreads":{"totalCount":1,"nodes":[
+  {"id":"T_nested_bad","isResolved":false,"isOutdated":false,"path":"n2.js","line":8,
+   "comments":{"nodes":[{"databaseId":321,"author":{"login":"codex","__typename":"Bot"},"body":"in scope","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r321"}],"pageInfo":{"hasNextPage":true,"endCursor":"CCUR2"}}}
+],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}
+JSON
+cat >"$d/comments-1" <<'JSON'
+{"data":{"node":{"comments":{"nodes":[{"databaseId":322,"author":{"login":"alice","__typename":"User"},"body":"wrong pr","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/999#discussion_r322"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+JSON
+cp "$d/threads-1" "$d/threads-2"
+cp "$d/comments-1" "$d/comments-2"
+run "$d" --repo acme/widgets 12
+assert_eq "e2: cross-PR nested comment fails closed (exit 3)" "$RUN_RC" 3
+assert_eq "e2: no stdout emitted (clean thread page never leaks)" "$RUN_OUT" ""
+assert_contains "e2: names the nested offending url" "$RUN_ERR" "https://github.com/acme/widgets/pull/999#discussion_r322"
+assert_eq "e2: fetched twice (retry once)" "$(count_matches "$d/log" '[owner=')" 2
+assert_eq "e2: nested page re-fetched on the retry" "$(count_matches "$d/log" '[threadId=')" 2
 
 # ============================================================================
 # (f) default repo resolution via `gh repo view` when --repo is omitted
@@ -532,9 +565,9 @@ NODES_I_P1='[
 # i3: page two echoes the WRONG nameWithOwner (url stays canonical).
 d="$(new_case)"
 threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-1"
-threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-2"
 threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-3"
-threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" >"$d/threads-4"
+threads_one_page "$NODES_I" 12 other/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-4"
 run "$d" --repo acme/widgets 12
 assert_eq "i3: later-page wrong nameWithOwner fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "i3: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""
@@ -546,9 +579,9 @@ assert_not_contains "i3: retry restarts at page one" "$(nth_match 3 "$d/log" '[o
 # i4: page two echoes the WRONG pullRequest.number (url stays canonical).
 d="$(new_case)"
 threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-1"
-threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-2"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-2"
 threads_first_of_two "$NODES_I_P1" CURSOR_I >"$d/threads-3"
-threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" >"$d/threads-4"
+threads_one_page "$NODES_I" 999 acme/widgets "$CANONICAL_PR_URL" 2 >"$d/threads-4"
 run "$d" --repo acme/widgets 12
 assert_eq "i4: later-page wrong PR number fails closed (exit 3)" "$RUN_RC" 3
 assert_eq "i4: no stdout emitted (clean first page never leaks)" "$RUN_OUT" ""

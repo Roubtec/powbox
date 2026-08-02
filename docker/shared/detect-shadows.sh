@@ -105,7 +105,7 @@ nested_dir_holds_content() {
 		return 0
 	fi
 	# An empty result is only trustworthy if there was an index to read.
-	! git_index_present "$parent"
+	! git_index_trustworthy "$parent"
 }
 
 # `ls-files --cached` reads the INDEX, and a missing index reads as an empty one
@@ -121,6 +121,20 @@ git_index_present() {
 	/*) [ -e "$index_path" ] ;;
 	*) [ -e "$1/$index_path" ] ;;
 	esac
+}
+
+# ... but a MISSING index is only suspicious when the repository has content to
+# be missing from.  `git init` writes no index until something is staged, so a
+# brand-new repo with no commits legitimately has none, and its empty answer is
+# the truth rather than a failure — treating that as broken would withhold the
+# shadows and print an alarm on an ordinary "start a new project here".  HEAD
+# tells the two apart: no index AND no commits is a fresh repo; no index WITH
+# commits is a broken one.
+git_index_trustworthy() {
+	if git_index_present "$1"; then
+		return 0
+	fi
+	! git_scrubbed -C "$1" rev-parse --verify --quiet HEAD >/dev/null 2>&1
 }
 
 # Expand workspace glob patterns into node_modules paths.
@@ -291,7 +305,7 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 			if [ "$tracked_file" = "$probe_sentinel" ]; then
 				# Success alone is not enough: a MISSING index also reads as an
 				# empty one with status 0 (see git_index_present).
-				if git_index_present "$WORKSPACE_DIR"; then
+				if git_index_trustworthy "$WORKSPACE_DIR"; then
 					probe_ok=1
 				fi
 				continue

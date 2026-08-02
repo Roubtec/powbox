@@ -576,6 +576,18 @@ rm -f "$ws/.git/index"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when the index is missing"
 assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed"
 
+echo "Test: a fresh repo with nothing staged is not mistaken for a broken one"
+# `git init` writes no index until something is staged, so a brand-new repo
+# legitimately has none — and nothing can be tracked, so its empty answer is the
+# truth. Treating it as broken would withhold the shadows and print an alarm on
+# an ordinary "start a new project here".
+ws="$(git_ws dotnet-fresh-init)"
+mkdir -p "$ws/app/bin" "$ws/app/obj"
+touch "$ws/app/App.csproj" "$ws/app/bin/App.dll"
+assert_emits "$ws" "$ws/app/bin" "an existing bin is still shadowed in a repo with no index yet"
+assert_emits "$ws" "$ws/app/obj" "an existing obj is still shadowed in a repo with no index yet"
+assert_stderr_absent "$ws" "could not read the Git index" "no fail-closed alarm for a fresh repo"
+
 echo "Test: an unreadable .git fails CLOSED rather than reading as a non-repo"
 # `rev-parse` reports "not a git repository" for an unreadable .git, so the
 # existence of the entry — not that probe alone — is what withholds the shadow.

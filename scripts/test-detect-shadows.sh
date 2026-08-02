@@ -599,6 +599,74 @@ chmod 000 "$ws/.git"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when .git is unreadable"
 chmod 755 "$ws/.git"
 
+echo "Test: a DANGLING .git symlink still counts as repository evidence"
+# `-e` follows symlinks, so it answers false for a dangling `.git` — and both
+# `rev-parse` and `ls-files` fail too, so nothing would be left to stop the
+# non-repository fail-OPEN path from shadowing an existing bin without ever
+# establishing whether it holds tracked content.  Lexical existence is the test.
+ws="$(new_ws dotnet-dangling-gitlink)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
+ln -s "$ws/.git-moved-away" "$ws/.git"
+assert_absent "$ws" "$ws/app/bin" "an existing bin is withheld when .git is a dangling symlink"
+assert_stderr "$ws" "could not read the Git index" "the dangling-.git fail-closed is announced on stderr"
+assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed behind a dangling .git"
+
+echo "Test: a dangling .git symlink on a nested ANCESTOR still routes to that repo"
+# nested_repo_owns decides which index owns the question by stat'ing ancestors;
+# missing a dangling one would fold the candidate into the outer batched query,
+# which answers "untracked" for content the outer index cannot see.
+ws="$(git_ws dotnet-dangling-nested)"
+mkdir -p "$ws/vendor/lib/app/bin"
+touch "$ws/vendor/lib/app/App.csproj" "$ws/vendor/lib/app/bin/tool.sh"
+ln -s "$ws/vendor/lib/.git-moved-away" "$ws/vendor/lib/.git"
+assert_absent "$ws" "$ws/vendor/lib/app/bin" "an existing bin under a dangling nested .git is withheld"
+
+echo "Test: a dangling .git symlink INSIDE a candidate marks it a checkout"
+# Same lexical rule at the third site: app/bin/.git pointing nowhere still means
+# app/bin is a repository checkout rather than MSBuild output.
+ws="$(git_ws dotnet-dangling-in-bin)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj"
+ln -s "$ws/app/bin/.git-moved-away" "$ws/app/bin/.git"
+assert_absent "$ws" "$ws/app/bin" "a bin holding a dangling .git symlink is not shadowed"
+assert_stderr "$ws" "Git repository or submodule checkout" "the repo-in-bin skip is announced on stderr"
+assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected"
+
+echo "Test: an undetermined NESTED answer withholds only what exists"
+# The nested probe is three-way, like the batched one: "could not determine" must
+# not withhold an ABSENT bin/obj — there is nothing there to mask, and that is
+# the fresh-clone case the feature exists for.  The outer path already behaves
+# this way; collapsing the nested one onto "tracked" made the two disagree.
+ws="$(git_ws dotnet-nested-undetermined)"
+mkdir -p "$ws/vendor/lib/bin"
+touch "$ws/vendor/lib/Lib.csproj" "$ws/vendor/lib/bin/tool.sh"
+git -c init.defaultBranch=main init -q "$ws/vendor/lib"
+git -C "$ws/vendor/lib" add -f bin/tool.sh
+git -C "$ws/vendor/lib" -c user.email=t@example.com -c user.name=t commit -qm "seed"
+rm -f "$ws/vendor/lib/.git/index"
+assert_absent "$ws" "$ws/vendor/lib/bin" "an existing bin is withheld when the nested index is missing"
+assert_emits "$ws" "$ws/vendor/lib/obj" "an absent obj is still shadowed when the nested index is missing"
+
+echo "Test: an undetermined nested answer is not reported as tracked content"
+# Saying "contains Git-tracked files" when nothing was established sends an
+# operator looking for files that are not there.
+assert_stderr "$ws" "could not read the Git index for the repository owning" \
+	"the nested fail-closed names the real reason"
+assert_stderr_absent "$ws" "contains Git-tracked files" \
+	"an undetermined nested answer does not claim tracked content"
+
+echo "Test: a fresh nested repo with no index yet still gets both shadows"
+# `git init` inside vendor/lib with nothing staged writes no index; that empty
+# answer is the truth, not a failure, exactly as for the workspace's own repo.
+ws="$(git_ws dotnet-nested-fresh-init)"
+mkdir -p "$ws/vendor/lib/bin"
+touch "$ws/vendor/lib/Lib.csproj" "$ws/vendor/lib/bin/Lib.dll"
+git -c init.defaultBranch=main init -q "$ws/vendor/lib"
+assert_emits "$ws" "$ws/vendor/lib/bin" "an existing bin is shadowed in a fresh nested repo"
+assert_emits "$ws" "$ws/vendor/lib/obj" "an absent obj is shadowed in a fresh nested repo"
+assert_stderr_absent "$ws" "could not read the Git index" "no fail-closed alarm for a fresh nested repo"
+
 echo "Test: ambient pathspec-mode variables do not disable the scan"
 # Any of GIT_*_PATHSPECS makes the explicit --literal-pathspecs fatal, which
 # would fail the whole probe closed and silently switch the feature off.

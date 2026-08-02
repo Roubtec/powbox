@@ -1,4 +1,4 @@
-# Task 053 — Persist the NuGet package cache and gate the worktrees volume on .NET repos
+# Task 055 — Persist the NuGet package cache and gate the worktrees volume on .NET repos
 
 ## Why this task exists
 

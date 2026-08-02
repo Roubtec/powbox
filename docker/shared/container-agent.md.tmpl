@@ -91,7 +91,7 @@ pg-dev-up                      # initdb + start + create db, prints DATABASE_URL
 eval "$(pg-dev-up url --export)"   # export DATABASE_URL into the current shell
 ```
 
-The emitted URL always ends in `?sslmode=disable` (`postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable`) — the cluster has no SSL, and Go's `lib/pq` defaults to `sslmode=require` when the DSN omits it (other drivers default to `prefer` and accept the parameter), so do **not** strip it or re-append it by hand; append any extra parameter with `&`.
+The emitted URL always ends in `?sslmode=disable` (`postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable`) — the cluster has no SSL, and Go's `lib/pq` refuses to connect when the DSN omits `sslmode` (`disable` is also the one spelling every other common client accepts), so do **not** strip it or re-append it by hand; append any extra parameter with `&`.
 
 It runs as the unprivileged `node` user with trust auth on a loopback socket (the container is the security boundary), so no `sudo -u postgres` dance is needed. Defaults are `postgres`/`postgres`/`postgres` on port `5432`; override per project to match its `.env` before the first call:
 

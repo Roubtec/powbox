@@ -56,16 +56,15 @@
 #
 # The emitted DATABASE_URL always ends in `?sslmode=disable`:
 #   postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable
-# The cluster is initdb'ed without SSL, but Go's lib/pq defaults to
-# sslmode=require when the DSN omits the parameter (through v1.11.x; v1.12.0
-# switched to libpq's `prefer`), so a Go integration suite on a common pin like
-# v1.10.9 would fail with "SSL is not enabled on the server" until someone
-# appended it by hand. Loopback-only + trust auth inside the container security
-# boundary makes `disable` the honest description, not a weakening; pgx,
-# libpq/psql and node-postgres all accept the explicit parameter too (they
-# default to `prefer`, i.e. TLS attempt then plaintext, so they connect either
-# way). The URL already carries a query string, so append any extra parameter
-# with `&`, not `?`.
+# The cluster is initdb'ed without SSL, and Go's lib/pq does NOT fall back to
+# plaintext when the DSN omits sslmode — it fails with "SSL is not enabled on
+# the server" — so a Go integration suite pointed at a bare URL breaks until
+# someone appends the parameter by hand. Loopback-only + trust auth inside the
+# container security boundary makes `disable` the honest description, not a
+# weakening, and it is the one spelling every common client accepts: pgx and
+# libpq/psql attempt TLS and fall back to plaintext, node-postgres attempts no
+# TLS at all, but all of them honor an explicit `disable`. The URL already
+# carries a query string, so append any extra parameter with `&`, not `?`.
 #
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
@@ -614,16 +613,17 @@ print_url() {
 	# a client that resolves localhost to ::1 first would fail to connect.
 	#
 	# ?sslmode=disable is not decoration: this cluster is initdb'ed without SSL,
-	# and Go's lib/pq DEFAULTS to sslmode=require when the DSN omits the
-	# parameter (through v1.11.x; v1.12.0 adopted libpq's `prefer`) — a Go
-	# integration suite on a common pin like v1.10.9 fails with "SSL is not
-	# enabled on the server" until someone appends it by hand. Stating it
-	# explicitly is the honest description of a loopback-only trust-auth cluster
-	# inside the container security boundary, not a weakening. pgx, libpq/psql
-	# and node-postgres accept the parameter too — they default to `prefer`
-	# (TLS attempt, then plaintext), so they connect with or without it — which
-	# makes the explicit form compatible across the ecosystem. Single
-	# construction site: `up`, `url`, and `url --export` all emit it.
+	# and Go's lib/pq does NOT fall back to plaintext when the DSN omits the
+	# parameter — it fails with "SSL is not enabled on the server", so a Go
+	# integration suite pointed at a bare URL breaks until someone appends it by
+	# hand. Stating it explicitly is the honest description of a loopback-only
+	# trust-auth cluster inside the container security boundary, not a weakening,
+	# and `disable` is the one spelling every common client accepts: pgx and
+	# libpq/psql attempt TLS and fall back to plaintext when the parameter is
+	# absent, node-postgres attempts no TLS at all (and treats `prefer`/`require`
+	# as verify-full aliases, so those spellings FAIL here), but all of them
+	# honor an explicit `disable`. Single construction site: `up`, `url`, and
+	# `url --export` all emit it.
 	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}?sslmode=disable"
 	if [ "${1:-}" = "--export" ]; then
 		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe
@@ -776,8 +776,8 @@ cmd_up() {
 		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
 		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
 		# unrelated server that happens to sit on the requested port. Unscoped mode
-		# keeps its historical behavior byte-for-byte (it just reports the requested
-		# port), so existing callers see the same URL as before scoped mode existed.
+		# keeps its historical port behavior — it just reports the requested port
+		# rather than probing for the one the cluster actually listens on.
 		if [ -n "$SCOPED" ]; then
 			actual="$(running_port || true)"
 			if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then

@@ -317,7 +317,7 @@ $dbScript = @(
   'printf %s "$url" | grep -qF "p%40s%2Fs%26w%23d" || { echo "FAIL: password not percent-encoded in URL" >&2; exit 1; }'
   'printf %s "$url" | grep -qF "@127.0.0.1:" || { echo "FAIL: URL host is not 127.0.0.1" >&2; exit 1; }'
   '# The DSN must state sslmode=disable: the cluster has no SSL and Go lib/pq'
-  '# defaults to sslmode=require when the parameter is absent (task 035). Assert'
+  '# refuses to connect when the parameter is absent (task 035). Assert'
   '# it on the BAKED copy, and again after the eval so the %q escaping of the ?'
   '# still round-trips.'
   'case "$url" in *"?sslmode=disable") : ;; *) echo "FAIL: URL missing ?sslmode=disable: $url" >&2; exit 1 ;; esac'

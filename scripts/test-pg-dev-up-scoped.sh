@@ -221,7 +221,7 @@ port_b="${port_b%%/*}"
 if [ -n "$port_a" ] && [ -n "$port_b" ]; then ok "both instances reported a URL/port"; else ko "missing URL/port (a='$url_a' b='$url_b')"; fi
 try "distinct ports ($port_a vs $port_b)" test "$port_a" != "$port_b"
 # Task 035: the DSN must state sslmode=disable. The cluster has no SSL, and
-# Go's lib/pq defaults to sslmode=require when the parameter is absent, so a
+# Go's lib/pq does not fall back to plaintext when the parameter is absent, so a
 # bare URL fails Go integration suites with "SSL is not enabled on the server".
 # Assert it on the SCOPED `up` output here; the unscoped/default path is
 # asserted in the "unscoped invocations" section at the end.

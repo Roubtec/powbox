@@ -42,6 +42,17 @@ new_ws() {
 	realpath "$ws"
 }
 
+# git_ws <name> — a workspace that is also a fresh git repo.  Use it wherever a
+# test needs a $ws/.git: a bare `mkdir "$ws/.git"` is repository EVIDENCE without
+# being a readable repository, which puts the tracked-content probe on its
+# fail-closed path and quietly couples the test to logic it is not about.
+git_ws() {
+	local ws
+	ws="$(new_ws "$1")"
+	git -c init.defaultBranch=main init -q "$ws"
+	printf '%s' "$ws"
+}
+
 # write_powbox <ws> <entry...> — write a .powbox.yml shadow list.  Each entry
 # is double-quoted so YAML special leaders ('!', '*', '[') are taken literally;
 # detect-shadows does its own glob expansion on the resulting string value.
@@ -390,7 +401,13 @@ else
 fi
 
 echo "Test: projects under node_modules / .git / .worktrees / .claude are pruned"
-ws="$(new_ws dotnet-pruned)"
+# git_ws, not new_ws: the `.git/tmpl` fixture below needs a $ws/.git, and a bare
+# `mkdir` one is repository EVIDENCE without being a readable repository, so the
+# tracked-content probe would fail closed and this pruning test would be quietly
+# exercising index-readability logic it is not about.  A real (freshly init'ed)
+# repository keeps the probe on its ordinary path; the assertion at the end of
+# the block pins that.
+ws="$(git_ws dotnet-pruned)"
 mkdir -p "$ws/node_modules/pkg" "$ws/.git/tmpl" "$ws/.worktrees/task/proj" \
 	"$ws/.claude/worktrees/task/proj"
 touch "$ws/node_modules/pkg/Vendored.csproj" \
@@ -408,6 +425,8 @@ assert_no_output "$ws" "pruned-only tree emits nothing"
 mkdir -p "$ws/src"
 touch "$ws/src/Real.csproj"
 assert_emits "$ws" "$ws/src/obj" "a project outside the pruned dirs is still found"
+assert_stderr_absent "$ws" "could not read the Git index" \
+	"pruning is decided without the fail-closed path being involved"
 
 echo "Test: a project file copied under bin/ or obj/ does not seed a nested scan"
 ws="$(new_ws dotnet-nested-artifacts)"
@@ -452,14 +471,6 @@ assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected by the symlinked
 # as deleted for the session and send edits to a tmpfs that dies with the
 # container, so tracked content vetoes the shadow.  `git add -f` mirrors the
 # real situation (the file IS in the index) regardless of any ignore rules.
-
-# git_ws <name> — a workspace that is also a fresh git repo.
-git_ws() {
-	local ws
-	ws="$(new_ws "$1")"
-	git -c init.defaultBranch=main init -q "$ws"
-	printf '%s' "$ws"
-}
 
 echo "Test: a bin/obj containing Git-tracked files is not shadowed"
 ws="$(git_ws dotnet-tracked)"
@@ -520,7 +531,7 @@ assert_absent "$ws" "$ws/vendor/lib/app/bin" "an unreadable nested index preserv
 # nothing, and so "withheld" is pinned to the fail-closed path rather than to
 # the ordinary tracked-content veto, which says something different.
 assert_emits "$ws" "$ws/vendor/lib/app/obj" "the absent sibling obj is still shadowed"
-assert_stderr "$ws" "could not read the Git index for the repository owning" \
+assert_stderr "$ws" "could not read the Git index for the repository owning '$ws/vendor/lib/app/bin'" \
 	"the nested fail-closed reason is announced on stderr"
 
 echo "Test: a tracked bin/ that is ABSENT on disk is still not shadowed"
@@ -639,7 +650,11 @@ assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when .git
 # scanned, and it does not distinguish the fail-closed path (which withholds
 # only what EXISTS) from the tracked-content veto (which withholds either way).
 assert_emits "$ws" "$ws/app/obj" "the absent sibling obj is still shadowed"
-assert_stderr "$ws" "could not read the Git index for" "the fail-closed reason is announced on stderr"
+# Pinned to the OUTER diagnostic, subject and all.  A bare "could not read the
+# Git index for" is also a prefix of the nested wording ("...for the repository
+# owning '..."), so the loose form would let a nested-path message satisfy an
+# assertion about the workspace's own repository.
+assert_stderr "$ws" "could not read the Git index for '$ws'" "the fail-closed reason is announced on stderr"
 chmod 755 "$ws/.git"
 
 echo "Test: a DANGLING .git symlink still counts as repository evidence"
@@ -652,7 +667,7 @@ mkdir -p "$ws/app/bin"
 touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
 ln -s "$ws/.git-moved-away" "$ws/.git"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is withheld when .git is a dangling symlink"
-assert_stderr "$ws" "could not read the Git index" "the dangling-.git fail-closed is announced on stderr"
+assert_stderr "$ws" "could not read the Git index for '$ws'" "the dangling-.git fail-closed is announced on stderr"
 assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed behind a dangling .git"
 
 echo "Test: a dangling .git symlink on a nested ANCESTOR still routes to that repo"
@@ -697,7 +712,7 @@ assert_emits "$ws" "$ws/vendor/lib/obj" "an absent obj is still shadowed when th
 echo "Test: an undetermined nested answer is not reported as tracked content"
 # Saying "contains Git-tracked files" when nothing was established sends an
 # operator looking for files that are not there.
-assert_stderr "$ws" "could not read the Git index for the repository owning" \
+assert_stderr "$ws" "could not read the Git index for the repository owning '$ws/vendor/lib/bin'" \
 	"the nested fail-closed names the real reason"
 assert_stderr_absent "$ws" "contains Git-tracked files" \
 	"an undetermined nested answer does not claim tracked content"
@@ -783,7 +798,7 @@ git -C "$ws" add -f app/bin/publish.sh
 printf 'not an index' >"$ws/.git/index"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when the index is unreadable"
 assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed (withholding it would break the fresh-clone case)"
-assert_stderr "$ws" "could not read the Git index" "the fail-closed decision is announced on stderr"
+assert_stderr "$ws" "could not read the Git index for '$ws'" "the fail-closed decision is announced on stderr"
 
 echo "Test: a non-git workspace keeps the default shadow (probe fails open)"
 ws="$(new_ws dotnet-nongit)"

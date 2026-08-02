@@ -543,6 +543,27 @@ assert_absent "$ws" "$ws/app/bin" "a bare repo at bin/ is not shadowed"
 assert_stderr "$ws" "Git repository or submodule checkout" "bare-repo skip is announced on stderr"
 assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected"
 
+echo "Test: a bare repository with a SYMLINKED HEAD is not shadowed"
+# `core.prefersymlinkrefs` (deprecated, still supported) makes `git init --bare`
+# write HEAD as a symlink to refs/heads/<default> — which does not exist until
+# the first commit, so `-e HEAD` is false on a freshly created bare repo while
+# `objects` and `refs` are real directories sitting right there.  Git still
+# calls it a repository; nothing else would stop its object store being masked.
+ws="$(git_ws dotnet-bare-symlink-head)"
+mkdir -p "$ws/app"
+touch "$ws/app/App.csproj"
+git -c core.prefersymlinkrefs=true -c init.defaultBranch=main init -q --bare "$ws/app/bin"
+if [ -L "$ws/app/bin/HEAD" ] && [ ! -e "$ws/app/bin/HEAD" ]; then
+	ok "precondition: this git writes a dangling symlink HEAD under prefersymlinkrefs"
+	assert_absent "$ws" "$ws/app/bin" "a bare repo with a symlinked HEAD is not shadowed"
+	assert_stderr "$ws" "Git repository or submodule checkout" "the symlinked-HEAD bare-repo skip is announced on stderr"
+	assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected"
+else
+	# Not a failure of the code under test: a future git may drop the option, or
+	# create the default branch eagerly.  Say so rather than assert a stale shape.
+	ok "skipped: this git does not produce a dangling symlink HEAD for a bare repo"
+fi
+
 echo "Test: a project path with glob metacharacters is probed literally"
 # --literal-pathspecs keeps `app[1]` from being read as a character class.
 ws="$(git_ws dotnet-metachars)"

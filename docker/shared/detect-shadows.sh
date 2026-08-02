@@ -72,17 +72,20 @@ git_scrubbed() {
 		git -c safe.directory='*' "$@"
 }
 
-# True when <dir>/.git exists LEXICALLY — a real entry, or a symlink whose
-# target is missing.  `-e` follows symlinks and so answers FALSE for a dangling
-# `.git` (a linked worktree whose gitdir moved or was pruned, a `.git` symlinked
-# onto a volume that is not mounted yet), and every caller here reads "no .git"
-# as "not a repository" — the fail-OPEN direction, which would shadow a bin/obj
-# without ever establishing whether it holds tracked content.  A `.git` entry
-# that merely EXISTS is enough evidence of a repository to withhold that; the
-# referenced Git directory being temporarily unavailable is exactly when the
-# tracked-content question cannot be answered and must not be assumed away.
-git_entry_present() {
-	[ -e "$1/.git" ] || [ -L "$1/.git" ]
+# True when <path> exists LEXICALLY — a real entry, or a symlink whose target is
+# missing.  `-e` follows symlinks and so answers FALSE for a dangling one, and
+# every repository-evidence test below reads a missing entry as "not a
+# repository" — the fail-OPEN direction, which would shadow a bin/obj without
+# ever establishing whether it holds real content.  An entry that merely EXISTS
+# is enough evidence to withhold that; the thing it points at being temporarily
+# unavailable is exactly when the question cannot be answered and must not be
+# assumed away.  Reached by a dangling `.git` (a linked worktree whose gitdir
+# moved or was pruned, a `.git` symlinked onto a volume not mounted yet) and by
+# a bare repository's `HEAD` under the deprecated-but-supported
+# `core.prefersymlinkrefs`, where HEAD is a symlink to a branch that does not
+# exist yet — an unborn default branch on a freshly created bare repo.
+entry_present() {
+	[ -e "$1" ] || [ -L "$1" ]
 }
 
 # True when <dir> lies inside a repository NESTED under the workspace — some
@@ -97,7 +100,7 @@ nested_repo_owns() {
 	local dir="${1%/*}"
 	NESTED_REPO_DIR=""
 	while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$WORKSPACE_DIR" ]; do
-		if git_entry_present "$dir"; then
+		if entry_present "$dir/.git"; then
 			NESTED_REPO_DIR="$dir"
 			return 0
 		fi
@@ -286,14 +289,20 @@ while IFS= read -r -d '' proj_dir; do
 		fi
 		# A .git covers a normal checkout and an initialized submodule (counted
 		# lexically, so a dangling one still says "repository" — see
-		# git_entry_present); the HEAD+objects+refs triple covers a BARE
+		# entry_present); the HEAD+objects+refs triple covers a BARE
 		# repository, which has no .git of its own and is invisible to the outer
 		# index, so nothing else would stop it being masked.  MSBuild output never
-		# looks like either.  The bare triple is deliberately NOT counted
-		# lexically: it already requires `objects` and `refs` to be real
-		# directories, which no symlink-existence test can supply.
-		if git_entry_present "$artifact_dir" ||
-			{ [ -e "$artifact_dir/HEAD" ] && [ -d "$artifact_dir/objects" ] && [ -d "$artifact_dir/refs" ]; }; then
+		# looks like either.  HEAD is counted lexically for the same reason as
+		# `.git`: under the deprecated-but-supported `core.prefersymlinkrefs`,
+		# `git init --bare` writes HEAD as a SYMLINK to `refs/heads/<default>`,
+		# which does not exist until the first commit — so `-e` is false on a
+		# freshly created bare repo while `objects` and `refs` are real
+		# directories sitting right there.  `objects`/`refs` stay `-d`: a
+		# repository cannot function without them as real directories (`-d`
+		# still follows a valid symlink to one), and loosening them would start
+		# matching things that are not repositories.
+		if entry_present "$artifact_dir/.git" ||
+			{ entry_present "$artifact_dir/HEAD" && [ -d "$artifact_dir/objects" ] && [ -d "$artifact_dir/refs" ]; }; then
 			echo "detect-shadows: skipping '$artifact_dir' — Git repository or submodule checkout, not build output." >&2
 			continue
 		fi
@@ -331,7 +340,11 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 			nested_dir_state "$artifact_dir" "$NESTED_REPO_DIR" || nested_state=$?
 			case "$nested_state" in
 			0) tracked_artifact_dir["${artifact_dir#"$WORKSPACE_DIR"/}"]=1 ;;
-			2) undetermined_artifact_dir["${artifact_dir#"$WORKSPACE_DIR"/}"]=1 ;;
+			1) ;;
+			# Only a positive "holds none" (1) may fall through to shadowing.
+			# Anything else is treated as undetermined, so a status this case
+			# does not know about cannot become the fail-OPEN answer by default.
+			*) undetermined_artifact_dir["${artifact_dir#"$WORKSPACE_DIR"/}"]=1 ;;
 			esac
 			continue
 		fi
@@ -367,7 +380,7 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 		if [ "$probe_ok" = 0 ] &&
 			{
 				git_scrubbed -C "$WORKSPACE_DIR" rev-parse --git-dir >/dev/null 2>&1 ||
-					git_entry_present "$WORKSPACE_DIR"
+					entry_present "$WORKSPACE_DIR/.git"
 			}; then
 			# It IS a repository, so the failure is a real one (unreadable or
 			# corrupt index, git too old for a flag, ...) and we cannot tell
@@ -381,7 +394,7 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 			# git repository" — which would fail OPEN and mask tracked files. So
 			# a .git entry that merely EXISTS is enough to withhold the shadow —
 			# lexically, so a DANGLING .git symlink counts too (see
-			# git_entry_present); `-e` alone would follow it and answer false.
+			# entry_present); `-e` alone would follow it and answer false.
 			probe_failed=1
 			echo "detect-shadows: could not read the Git index for '$WORKSPACE_DIR'; leaving every existing .NET bin/obj un-shadowed rather than risk masking tracked files." >&2
 		fi
@@ -403,11 +416,9 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 		# entrypoint-core.sh's stderr allow-list carries it through unchanged:
 		# both mean the same thing to an operator — the scan withheld a shadow
 		# because it could not read an index, so the feature is degraded.
-		if [ -n "${undetermined_artifact_dir["$rel"]:-}" ]; then
-			if [ -d "$artifact_dir" ]; then
-				echo "detect-shadows: could not read the Git index for the repository owning '$artifact_dir'; leaving it un-shadowed rather than risk masking tracked files." >&2
-				continue
-			fi
+		if [ -n "${undetermined_artifact_dir["$rel"]:-}" ] && [ -d "$artifact_dir" ]; then
+			echo "detect-shadows: could not read the Git index for the repository owning '$artifact_dir'; leaving it un-shadowed rather than risk masking tracked files." >&2
+			continue
 		fi
 		if [ "$probe_failed" = 1 ] && [ -d "$artifact_dir" ]; then
 			continue

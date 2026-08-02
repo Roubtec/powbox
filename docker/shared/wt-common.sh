@@ -100,12 +100,53 @@ wt_primary_checkout() {
 	return 1
 }
 
+# wt_branch_held_by_operation <worktree> <branch>
+#   Return 0 when the worktree at <worktree> — which `git worktree list
+#   --porcelain` reports as DETACHED — is nevertheless holding <branch> through
+#   an in-progress rebase or bisect. Git counts such a branch as checked out and
+#   refuses to check it out again (worktree.c: find_shared_symref() consults
+#   is_worktree_being_rebased() / is_worktree_being_bisected() for detached
+#   worktrees), so without this the resolver would miss exactly the case where an
+#   interrupted operation, not a plain checkout, is the blocker.
+#
+#   Reads the same per-worktree state files git itself reads, all under the
+#   worktree's own git dir (<common>/worktrees/<id>, or <root>/.git for the main
+#   working tree):
+#     rebase-merge/head-name  merge/interactive backend    -> "refs/heads/<b>"
+#     rebase-apply/head-name  apply backend                -> "refs/heads/<b>"
+#                             (skipped when the sibling `applying` marker says
+#                             this is a `git am`, which git does not treat as a
+#                             rebase holding the branch)
+#     BISECT_START            bisect (guarded by BISECT_LOG) -> bare "<b>"
+#   Any of these may hold a non-branch value (a sha, or "detached HEAD") — that
+#   simply never equals the branch, so it cannot produce a false positive.
+#   Returns 1 when the state cannot be read (e.g. the worktree dir is gone), so
+#   the caller degrades to git's own error rather than guessing.
+wt_branch_held_by_operation() {
+	local wt="$1" branch="$2" gitdir head
+	gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+	if [ -d "$gitdir/rebase-merge" ]; then
+		head="$(cat "$gitdir/rebase-merge/head-name" 2>/dev/null || true)"
+		[ "$head" != "refs/heads/$branch" ] || return 0
+	elif [ -d "$gitdir/rebase-apply" ] && [ ! -e "$gitdir/rebase-apply/applying" ]; then
+		head="$(cat "$gitdir/rebase-apply/head-name" 2>/dev/null || true)"
+		[ "$head" != "refs/heads/$branch" ] || return 0
+	fi
+	if [ -e "$gitdir/BISECT_LOG" ]; then
+		head="$(cat "$gitdir/BISECT_START" 2>/dev/null || true)"
+		[ "$head" != "$branch" ] || return 0
+	fi
+	return 1
+}
+
 # wt_worktree_for_branch <root> <branch>
 #   Print the absolute path of the worktree that currently has <branch> checked
-#   out, or return 1 (printing nothing) when no worktree holds it. Note that a
-#   worktree with a rebase/bisect in progress reports as detached, so a branch
-#   held only by such an operation is NOT found here — callers must treat a
-#   non-zero return as "unknown", not as "no conflict".
+#   out, or return 1 (printing nothing) when no worktree holds it. A worktree
+#   with a rebase/bisect in progress reports as `detached` in the porcelain even
+#   though git still refuses to check its branch out elsewhere, so detached
+#   records are cross-checked against the operation state (see
+#   wt_branch_held_by_operation). A non-zero return still means "unknown" rather
+#   than a guarantee of "no conflict": callers must fall back to git's own error.
 wt_worktree_for_branch() {
 	local root="$1" branch="$2" out line path=""
 	out="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || return 1
@@ -114,6 +155,12 @@ wt_worktree_for_branch() {
 		"worktree "*) path="${line#worktree }" ;;
 		"branch "*)
 			if [ "${line#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
+				printf '%s\n' "$path"
+				return 0
+			fi
+			;;
+		detached)
+			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch"; then
 				printf '%s\n' "$path"
 				return 0
 			fi

@@ -18,7 +18,9 @@
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
-#     misreading as a stale worktree — while stdout stays empty on failure.
+#     misreading as a stale worktree — while stdout stays empty on failure. The
+#     blocker is also named when an interrupted rebase leaves the holding
+#     worktree reporting as `detached`.
 #
 # Runs directly against the repo copies — no image build needed. Requires bash
 # and git on PATH (present in the agent image).
@@ -251,6 +253,44 @@ else
 	else
 		no "wt-enter sibling-worktree conflict message inadequate:$miss"
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: blocked by a worktree with an INTERRUPTED REBASE. git reports
+# such a worktree as `detached` in the porcelain, yet still refuses to check its
+# branch out elsewhere — so the diagnosis must consult the rebase state instead
+# of concluding "no worktree holds this branch" and falling back to git's bare
+# fatal. Same expectations as the sibling case above.
+# ---------------------------------------------------------------------------
+R7="$(make_repo r7)"
+WB7="$R7/.worktrees/$CONTAINER_NAME"
+E7="$WORK_ROOT/r7.err"
+git_quiet -C "$R7" checkout -q -b task-h
+echo "branch side" >"$R7/seed.txt"
+git_quiet -C "$R7" commit -qam "task-h edit"
+git_quiet -C "$R7" checkout -q main
+echo "main side" >"$R7/seed.txt"
+git_quiet -C "$R7" commit -qam "main edit"
+git_quiet -C "$R7" worktree add -q "$WB7/task-h" task-h >/dev/null 2>&1
+# Conflicting rebase: it stops mid-flight and leaves the worktree detached.
+git_quiet -C "$WB7/task-h" rebase main >/dev/null 2>&1 || true
+if git -C "$R7" worktree list --porcelain | grep -qx detached; then
+	if out="$(cd "$R7" && bash "$WT_ENTER" task-i task-h 2>"$E7")"; then
+		no "wt-enter must fail when the branch is held by an interrupted rebase (got '$out')"
+	else
+		miss=""
+		[ -z "$out" ] || miss="$miss stdout-not-empty"
+		grep -F "$WB7/task-h" "$E7" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		! grep -qiF "primary" "$E7" || miss="$miss claims-primary"
+		[ ! -e "$WB7/task-i" ] || miss="$miss worktree-created"
+		if [ -z "$miss" ]; then
+			ok "wt-enter names the blocking worktree even when a rebase leaves it detached"
+		else
+			no "wt-enter interrupted-rebase conflict message inadequate:$miss"
+		fi
+	fi
+else
+	no "precondition: rebase did not leave $WB7/task-h detached"
 fi
 
 echo

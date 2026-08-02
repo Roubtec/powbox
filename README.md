@@ -234,7 +234,7 @@ Shared volume names are kept stable to preserve existing data:
 The launcher also creates **per-container** volumes, keyed by the full container name (agent + project) so a project's Claude and Codex containers each get their own copy (not shared):
 
 - `agent-nm-<agent>-<project>` → the root `node_modules` (mounted for JS/powbox projects: `package.json`, `pnpm-workspace.yaml`, committed `.powbox.yml`, or `.powbox.local.yml` with a top-level `shadow:` key; a ctx-only local config does not trigger it)
-- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the durable per-worktree git metadata** (`.worktrees/.gitworktrees`, bind-mounted over `.git/worktrees` so worktrees survive container recreation), the **per-container pnpm store** (`.worktrees/.pnpm-store`) **and the Go caches** — the shared `GOMODCACHE`/`GOCACHE` (`.worktrees/.gomodcache`, `.worktrees/.gocache`) plus the per-worktree golangci-lint analysis caches (`.worktrees/.golangci-cache/…`) **and the opt-in ccache compiler cache** (`.worktrees/.ccache`, `CCACHE_DIR`) — so worktrees, Go module downloads and builds (and, when activated, native C/C++ compiles) survive container recreation. Mounted for the same JS/powbox gate **and** for repos with a `go.mod`; a go.mod-only repo gets this volume without the `node_modules` one, so no empty `node_modules/` dir appears in the host folder.
+- `agent-wt-<agent>-<project>` → the `.worktrees` tree, which **also holds the durable per-worktree git metadata** (`.worktrees/.gitworktrees`, bind-mounted over `.git/worktrees` so worktrees survive container recreation), the **per-container pnpm store** (`.worktrees/.pnpm-store`, JS/powbox gate only) **and the Go caches** — the shared `GOMODCACHE`/`GOCACHE` (`.worktrees/.gomodcache`, `.worktrees/.gocache`) plus the per-worktree golangci-lint analysis caches (`.worktrees/.golangci-cache/…`) **and the opt-in ccache compiler cache** (`.worktrees/.ccache`, `CCACHE_DIR`) — so worktrees, Go module downloads and builds (and, when activated, native C/C++ compiles) survive container recreation. Mounted for the same JS/powbox gate **and** for repos with a `go.mod`; a go.mod-only repo gets this volume without the `node_modules` one, so no empty `node_modules/` dir appears in the host folder.
 
 In [self-hosted mode](#self-hosted-mode---isolated) these two are replaced by a single per-**instance** `agent-ws-<container>` volume that holds the whole clone (the workspace, `node_modules`, `.worktrees`, and the stores/caches as subdirs); it is keyed per container, like the Podman storage volume below.
 
@@ -299,7 +299,7 @@ The ceiling: GUI apps, phone emulators, and non-headless browsers are the signal
 
 ## Per-Project Workspace Paths
 
-Each project is mounted at `/workspace/<project>-<hash>` inside the container instead of a shared `/workspace` path.
+Each project is mounted at `/workspace/<project-slug>` inside the container instead of a shared `/workspace` path.
 This gives every project a unique absolute path, which prevents tools that cache by path (Claude project memory, build caches, etc.) from colliding across projects.
 The container's working directory is set to the project-specific path automatically.
 
@@ -484,7 +484,7 @@ The .NET scan prunes `node_modules`, `.git`, `.worktrees`, `.claude`, and `bin`/
 Unlike the workspace globs, `bin`/`obj` are emitted as **literal** paths, so they are created and shadowed even on a fresh clone where no build has run yet; the cost is an empty `bin`/`obj` mountpoint dir appearing for a project that has never been built (or one that redirects output via `ArtifactsPath`), which every standard .NET template already gitignores.
 An existing `bin`/`obj` that is a **symlink** is skipped rather than followed — this scan is derived from repo content rather than declared by you, so resolving `app/bin -> ../src` would let the tree itself decide to mask real source for the whole session. Declare such a path in `.powbox.yml` if you genuinely want its target shadowed.
 For the same reason an existing `bin`/`obj` holding **Git-tracked** files is left alone: a project that redirects its output (`ArtifactsPath`, `OutputPath`) can legitimately keep tracked scripts or fixtures there, and masking them would make them read as deleted for the session while any edit landed in a tmpfs that dies with the container. Real build output is gitignored by every standard .NET template, so only genuinely disposable directories are shadowed. A `bin`/`obj` that belongs to a repository nested inside the workspace — a submodule, or a nested clone, whether it sits at the `bin` itself or above it — is judged by that repository rather than by the outer one. If the workspace is a Git repo whose index cannot be read, existing `bin`/`obj` are left alone rather than masked on a guess; a folder that is not a repo at all shadows as usual. (Declare the path in `.powbox.yml` if you want it shadowed anyway.)
-A .NET project added mid-session is picked up by re-running `shadow-refresh.sh` (there is no `dotnet` wrapper equivalent to the `pnpm` one below), so run it before your first build of a new project.
+A .NET project added mid-session is picked up by re-running `shadow-refresh.sh` in dir-mounted mode (there is no `dotnet` wrapper equivalent to the `pnpm` one below), so run it before your first build of a new project.
 
 ### Mid-Session Packages
 
@@ -492,8 +492,8 @@ Auto-detection runs once, at container start, so it only shadows the subpackages
 A package scaffolded *during* a session (create `packages/foo`, write its `package.json`, then `pnpm install`) is not shadowed yet, so its `node_modules` would be created and populated straight onto the host bind mount — re-introducing the exact Linux/host binary and ownership mix this feature exists to prevent, and breaking the host's own `pnpm install` with `EACCES`.
 
 To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked into the image: before any node_modules-writing subcommand (`install`, `add`, `update`, …) it re-runs detection so a freshly added package's `node_modules` is tmpfs-shadowed *before* pnpm writes into it, then delegates to the real pnpm.
-Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure (e.g. self-hosted mode, where there is no host filesystem to shadow) never blocks the command.
-You can still run `shadow-refresh.sh` by hand at any time.
+Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always exec's the real pnpm, so a shadow failure never blocks the command. Under `--isolated` it returns before invoking `shadow-refresh.sh` at all — there is no host filesystem to shadow, and the entrypoint skips shadowing there too.
+In dir-mounted mode you can still run `shadow-refresh.sh` by hand at any time — but never under `--isolated`: the script itself has no self-hosted guard, and the container holds `CAP_SYS_ADMIN` in both modes, so it would succeed and tmpfs-mask real workspace content.
 
 One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, committed `.powbox.yml`, or `.powbox.local.yml` with a top-level `shadow:` key at launch, so the launcher mounted no isolated root `node_modules` volume for it; a local config with only `ctx:` still counts as non-dev). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
 
@@ -550,6 +550,7 @@ shadow-refresh.sh
 
 This re-runs detection and mounts tmpfs over any new directories that were not previously shadowed.
 Already-mounted paths are skipped.
+Dir-mounted mode only — see the `--isolated` warning under [Mid-Session Packages](#mid-session-packages).
 
 ### Lifecycle
 

@@ -204,10 +204,14 @@ if [ -f "$AGENT_TMPL" ]; then
 		# container start, or run `agent-update-skills` to force a refresh).
 		# Per-repo .agents/skills/ still takes precedence at invoke time. The copy
 		# logic and the .powbox-seeded ownership marker live in the shared
-		# seed-skills.sh so this and the updater never drift.
+		# seed-skills.sh so this and the updater never drift. The baked palette
+		# comes verbatim from Roubtec/agent-skills' codex/dev-skills/skills/, so
+		# each marker records that upstream path (POWBOX_SEED_SOURCE_CODEX_SKILLS)
+		# — "where do I fix a defect in this skill" in one `cat`.
 		# shellcheck source=docker/shared/seed-skills.sh
 		. /usr/local/bin/seed-skills.sh
-		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/agents/skills" noclobber "$AGENT_SEED_DIR" ||
+		seed_skills "$AGENT_SEED_DIR/skills" "$AGENT_CONFIG_DIR/agents/skills" noclobber \
+			"$AGENT_SEED_DIR" "$POWBOX_SEED_SOURCE_CODEX_SKILLS" ||
 			echo "Warning: one or more Codex skills failed to seed; continuing." >&2
 
 		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"

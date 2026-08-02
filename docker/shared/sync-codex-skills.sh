@@ -37,10 +37,16 @@
 # OWNERSHIP: reuses seed-skills.sh's marker semantics. Only a skill whose
 # .powbox-seeded marker is present (powbox owns that copy) is overwritten; a
 # marker-less (user-adopted) skill is never touched. Provenance in the marker is
-# the SYNCED agent-skills SHA (source=plugin-clone), so agent-update-skills and
-# humans can see which channel last wrote the copy — see
+# the SYNCED agent-skills SHA plus channel=plugin-clone, so agent-update-skills
+# and humans can see which channel last wrote the copy — see
 # docs/skills-refresh-and-provenance.md for the precedence with the bake+seed
 # refresher (last-writer-wins; the next start re-syncs forward as a cheap no-op).
+# The marker's `source=` line is the UPSTREAM path in agent-skills
+# (codex/dev-skills/skills/<name>) — the same value the bake channel stamps,
+# because both channels ship the same upstream file; `channel=` is what
+# distinguishes the writer. (Images before this split recorded the channel as
+# `source=plugin-clone`; nothing parses either key, so old markers just carry the
+# old spelling until the next sync rewrites them.)
 
 set -uo pipefail
 
@@ -221,17 +227,9 @@ sync_from_clone() {
 		return 0
 	fi
 
-	# Marker body: the image bake's epoch/commit baseline (kept coherent with the
-	# updater's marker) PLUS the channel provenance — the synced agent-skills SHA
-	# and source=plugin-clone, so a human / agent-update-skills can see which
-	# channel last wrote this copy.
-	local marker
-	marker="$(printf '%s\nagent_skills_commit=%s\nsource=plugin-clone\n' \
-		"$(seed_marker_content "$CODEX_SEED_META")" "$clone_sha")"
-
 	mkdir -p "$CODEX_SKILLS_DEST" 2>/dev/null || true
 
-	local name target synced=0 skipped=0 rc=0
+	local name target marker synced=0 skipped=0 rc=0
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$CODEX_SKILLS_DEST/$name"
@@ -251,6 +249,16 @@ sync_from_clone() {
 				continue
 			fi
 		fi
+		# Marker body, built PER SKILL because `source=` names this skill's own
+		# upstream path: the image bake's epoch/commit baseline plus the upstream
+		# location (both via seed_marker_content, kept coherent with what the
+		# bake+seed refresher writes), then this channel's provenance — the synced
+		# agent-skills SHA and channel=plugin-clone, so a human /
+		# agent-update-skills can see which channel last wrote this copy.
+		marker="$(printf '%s\nagent_skills_commit=%s\nchannel=plugin-clone\n' \
+			"$(seed_marker_content "$CODEX_SEED_META" \
+				"$(seed_source_ref "$POWBOX_SEED_SOURCE_CODEX_SKILLS" "$name")")" \
+			"$clone_sha")"
 		# Absent, or marked-and-stale: atomic stage + rename (seed_skill), stamping
 		# the synced-SHA marker. Keeps the mid-session write window minimal.
 		if seed_skill "$CLONE_SKILLS_DIR/$name" "$target" "$marker"; then

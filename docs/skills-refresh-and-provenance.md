@@ -110,11 +110,13 @@ is actually iterated on still needs no rebuild.
 ### D2 — Per-skill ownership marker `.powbox-seeded`
 
 `seed_skills` writes `<dest>/<skill>/.powbox-seeded` whenever it places/refreshes a
-skill. Content (chosen: **epoch + commit**):
+skill. Content (chosen: **epoch + commit**, later extended with **source** — see
+[D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath)):
 
 ```
 epoch=<image build-epoch>
 commit=<powbox commit that built the agent image>
+source=<owner>/<repo>#<repo-relative path of this item>
 ```
 
 Discrimination rule — **the marker means "powbox owns this copy."**
@@ -192,6 +194,35 @@ passes it as a bake var → Dockerfile `ARG` → write to
 `/home/node/.agent-container/{claude,codex}/build-commit` in the **same `RUN`** as
 the epoch (that layer already rebuilds every build, so it is free). The entrypoint
 hook and the updater worker read it next to `build-epoch`.
+
+### D8 — The marker records its upstream source (`source=<owner>/<repo>#<path>`)
+
+`epoch=`/`commit=` answer *"which image build put this here"*. They do not answer the question an agent actually hits when it finds a **defect** in a seeded skill mid-run: *"where do I fix it?"*.
+That gap cost a real session several exploratory commands across four plugin-cache copies, ending in a report that could only describe the upstream location by inference — and the session's patch died with the session.
+
+So every marker also records the **source-of-truth path in the owning repo**:
+
+```
+source=Roubtec/agent-skills#codex/dev-skills/skills/address-review
+```
+
+Format: `<owner>/<repo>#<repo-relative-path>` — greppable, unambiguous, and pasteable straight into a report or PR description.
+The path is the **upstream** one, never the container destination, and it names the **item itself** (the trailing component is the skill folder / workflow file name), so `cat ~/.codex/agents/skills/<name>/.powbox-seeded` is the whole hunt.
+
+Where the value comes from: everything powbox seeds today originates in `Roubtec/agent-skills`, so a **per-source-root constant** is enough — no git metadata is threaded through the seed path.
+`seed-skills.sh` defines the roots (`POWBOX_SEED_SOURCE_{CODEX_SKILLS,CLAUDE_SKILLS,CLAUDE_WORKFLOWS}`, all derived from `POWBOX_SEED_SOURCE_REPO`), `seed_source_ref <root> <name>` appends the item name, and `seed_marker_content <meta> [<source_ref>]` emits the line.
+Each producer passes the root for the kind it is writing: the Codex entrypoint hook and the plugin-clone sync pass the Codex-skills root; `update-skills-incontainer.sh` carries one per row of its driver table.
+Because the value is per **item**, the marker body is built inside each producer's per-item loop rather than hoisted out of it — a hoisted body would stamp every skill with one name.
+
+Should powbox ever bake an asset it owns itself again, that call site gets its own `<owner>/<repo>#<path>` root; a call site with no upstream to name passes nothing (or `-`) and the line is **omitted** rather than written empty — an unknown source must be absent, never a misleading guess.
+
+**Marker parsing contract (both directions of the transition).** The marker is a set of `key=value` lines and **must be parsed by key** (`grep '^commit='`), never by line number or line count.
+An older image writes two-line markers that a newer image reads (ownership hinges on the marker's *presence*, so they classify, refresh, and prune exactly as before); a newer image writes three-plus-line markers that an older container may read.
+Every current consumer already satisfies this — `seed_is_marked`/`seed_workflow_is_marked` test existence only, and `codex_recorded_sha` greps `^agent_skills_commit=` — and `scripts/test-seed-marker-source.sh` pins it with legacy-marker refresh/prune cases.
+
+**Channel rename.** The plugin-clone sync previously recorded *which channel wrote the copy* as `source=plugin-clone`.
+That key now means the upstream path, so the channel moved to its own key, `channel=plugin-clone` (see the task-021 section below).
+Nothing in the codebase branches on either key — they are introspection only — so the transition needs no migration: a marker written by an older image keeps the old spelling until the next sync or refresh rewrites it.
 
 ---
 
@@ -338,18 +369,24 @@ upstream name collision. The forfeit moved both skills into `agent-skills`, so t
 arrive via the clone and are refreshed like any other shared skill — the denylist was
 removed with it.) It overwrites only a `.powbox-seeded`-marked (powbox-owned)
 copy via an atomic stage+rename, and never touches a marker-less user-adopted copy. It is **SHA-gated** to a byte-for-byte no-op when unchanged, and
-stamps each refreshed marker with two extra provenance lines beyond the D2 baseline:
+stamps each refreshed marker with two extra provenance lines beyond the D2/D8 baseline:
 
 ```
 epoch=<image build-epoch>
 commit=<powbox commit that built the image>
+source=Roubtec/agent-skills#codex/dev-skills/skills/<name>
 agent_skills_commit=<synced agent-skills HEAD SHA>
-source=plugin-clone
+channel=plugin-clone
 ```
 
-The `epoch`/`commit` lines are still written (via `seed_marker_content`, unchanged) so
-the marker stays coherent with what the bake+seed refresher writes; the two added lines
-record *which channel last wrote the copy* and *which agent-skills commit it carries*.
+The `epoch`/`commit`/`source` lines are still written (via `seed_marker_content`) so the
+marker stays coherent with what the bake+seed refresher writes — note `source=` is
+**identical** across the two channels, because both ship the same upstream file; the two
+added lines record *which channel last wrote the copy* and *which agent-skills commit it
+carries*.
+(Before D8 the channel was spelled `source=plugin-clone`; that key was repurposed for the
+upstream path and the channel moved to `channel=`. Nothing parses either, so markers on an
+existing volume simply keep the old spelling until the next write.)
 
 ### Precedence decision (D7): last-writer-wins, re-sync-forward
 
@@ -358,10 +395,11 @@ plugin-clone sync wrote it from a fresher `agent-skills` HEAD). The bake+seed re
 (`update-skills-incontainer.sh`, run by `agent-update-skills`) force-refreshes every
 *marked* skill from the image, and a marked skill is exactly what the sync produces — so
 running the updater rewrites those copies back to the image bake (and back to the plain
-2-line D2 marker).
+bake marker — `epoch`/`commit`/`source`, without the sync's `agent_skills_commit` and
+`channel` lines).
 
 **Decision: accept last-writer-wins.** We deliberately do **not** teach the updater to
-inspect `source=plugin-clone` / `agent_skills_commit` and skip a marker whose recorded
+inspect `channel=plugin-clone` / `agent_skills_commit` and skip a marker whose recorded
 channel is newer. Rationale:
 
 - The rollback is self-healing and cheap. The very next container start re-runs

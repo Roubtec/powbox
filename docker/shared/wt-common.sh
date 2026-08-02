@@ -110,12 +110,23 @@ wt_primary_checkout() {
 #                                   checkout for either spelling)
 #     other "refs/..." -> verbatim (never equals a branch short-name, so no match)
 #     "detached HEAD"  -> nothing, return 1 (rebase started from a detached HEAD)
-#     a full object id -> nothing, return 1 (a bisect started from a detached
-#                                   HEAD records the commit; git abbreviates it,
-#                                   so the full id must NEVER be compared against
-#                                   a branch name — verified: git does not treat
-#                                   a branch literally named that 40-hex as held)
+#     an object id     -> nothing, return 1 (a bisect started from a detached
+#                                   HEAD records the commit; git abbreviates it
+#                                   before comparing, so the recorded id must
+#                                   NEVER be matched against a branch name)
 #     anything else    -> verbatim (bisect's bare "<b>")
+#
+#   The object-id test mirrors git's get_oid_hex() CONSERVATIVELY. git parses hex
+#   case-INsensitively and consumes exactly the repository's hash width without
+#   requiring end-of-string, so a value of 41+ hex digits, or one with trailing
+#   junk after the first 40, is an object id to git — verified: for both, git
+#   ALLOWS a second checkout of a same-named branch, while an `^[0-9a-f]{40}$`
+#   test would have called it held (a false "held"). We therefore treat any value
+#   BEGINNING with 40 hex digits of either case as an object id. That is wider
+#   than git in a SHA-256 repository (where 40 hex digits are just a branch name)
+#   and for the handful of oid-shaped refnames git itself rejects as ambiguous;
+#   both extras only degrade to UNKNOWN, which costs nothing but git's own error
+#   message, whereas the opposite error would be a false "held".
 #   Returns 1 (printing nothing) when the file is missing, unreadable or empty,
 #   so a state we could not fully read degrades to UNKNOWN instead of being
 #   compared against truncated content.
@@ -130,7 +141,7 @@ wt_state_branch() {
 		return 0
 		;;
 	esac
-	if printf '%s' "$raw" | LC_ALL=C grep -Eq '^([0-9a-f]{40}|[0-9a-f]{64})$'; then
+	if printf '%s' "$raw" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{40}'; then
 		return 1
 	fi
 	printf '%s\n' "$raw"
@@ -159,19 +170,29 @@ wt_state_branch() {
 #     rebase-merge/         merge/interactive backend, only when rebase-apply is
 #                           absent.
 #     BISECT_START          bisect, only when BISECT_LOG marks one in progress.
+#                           Checked independently of the rebase state, exactly as
+#                           git checks is_worktree_being_bisected() separately
+#                           from is_worktree_being_rebased().
+#   The two rebase entries are probed with `-e`, not `-d`, because git decides
+#   with a bare stat(): a NON-directory `rebase-apply` still makes git stop at the
+#   apply backend, where it then finds no branch — verified: with a regular file
+#   at rebase-apply and a rebase-merge/head-name naming the branch, git ALLOWS the
+#   second checkout, whereas a `-d` probe would skip to rebase-merge and report a
+#   false "held". `-e` follows symlinks just as stat() does, so a DANGLING symlink
+#   correctly falls through to rebase-merge (verified: git refuses there).
 #   Returns 1 when the state cannot be read (e.g. the worktree dir is gone), so
 #   the caller degrades to git's own error rather than guessing: a false "held"
 #   is worse than falling back to git's message.
 wt_branch_held_by_operation() {
 	local wt="$1" branch="$2" gitdir head
 	gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
-	if [ -d "$gitdir/rebase-apply" ]; then
+	if [ -e "$gitdir/rebase-apply" ]; then
 		if [ ! -e "$gitdir/rebase-apply/applying" ] &&
 			head="$(wt_state_branch "$gitdir/rebase-apply/head-name")" &&
 			[ "$head" = "$branch" ]; then
 			return 0
 		fi
-	elif [ -d "$gitdir/rebase-merge" ]; then
+	elif [ -e "$gitdir/rebase-merge" ]; then
 		if head="$(wt_state_branch "$gitdir/rebase-merge/head-name")" &&
 			[ "$head" = "$branch" ]; then
 			return 0
@@ -193,20 +214,45 @@ wt_branch_held_by_operation() {
 #   records are cross-checked against the operation state (see
 #   wt_branch_held_by_operation). A non-zero return still means "unknown" rather
 #   than a guarantee of "no conflict": callers must fall back to git's own error.
+#
+#   The SAME scan also records what it found in two globals, so a caller picking a
+#   remedy never re-probes the blocker. A second probe can disagree with the first
+#   — the operation may have ended, or a read failed transiently — and then the
+#   advice would not match the blocker that was actually found, which here means
+#   offering "just remove that worktree" for one holding live bisect state:
+#     WT_BLOCKER_PATH                  the path just printed ("" when none)
+#     WT_BLOCKER_OPERATION_IN_FLIGHT   1 when that worktree holds an UNFINISHED
+#                                      rebase or bisect naming <branch>, else 0
+#   The flag is probed for a plain `branch` record too, not only for `detached`
+#   ones: `git bisect start` before the first good/bad leaves HEAD ON the branch,
+#   so the porcelain reports `branch` while a bisect really is in flight (verified
+#   — and that state is invisible to `git status --porcelain`, so a "remove the
+#   worktree" remedy would silently discard it).
+#   A command substitution runs the function in a subshell and would throw both
+#   globals away, so a caller that needs them invokes it directly and redirects
+#   stdout instead.
+# shellcheck disable=SC2034 # WT_BLOCKER_* are outputs, read by the caller (wt-enter)
 wt_worktree_for_branch() {
 	local root="$1" branch="$2" out line path=""
+	WT_BLOCKER_PATH=""
+	WT_BLOCKER_OPERATION_IN_FLIGHT=0
 	out="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || return 1
 	while IFS= read -r line; do
 		case "$line" in
 		"worktree "*) path="${line#worktree }" ;;
 		"branch "*)
 			if [ "${line#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
+				WT_BLOCKER_PATH="$path"
+				! wt_branch_held_by_operation "$path" "$branch" ||
+					WT_BLOCKER_OPERATION_IN_FLIGHT=1
 				printf '%s\n' "$path"
 				return 0
 			fi
 			;;
 		detached)
 			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch"; then
+				WT_BLOCKER_PATH="$path"
+				WT_BLOCKER_OPERATION_IN_FLIGHT=1
 				printf '%s\n' "$path"
 				return 0
 			fi

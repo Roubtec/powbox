@@ -125,11 +125,38 @@ for target in "$@"; do
 		;;
 	esac
 
+	# ... and must be NESTED inside a workspace, never a workspace itself. Every
+	# legitimate shadow (a package's node_modules, a project's bin/obj, .worktrees,
+	# .git/worktrees) lives below /workspace/<slug>, so a depth-1 target can only
+	# be a mistake — and tmpfs over it masks an entire checkout for the session.
+	# The producers already refuse to emit one (detect-shadows.sh rejects the
+	# workspace root and any path whose newline would split into a truncated
+	# ancestor), but this is the privileged end: the invariant should hold no
+	# matter who calls, since a caller passes arbitrary argv and the damage is
+	# whole-checkout.
+	case "${resolved_target#"$workspace_root"/}" in
+	*/*) ;;
+	*)
+		echo "shadow-mounts: refusing to shadow '$target' (resolves to the workspace '$resolved_target' itself, not a directory inside it)." >&2
+		continue
+		;;
+	esac
+
 	# Skip if already a mountpoint (handles re-runs and shadow-refresh.sh) — this
 	# covers both a prior tmpfs shadow and a prior durable .git/worktrees bind.
 	if mountpoint -q "$resolved_target" 2>/dev/null; then
 		continue
 	fi
+
+	# Remember which components mkdir -p is about to create, plus the deepest
+	# ancestor that already exists, so the new ones can inherit its ownership
+	# (see the chown below).  Computed BEFORE the mkdir, while they are absent.
+	new_dirs=()
+	deepest_existing="$resolved_target"
+	while [ ! -e "$deepest_existing" ] && [ "$deepest_existing" != "/" ]; do
+		new_dirs+=("$deepest_existing")
+		deepest_existing="$(dirname "$deepest_existing")"
+	done
 
 	# Non-fatal under set -e: a path whose parent is a file (e.g. a literal
 	# under a .git that is itself a file in a linked worktree) must not abort
@@ -137,6 +164,64 @@ for target in "$@"; do
 	if ! mkdir -p "$resolved_target" 2>/dev/null; then
 		echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
 		continue
+	fi
+
+	# A mountpoint we had to create is created by ROOT (this helper only ever runs
+	# via sudo), so on a native-Linux bind mount it outlives the container as a
+	# root-owned mode-755 directory once the tmpfs goes away — and the host user
+	# can then neither populate nor remove it (e.g. a subsequent host `dotnet
+	# build` writing into bin/obj). Only the tmpfs itself was ever node-owned, and
+	# it exists only while the container runs. So hand every component we just
+	# created the uid/gid of the deepest ancestor that already existed: for a
+	# bind-mounted checkout that is the tree's host owner, and for a container-local
+	# volume it is node either way. heal-workspace-perms.sh has already run by this
+	# point in entrypoint-core.sh, so a root-owned checkout is node-owned here
+	# rather than inheriting root. Pre-existing for .powbox.yml literals; the .NET
+	# scan is what makes it automatic and per-project, hence the fix. Must happen
+	# BEFORE the mount below, or it would chown the tmpfs root instead of the
+	# directory underneath it. Never fatal: a failed chown leaves today's behaviour.
+	if [ "${#new_dirs[@]}" -gt 0 ]; then
+		chown_failed=0
+		if owner="$(stat -c '%u:%g' "$deepest_existing" 2>/dev/null)"; then
+			for new_dir in "${new_dirs[@]}"; do
+				# Re-validate each directory AFTER the mkdir: skip one that is now a
+				# symlink, and require the resolved path to still land under /workspace
+				# — the same containment the target itself was validated against above.
+				# This NARROWS the mkdir→chown window rather than closing it: `chown -h`
+				# declines to dereference only the FINAL component, so a swap of an
+				# intermediate one between this check and the chown would still be
+				# followed. That residue is not a privilege boundary here — the node user
+				# already reaches root through the sudoers-allowed apt-get, and the
+				# mkdir and mount below traverse the very same attacker-mutable path —
+				# so the cheap check is worth having and the race is not worth the
+				# create-as-the-target-user machinery it would take to remove.
+				if [ -L "$new_dir" ]; then
+					chown_failed=1
+					continue
+				fi
+				if ! resolved_new="$(realpath -e -- "$new_dir" 2>/dev/null)"; then
+					chown_failed=1
+					continue
+				fi
+				case "$resolved_new" in
+				"$workspace_root"/*) ;;
+				*)
+					chown_failed=1
+					continue
+					;;
+				esac
+				chown -h "$owner" "$resolved_new" 2>/dev/null || chown_failed=1
+			done
+		else
+			chown_failed=1
+		fi
+		# One warning per run, not per directory: on a Windows/FUSE bind mount chown
+		# is expected to be a no-op or EPERM, and a repo full of never-built projects
+		# would otherwise print dozens of identical lines at every container start.
+		if [ "${chown_failed:-0}" = 1 ] && [ "${chown_warned:-0}" != 1 ]; then
+			chown_warned=1
+			echo "shadow-mounts: warning: could not give one or more created mountpoint directories the host ownership of their parent tree; on a native-Linux bind mount they may be left root-owned on the host after the container stops." >&2
+		fi
 	fi
 
 	# .git/worktrees gets a durable bind from the persistent .worktrees volume

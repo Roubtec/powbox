@@ -344,10 +344,21 @@ fi
 # deleting its .pnpm-workspace-state-v1.json below) would churn host-side pnpm state on
 # every fuse-enabled launch — and the writer only needs egress + a Podman that can pull.
 if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "writer" ]; then
+	# detect-shadows.sh's stderr is filtered down to the lines an operator has to
+	# see at startup, so ordinary per-path validation noise does not print on every
+	# launch. Two qualify. The .powbox.local.yml override notice (task 014a): a
+	# local file silently replacing the committed shadow list is worth announcing.
+	# And the Git-index failure: it means the .NET bin/obj scan deliberately
+	# WITHHELD shadows for directories that exist, rather than risk masking tracked
+	# files — the feature is degraded, and this is the operator's only signal.
+	# Per-path skips (symlink, tracked content, non-directory, repo-in-bin) stay
+	# filtered: they are expected, there can be one per project on a large repo,
+	# and re-running shadow-refresh.sh shows them on demand.
+	_shadow_stderr_allow='detect-shadows: shadow list overridden by \.powbox\.local\.yml|detect-shadows: could not read the Git index for .*'
 	for _dir in /workspace/*/; do
 		[ -d "$_dir" ] || continue
 		_dir="${_dir%/}"
-		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2> >(grep -Fx 'detect-shadows: shadow list overridden by .powbox.local.yml' >&2 || true) || true)
+		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2> >(grep -Ex "$_shadow_stderr_allow" >&2 || true) || true)
 		if [ "${#_targets[@]}" -gt 0 ]; then
 			if sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
 				# The subpackage node_modules just (re)mounted above are ephemeral tmpfs:
@@ -395,7 +406,7 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 			fi
 		fi
 	done
-	unset _dir _targets _t _has_nm_shadow
+	unset _dir _targets _t _has_nm_shadow _shadow_stderr_allow
 fi
 
 # Co-locate the pnpm store with the per-container worktrees volume so that

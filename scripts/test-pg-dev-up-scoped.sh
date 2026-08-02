@@ -664,9 +664,9 @@ try "restart re-recorded the explicit data dir" test "$rec_g2" = "$resume_data"
 try "restarted instance serves queries" test "$(psql "$url_g3" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_G" -- --worktree down >/dev/null 2>&1 || true
 
-echo "== unscoped invocations keep the historical defaults =="
+echo "== unscoped invocations keep the historical port and credentials =="
 url_plain="$(pg "$WORK" -- url)"
-try "unscoped url unchanged (/5432, default creds) + sslmode=disable" test "$url_plain" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+try "unscoped URL keeps port 5432 and the default credentials, and adds sslmode=disable" test "$url_plain" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
 # Task 035, DEFAULT (unscoped) path: the same single construction site feeds
 # `up`, `url`, and `url --export`, so the parameter and its eval round-trip must
 # hold here too — `url` alone is hermetic (it touches no cluster).

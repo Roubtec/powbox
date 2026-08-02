@@ -213,6 +213,8 @@ Where the value comes from: everything powbox seeds today originates in `Roubtec
 `seed-skills.sh` defines the roots (`POWBOX_SEED_SOURCE_{CODEX_SKILLS,CLAUDE_SKILLS,CLAUDE_WORKFLOWS}`, all derived from `POWBOX_SEED_SOURCE_REPO`), `seed_source_ref <root> <name>` appends the item name, and `seed_marker_content <meta> [<source_ref>]` emits the line.
 Each producer passes the root for the kind it is writing: the Codex entrypoint hook and the plugin-clone sync pass the Codex-skills root; `update-skills-incontainer.sh` carries one per row of its driver table.
 Because the value is per **item**, the marker body is built inside each producer's per-item loop rather than hoisted out of it — a hoisted body would stamp every skill with one name.
+Only the updater worker needs a build-skew guard: it is bind-mounted from the checkout while `seed-skills.sh` comes from the image, so a newer worker can meet a pre-`source=` library — it then stubs `seed_source_ref`, defaults the roots to `-` (so `set -u` cannot abort the refresh), writes the same two-line markers that image wrote anyway, and says so once on stderr, since a silently source-less marker is the very gap D8 closes.
+The other producers are baked in the same image layer as the library, so skew is structurally impossible for them.
 
 Should powbox ever bake an asset it owns itself again, that call site gets its own `<owner>/<repo>#<path>` root; a call site with no upstream to name passes nothing (or `-`) and the line is **omitted** rather than written empty — an unknown source must be absent, never a misleading guess.
 
@@ -294,7 +296,7 @@ The single agent `build-commit` baked in THIS branch (D6) is the same value as t
 
 **This branch (`agent-update-skills`):**
 - `docker/shared/seed-skills.sh` shared helper; both hooks + updater worker call it (D1).
-- `.powbox-seeded` marker, content `epoch=…\ncommit=…` (D2).
+- `.powbox-seeded` marker, content `epoch=…\ncommit=…` (D2; later extended with `source=…`, D8).
 - Bake the agent `build-commit` next to `build-epoch` + `build-image.{sh,ps1}`
   `git rev-parse` plumbing → bake var → Dockerfile `ARG` (D6).
 - Three-way refresh with adopt/skip/rename + `--adopt-all`/`-AdoptAll` (D3).

@@ -348,14 +348,36 @@ fi
 # …and the driver table itself must still expand: it interpolates the source-root
 # constants, so under `set -u` an older library without them would abort the run
 # before a single item is classified.
+# (stdout is the worker's record protocol, so the rows are captured apart from
+# stderr — where the skew warning asserted just below lands.)
+legacy_err="$WORK_ROOT/t10-legacy.err"
 if legacy_rows="$(POWBOX_SEED_SKILLS_LIB="$LEGACY_LIB" POWBOX_WORKER="$WORKER" bash -c '
 	# shellcheck disable=SC1090
 	. "$POWBOX_WORKER"
-	seed_targets' 2>&1)" &&
+	seed_targets' 2>"$legacy_err")" &&
 	[ "$(printf '%s\n' "$legacy_rows" | grep -c .)" -eq 3 ]; then
 	ok "seed_targets still expands against a pre-source= baked library"
 else
 	no "seed_targets still expands against a pre-source= baked library"
+fi
+
+# ================================================================================
+# Test 11: the skew degradation is ANNOUNCED. A source-less marker is exactly the
+#          provenance gap this feature closes, so the fallback must not be silent:
+#          it warns on STDERR (which the launcher forwards, and which is not the
+#          record protocol on stdout) — and only when the baked library really is
+#          old, never on the normal path.
+# ================================================================================
+current_err="$WORK_ROOT/t11-current.err"
+POWBOX_SEED_SKILLS_LIB="$SEED_LIB" POWBOX_WORKER="$WORKER" bash -c '
+	# shellcheck disable=SC1090
+	. "$POWBOX_WORKER"
+	seed_targets' >/dev/null 2>"$current_err" || true
+if grep -q 'predates source= provenance' "$legacy_err" &&
+	! grep -q 'predates source= provenance' "$current_err"; then
+	ok "pre-source= baked library warns on stderr; current library stays quiet"
+else
+	no "pre-source= baked library warns on stderr; current library stays quiet"
 fi
 
 printf '\nseed marker source tests: %d passed, %d failed\n' "$pass" "$fail"

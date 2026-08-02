@@ -54,7 +54,11 @@ POWBOX_SEED_SKILLS_LIB="${POWBOX_SEED_SKILLS_LIB:-/usr/local/bin/seed-skills.sh}
 # provenance. Without this, `set -u` would abort the whole refresh on the first
 # unset source-root constant. Degrade instead: an absent helper/constant yields
 # markers WITHOUT a source= line, exactly what that older image wrote anyway.
+# The degradation is announced on STDERR (which the launcher forwards) so a
+# new-checkout/old-image mismatch surfaces instead of silently shipping
+# source-less markers; rebuilding the agent image restores the provenance.
 if ! declare -F seed_source_ref >/dev/null 2>&1; then
+	echo "Warning: the image-baked seed-skills.sh predates source= provenance; markers will omit it (rebuild the agent image)." >&2
 	seed_source_ref() { :; }
 fi
 : "${POWBOX_SEED_SOURCE_CODEX_SKILLS:=-}"

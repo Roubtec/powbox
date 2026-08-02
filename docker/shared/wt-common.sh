@@ -74,3 +74,51 @@ wt_reap_orphan_dir() {
 	printf 'kept\n'
 	return 0
 }
+
+# The two resolvers below exist so callers can DIAGNOSE a "branch is already used
+# by worktree at ..." failure without parsing git's fatal message: that text is
+# localizable and unstable, whereas `git worktree list --porcelain` is a
+# documented, machine-readable format. Both print a single absolute path on
+# stdout (nothing on failure) and return non-zero when they cannot answer, so a
+# caller can always fall back to git's own error.
+
+# wt_primary_checkout <root>
+#   Print the absolute path of the repository's PRIMARY (main) working tree.
+#   `git worktree list --porcelain` always lists the main working tree first, so
+#   the first `worktree ` line is it. Returns 1 if git cannot be queried.
+wt_primary_checkout() {
+	local out line
+	out="$(git -C "$1" worktree list --porcelain 2>/dev/null)" || return 1
+	while IFS= read -r line; do
+		case "$line" in
+		"worktree "*)
+			printf '%s\n' "${line#worktree }"
+			return 0
+			;;
+		esac
+	done <<<"$out"
+	return 1
+}
+
+# wt_worktree_for_branch <root> <branch>
+#   Print the absolute path of the worktree that currently has <branch> checked
+#   out, or return 1 (printing nothing) when no worktree holds it. Note that a
+#   worktree with a rebase/bisect in progress reports as detached, so a branch
+#   held only by such an operation is NOT found here — callers must treat a
+#   non-zero return as "unknown", not as "no conflict".
+wt_worktree_for_branch() {
+	local root="$1" branch="$2" out line path=""
+	out="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || return 1
+	while IFS= read -r line; do
+		case "$line" in
+		"worktree "*) path="${line#worktree }" ;;
+		"branch "*)
+			if [ "${line#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
+				printf '%s\n' "$path"
+				return 0
+			fi
+			;;
+		esac
+	done <<<"$out"
+	return 1
+}

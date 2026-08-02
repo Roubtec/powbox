@@ -15,6 +15,10 @@
 #     wt-bootstrap needs (those require a real image + volumes — see the smoke).
 #   * wt-enter and wt-remove end-to-end against a real temp git repo, with a
 #     dead-metadata orphan simulated by deleting .git/worktrees/<slug>.
+#   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
+#     checked out, the error must name the blocking worktree — and say plainly
+#     when that blocker is the SHARED primary checkout, the case agents keep
+#     misreading as a stale worktree — while stdout stays empty on failure.
 #
 # Runs directly against the repo copies — no image build needed. Requires bash
 # and git on PATH (present in the agent image).
@@ -191,6 +195,62 @@ if (cd "$R4" && bash "$WT_REMOVE" never-existed >/dev/null 2>&1) &&
 	ok "wt-remove on an absent slug is a clean no-op"
 else
 	no "wt-remove on an absent slug did not succeed cleanly"
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: wt-enter names the PRIMARY checkout when it is what blocks the
+# branch (a human or peer agent switched the shared main working tree onto it).
+# The error must identify the main checkout, flag that it is shared, and point
+# at coordination — never auto-detach — and stdout must stay empty on failure.
+# ---------------------------------------------------------------------------
+R5="$(make_repo r5)"
+E5="$WORK_ROOT/r5.err"
+# make_repo leaves the primary checkout on 'main', so requesting a worktree on
+# 'main' is blocked by the primary checkout itself.
+if out="$(cd "$R5" && bash "$WT_ENTER" task-e main 2>"$E5")"; then
+	no "wt-enter must fail when the branch is checked out in the primary checkout (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	grep -qiF "primary" "$E5" || miss="$miss no-primary-wording"
+	# The path must appear on wt-enter's OWN line, not only in git's fatal.
+	grep -F "$R5" "$E5" | grep -q '^wt-enter:' || miss="$miss no-primary-path"
+	grep -qiF "shared" "$E5" || miss="$miss no-shared-warning"
+	grep -qiF "coordinate" "$E5" || miss="$miss no-coordination-hint"
+	# Nothing may be silently remediated: the main checkout stays on 'main' and
+	# no worktree is left behind.
+	[ "$(git -C "$R5" branch --show-current)" = "main" ] || miss="$miss primary-branch-moved"
+	[ ! -e "$R5/.worktrees/$CONTAINER_NAME/task-e" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter names the shared primary checkout when it blocks the branch"
+	else
+		no "wt-enter primary-checkout conflict message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: blocked by a SIBLING task worktree keeps the ordinary semantics
+# (failure, empty stdout) but must surface the blocking worktree path rather
+# than swallowing it — and must NOT claim the primary checkout is involved.
+# ---------------------------------------------------------------------------
+R6="$(make_repo r6)"
+WB6="$R6/.worktrees/$CONTAINER_NAME"
+E6="$WORK_ROOT/r6.err"
+git_quiet -C "$R6" worktree add -q "$WB6/task-f" -b task-f >/dev/null 2>&1
+if out="$(cd "$R6" && bash "$WT_ENTER" task-g task-f 2>"$E6")"; then
+	no "wt-enter must fail when the branch is checked out in a sibling worktree (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	# Surfaced by wt-enter itself, not merely left inside git's fatal text.
+	grep -F "$WB6/task-f" "$E6" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	! grep -qiF "primary" "$E6" || miss="$miss claims-primary"
+	[ ! -e "$WB6/task-g" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter surfaces the blocking sibling worktree path (and does not blame the primary checkout)"
+	else
+		no "wt-enter sibling-worktree conflict message inadequate:$miss"
+	fi
 fi
 
 echo

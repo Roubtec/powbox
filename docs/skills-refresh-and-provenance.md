@@ -20,8 +20,8 @@ image-baked skills onto the `claude-config` / `codex-config` volumes (commits
    `entrypoint-codex-hook.sh`, and the updater worker. Extract it into one baked
    helper used by all three, with a `noclobber|refresh` mode flag.
 2. **Mark powbox-owned skills.** Drop a per-skill `.powbox-seeded` marker (content
-   `epoch=… commit=…`) when seeding, so the updater can tell its own copies from
-   user-authored/forked skills.
+   `epoch=… commit=…`, later also `source=…` — see D8) when seeding, so the updater
+   can tell its own copies from user-authored/forked skills.
 3. **Resolve conflicts explicitly.** On refresh, an *unmarked* folder whose name
    collides with a baked skill is ambiguous (legacy seed vs. user fork) — never
    silently overwrite it; surface it and let the user adopt / skip / rename.

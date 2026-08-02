@@ -47,7 +47,7 @@ Land the agent-skills fix first, then the tests here.
 - `.agent-skills-src/plugins/dev-skills/bin/gh-review-threads` — `complete_comments()` is the affected function; the threads-page path in `fetch_all()` shows the established fail-closed pattern to mirror.
 - `scripts/test-gh-review-threads.sh` — cases (h)/(i) are the model for the new cases; case (e)/(e2) already build nested-page fixtures via `$d/comments-N`.
 - `docker/agent/Dockerfile:139`, `scripts/build-image.sh:177-183` — how the baked helper is staged.
-- `tasks/033-gh-review-threads-parser-failure-fail-closed-tests.md` — the parent task and its fail-open principle.
+- task `033` — the parent task and its fail-open principle.
 - Discovered during review of PR #118 (https://github.com/Roubtec/powbox/pull/118), by the independent reviewer verifying the same-pattern sweep; not raised in a review thread.
 
 ## Target files or areas

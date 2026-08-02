@@ -1,6 +1,7 @@
 # Container Environment
 
-You are running inside an isolated Docker container. The host filesystem is not accessible except through the bind mount under `/workspace`. You have full autonomy (`${AGENT_AUTONOMY_FLAG}`) — the container and its network firewall are your safety boundary.
+You are running inside an isolated Docker container. Nothing of the host filesystem is reachable except your workspace under `/workspace` — and whether even that reaches the host depends on the launch mode: in **dir-mounted** mode (the default) it is a host bind mount, so edits land on the user's disk; in **self-hosted** mode (`--isolated`) it is a container-local Docker volume holding a clone, so nothing written there is visible to the user and work leaves only by `git push` / a PR.
+Check the mode at runtime with the `POWBOX_WORKSPACE_HOST_PATH` env var — set and non-empty means a host bind mount (its value is the workspace's host path), unset means container-local. Use it before you promise the user a local file. You have full autonomy (`${AGENT_AUTONOMY_FLAG}`) — the container and its network firewall are your safety boundary.
 
 Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` command).
 
@@ -35,9 +36,16 @@ This container ships more than one agent harness. Besides yourself, the followin
 
 ${AGENT_PEERS}
 
-Invoke a peer directly when it helps — e.g. ask the other agent for an independent review of your work, or hand a self-contained sub-task to it. A peer shares this container and the `/workspace` bind mount, so it sees the same files you do. Run it non-interactively for a one-shot task (the one-shot forms above; a single invocation runs a full agentic loop, so one prompt is enough for a thorough review with a verdict and findings), or interactively to hand off the session.
+Invoke a peer directly when it helps — e.g. ask the other agent for an independent review of your work, or hand a self-contained sub-task to it. A peer shares this container and its `/workspace` tree (bind mount or self-hosted volume alike), so it sees the same files you do. Run it non-interactively for a one-shot task (the one-shot forms above; a single invocation runs a full agentic loop, so one prompt is enough for a thorough review with a verdict and findings), or interactively to hand off the session.
 
 Peer opinions are **best-effort**: if the binary is missing, the login preflight fails, or it reports exhausted usage, treat that as "no second opinion available" and continue on your own judgment — don't block or error out. Retry only clearly transient failures, once or twice. When delegating a review, give the peer the concrete scope (base branch or commit range, worktree path) and ask for a verdict plus numbered findings so the result is directly actionable.
+
+### Scratchpad discipline
+
+The session scratchpad directory is **one directory shared by every concurrently running subagent in the session** — despite reading as "session-specific", it is not per-subagent, and subagents cannot see each other's filenames.
+So every file written there by parallel work MUST carry a per-task unique name — suffix the worktree slug, the PR number, or `$$` (PID) — or live in a per-task subdirectory.
+Fixed names are how parallel runs silently read each other's output: two reviewers both writing `verify.log` (one then validated the other's worktree) and two PR fixers both writing `threads.json` are real incidents here.
+When you fan work out, state the unique-name rule in each subagent's prompt — the subagent has no other way to know it has siblings.
 
 ## Git and GitHub
 
@@ -65,7 +73,7 @@ Parallel, worktree-isolated work uses three baked helpers on `PATH`. Skills and 
 
 | Path | What it is |
 |------|------------|
-| `/workspace/<project-slug>` | Project source (bind-mounted from host, read-write); the working directory (slug is `<name>-<hash>`) |
+| `/workspace/<project-slug>` | Project source, read-write; the working directory. Dir-mounted mode (default): a host bind mount, so edits are visible to the user (slug is `<name>-<hash>`). Self-hosted mode (`--isolated`): a container-local volume (`agent-ws-*`) holding a clone, slug `<repo-slug>-<instance-hash>` — **no host visibility**, deliver via `git push` / PR. Distinguish with `POWBOX_WORKSPACE_HOST_PATH` (set and non-empty ⇒ bind mount, unset ⇒ container-local) |
 | `/workspace/<project-slug>/node_modules` | Per-project Docker volume (Linux packages, separate from host) |
 | `/workspace/<project-slug>/<subpackage>/node_modules` | Ephemeral tmpfs shadow (auto-detected for monorepo workspaces; the `pnpm`/`pn` wrapper re-shadows before installs, so a package added mid-session is covered automatically — run `shadow-refresh.sh` by hand only if you populate `node_modules` another way) |
 | `/workspace/<project-slug>/<dotnet-project>/{bin,obj}` | Ephemeral tmpfs shadow (auto-detected beside every `*.csproj`/`*.fsproj`/`*.vbproj`, matched case-insensitively so a Windows-authored `Legacy.CSPROJ` counts too, ensuring a container `dotnet build` never writes container-absolute paths into `obj/` on the host bind mount where a host build would trip over them). Build output does not survive container recreation; run `shadow-refresh.sh` after adding a project mid-session. An existing `bin`/`obj` that is a symlink, or that holds Git-tracked files (a project redirecting output via `ArtifactsPath` may keep real content there), is left un-shadowed so nothing real is masked |

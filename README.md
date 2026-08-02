@@ -508,7 +508,7 @@ shadow:
 ```
 
 Use `.powbox.local.yml` for machine-local experiments or overrides that should not be committed.
-If `.powbox.local.yml` has a top-level `shadow:` key, its list replaces the committed `.powbox.yml` shadow list wholesale; `shadow: []` locally disables committed custom shadows while leaving workspace auto-detection from `pnpm-workspace.yaml` and `package.json` active.
+If `.powbox.local.yml` has a top-level `shadow:` key, its list replaces the committed `.powbox.yml` shadow list wholesale; `shadow: []` locally disables committed custom shadows while leaving auto-detection active — from `pnpm-workspace.yaml` and `package.json`, and from `*.csproj`/`*.fsproj`/`*.vbproj` for the .NET `bin`/`obj` scan.
 
 Patterns are resolved relative to the project root.
 A pattern containing glob metacharacters (`*`, `?`, `[`, `]`) is expanded as a glob, and only directories that exist at container start are shadowed.

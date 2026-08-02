@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-`scripts/test-detect-shadows.sh` is now the largest pure-shell unit suite in the repo (119 assertions after PR #121) and it guards genuinely load-bearing security properties: the under-workspace-root validation, the symlink skip, the Git-tracked-content veto and its fail-closed paths, the newline rejection, and the workspace-glob containment.
+`scripts/test-detect-shadows.sh` is now the largest pure-shell unit suite in the repo (121 assertions after PR #121) and it guards genuinely load-bearing security properties: the under-workspace-root validation, the symlink skip, the Git-tracked-content veto and its fail-closed paths, the newline rejection, and the workspace-glob containment.
 Every one of those cases was verified to fail against the pre-fix script — they are real regression tests.
 And **nothing runs them**: Tier 0 CI (`.github/workflows/native-linux-ci.yml`) runs only exec-bits, shellcheck, shfmt, and PSScriptAnalyzer, and `commands/smoke-test.sh` does not invoke the suite the way it invokes `test-sensitive-host-path.sh` (Stage 0/0a), `test-gh-review-threads.sh` (Stage 0b), `test-wt-orphan-safety.sh` (Stage 0c/0d), and `test-peer-review-run.sh`.
 So a future edit to `detect-shadows.sh` can silently reopen any of those holes, and only a reviewer who happens to run the script by hand would notice.

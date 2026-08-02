@@ -564,6 +564,18 @@ assert_emits "$ws/" "$ws/app/obj" "obj still emitted (and normalized) with a tra
 assert_absent "$ws//" "$ws/app/bin" "tracked bin is vetoed with a doubled trailing slash too"
 assert_emits "$ws//" "$ws/app/obj" "obj still emitted with a doubled trailing slash"
 
+echo "Test: a MISSING index fails closed, not as an empty one"
+# `ls-files --cached` reads the index, and an absent index reads as an empty one
+# with a success status — so the exit code alone cannot tell the two apart.
+ws="$(git_ws dotnet-missing-index)"
+mkdir -p "$ws/app/bin"
+touch "$ws/app/App.csproj" "$ws/app/bin/tool.sh"
+git -C "$ws" add -f app/bin/tool.sh
+git -C "$ws" -c user.email=t@example.com -c user.name=t commit -qm "seed"
+rm -f "$ws/.git/index"
+assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when the index is missing"
+assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed"
+
 echo "Test: an unreadable .git fails CLOSED rather than reading as a non-repo"
 # `rev-parse` reports "not a git repository" for an unreadable .git, so the
 # existence of the entry — not that probe alone — is what withholds the shadow.
@@ -644,7 +656,7 @@ touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
 git -C "$ws" add -f app/bin/publish.sh
 printf 'not an index' >"$ws/.git/index"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when the index is unreadable"
-assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed (it cannot hold tracked content)"
+assert_emits "$ws" "$ws/app/obj" "an absent obj is still shadowed (withholding it would break the fresh-clone case)"
 assert_stderr "$ws" "could not read the Git index" "the fail-closed decision is announced on stderr"
 
 echo "Test: a non-git workspace keeps the default shadow (probe fails open)"

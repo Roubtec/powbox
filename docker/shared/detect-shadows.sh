@@ -101,7 +101,26 @@ nested_dir_holds_content() {
 		ls-files --cached -- "$name" 2>/dev/null)"; then
 		return 0
 	fi
-	[ -n "$tracked" ]
+	if [ -n "$tracked" ]; then
+		return 0
+	fi
+	# An empty result is only trustworthy if there was an index to read.
+	! git_index_present "$parent"
+}
+
+# `ls-files --cached` reads the INDEX, and a missing index reads as an empty one
+# with a SUCCESS status — so "nothing tracked here" and "no index at all" are
+# indistinguishable from the exit code, and the latter would fail open on a repo
+# whose index was deleted or never written.  Ask git where the index belongs and
+# look.  ($1 is a directory to ask from; the path git prints is relative to it
+# unless absolute.)
+git_index_present() {
+	local index_path
+	index_path="$(git_scrubbed -C "$1" rev-parse --git-path index 2>/dev/null)" || return 1
+	case "$index_path" in
+	/*) [ -e "$index_path" ] ;;
+	*) [ -e "$1/$index_path" ] ;;
+	esac
 }
 
 # Expand workspace glob patterns into node_modules paths.
@@ -270,7 +289,11 @@ if [ ${#dotnet_artifact_dirs[@]} -gt 0 ]; then
 		probe_sentinel='//detect-shadows-probe-ok//'
 		while IFS= read -r -d '' tracked_file; do
 			if [ "$tracked_file" = "$probe_sentinel" ]; then
-				probe_ok=1
+				# Success alone is not enough: a MISSING index also reads as an
+				# empty one with status 0 (see git_index_present).
+				if git_index_present "$WORKSPACE_DIR"; then
+					probe_ok=1
+				fi
 				continue
 			fi
 			for rel in "${candidate_rel[@]}"; do

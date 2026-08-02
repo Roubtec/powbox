@@ -100,6 +100,42 @@ wt_primary_checkout() {
 	return 1
 }
 
+# wt_state_branch <file>
+#   Print the BARE branch name recorded in a per-worktree operation-state file,
+#   mirroring git's own reader (wt-status.c: get_branch()), which is deliberately
+#   tolerant of the several formats these files can hold:
+#     "refs/heads/<b>" -> "<b>"    (what rebase writes to head-name; git also
+#                                   accepts it in BISECT_START, where it writes
+#                                   the bare name — verified: git refuses a second
+#                                   checkout for either spelling)
+#     other "refs/..." -> verbatim (never equals a branch short-name, so no match)
+#     "detached HEAD"  -> nothing, return 1 (rebase started from a detached HEAD)
+#     a full object id -> nothing, return 1 (a bisect started from a detached
+#                                   HEAD records the commit; git abbreviates it,
+#                                   so the full id must NEVER be compared against
+#                                   a branch name — verified: git does not treat
+#                                   a branch literally named that 40-hex as held)
+#     anything else    -> verbatim (bisect's bare "<b>")
+#   Returns 1 (printing nothing) when the file is missing, unreadable or empty,
+#   so a state we could not fully read degrades to UNKNOWN instead of being
+#   compared against truncated content.
+wt_state_branch() {
+	local raw
+	raw="$(cat -- "$1" 2>/dev/null)" || return 1
+	[ -n "$raw" ] || return 1
+	case "$raw" in
+	"detached HEAD") return 1 ;;
+	refs/heads/*)
+		printf '%s\n' "${raw#refs/heads/}"
+		return 0
+		;;
+	esac
+	if printf '%s' "$raw" | LC_ALL=C grep -Eq '^([0-9a-f]{40}|[0-9a-f]{64})$'; then
+		return 1
+	fi
+	printf '%s\n' "$raw"
+}
+
 # wt_branch_held_by_operation <worktree> <branch>
 #   Return 0 when the worktree at <worktree> — which `git worktree list
 #   --porcelain` reports as DETACHED — is nevertheless holding <branch> through
@@ -111,30 +147,40 @@ wt_primary_checkout() {
 #
 #   Reads the same per-worktree state files git itself reads, all under the
 #   worktree's own git dir (<common>/worktrees/<id>, or <root>/.git for the main
-#   working tree):
-#     rebase-merge/head-name  merge/interactive backend    -> "refs/heads/<b>"
-#     rebase-apply/head-name  apply backend                -> "refs/heads/<b>"
-#                             (skipped when the sibling `applying` marker says
-#                             this is a `git am`, which git does not treat as a
-#                             rebase holding the branch)
-#     BISECT_START            bisect (guarded by BISECT_LOG) -> bare "<b>"
-#   Any of these may hold a non-branch value (a sha, or "detached HEAD") — that
-#   simply never equals the branch, so it cannot produce a false positive.
+#   working tree), and in git's own precedence (wt-status.c:
+#   wt_status_check_rebase / wt_status_check_bisect):
+#     rebase-apply/         apply backend, checked FIRST. When the sibling
+#                           `applying` marker marks it a `git am`, git stops
+#                           there and does NOT fall through to rebase-merge, and
+#                           an am does not hold the branch — verified: with both
+#                           dirs present and `applying` set, git allows the second
+#                           checkout, so probing rebase-merge first would be a
+#                           FALSE "held".
+#     rebase-merge/         merge/interactive backend, only when rebase-apply is
+#                           absent.
+#     BISECT_START          bisect, only when BISECT_LOG marks one in progress.
 #   Returns 1 when the state cannot be read (e.g. the worktree dir is gone), so
-#   the caller degrades to git's own error rather than guessing.
+#   the caller degrades to git's own error rather than guessing: a false "held"
+#   is worse than falling back to git's message.
 wt_branch_held_by_operation() {
 	local wt="$1" branch="$2" gitdir head
 	gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
-	if [ -d "$gitdir/rebase-merge" ]; then
-		head="$(cat "$gitdir/rebase-merge/head-name" 2>/dev/null || true)"
-		[ "$head" != "refs/heads/$branch" ] || return 0
-	elif [ -d "$gitdir/rebase-apply" ] && [ ! -e "$gitdir/rebase-apply/applying" ]; then
-		head="$(cat "$gitdir/rebase-apply/head-name" 2>/dev/null || true)"
-		[ "$head" != "refs/heads/$branch" ] || return 0
+	if [ -d "$gitdir/rebase-apply" ]; then
+		if [ ! -e "$gitdir/rebase-apply/applying" ] &&
+			head="$(wt_state_branch "$gitdir/rebase-apply/head-name")" &&
+			[ "$head" = "$branch" ]; then
+			return 0
+		fi
+	elif [ -d "$gitdir/rebase-merge" ]; then
+		if head="$(wt_state_branch "$gitdir/rebase-merge/head-name")" &&
+			[ "$head" = "$branch" ]; then
+			return 0
+		fi
 	fi
-	if [ -e "$gitdir/BISECT_LOG" ]; then
-		head="$(cat "$gitdir/BISECT_START" 2>/dev/null || true)"
-		[ "$head" != "$branch" ] || return 0
+	if [ -e "$gitdir/BISECT_LOG" ] &&
+		head="$(wt_state_branch "$gitdir/BISECT_START")" &&
+		[ "$head" = "$branch" ]; then
+		return 0
 	fi
 	return 1
 }

@@ -19,8 +19,13 @@
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
 #     misreading as a stale worktree — while stdout stays empty on failure. The
-#     blocker is also named when an interrupted rebase leaves the holding
-#     worktree reporting as `detached`.
+#     blocker is also named when an interrupted rebase or a bisect leaves the
+#     holding worktree reporting as `detached`, and the remedy offered must not
+#     destroy work: wt-remove only where it applies, "finish or abort it" where
+#     an operation is in flight. The diagnosis stays SILENT when the blocker git
+#     names is wt-enter's own destination, so git's prune/remove advice stands.
+#   * wt-common.sh wt_branch_held_by_operation against fabricated operation
+#     state, pinned to what real git does with the same state.
 #
 # Runs directly against the repo copies — no image build needed. Requires bash
 # and git on PATH (present in the agent image).
@@ -125,6 +130,77 @@ make_repo() {
 break_metadata() {
 	rm -rf "$1/.git/worktrees/$2"
 }
+
+# ---------------------------------------------------------------------------
+# Unit: wt_branch_held_by_operation must read a detached worktree's operation
+# state the way GIT reads it, because git is what actually decides whether the
+# branch may be checked out again. Every expectation below was verified against
+# real git by fabricating the same state and observing whether `git worktree add`
+# refuses; a mismatch would make wt-enter either claim a blocker git does not
+# see (a false "held") or miss the one it does.
+# ---------------------------------------------------------------------------
+RU="$(make_repo ru)"
+git_quiet -C "$RU" branch foo
+git_quiet -C "$RU" worktree add -q --detach "$RU/w" >/dev/null 2>&1
+GDU="$RU/.git/worktrees/w"
+
+# git checks rebase-apply BEFORE rebase-merge, and an `applying` marker makes it
+# a `git am` — which does not hold the branch, and stops git from consulting
+# rebase-merge at all. Verified: with both dirs present and `applying` set, git
+# ALLOWS the second checkout, so probing rebase-merge first is a false "held".
+mkdir -p "$GDU/rebase-merge" "$GDU/rebase-apply"
+printf 'refs/heads/foo\n' >"$GDU/rebase-merge/head-name"
+printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
+: >"$GDU/rebase-apply/applying"
+if wt_branch_held_by_operation "$RU/w" foo; then
+	no "a git am beside a stale rebase-merge must not count as holding the branch (git allows the checkout)"
+else
+	ok "operation state honours git's rebase-apply-before-rebase-merge precedence"
+fi
+rm -rf "$GDU/rebase-merge" "$GDU/rebase-apply"
+
+# A real apply-backend rebase (no `applying` marker) DOES hold the branch.
+mkdir -p "$GDU/rebase-apply"
+printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
+if wt_branch_held_by_operation "$RU/w" foo; then
+	ok "an apply-backend rebase is recognised as holding the branch"
+else
+	no "apply-backend rebase not recognised as holding the branch"
+fi
+rm -rf "$GDU/rebase-apply"
+
+# git writes the BARE branch name to BISECT_START, but its reader also strips a
+# refs/heads/ prefix — and treats such a bisect as holding the branch (verified).
+: >"$GDU/BISECT_LOG"
+printf 'refs/heads/foo\n' >"$GDU/BISECT_START"
+if wt_branch_held_by_operation "$RU/w" foo; then
+	ok "a BISECT_START written in refs/heads/ form is recognised (git strips the prefix too)"
+else
+	no "BISECT_START in refs/heads/ form not recognised as holding the branch"
+fi
+
+# A bisect started from a detached HEAD records the full object id. git
+# abbreviates it before comparing, so it can never match a branch literally
+# named that 40-hex string (verified: git allows the checkout). Comparing the
+# raw value would be a false "held".
+HEXB=0123456789abcdef0123456789abcdef01234567
+printf '%s\n' "$HEXB" >"$GDU/BISECT_START"
+if wt_branch_held_by_operation "$RU/w" "$HEXB"; then
+	no "a full object id in BISECT_START must not match a same-named branch (git allows the checkout)"
+else
+	ok "a full object id in BISECT_START is treated as a detached start, not a branch"
+fi
+
+# State that cannot be read must degrade to "unknown" (never held), so the caller
+# falls back to git's own error instead of guessing from a partial read.
+rm -f "$GDU/BISECT_START"
+mkdir -p "$GDU/BISECT_START"
+if wt_branch_held_by_operation "$RU/w" foo; then
+	no "an unreadable BISECT_START must degrade to unknown, not report the branch as held"
+else
+	ok "unreadable operation state degrades to unknown"
+fi
+rm -rf "$GDU/BISECT_LOG" "$GDU/BISECT_START"
 
 # ---------------------------------------------------------------------------
 # Integration: wt-enter reuses a LIVE worktree (durable-metadata happy path)
@@ -247,6 +323,9 @@ else
 	# Surfaced by wt-enter itself, not merely left inside git's fatal text.
 	grep -F "$WB6/task-f" "$E6" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 	! grep -qiF "primary" "$E6" || miss="$miss claims-primary"
+	# Nothing is in flight in that worktree, so wt-remove genuinely is the remedy
+	# (and still refuses over unsaved work) — it must be offered here.
+	grep -qF "wt-remove" "$E6" || miss="$miss no-wt-remove-remedy"
 	[ ! -e "$WB6/task-g" ] || miss="$miss worktree-created"
 	if [ -z "$miss" ]; then
 		ok "wt-enter surfaces the blocking sibling worktree path (and does not blame the primary checkout)"
@@ -282,6 +361,9 @@ if git -C "$R7" worktree list --porcelain | grep -qx detached; then
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WB7/task-h" "$E7" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E7" || miss="$miss claims-primary"
+		# An unfinished operation must NOT be answered with wt-remove.
+		! grep -qF "wt-remove" "$E7" || miss="$miss points-at-wt-remove"
+		grep -qiF "abort" "$E7" || miss="$miss no-finish-or-abort-remedy"
 		[ ! -e "$WB7/task-i" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
 			ok "wt-enter names the blocking worktree even when a rebase leaves it detached"
@@ -291,6 +373,74 @@ if git -C "$R7" worktree list --porcelain | grep -qx detached; then
 	fi
 else
 	no "precondition: rebase did not leave $WB7/task-h detached"
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: blocked by a BISECT. Same detached-worktree shape as the rebase
+# above, but the remedy differs: wt-remove has no bisect guard (and plain
+# `git worktree remove` happily deletes a bisecting worktree), so pointing the
+# caller at wt-remove here would destroy the in-progress bisect. The message must
+# say to finish or abort the operation instead.
+# ---------------------------------------------------------------------------
+R8="$(make_repo r8)"
+WB8="$R8/.worktrees/$CONTAINER_NAME"
+E8="$WORK_ROOT/r8.err"
+for i in 1 2 3; do
+	echo "rev $i" >"$R8/seed.txt"
+	git_quiet -C "$R8" commit -qam "c$i"
+done
+git_quiet -C "$R8" branch task-j
+git_quiet -C "$R8" worktree add -q "$WB8/task-j" task-j >/dev/null 2>&1
+git_quiet -C "$WB8/task-j" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+if git -C "$R8" worktree list --porcelain | grep -qx detached; then
+	if out="$(cd "$R8" && bash "$WT_ENTER" task-k task-j 2>"$E8")"; then
+		no "wt-enter must fail when the branch is held by a bisect (got '$out')"
+	else
+		miss=""
+		[ -z "$out" ] || miss="$miss stdout-not-empty"
+		grep -F "$WB8/task-j" "$E8" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		! grep -qiF "primary" "$E8" || miss="$miss claims-primary"
+		# wt-remove would delete the worktree and the bisect state with it.
+		! grep -qF "wt-remove" "$E8" || miss="$miss points-at-wt-remove"
+		grep -qiF "bisect reset" "$E8" || miss="$miss no-bisect-remedy"
+		[ ! -e "$WB8/task-k" ] || miss="$miss worktree-created"
+		if [ -z "$miss" ]; then
+			ok "wt-enter tells a bisect-blocked caller to finish/abort, never to wt-remove the worktree"
+		else
+			no "wt-enter bisect conflict message inadequate:$miss"
+		fi
+	fi
+else
+	no "precondition: bisect did not leave $WB8/task-j detached"
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: `git worktree add` also fails when the DESTINATION worktree is
+# registered but missing on disk (hand-deleted, or a pre-durable-metadata
+# leftover). git's own message carries the right remedy there ("prune"/"remove"),
+# and the porcelain still lists that path as holding the branch — so the
+# branch-conflict diagnosis must stay silent rather than tell the caller the path
+# it just asked for is blocked by "another worktree" and hand it a wt-remove that
+# is a no-op on an absent dir (a closed advice loop).
+# ---------------------------------------------------------------------------
+R9="$(make_repo r9)"
+WB9="$R9/.worktrees/$CONTAINER_NAME"
+E9="$WORK_ROOT/r9.err"
+git_quiet -C "$R9" worktree add -q "$WB9/task-l" -b task-l >/dev/null 2>&1
+rm -rf "$WB9/task-l" # registered in .git/worktrees, gone from disk
+if out="$(cd "$R9" && bash "$WT_ENTER" task-l task-l 2>"$E9")"; then
+	no "wt-enter must fail when its destination is registered but missing (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	# No tailored branch-conflict diagnosis: git's own remedy must stand alone.
+	! grep -q '^wt-enter: branch ' "$E9" || miss="$miss self-blocker-diagnosis"
+	! grep -qF "wt-remove" "$E9" || miss="$miss dead-end-wt-remove-advice"
+	if [ -z "$miss" ]; then
+		ok "wt-enter leaves git's own remedy standing when the blocker is its own destination"
+	else
+		no "wt-enter self-blocker message inadequate:$miss"
+	fi
 fi
 
 echo

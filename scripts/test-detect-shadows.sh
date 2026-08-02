@@ -402,6 +402,12 @@ assert_absent "$ws" "$ws/.git/tmpl/obj" "csproj under .git pruned"
 assert_absent "$ws" "$ws/.worktrees/task/proj/obj" "csproj under .worktrees pruned"
 assert_absent "$ws" "$ws/.claude/worktrees/task/proj/obj" "csproj under .claude/worktrees pruned"
 assert_no_output "$ws" "pruned-only tree emits nothing"
+# All five above are negative, so a scan that found nothing at all would score
+# five passes.  A project OUTSIDE every pruned directory pins that the walk is
+# alive and that the prunes are what silenced the others.
+mkdir -p "$ws/src"
+touch "$ws/src/Real.csproj"
+assert_emits "$ws" "$ws/src/obj" "a project outside the pruned dirs is still found"
 
 echo "Test: a project file copied under bin/ or obj/ does not seed a nested scan"
 ws="$(new_ws dotnet-nested-artifacts)"
@@ -510,6 +516,12 @@ git -c init.defaultBranch=main init -q "$ws/vendor/lib"
 git -C "$ws/vendor/lib" add -f app/bin/tool.sh
 printf 'not an index' >"$ws/vendor/lib/.git/index"
 assert_absent "$ws" "$ws/vendor/lib/app/bin" "an unreadable nested index preserves the directory"
+# Companions, so the negative above cannot pass merely because the scan found
+# nothing, and so "withheld" is pinned to the fail-closed path rather than to
+# the ordinary tracked-content veto, which says something different.
+assert_emits "$ws" "$ws/vendor/lib/app/obj" "the absent sibling obj is still shadowed"
+assert_stderr "$ws" "could not read the Git index for the repository owning" \
+	"the nested fail-closed reason is announced on stderr"
 
 echo "Test: a tracked bin/ that is ABSENT on disk is still not shadowed"
 # "Absent means it cannot hold tracked content" is false: a gitlink whose
@@ -623,6 +635,11 @@ touch "$ws/app/App.csproj" "$ws/app/bin/publish.sh"
 git -C "$ws" add -f app/bin/publish.sh
 chmod 000 "$ws/.git"
 assert_absent "$ws" "$ws/app/bin" "an existing bin is left un-shadowed when .git is unreadable"
+# Companions, as above: the negative alone would also hold if nothing was
+# scanned, and it does not distinguish the fail-closed path (which withholds
+# only what EXISTS) from the tracked-content veto (which withholds either way).
+assert_emits "$ws" "$ws/app/obj" "the absent sibling obj is still shadowed"
+assert_stderr "$ws" "could not read the Git index for" "the fail-closed reason is announced on stderr"
 chmod 755 "$ws/.git"
 
 echo "Test: a DANGLING .git symlink still counts as repository evidence"

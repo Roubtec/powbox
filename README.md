@@ -474,7 +474,7 @@ The entrypoint scans for project declarations in this order:
 
 1. **pnpm** — reads `pnpm-workspace.yaml` `packages` globs → each package's `node_modules`
 2. **npm / yarn** — reads `package.json` `workspaces` array (or `workspaces.packages`) → each package's `node_modules`
-3. **.NET** — finds `*.csproj` / `*.fsproj` / `*.vbproj` → each project's `bin` and `obj`
+3. **.NET** — finds `*.csproj` / `*.fsproj` / `*.vbproj` (case-insensitively, so a Windows-authored `Legacy.CSPROJ` counts) → each project's `bin` and `obj`
 4. **`.powbox.yml` / `.powbox.local.yml` with `shadow:`** — reads custom `shadow` glob patterns (see below)
 
 All matched directories get a tmpfs overlay.
@@ -508,7 +508,7 @@ shadow:
 ```
 
 Use `.powbox.local.yml` for machine-local experiments or overrides that should not be committed.
-If `.powbox.local.yml` has a top-level `shadow:` key, its list replaces the committed `.powbox.yml` shadow list wholesale; `shadow: []` locally disables committed custom shadows while leaving auto-detection active — from `pnpm-workspace.yaml` and `package.json`, and from `*.csproj`/`*.fsproj`/`*.vbproj` for the .NET `bin`/`obj` scan.
+If `.powbox.local.yml` has a top-level `shadow:` key, its list replaces the committed `.powbox.yml` shadow list wholesale; `shadow: []` locally disables committed custom shadows while leaving auto-detection active — from `pnpm-workspace.yaml` and `package.json`, and from `*.csproj`/`*.fsproj`/`*.vbproj` (matched case-insensitively) for the .NET `bin`/`obj` scan.
 
 Patterns are resolved relative to the project root.
 A pattern containing glob metacharacters (`*`, `?`, `[`, `]`) is expanded as a glob, and only directories that exist at container start are shadowed.

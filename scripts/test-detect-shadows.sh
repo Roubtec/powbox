@@ -438,6 +438,36 @@ assert_emits "$ws" "$ws/app/bin" "the project's own bin still emitted"
 assert_absent "$ws" "$ws/app/bin/Release/net8.0/bin" "csproj under bin/ pruned"
 assert_absent "$ws" "$ws/app/obj/Debug/obj" "csproj under obj/ pruned"
 
+echo "Test: project extensions are matched case-insensitively"
+# A checkout authored on Windows keeps its casing once bind-mounted onto a
+# case-sensitive Linux filesystem, and MSBuild happily builds `Legacy.CSPROJ` —
+# writing bin/obj beside it and recreating the host/container collision this
+# scan exists to prevent.  A case-SENSITIVE `-name` would never see the project.
+ws="$(new_ws dotnet-case-ext)"
+mkdir -p "$ws/upper" "$ws/mixed" "$ws/vb"
+touch "$ws/upper/Legacy.CSPROJ" "$ws/mixed/App.FsProj" "$ws/vb/Old.VBPROJ"
+assert_emits "$ws" "$ws/upper/bin" "an upper-case .CSPROJ is discovered"
+assert_emits "$ws" "$ws/upper/obj" "an upper-case .CSPROJ emits obj too"
+assert_emits "$ws" "$ws/mixed/obj" "a mixed-case .FsProj is discovered"
+assert_emits "$ws" "$ws/vb/obj" "an upper-case .VBPROJ is discovered"
+# The EMITTED names stay lower case whatever the project file was called: that is
+# what a container-side `dotnet build` writes.  Pinned so a future `-iname` on the
+# emit side cannot start mirroring the source casing.
+assert_absent "$ws" "$ws/upper/Bin" "the emitted artifact dir is lower-case regardless"
+
+echo "Test: a capitalised Bin/Obj is pruned like its lower-case spelling"
+# Same host-casing argument on the prune side: an output directory spelled `Bin`
+# (an older template, or an OutputPath written that way) must not be walked into,
+# or a project file copied under it seeds a nested scan.
+ws="$(new_ws dotnet-case-prune)"
+mkdir -p "$ws/app/Bin/Release/net8.0" "$ws/app/Obj/Debug"
+touch "$ws/app/App.csproj" \
+	"$ws/app/Bin/Release/net8.0/Copied.csproj" \
+	"$ws/app/Obj/Debug/Stale.csproj"
+assert_emits "$ws" "$ws/app/bin" "the project's own bin is still emitted"
+assert_absent "$ws" "$ws/app/Bin/Release/net8.0/bin" "csproj under Bin/ pruned"
+assert_absent "$ws" "$ws/app/Obj/Debug/obj" "csproj under Obj/ pruned"
+
 echo "Test: project directories containing spaces are handled"
 ws="$(new_ws dotnet-spaces)"
 mkdir -p "$ws/my project"
@@ -463,6 +493,40 @@ touch "$ws/app/App.csproj"
 ln -s ../src "$ws/app/bin"
 assert_absent "$ws" "$ws/app/bin" "symlinked bin still skipped"
 assert_emits "$ws" "$ws/app/obj" "the sibling obj is unaffected by the symlinked bin"
+
+echo "Test: a workspace argument that is itself a symlink is still scanned"
+# `find` with the default -P does not descend into a command-line symlink, so a
+# hand-run `shadow-refresh.sh /path/to/symlink-to-workspace` scanned nothing and
+# silently emitted no .NET shadows.  -H dereferences the ARGUMENT only.
+symlink_target="$(new_ws dotnet-symlinked-root-target)"
+symlink_ws="$(dirname "$symlink_target")/dotnet-symlinked-root"
+ln -s "$symlink_target" "$symlink_ws"
+mkdir -p "$symlink_target/app"
+touch "$symlink_target/app/App.csproj"
+# add_shadow_path realpaths every candidate, so the emitted paths are spelled
+# with the resolved root rather than the symlink that was passed in.
+assert_emits "$symlink_ws" "$symlink_target/app/bin" "a symlinked workspace root still yields bin"
+assert_emits "$symlink_ws" "$symlink_target/app/obj" "a symlinked workspace root still yields obj"
+
+echo "Test: -H still refuses to descend a symlinked directory INSIDE the tree"
+# The guard the whole .NET branch leans on: repo content must not be able to aim
+# the walk.  Only the operator's own argument is dereferenced, so a `vendor ->`
+# symlink pointing out of the workspace is never followed — if it were, the
+# outside project's bin/obj would reach add_shadow_path and be rejected there
+# with a diagnostic, which is the oracle below.
+outside_ws="$(new_ws dotnet-inner-symlink-target)"
+mkdir -p "$outside_ws/app"
+touch "$outside_ws/app/App.csproj"
+ws="$(new_ws dotnet-inner-symlink)"
+mkdir -p "$ws/own"
+touch "$ws/own/Own.csproj"
+ln -s "$outside_ws" "$ws/vendor"
+# Positive companion first: without it the two negatives below would also hold if
+# discovery had died outright.
+assert_emits "$ws" "$ws/own/bin" "the workspace's own project is still found"
+assert_absent "$ws" "$outside_ws/app/bin" "the project behind an inner symlink is never reached"
+assert_stderr_absent "$ws" "resolves outside workspace root" \
+	"no outside candidate was even considered, so nothing had to be rejected"
 
 # --- .NET: an existing bin/obj holding tracked content is never masked ---
 #

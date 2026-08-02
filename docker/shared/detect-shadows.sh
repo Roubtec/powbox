@@ -252,6 +252,21 @@ fi
 # nest a tmpfs inside a tmpfs.  bin/obj themselves are pruned so a copied-out
 # project file under bin/ cannot seed a nested scan.
 #
+# The project extensions and the bin/obj prune are matched CASE-INSENSITIVELY
+# (-iname); the four tool-created names stay case-sensitive (-name).  A checkout
+# authored on Windows keeps whatever casing it was created with once it is bind-
+# mounted onto a case-SENSITIVE Linux filesystem, and `Legacy.CSPROJ` /
+# `App.FsProj` are perfectly valid there — MSBuild matches project extensions
+# case-insensitively, so building one in the container writes bin/obj beside it
+# and recreates exactly the host/container collision this scan exists to prevent.
+# The same argument covers the prune: an output directory spelled `Bin`/`Obj` (an
+# older template, or an `OutputPath` written that way) must not be walked into,
+# or a project file copied under it seeds a nested scan.  node_modules, .git,
+# .worktrees, and .claude are created by tooling that only ever writes them in
+# lower case, so loosening those would buy nothing and only widen what is
+# skipped.  The EMITTED paths stay lower-case literals regardless, because that
+# is what a container-side `dotnet build` writes.
+#
 # An existing bin/obj that is itself a SYMLINK is skipped rather than resolved.
 # This scan is automatic — no config declares it — so it must never let repo
 # content decide what gets masked: `realpath` on `app/bin -> ../src` yields
@@ -259,8 +274,18 @@ fi
 # would then tmpfs over real source for the whole session.  (The .powbox.yml
 # branches below deliberately still resolve symlinks: those paths are an
 # explicit operator declaration, not something inferred from the tree.)
-# find(1) does not follow symlinks (-P), so proj_dir itself can contain no
-# symlinked component and checking the final bin/obj component is sufficient.
+# The walk runs `find -H`, which dereferences ONLY its command-line arguments —
+# so no symlink found INSIDE the tree is ever followed, proj_dir can contain no
+# symlinked component that came from repo content, and checking the final bin/obj
+# component is sufficient.  The one dereferenced component is $WORKSPACE_DIR
+# itself, which is the operator's argument rather than something inferred from
+# the tree, and it has to be: plain `-P` does not descend into a command-line
+# symlink at all, so `shadow-refresh.sh /path/to/symlink-to-workspace` would scan
+# nothing and silently emit no .NET shadows.  (entrypoint-core.sh iterates real
+# /workspace/*/ directories, so startup never took that path.)  -H also keeps
+# find printing the paths with the argument's own spelling, which is what the
+# workspace-relative arithmetic below and `git -C "$WORKSPACE_DIR"` both assume;
+# add_shadow_path still realpath's each candidate before emitting it.
 #
 # An existing bin/obj that is a REPOSITORY CHECKOUT (it contains a .git) or that
 # holds GIT-TRACKED content is skipped for that same reason.  A project that
@@ -309,10 +334,10 @@ while IFS= read -r -d '' proj_dir; do
 		dotnet_artifact_dirs+=("$artifact_dir")
 	done
 done < <(
-	find "$WORKSPACE_DIR" \
+	find -H "$WORKSPACE_DIR" \
 		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \
-		-o -name .claude -o -name bin -o -name obj \) -prune \) -o \
-		\( -type f \( -name '*.csproj' -o -name '*.fsproj' -o -name '*.vbproj' \) \
+		-o -name .claude -o -iname bin -o -iname obj \) -prune \) -o \
+		\( -type f \( -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \
 		-printf '%h\0' \) 2>/dev/null | sort -zu
 )
 

@@ -455,6 +455,20 @@ assert_emits "$ws" "$ws/vb/obj" "an upper-case .VBPROJ is discovered"
 # emit side cannot start mirroring the source casing.
 assert_absent "$ws" "$ws/upper/Bin" "the emitted artifact dir is lower-case regardless"
 
+echo "Test: a workspace root whose own name is pruned is still scanned"
+# find evaluates the prune expression against the scan ROOT too, so a workspace
+# called `bin` — or, now that the prune is case-insensitive, `Bin` — pruned
+# itself at depth 0 and the whole .NET scan silently emitted nothing.  Same
+# scans-nothing failure as the symlinked-root case below, reachable the same way
+# through a hand-run `shadow-refresh.sh <path>`; a container slug is
+# `<name>-<hash>`, so startup never reached either.
+for root_name in bin Bin obj OBJ node_modules .git .worktrees .claude; do
+	ws="$(new_ws "$root_name")"
+	mkdir -p "$ws/app"
+	touch "$ws/app/App.csproj"
+	assert_emits "$ws" "$ws/app/obj" "a workspace root named '$root_name' is still scanned"
+done
+
 echo "Test: a capitalised Bin/Obj is pruned like its lower-case spelling"
 # Same host-casing argument on the prune side: an output directory spelled `Bin`
 # (an older template, or an OutputPath written that way) must not be walked into,

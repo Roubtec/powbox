@@ -267,6 +267,15 @@ fi
 # skipped.  The EMITTED paths stay lower-case literals regardless, because that
 # is what a container-side `dotnet build` writes.
 #
+# -mindepth 1 keeps the prune to the tree's INTERIOR.  find evaluates the
+# expression against the scan root as well, so a workspace whose own basename is
+# one of the pruned names — `bin`, or now `Bin` too — pruned itself at depth 0
+# and silenced the entire .NET scan.  A container's slug is `<name>-<hash>` so
+# startup never hit it, but a hand-run `shadow-refresh.sh <path>` did, and that
+# is the same scans-nothing failure the -H note below exists to remove.  Nothing
+# else changes: the root is a directory, so it can never be the -type f project
+# match the second branch looks for.
+#
 # An existing bin/obj that is itself a SYMLINK is skipped rather than resolved.
 # This scan is automatic — no config declares it — so it must never let repo
 # content decide what gets masked: `realpath` on `app/bin -> ../src` yields
@@ -281,11 +290,13 @@ fi
 # itself, which is the operator's argument rather than something inferred from
 # the tree, and it has to be: plain `-P` does not descend into a command-line
 # symlink at all, so `shadow-refresh.sh /path/to/symlink-to-workspace` would scan
-# nothing and silently emit no .NET shadows.  (entrypoint-core.sh iterates real
-# /workspace/*/ directories, so startup never took that path.)  -H also keeps
-# find printing the paths with the argument's own spelling, which is what the
-# workspace-relative arithmetic below and `git -C "$WORKSPACE_DIR"` both assume;
-# add_shadow_path still realpath's each candidate before emitting it.
+# nothing and silently emit no .NET shadows.  (In practice the /workspace entries
+# are bind mounts, so startup never hit it; entrypoint-core.sh's `/workspace/*/`
+# glob would pass a symlinked entry straight through, which -H now handles
+# correctly instead of skipping in silence.)  -H also keeps find printing the
+# paths with the argument's own spelling, which is what the workspace-relative
+# arithmetic below and `git -C "$WORKSPACE_DIR"` both assume; add_shadow_path
+# still realpath's each candidate before emitting it.
 #
 # An existing bin/obj that is a REPOSITORY CHECKOUT (it contains a .git) or that
 # holds GIT-TRACKED content is skipped for that same reason.  A project that
@@ -334,7 +345,7 @@ while IFS= read -r -d '' proj_dir; do
 		dotnet_artifact_dirs+=("$artifact_dir")
 	done
 done < <(
-	find -H "$WORKSPACE_DIR" \
+	find -H "$WORKSPACE_DIR" -mindepth 1 \
 		\( -type d \( -name node_modules -o -name .git -o -name .worktrees \
 		-o -name .claude -o -iname bin -o -iname obj \) -prune \) -o \
 		\( -type f \( -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \

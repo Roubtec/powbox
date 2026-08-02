@@ -54,6 +54,15 @@
 # To match a project's expected credentials, set the env vars before calling,
 # e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
 #
+# The emitted DATABASE_URL always ends in `?sslmode=disable`:
+#   postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable
+# The cluster is initdb'ed without SSL, but Go's lib/pq (and pgx via its stdlib
+# DSN parsing) default to sslmode=require when the DSN omits the parameter, so a
+# Go integration suite would fail with "SSL is not enabled on the server" until
+# someone appended it by hand. Loopback-only + trust auth inside the container
+# security boundary makes `disable` the honest description, not a weakening;
+# libpq/psql and node-postgres accept the parameter too.
+#
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
 #   eval "$(pg-dev-up --worktree url --export)"   # scoped
@@ -599,9 +608,22 @@ print_url() {
 	db="$(urlencode "$POSTGRES_DB")"
 	# Use $PG_HOST (127.0.0.1), not "localhost": the server binds IPv4 only, so
 	# a client that resolves localhost to ::1 first would fail to connect.
-	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}"
+	#
+	# ?sslmode=disable is not decoration: this cluster is initdb'ed without SSL,
+	# and Go's lib/pq (and pgx's stdlib DSN parsing) DEFAULT to sslmode=require
+	# when the DSN omits the parameter — a Go integration suite pointed at this
+	# URL fails with "SSL is not enabled on the server" until someone appends it
+	# by hand. Stating it explicitly is the honest description of a loopback-only
+	# trust-auth cluster inside the container security boundary, not a
+	# weakening. libpq/psql and node-postgres accept the parameter too (the JS
+	# client already connects plaintext when it is absent), so it is compatible
+	# across the ecosystem. Single construction site: `up`, `url`, and
+	# `url --export` all emit it.
+	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}?sslmode=disable"
 	if [ "${1:-}" = "--export" ]; then
-		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe.
+		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe
+		# — it backslash-escapes the `?` (a glob character), which eval strips
+		# back to a literal, so the query parameter survives the round-trip.
 		printf 'export DATABASE_URL=%q\n' "$url"
 	else
 		printf '%s\n' "$url"
@@ -854,7 +876,11 @@ cmd_check() {
 	"$BINDIR/postgres" --version
 }
 
-usage() { sed -n '2,59p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+# Print the header comment block as help. Derive its extent (line 2 through the
+# last leading-`#` line, i.e. everything before `set -euo pipefail`) instead of
+# hard-coding an end line: a hard-coded range silently truncates the help the
+# next time someone adds a paragraph to the header.
+usage() { sed -n '2,${/^#/!q; s/^#\{1\} \{0,1\}//; s/^#$//; p; }' "$0"; }
 
 # Consume a leading scope flag (--worktree / --profile <id>) BEFORE the command;
 # everything after the flag is the command and its own arguments (e.g. the

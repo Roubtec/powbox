@@ -22,7 +22,7 @@ The container sets `push.useForceIfIncludes=true` (in `docker/shared/entrypoint-
 
 | Path | Purpose |
 |------|---------|
-| `/workspace/<project-slug>` | Bind-mounted project directory (working directory; slug is `<name>-<hash>`) |
+| `/workspace/<project-slug>` | Project directory (working directory). Dir-mounted mode (default): a host bind mount, slug `<name>-<hash>`. Self-hosted (`--isolated`): a container-local volume, see the last row |
 | `/ctx` | Optional context mount root; external folders are mounted under `/ctx/<name>` via `--ctx` or `ctx:` config |
 | `/home/node/.claude` | Claude config volume (`claude-config`); always mounted regardless of primary agent |
 | `/home/node/.codex` | Codex config volume (`codex-config`); always mounted regardless of primary agent |
@@ -30,7 +30,7 @@ The container sets `push.useForceIfIncludes=true` (in `docker/shared/entrypoint-
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
 | `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted JS/powbox projects only |
 | `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`, so worktrees survive container recycle), the per-container pnpm store at `.worktrees/.pnpm-store`, the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), and the opt-in ccache compiler cache (`.worktrees/.ccache`); dir-mounted JS/powbox **or** `go.mod` projects |
-| `/workspace/<repo-slug>-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / ccache as subdirs; replaces the bind mount and the two volumes above |
+| `/workspace/<repo-slug>[-<name>]-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / ccache as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 

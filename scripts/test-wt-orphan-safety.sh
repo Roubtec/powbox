@@ -15,6 +15,21 @@
 #     wt-bootstrap needs (those require a real image + volumes — see the smoke).
 #   * wt-enter and wt-remove end-to-end against a real temp git repo, with a
 #     dead-metadata orphan simulated by deleting .git/worktrees/<slug>.
+#   * wt-remove's OPERATION-IN-PROGRESS guard (task 039 found the hole, task 057
+#     closed it): the helper promises to remove a worktree but never work, and
+#     `git status --porcelain` is EMPTY for a bisect, a `git am`, a rebase paused
+#     at a `break`, a cherry-pick/revert SEQUENCE stopped on an empty patch, and
+#     any conflict resolved back to HEAD's content — so each of those was, or
+#     could have been, deleted silently. Every state git can leave behind is
+#     fabricated with REAL git and pinned: the removal must be refused WITH and
+#     WITHOUT --force, the worktree and its state files must survive untouched,
+#     the refusal must NAME the operation, and it must pass the same
+#     destructive_advice detector wt-enter's messages do — naming `--abort` or
+#     `bisect reset` is the same loss by another route. The fail-safe direction
+#     is pinned too (metadata that cannot be read ⇒ refuse, the opposite of
+#     wt-enter's bias), as is the absence of FALSE refusals: a clean worktree is
+#     still removed, --force still reaches git once the clean checks pass, and a
+#     bisect in the MAIN checkout does not leak into a task worktree's verdict.
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
@@ -187,6 +202,15 @@ no() {
 # applied by deleting just that two-word phrase before scanning — never by
 # skipping the line that carries it — so a message naming `prune` is still checked
 # for everything else it says.
+#
+# The detector is used on wt-remove's refusals too (task 057), which means one
+# more piece of non-advice has to be taken out of scope: the SPEAKER LABEL each
+# helper prefixes its own lines with. `wt-remove` is itself one of the patterns —
+# it is exactly what wt-enter must never point at — so every line wt-remove
+# prints would otherwise trip the detector on its own name. Only the anchored
+# `^<helper>: ` prefix is removed, once per line, so a `wt-remove <slug>` offered
+# as a COMMAND anywhere in the text is still caught; the label is stripped
+# whoever emitted it, since no helper names another one that way.
 destructive_advice() {
 	local errfile="$1" text value quoted
 	shift
@@ -214,6 +238,7 @@ destructive_advice() {
 		esac
 	done
 	printf '%s\n' "$text" |
+		LC_ALL=C sed -E 's/^(wt-enter|wt-remove|wt-bootstrap): //' |
 		LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' |
 		grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-zA-Z]*[rRfF]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-zA-Z]*[fF]|checkout[[:space:]]+--[[:space:]]|switch[[:space:]]+-[a-zA-Z]*[fF]|--discard-changes\b|\brestore\b|clean[[:space:]]+-[a-zA-Z]*[fFdDxX]|branch[[:space:]]+-[dD]\b|bisect[[:space:]]+reset\b|--skip\b|--quit\b|--delete\b|--force\b' &&
 		echo " destructive-advice"
@@ -337,6 +362,31 @@ if [ -z "$(destructive_advice "$DA_ERR" "$DA_Q_BLOCKER" "$DA_ROOT" nb)" ]; then
 	ok "a blocker path needing shell-quoting is data in the 'at' position too"
 else
 	no "destructive_advice false-alarms on a shell-quoted blocker path in the 'at' position"
+fi
+
+# The SPEAKER LABEL is not advice: wt-remove prefixes every line it prints with
+# its own name, which is itself one of the detector's patterns. Both directions
+# again, because the strip that makes wt-remove's refusals checkable at all is
+# exactly the kind of edit that can quietly disarm the pattern it touches: a
+# `wt-remove <slug>` offered as a COMMAND — the thing wt-enter must never point
+# at — has to stay caught, wherever in the line it sits.
+{
+	printf "wt-remove: a bisect (BISECT_LOG) is in progress in the worktree at %s; nothing was changed.\n" "$DA_BLOCKER"
+	printf "wt-remove: look at it yourself: 'git -C %s status'.\n" "$DA_BLOCKER"
+} >"$DA_ERR"
+if [ -z "$(destructive_advice "$DA_ERR" "$DA_BLOCKER" "$DA_ROOT" task-a)" ]; then
+	ok "a helper's own 'wt-remove:' line prefix is a speaker label, not advice"
+else
+	no "destructive_advice false-alarms on wt-remove's own line prefix"
+fi
+{
+	printf "wt-enter: branch 'task-a' is already checked out in another worktree at %s.\n" "$DA_BLOCKER"
+	printf "wt-enter: run 'wt-remove task-a' to free it.\n"
+} >"$DA_ERR"
+if [ -n "$(destructive_advice "$DA_ERR" "$DA_BLOCKER" "$DA_ROOT" task-a)" ]; then
+	ok "a suggested 'wt-remove <slug>' is still caught after the line-prefix strip"
+else
+	no "the speaker-label strip HID a suggested 'wt-remove <slug>' command"
 fi
 
 # ---------------------------------------------------------------------------
@@ -938,6 +988,353 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# THE OPERATION-IN-PROGRESS GUARD (task 057). wt-remove's contract is to remove a
+# worktree but NEVER work, and `git status --porcelain` is the wrong instrument
+# for that on its own: it is EMPTY for a bisect, for a `git am`, for a rebase
+# stopped at a `break`, for a cherry-pick/revert SEQUENCE stopped on an empty
+# patch, and for any conflict whose resolution happens to equal HEAD — every one
+# of which is state that exists nowhere else and that removing the worktree
+# destroys. (`git worktree remove` behaves the same way, so this helper's guard
+# is the only protection there is.)
+#
+# Each fixture below is built with REAL git rather than by fabricating files, and
+# every case asserts the porcelain is CLEAN first — otherwise the pre-existing
+# uncommitted-changes guard would be what refused and the operation guard would
+# go untested. The refusal must hold BOTH with and without --force (the
+# documented inversion of vanilla `git worktree remove --force`), must leave the
+# worktree AND its state files exactly where they were, must NAME the operation,
+# and must pass the non-destruction detector: naming a way to clear the state
+# (`--abort`, `bisect reset`, `reset --hard`, ...) is the same loss by another
+# route, and task 039 removed that class of advice from wt-enter.
+#
+# wt_remove_must_refuse <expected phrase> <root> <slug> <state marker path>
+#   Echo a `miss` fragment (empty when all is well), in the same shape the
+#   wt-enter cases use.
+# ---------------------------------------------------------------------------
+wt_remove_must_refuse() {
+	local phrase="$1" root="$2" slug="$3" marker="$4"
+	local wt="$root/.worktrees/$CONTAINER_NAME/$slug"
+	local err="$WORK_ROOT/wtrm-$slug.err" miss="" mode rc
+
+	[ -d "$wt" ] || {
+		printf '%s' " fixture-worktree-missing"
+		return 0
+	}
+	[ -e "$marker" ] || {
+		printf '%s' " fixture-state-missing"
+		return 0
+	}
+	# The whole point: nothing the porcelain guard would already have caught.
+	[ -z "$(git -C "$wt" status --porcelain)" ] || miss="$miss fixture-porcelain-not-clean"
+
+	for mode in plain force; do
+		rc=0
+		if [ "$mode" = plain ]; then
+			(cd "$root" && bash "$WT_REMOVE" "$slug" 2>"$err") || rc=$?
+		else
+			(cd "$root" && bash "$WT_REMOVE" "$slug" --force 2>"$err") || rc=$?
+		fi
+		[ "$rc" -ne 0 ] || miss="$miss $mode-REMOVED-ANYWAY"
+		[ -d "$wt" ] || miss="$miss $mode-worktree-gone"
+		[ -e "$marker" ] || miss="$miss $mode-state-lost"
+		grep -qF "$phrase" "$err" || miss="$miss $mode-operation-not-named"
+		miss="$miss$(destructive_advice "$err" "$wt" "$root" "$slug")"
+	done
+	printf '%s' "$miss"
+}
+
+# --- bisect, DETACHED (`git bisect start <bad> <good>`) ---------------------
+RB1="$(make_repo rb-detached)"
+for i in 1 2 3; do
+	echo "rev $i" >"$RB1/seed.txt"
+	git_quiet -C "$RB1" commit -qam "c$i"
+done
+git_quiet -C "$RB1" branch bis-d
+git_quiet -C "$RB1" worktree add -q "$RB1/.worktrees/$CONTAINER_NAME/bis-d" bis-d >/dev/null 2>&1
+git_quiet -C "$RB1/.worktrees/$CONTAINER_NAME/bis-d" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+miss="$(wt_remove_must_refuse "a bisect (BISECT_LOG)" "$RB1" bis-d "$RB1/.git/worktrees/bis-d/BISECT_LOG")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a worktree with a DETACHED bisect in progress, with and without --force"
+else
+	no "wt-remove detached-bisect guard inadequate:$miss"
+fi
+
+# --- bisect, still ON its branch (`git bisect start` with no revs) ----------
+# The shape that started this: the worktree is not even detached, `git status
+# --porcelain` is empty, and every guard wt-remove used to have passed.
+RB2="$(make_repo rb-onbranch)"
+git_quiet -C "$RB2" branch bis-b
+git_quiet -C "$RB2" worktree add -q "$RB2/.worktrees/$CONTAINER_NAME/bis-b" bis-b >/dev/null 2>&1
+git_quiet -C "$RB2/.worktrees/$CONTAINER_NAME/bis-b" bisect start >/dev/null 2>&1 || true
+if git -C "$RB2" worktree list --porcelain | grep -qx "branch refs/heads/bis-b"; then
+	miss="$(wt_remove_must_refuse "a bisect (BISECT_LOG)" "$RB2" bis-b "$RB2/.git/worktrees/bis-b/BISECT_START")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a worktree bisecting ON its branch (clean status, nothing else to see)"
+	else
+		no "wt-remove on-branch-bisect guard inadequate:$miss"
+	fi
+else
+	no "precondition: 'git bisect start' should leave the worktree on its branch"
+fi
+
+# --- multi-commit revert stopped on an EMPTY revert -------------------------
+# sequencer/ + MERGE_MSG, clean porcelain, and NO REVERT_HEAD — so `sequencer/`
+# is the only thing that marks it.
+RS1="$(make_repo rs-seq)"
+echo x >"$RS1/other.txt"
+git_quiet -C "$RS1" add -A
+git_quiet -C "$RS1" commit -qm "add other"
+echo one >"$RS1/seed.txt"
+git_quiet -C "$RS1" commit -qam c1
+echo y >"$RS1/other.txt"
+git_quiet -C "$RS1" commit -qam c2
+echo seed >"$RS1/seed.txt" # undoes c1 by hand, so reverting c1 later is empty
+git_quiet -C "$RS1" commit -qam "undo c1"
+git_quiet -C "$RS1" branch seq-u
+git_quiet -C "$RS1" worktree add -q "$RS1/.worktrees/$CONTAINER_NAME/seq-u" seq-u >/dev/null 2>&1
+git_quiet -C "$RS1/.worktrees/$CONTAINER_NAME/seq-u" revert --no-edit \
+	"$(git -C "$RS1" rev-parse seq-u~1)" "$(git -C "$RS1" rev-parse seq-u~2)" >/dev/null 2>&1 || true
+if [ ! -e "$RS1/.git/worktrees/seq-u/REVERT_HEAD" ]; then
+	miss="$(wt_remove_must_refuse "a cherry-pick/revert sequence (sequencer/)" "$RS1" seq-u "$RS1/.git/worktrees/seq-u/sequencer/todo")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a worktree stopped mid-SEQUENCE (sequencer/, clean status, no REVERT_HEAD)"
+	else
+		no "wt-remove sequencer guard inadequate:$miss"
+	fi
+else
+	no "precondition: the empty-revert stop should leave no REVERT_HEAD (else sequencer/ is not what is under test)"
+fi
+
+# --- REVERT_HEAD alone, with a CLEAN porcelain ------------------------------
+# A single-commit revert whose conflict is resolved back to HEAD's own content:
+# the index matches HEAD, `git status --porcelain` is empty, and REVERT_HEAD is
+# all that is left of the revert. git reads REVERT_HEAD independently of the
+# sequencer, so it has to be guarded independently too.
+RS2="$(make_repo rs-revhead)"
+printf 'a\n' >"$RS2/f.txt"
+git_quiet -C "$RS2" add -A
+git_quiet -C "$RS2" commit -qm f1
+printf 'b\n' >"$RS2/f.txt"
+git_quiet -C "$RS2" commit -qam f2
+printf 'c\n' >"$RS2/f.txt"
+git_quiet -C "$RS2" commit -qam f3
+git_quiet -C "$RS2" branch rev-h
+git_quiet -C "$RS2" worktree add -q "$RS2/.worktrees/$CONTAINER_NAME/rev-h" rev-h >/dev/null 2>&1
+git_quiet -C "$RS2/.worktrees/$CONTAINER_NAME/rev-h" revert --no-edit HEAD~1 >/dev/null 2>&1 || true
+printf 'c\n' >"$RS2/.worktrees/$CONTAINER_NAME/rev-h/f.txt"
+git_quiet -C "$RS2/.worktrees/$CONTAINER_NAME/rev-h" add f.txt
+if [ ! -e "$RS2/.git/worktrees/rev-h/sequencer" ]; then
+	miss="$(wt_remove_must_refuse "a revert (REVERT_HEAD)" "$RS2" rev-h "$RS2/.git/worktrees/rev-h/REVERT_HEAD")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a worktree holding REVERT_HEAD with a clean status"
+	else
+		no "wt-remove REVERT_HEAD guard inadequate:$miss"
+	fi
+else
+	no "precondition: a single-commit revert should leave no sequencer/ (else REVERT_HEAD is not what is under test)"
+fi
+
+# --- the states that were ALREADY guarded, re-pinned in their CLEAN shapes ---
+# They are in the guard set because git's own wt-status.c reads them, and each is
+# reachable with an empty porcelain — the shape in which only the guard stands
+# between the state and deletion. Regression pins for the audit, not new gaps.
+
+# CHERRY_PICK_HEAD: conflict resolved back to HEAD's content.
+RS3="$(make_repo rs-cp)"
+printf 'a\n' >"$RS3/f.txt"
+git_quiet -C "$RS3" add -A
+git_quiet -C "$RS3" commit -qm f1
+git_quiet -C "$RS3" checkout -q -b cp-side
+printf 'b\n' >"$RS3/f.txt"
+git_quiet -C "$RS3" commit -qam s1
+git_quiet -C "$RS3" checkout -q main
+printf 'c\n' >"$RS3/f.txt"
+git_quiet -C "$RS3" commit -qam m1
+git_quiet -C "$RS3" branch cp-h
+git_quiet -C "$RS3" worktree add -q "$RS3/.worktrees/$CONTAINER_NAME/cp-h" cp-h >/dev/null 2>&1
+git_quiet -C "$RS3/.worktrees/$CONTAINER_NAME/cp-h" cherry-pick cp-side >/dev/null 2>&1 || true
+printf 'c\n' >"$RS3/.worktrees/$CONTAINER_NAME/cp-h/f.txt"
+git_quiet -C "$RS3/.worktrees/$CONTAINER_NAME/cp-h" add f.txt
+miss="$(wt_remove_must_refuse "a cherry-pick (CHERRY_PICK_HEAD)" "$RS3" cp-h "$RS3/.git/worktrees/cp-h/CHERRY_PICK_HEAD")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a worktree holding CHERRY_PICK_HEAD with a clean status"
+else
+	no "wt-remove CHERRY_PICK_HEAD guard inadequate:$miss"
+fi
+
+# MERGE_HEAD: same trick, an interrupted merge whose resolution equals HEAD.
+RS4="$(make_repo rs-merge)"
+printf 'a\n' >"$RS4/f.txt"
+git_quiet -C "$RS4" add -A
+git_quiet -C "$RS4" commit -qm f1
+git_quiet -C "$RS4" checkout -q -b mg-side
+printf 'b\n' >"$RS4/f.txt"
+git_quiet -C "$RS4" commit -qam s1
+git_quiet -C "$RS4" checkout -q main
+printf 'c\n' >"$RS4/f.txt"
+git_quiet -C "$RS4" commit -qam m1
+git_quiet -C "$RS4" branch mg-h
+git_quiet -C "$RS4" worktree add -q "$RS4/.worktrees/$CONTAINER_NAME/mg-h" mg-h >/dev/null 2>&1
+git_quiet -C "$RS4/.worktrees/$CONTAINER_NAME/mg-h" merge mg-side >/dev/null 2>&1 || true
+printf 'c\n' >"$RS4/.worktrees/$CONTAINER_NAME/mg-h/f.txt"
+git_quiet -C "$RS4/.worktrees/$CONTAINER_NAME/mg-h" add f.txt
+miss="$(wt_remove_must_refuse "a merge (MERGE_HEAD)" "$RS4" mg-h "$RS4/.git/worktrees/mg-h/MERGE_HEAD")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a worktree holding MERGE_HEAD with a clean status"
+else
+	no "wt-remove MERGE_HEAD guard inadequate:$miss"
+fi
+
+# rebase-merge: an interactive rebase stopped at a `break` — clean porcelain, and
+# the whole rebase plan lives in that directory.
+RS5="$(make_repo rs-rebase)"
+for i in 1 2 3; do
+	echo "rev $i" >"$RS5/seed.txt"
+	git_quiet -C "$RS5" commit -qam "c$i"
+done
+git_quiet -C "$RS5" branch rb-h
+git_quiet -C "$RS5" worktree add -q "$RS5/.worktrees/$CONTAINER_NAME/rb-h" rb-h >/dev/null 2>&1
+(
+	export GIT_SEQUENCE_EDITOR='sed -i "1i break"'
+	git_quiet -C "$RS5/.worktrees/$CONTAINER_NAME/rb-h" rebase -i HEAD~2 >/dev/null 2>&1
+) || true
+miss="$(wt_remove_must_refuse "a rebase, merge/interactive backend (rebase-merge/)" "$RS5" rb-h "$RS5/.git/worktrees/rb-h/rebase-merge")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a worktree with an interactive rebase stopped at a break"
+else
+	no "wt-remove rebase-merge guard inadequate:$miss"
+fi
+
+# rebase-apply + `applying`: an interrupted `git am`, which git distinguishes
+# from a rebase by that marker — the refusal names the am session, not a rebase.
+RS6="$(make_repo rs-am)"
+printf 'a\n' >"$RS6/f.txt"
+git_quiet -C "$RS6" add -A
+git_quiet -C "$RS6" commit -qm f1
+git_quiet -C "$RS6" checkout -q -b am-side
+printf 'a\nb\n' >"$RS6/f.txt"
+git_quiet -C "$RS6" commit -qam s1
+git_quiet -C "$RS6" format-patch -1 -q -o "$WORK_ROOT/am-patches"
+git_quiet -C "$RS6" checkout -q main
+printf 'a\nX\n' >"$RS6/f.txt"
+git_quiet -C "$RS6" commit -qam divergent
+git_quiet -C "$RS6" branch am-h
+git_quiet -C "$RS6" worktree add -q "$RS6/.worktrees/$CONTAINER_NAME/am-h" am-h >/dev/null 2>&1
+git_quiet -C "$RS6/.worktrees/$CONTAINER_NAME/am-h" am "$WORK_ROOT/am-patches"/*.patch >/dev/null 2>&1 || true
+miss="$(wt_remove_must_refuse "a 'git am' session (rebase-apply/applying)" "$RS6" am-h "$RS6/.git/worktrees/am-h/rebase-apply/applying")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a worktree with an interrupted 'git am' and names it as an am session"
+else
+	no "wt-remove git-am guard inadequate:$miss"
+fi
+
+# --- fail safe: state that cannot be READ must refuse, not permit -----------
+# The opposite of wt-enter's bias, and correctly so: there an unknown blocker
+# degrades to git's own message and costs nothing, here an unknown means we
+# cannot PROVE the tree is safe to delete. Both halves of the lookup are pinned,
+# each with a fixture that leaves git itself perfectly able to work in the
+# worktree (`rev-parse` succeeds, the porcelain is empty) so that nothing but the
+# unreadable metadata is under test.
+#
+# fs_case <label> <root> <slug> <before-hook> <after-hook> — break the metadata,
+# run wt-remove both ways, restore, and report.
+fs_case() {
+	local label="$1" root="$2" slug="$3" break_cmd="$4" restore_cmd="$5"
+	local wt="$root/.worktrees/$CONTAINER_NAME/$slug" miss="" rc rcf
+	eval "$break_cmd"
+	rc=0
+	(cd "$root" && bash "$WT_REMOVE" "$slug" 2>"$WORK_ROOT/fs-$slug.err") || rc=$?
+	rcf=0
+	(cd "$root" && bash "$WT_REMOVE" "$slug" --force 2>"$WORK_ROOT/fs-$slug-force.err") || rcf=$?
+	eval "$restore_cmd"
+	[ "$rc" -ne 0 ] || miss="$miss REMOVED-ANYWAY"
+	[ "$rcf" -ne 0 ] || miss="$miss force-REMOVED-ANYWAY"
+	[ -d "$wt" ] || miss="$miss worktree-gone"
+	grep -qF "refusing to remove it" "$WORK_ROOT/fs-$slug.err" || miss="$miss no-refusal-wording"
+	miss="$miss$(destructive_advice "$WORK_ROOT/fs-$slug.err" "$wt" "$root" "$slug")"
+	if [ -z "$miss" ]; then
+		ok "$label"
+	else
+		no "$label — inadequate:$miss"
+	fi
+}
+
+# (a) The REGISTRATION cannot be read, so the worktree's admin dir cannot even be
+# identified. git needs no such lookup to operate inside the worktree — the
+# `gitdir` file exists for `worktree prune` — so this is precisely the shape where
+# the tree looks fine and its state is unknowable.
+RF1="$(make_repo rf-registration)"
+git_quiet -C "$RF1" worktree add -q "$RF1/.worktrees/$CONTAINER_NAME/opaque" -b opaque-b >/dev/null 2>&1
+fs_case "wt-remove refuses when a worktree's registration cannot be read (fail safe)" \
+	"$RF1" opaque \
+	"chmod 000 '$RF1/.git/worktrees/opaque/gitdir'" \
+	"chmod 644 '$RF1/.git/worktrees/opaque/gitdir'"
+
+# (b) The admin dir resolves but is not READABLE, so the state files inside it
+# cannot be enumerated or probed. An `-e` test would answer "absent" for every
+# one of them — i.e. "nothing in flight" — which is the wrong direction.
+RF2="$(make_repo rf-admindir)"
+git_quiet -C "$RF2" worktree add -q "$RF2/.worktrees/$CONTAINER_NAME/shut" -b shut-b >/dev/null 2>&1
+fs_case "wt-remove refuses when a worktree's admin git dir is unreadable (fail safe)" \
+	"$RF2" shut \
+	"chmod 111 '$RF2/.git/worktrees/shut'" \
+	"chmod 700 '$RF2/.git/worktrees/shut'"
+
+# --- and NO false refusals: a clean worktree is still removed with no friction
+# wt-remove is called by the batch skills after every PR is opened, so a guard
+# that refused a clean tree would be its own kind of breakage.
+RC1="$(make_repo rc-clean)"
+git_quiet -C "$RC1" worktree add -q "$RC1/.worktrees/$CONTAINER_NAME/clean" -b clean-b >/dev/null 2>&1
+if (cd "$RC1" && bash "$WT_REMOVE" clean 2>"$WORK_ROOT/rc.err") &&
+	[ ! -e "$RC1/.worktrees/$CONTAINER_NAME/clean" ] &&
+	git -C "$RC1" show-ref --verify --quiet refs/heads/clean-b; then
+	ok "wt-remove still removes a clean, operation-free worktree (branch kept)"
+else
+	no "wt-remove refused or mishandled a clean worktree: $(cat "$WORK_ROOT/rc.err")"
+fi
+
+# The main checkout being mid-operation must not leak into a task worktree's
+# verdict: the state is read from the worktree's OWN admin dir, and the primary
+# checkout's `.git` is a different one. A bisecting main tree is the case that
+# would misfire if the two were ever conflated.
+RC2="$(make_repo rc-mainbisect)"
+for i in 1 2 3; do
+	echo "rev $i" >"$RC2/seed.txt"
+	git_quiet -C "$RC2" commit -qam "c$i"
+done
+git_quiet -C "$RC2" worktree add -q "$RC2/.worktrees/$CONTAINER_NAME/sib" -b sib-b >/dev/null 2>&1
+git_quiet -C "$RC2" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+if [ -e "$RC2/.git/BISECT_LOG" ]; then
+	if (cd "$RC2/.worktrees/$CONTAINER_NAME" && bash "$WT_REMOVE" sib 2>"$WORK_ROOT/rc2.err") &&
+		[ ! -e "$RC2/.worktrees/$CONTAINER_NAME/sib" ] &&
+		[ -e "$RC2/.git/BISECT_LOG" ]; then
+		ok "a bisect in the MAIN checkout does not block removing a clean task worktree"
+	else
+		no "wt-remove read the main checkout's operation state as the worktree's own: $(cat "$WORK_ROOT/rc2.err")"
+	fi
+else
+	no "precondition: bisect did not start in the main checkout of $RC2"
+fi
+
+# --force still reaches `git worktree remove` once the clean checks pass — it is
+# gated, not disabled. Ignored build artifacts are the case it exists for.
+RC3="$(make_repo rc-force)"
+printf 'build/\n' >"$RC3/.gitignore"
+git_quiet -C "$RC3" add -A
+git_quiet -C "$RC3" commit -qm ignore
+git_quiet -C "$RC3" worktree add -q "$RC3/.worktrees/$CONTAINER_NAME/art" -b art-b >/dev/null 2>&1
+mkdir -p "$RC3/.worktrees/$CONTAINER_NAME/art/build"
+echo artifact >"$RC3/.worktrees/$CONTAINER_NAME/art/build/out.o"
+if [ -z "$(git -C "$RC3/.worktrees/$CONTAINER_NAME/art" status --porcelain)" ] &&
+	(cd "$RC3" && bash "$WT_REMOVE" art --force 2>"$WORK_ROOT/rc3.err") &&
+	[ ! -e "$RC3/.worktrees/$CONTAINER_NAME/art" ] &&
+	git -C "$RC3" show-ref --verify --quiet refs/heads/art-b; then
+	ok "wt-remove --force still removes a clean worktree carrying ignored build artifacts (branch kept)"
+else
+	no "wt-remove --force did not remove a clean worktree with ignored artifacts: $(cat "$WORK_ROOT/rc3.err")"
+fi
+
+# ---------------------------------------------------------------------------
 # Integration: wt-enter names the PRIMARY checkout when it is what blocks the
 # branch (a human or peer agent switched the shared main working tree onto it).
 # The error must identify the main checkout, flag that it is shared, and point
@@ -1203,7 +1600,10 @@ fi
 # list is a deleted worktree. The fixtures below are exactly the states that gap
 # has produced: a rebase, a bisect (twice, because one shape keeps the worktree
 # on its branch with a CLEAN `git status`), and an interrupted revert (same clean
-# shape, and invisible to every guard wt-remove has).
+# shape). Task 057 closed the wt-remove side for all of them — see the
+# operation-in-progress guard cases above — which is exactly why wt-enter still
+# must not lean on that list: the two are maintained independently, and the
+# reason wt-enter is safe is that it enumerates nothing at all.
 #
 # Integration: blocked by a worktree with an INTERRUPTED REBASE. git reports such
 # a worktree as `detached` in the porcelain yet still refuses to check its branch
@@ -1277,9 +1677,10 @@ fi
 
 # ---------------------------------------------------------------------------
 # Integration: a bisect not yet given a good/bad commit does NOT detach — the
-# worktree stays ON its branch and `git status` is clean, so nothing wt-remove
-# checks would stop it discarding the bisect. Identification comes free from the
-# `branch` record; what is pinned here is that the advice stays hands-off.
+# worktree stays ON its branch and `git status` is clean — the shape in which
+# nothing wt-remove checked used to stop it discarding the bisect (guarded since
+# task 057, pinned above). Identification comes free from the `branch` record;
+# what is pinned here is that the advice stays hands-off.
 # ---------------------------------------------------------------------------
 RA="$(make_repo ra)"
 WBA="$RA/.worktrees/$CONTAINER_NAME"
@@ -1311,9 +1712,11 @@ fi
 # Integration: blocked by a worktree with an INTERRUPTED REVERT. `git revert A B`
 # where B's revert turns out empty stops the sequence with the worktree ON its
 # branch, `git status --porcelain` EMPTY, and nothing but sequencer/ + MERGE_MSG
-# to show for it — none of which appears in wt-remove's guard list. Removing that
-# worktree would take the revert sequence with it and no guard would object, so
-# wt-enter must not point anywhere near removal.
+# to show for it — none of which used to appear in wt-remove's guard list, so
+# removing that worktree took the revert sequence with it and no guard objected
+# (closed by task 057, pinned above). wt-enter must not point anywhere near
+# removal regardless: it is the state it cannot see that makes the advice wrong,
+# not whether some other script happens to check for it today.
 # ---------------------------------------------------------------------------
 RR="$(make_repo rr)"
 WBR="$RR/.worktrees/$CONTAINER_NAME"
@@ -1345,7 +1748,7 @@ if [ -e "$RR/.git/worktrees/task-u/sequencer" ] &&
 		[ -e "$RR/.git/worktrees/task-u/sequencer" ] || miss="$miss revert-state-lost"
 		[ ! -e "$WBR/task-v" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
-			ok "wt-enter stays hands-off for a worktree stopped mid-revert (clean status, no wt-remove guard)"
+			ok "wt-enter stays hands-off for a worktree stopped mid-revert (clean status, invisible to git status)"
 		else
 			no "wt-enter interrupted-revert conflict message inadequate:$miss"
 		fi

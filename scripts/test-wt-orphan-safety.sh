@@ -37,6 +37,11 @@
 #     naming the MAIN working tree (pinned directly: the integration case cannot
 #     tell a broken implementation apart, since in an ordinary repo the main tree
 #     is the repo root wt-enter already knows).
+#   * the non-destruction DETECTOR itself (destructive_advice below), because
+#     every case above delegates to it: a hostile dynamic value — a branch named
+#     `abort`, `force`, `remove`, `hard`, `rf` or `restore` — must still be
+#     treated as data, WITHOUT disarming the detector for a separate destructive
+#     command in the same message.
 #   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
 #     the paths inside the commands wt-enter suggests are shell-quoted, so advice
 #     about a worktree under a spaced path stays pasteable and safe to paste.
@@ -111,6 +116,30 @@ no() {
 # and git's own diagnostics stay in scope: whoever printed it, a command that
 # could destroy the blocker is something a human should look at.
 #
+# Neutralisation is ANCHORED to the positions a dynamic value can actually be
+# emitted in, never applied as a free substring replacement over the whole text.
+# A free replacement is a trapdoor: it deletes the value wherever the characters
+# happen to line up, so a branch named `abort` would erase the `abort` out of a
+# genuinely suggested `rebase --abort`, `force` out of `--force`, `remove` out of
+# `worktree remove`, and `rf` out of `rm -rf` — silently turning the detector off
+# for exactly the advice it exists to catch. The anchors are the three shapes
+# observed in the real messages (both wt-enter's own lines and git's fatals):
+#
+#   '<value>'        single-quoted prose — git's `fatal: '<branch>' is already
+#                    used by worktree at '<path>'`, and wt-enter's `branch
+#                    '<branch>'` / `once '<branch>' is free`
+#   at <value>       the blocker path, bare, in wt-enter's prose (paths only)
+#   -C <value>       the argument of a suggested `git -C … status`, in the bare
+#                    and the shell-quoted spelling wt-enter actually prints
+#
+# Each anchor removes the value TOGETHER with its surrounding context, so for a
+# destructive pattern to be hidden it would have to sit inside that context —
+# i.e. inside the dynamic value itself, which is the intended exemption. Text
+# belonging to a separate command is unreachable. The trade is one-directional
+# and safe: should wt-enter ever emit a value in some fourth position, the value
+# is simply NOT neutralised there, which can only produce a false positive — a
+# loud test failure — and never a silent miss.
+#
 # The single exemption is git's own `git worktree prune`, which drops a stale
 # record for a directory that is already gone and can destroy nothing. It is
 # applied by deleting just that two-word phrase before scanning — never by
@@ -122,11 +151,19 @@ destructive_advice() {
 	text="$(cat -- "$errfile" 2>/dev/null)" || return 0
 	for value in "$@"; do
 		[ -n "$value" ] || continue
-		# Both spellings: wt-enter prints these values bare in prose and
-		# shell-quoted inside the commands it suggests.
+		# Each anchor is tried in BOTH spellings: wt-enter prints these values
+		# bare in prose and shell-quoted (`shq`, itself `printf %q`) inside the
+		# commands it suggests, and for a plain value the two coincide.
 		printf -v quoted '%q' "$value"
-		text="${text//"$value"/<dynamic>}"
-		text="${text//"$quoted"/<dynamic>}"
+		text="${text//"'$value'"/'<dynamic>'}"
+		text="${text//"'$quoted'"/'<dynamic>'}"
+		text="${text//"-C $value"/-C <dynamic>}"
+		text="${text//"-C $quoted"/-C <dynamic>}"
+		# Only a path is ever printed bare after `at `, and anchoring this one to
+		# absolute paths keeps a short branch name out of the substitution.
+		case "$value" in
+		/*) text="${text//"at $value"/at <dynamic>}" ;;
+		esac
 	done
 	printf '%s\n' "$text" |
 		LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' |
@@ -139,6 +176,68 @@ WORK_ROOT="$(mktemp -d)"
 trap 'rm -rf "$WORK_ROOT"' EXIT
 
 export CONTAINER_NAME="testcont"
+
+# ---------------------------------------------------------------------------
+# Unit: destructive_advice ITSELF. Every branch-conflict case below leans on it,
+# so a blind spot in the detector silently disarms all of them — and the defect
+# class it guards has recurred often enough on this branch that "the net looks
+# fine" is not evidence.
+#
+# The blind spot it can plausibly grow is over-broad neutralisation. Neutralising
+# a dynamic value ANYWHERE its characters occur would delete the matching text
+# out of a genuinely destructive command printed elsewhere in the same message: a
+# branch named `abort` disarms `rebase --abort`, `force` disarms `--force`,
+# `remove` disarms `worktree remove`, `hard` disarms `reset --hard`, `rf` disarms
+# `rm -rf`, `restore` disarms `restore --worktree`. None of the fixtures below
+# happens to use such a name today, which is precisely why this is pinned here
+# rather than left to be discovered by the fixture that eventually does.
+#
+# Each hostile name is checked in BOTH directions, since either alone is
+# trivially satisfiable — neutralise nothing and the first passes, neutralise
+# everything and the second does:
+#   1. it is still treated as DATA where wt-enter echoes it back (no false alarm)
+#   2. a separate destructive command in the same message is STILL caught
+# ---------------------------------------------------------------------------
+DA_ERR="$WORK_ROOT/da.err"
+DA_BLOCKER="/w/.worktrees/$CONTAINER_NAME/task-a"
+DA_ROOT="/w"
+
+# da_message <branch> [<extra-line>] — the real branch-conflict message shape
+# (git's fatal, then wt-enter's diagnosis), optionally plus one more line. The
+# branch name lands in every position the real messages put it in.
+da_message() {
+	{
+		printf "Preparing worktree (checking out '%s')\n" "$1"
+		printf "fatal: '%s' is already used by worktree at '%s'\n" "$1" "$DA_BLOCKER"
+		printf "wt-enter: branch '%s' is already checked out in another worktree at %s; git refuses to check one branch out twice.\n" "$1" "$DA_BLOCKER"
+		printf "wt-enter: look at it yourself: 'git -C %s status', or coordinate with whoever owns that worktree. Rerun wt-enter once '%s' is free.\n" "$DA_BLOCKER" "$1"
+		[ -z "${2:-}" ] || printf '%s\n' "$2"
+	} >"$DA_ERR"
+}
+
+# <hostile branch>|<short label>|<a destructive line the same message also carries>
+while IFS='|' read -r hostile label destructive; do
+	[ -n "$hostile" ] || continue
+	da_message "$hostile"
+	if [ -z "$(destructive_advice "$DA_ERR" "$DA_BLOCKER" "$DA_ROOT" "$hostile" task-b)" ]; then
+		ok "a branch named '$hostile' is data, not advice"
+	else
+		no "destructive_advice false-alarms on a branch merely named '$hostile'"
+	fi
+	da_message "$hostile" "$destructive"
+	if [ -n "$(destructive_advice "$DA_ERR" "$DA_BLOCKER" "$DA_ROOT" "$hostile" task-b)" ]; then
+		ok "a suggested '$label' is caught even beside a branch named '$hostile'"
+	else
+		no "a suggested '$label' was HIDDEN by neutralising a branch named '$hostile'"
+	fi
+done <<EOF
+abort|rebase --abort|wt-enter: then run 'git -C $DA_BLOCKER rebase --abort' to clear it.
+restore|restore --worktree|wt-enter: then run 'git -C $DA_BLOCKER restore --worktree --staged .' to clear it.
+force|checkout --force|wt-enter: then run 'git -C $DA_BLOCKER checkout --force main' to free it.
+remove|worktree remove|wt-enter: then run 'git -C $DA_BLOCKER worktree remove' to free it.
+hard|reset --hard|wt-enter: then run 'git -C $DA_BLOCKER reset --hard' to clear it.
+rf|rm -rf|wt-enter: then run 'rm -rf $DA_BLOCKER' to free it.
+EOF
 
 # ---------------------------------------------------------------------------
 # Unit: wt_reap_orphan_dir

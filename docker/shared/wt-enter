@@ -22,7 +22,9 @@
 # the blocking worktree is named — and, when it is the repository's PRIMARY
 # checkout (shared with humans and peer agents), the error says so explicitly
 # instead of leaving git's bare "already used by worktree at ..." to be misread
-# as a stale worktree. Nothing is ever auto-detached or auto-switched.
+# as a stale worktree. Nothing is ever auto-detached or auto-switched, and no
+# remedy that could DISCARD the blocking worktree is ever suggested (see the
+# note above worktree_add).
 #
 # stdout is ONLY the worktree path, so callers can `WT="$(wt-enter ...)"`;
 # diagnostics go to stderr. Non-zero exit means the caller must STOP and
@@ -113,6 +115,17 @@ fi
 #   captured — so stdout stays path-only for callers while git keeps streaming
 #   live to a terminal on fd 2; only its exit status is taken, and preserved.
 #
+#   The diagnosis NAMES the blocker and stops there: it never suggests removing
+#   or otherwise discarding that worktree, not even conditionally. Deciding that
+#   a worktree is safe to delete would mean enumerating every state git can leave
+#   behind (rebase, am, cherry-pick, revert/sequencer, merge, bisect, ...) and
+#   keeping that list in lockstep with wt-remove's independently maintained
+#   guards; the gap between the two lists is a deleted worktree, and it has bitten
+#   more than once. The one remedy offered is git's own `worktree prune`, for a
+#   blocker whose directory is already gone — it drops a stale record and can
+#   destroy nothing. Everything else is "go look at it yourself", which is
+#   non-destructive by construction and needs no such list.
+#
 #   The diagnosis is deliberately SUPPRESSED when the resolved blocker is the
 #   destination worktree itself: `git worktree add` also fails when $WT is
 #   registered but missing on disk (a hand-deleted dir, or a pre-durable-metadata
@@ -131,18 +144,7 @@ worktree_add() {
 	# some other cause, or no worktree could be identified) — then git's own
 	# message above is all we have, and that is fine. So is a blocker that IS
 	# the destination (see the note above).
-	#
-	# ONE resolution decides everything below: the same scan yields the blocker
-	# path and its operation state (none / in-flight / unknown), so the
-	# remedy can never describe a different state than the blocker that was
-	# found. Re-probing for the remedy would race — a transient read failure, or
-	# an operation ending between the two scans, would downgrade the advice to a
-	# plain "remove that worktree" for a worktree whose live bisect state that
-	# very removal destroys. The resolver is therefore called DIRECTLY, not in a
-	# command substitution (a subshell would discard its globals), with stdout
-	# dropped so our own stays path-only.
-	if wt_worktree_for_branch "$ROOT" "$BRANCH" >/dev/null &&
-		blocker="$WT_BLOCKER_PATH" && [ "$blocker" != "$WT" ]; then
+	if blocker="$(wt_worktree_for_branch "$ROOT" "$BRANCH")" && [ "$blocker" != "$WT" ]; then
 		primary="$(wt_primary_checkout "$ROOT" || printf '%s\n' "$ROOT")"
 		if [ "$blocker" = "$primary" ] || [ "$blocker" = "$ROOT" ]; then
 			echo "wt-enter: branch '$BRANCH' is checked out in the repository's PRIMARY (main) working tree at $blocker — not in a task worktree." >&2
@@ -150,25 +152,16 @@ worktree_add() {
 			echo "wt-enter: nothing was changed. Do NOT detach or switch the main checkout blindly — either run this task on a different branch, or coordinate with whoever owns that checkout before moving it off '$BRANCH', then rerun wt-enter." >&2
 		else
 			echo "wt-enter: branch '$BRANCH' is already checked out in another worktree at $blocker; git refuses to check one branch out twice." >&2
-			echo "wt-enter: nothing was changed. Use that worktree, or pick a different branch." >&2
-			# Only a VERIFIED "no operation" may be answered with wt-remove: it
-			# guards rebase/merge state and unsaved work but has NO bisect guard,
-			# and a bisect leaves `git status --porcelain` empty, so nothing would
-			# stop the removal from discarding it. "unknown" therefore routes with
-			# "in-flight", never with "none" — losing a wt-remove suggestion costs
-			# a caller one message, a wrong one costs it the bisect.
 			if [ ! -d "$blocker" ]; then
-				echo "wt-enter: that worktree is registered in git's metadata but MISSING on disk, so no removal can free it. Run 'git -C $ROOT worktree prune' to drop the stale record, then rerun wt-enter." >&2
-			elif [ "$WT_BLOCKER_OPERATION" = in-flight ]; then
-				echo "wt-enter: that worktree has an UNFINISHED rebase, am or bisect (git may report it as detached and still count '$BRANCH' as checked out)." >&2
-				echo "wt-enter: finish or abort it THERE — e.g. 'git -C $blocker rebase --continue' / '--abort', or 'git -C $blocker bisect reset' — then rerun wt-enter." >&2
-				echo "wt-enter: do NOT remove that worktree instead: removal throws the in-progress state away, and 'git status' shows nothing that would stop you." >&2
-			elif [ "$WT_BLOCKER_OPERATION" = unknown ]; then
-				echo "wt-enter: that worktree's rebase/bisect state could NOT be read, so an unfinished operation may be in flight there." >&2
-				echo "wt-enter: do NOT remove it on that basis — inspect it yourself (e.g. 'git -C $blocker status', 'git -C $blocker bisect log'), finish or abort anything in flight, or coordinate with its owner. Then rerun wt-enter." >&2
+				echo "wt-enter: nothing was changed. That worktree is registered in git's metadata but MISSING on disk. Run 'git -C $ROOT worktree prune' to drop the stale record, then rerun wt-enter." >&2
 			else
-				echo "wt-enter: if it is one of YOUR container's worktrees (under $WT_BASE/), 'wt-remove <slug>' frees it — it refuses while the worktree holds unsaved work or an in-progress rebase/merge." >&2
-				echo "wt-enter: a worktree owned by a PEER container is out of wt-remove's reach: coordinate with its owner instead. Then rerun wt-enter." >&2
+				# No removal is suggested, whatever state that worktree is in:
+				# git may have left a rebase, am, cherry-pick, revert or bisect
+				# there that `git status` does not flag, and only its owner can
+				# see which. Naming it and handing over is what cannot go wrong.
+				echo "wt-enter: nothing was changed. That worktree may hold uncommitted work, or an unfinished rebase, am, cherry-pick, revert or bisect that 'git status' does not show — so wt-enter neither touches it nor tells you how to get rid of it." >&2
+				echo "wt-enter: look at it yourself: 'git -C $blocker status' (plus 'git -C $blocker bisect log' if a bisect may be running). Finish or abort whatever is in flight there and free '$BRANCH', or coordinate with whoever owns that worktree, then rerun wt-enter." >&2
+				echo "wt-enter: running this task on a different branch avoids the conflict entirely." >&2
 			fi
 		fi
 	fi

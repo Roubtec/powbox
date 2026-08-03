@@ -20,17 +20,19 @@
 #     when that blocker is the SHARED primary checkout, the case agents keep
 #     misreading as a stale worktree — while stdout stays empty on failure. The
 #     blocker is also named when an interrupted rebase or a bisect leaves the
-#     holding worktree reporting as `detached`, and the remedy offered must not
-#     destroy work: wt-remove only where it applies, "finish or abort it" where
-#     an operation is in flight. The diagnosis stays SILENT when the blocker git
-#     names is wt-enter's own destination, so git's prune/remove advice stands.
-#   * wt-common.sh wt_branch_held_by_operation and wt_operation_in_flight against
-#     fabricated operation state, pinned to what real git does with the same
-#     state.
-#   * wt-common.sh wt_worktree_for_branch reporting the blocker and its operation
-#     state (none / in-flight / unknown) from ONE scan, so wt-enter never
-#     re-probes to choose a remedy — and never answers an UNVERIFIED state with a
-#     remedy that deletes the worktree.
+#     holding worktree reporting as `detached`. The diagnosis stays SILENT when
+#     the blocker git names is wt-enter's own destination, so git's prune/remove
+#     advice stands.
+#   * that the diagnosis NEVER advises discarding the blocking worktree, in ANY
+#     of the states it can be found in — an idle one, a rebase, a bisect, an
+#     interrupted revert, one whose state cannot even be read. wt-enter only
+#     names the blocker and hands over; the one remedy it offers is git's own
+#     `worktree prune`, for a blocker whose directory is already gone.
+#   * wt-common.sh wt_branch_held_by_operation against fabricated operation
+#     state, pinned to what real git does with the same state — it decides
+#     whether a DETACHED worktree is nevertheless identified as the blocker.
+#   * wt-common.sh wt_worktree_for_branch reporting the blocking worktree's path
+#     (and only that) for both porcelain record kinds.
 #
 # WHY each expectation is what it is (git's own precedence, its object-id
 # parsing, its bare stat()) is documented once, in docker/shared/wt-common.sh.
@@ -70,6 +72,17 @@ ok() {
 no() {
 	fail=$((fail + 1))
 	echo "NOT OK - $1" >&2
+}
+
+# destructive_advice <errfile> — echo a `miss` fragment when wt-enter's stderr
+# points the caller at anything that could DISCARD the blocking worktree. This is
+# the invariant every branch-conflict case below re-checks, because the class of
+# bug it guards (advice that deletes a worktree holding state `git status` does
+# not show) has recurred once per state git can leave behind. Only `git worktree
+# prune` is exempt: it drops a stale record for a directory that is already gone.
+destructive_advice() {
+	grep -qiE 'wt-remove|worktree remove|rm -rf' "$1" && echo " destructive-advice"
+	return 0
 }
 
 WORK_ROOT="$(mktemp -d)"
@@ -270,166 +283,59 @@ else
 fi
 rm -rf "$GDU/BISECT_LOG" "$GDU/BISECT_START"
 
-# ---------------------------------------------------------------------------
-# Unit: wt_operation_in_flight answers the question a `branch` record poses —
-# "is ANY operation running here?" — with THREE outcomes, per THE REMEDY RULE.
-# ---------------------------------------------------------------------------
-RO="$(make_repo ro)"
-git_quiet -C "$RO" worktree add -q "$RO/op" -b op-b >/dev/null 2>&1
-GDO="$RO/.git/worktrees/op"
-
-op_rc() {
-	local rc=0
-	wt_operation_in_flight "$1" || rc=$?
-	echo "$rc"
-}
-
-if [ "$(op_rc "$RO/op")" = 1 ]; then
-	ok "wt_operation_in_flight verifies 'none' on a quiet worktree"
-else
-	no "quiet worktree should report 1 (none), got $(op_rc "$RO/op")"
-fi
-
-: >"$GDO/BISECT_LOG"
-if [ "$(op_rc "$RO/op")" = 0 ]; then
-	ok "wt_operation_in_flight sees a bisect with no reference to what BISECT_START names"
-else
-	no "BISECT_LOG present should report 0 (in flight), got $(op_rc "$RO/op")"
-fi
-rm -f "$GDO/BISECT_LOG"
-
-# A `git am` is an operation too, and needs the same "finish or abort" advice.
-mkdir -p "$GDO/rebase-apply"
-: >"$GDO/rebase-apply/applying"
-if [ "$(op_rc "$RO/op")" = 0 ]; then
-	ok "wt_operation_in_flight counts a git am as an operation in flight"
-else
-	no "git am should report 0 (in flight), got $(op_rc "$RO/op")"
-fi
-rm -rf "$GDO/rebase-apply"
-
-if [ "$(op_rc "$RO/does-not-exist")" = 2 ]; then
-	ok "wt_operation_in_flight reports UNKNOWN for a worktree that is not there"
-else
-	no "missing worktree should report 2 (unknown), got $(op_rc "$RO/does-not-exist")"
-fi
-
 # A worktree that lost its own .git pointer still satisfies `rev-parse`, because
 # task worktrees sit INSIDE the main working tree — the answer then describes the
-# ENCLOSING repo. That must read as UNKNOWN, not as the enclosing repo's state.
-git_quiet -C "$RO" worktree add -q "$RO/.worktrees/$CONTAINER_NAME/inside" -b inside-b >/dev/null 2>&1
+# ENCLOSING repo, whose operation state belongs to a different checkout. Reading
+# it as the worktree's own would identify a blocker that git is not blocking on.
+RO="$(make_repo ro)"
+git_quiet -C "$RO" worktree add -q --detach "$RO/.worktrees/$CONTAINER_NAME/inside" >/dev/null 2>&1
 rm -f "$RO/.worktrees/$CONTAINER_NAME/inside/.git"
+mkdir -p "$RO/.git/rebase-merge"
+printf 'refs/heads/main\n' >"$RO/.git/rebase-merge/head-name"
 if git -C "$RO/.worktrees/$CONTAINER_NAME/inside" rev-parse --absolute-git-dir >/dev/null 2>&1; then
-	if [ "$(op_rc "$RO/.worktrees/$CONTAINER_NAME/inside")" = 2 ]; then
-		ok "wt_operation_in_flight refuses to read the ENCLOSING repo's state as the worktree's"
+	if wt_branch_held_by_operation "$RO/.worktrees/$CONTAINER_NAME/inside" main; then
+		no "a worktree without its .git pointer must not have the ENCLOSING repo's state read as its own"
 	else
-		no "worktree without its .git pointer should report 2 (unknown), got $(op_rc "$RO/.worktrees/$CONTAINER_NAME/inside")"
+		ok "operation state is read from the worktree's OWN git dir, never the enclosing repo's"
 	fi
 else
 	no "precondition: rev-parse should still resolve upwards from a worktree that lost its .git"
 fi
+rm -rf "$RO/.git/rebase-merge"
 
 # ---------------------------------------------------------------------------
-# Unit: wt_worktree_for_branch must report the blocker AND its operation state
-# from ONE scan, so the caller never re-probes to pick a remedy (a second probe
-# can disagree with the first and hand out advice that does not match the blocker
-# actually found). Cases below cover both record kinds and all three states.
+# Unit: wt_worktree_for_branch identifies the blocking worktree — a PATH, and
+# nothing else — for both porcelain record kinds, and claims nothing when no
+# worktree holds the branch.
 # ---------------------------------------------------------------------------
 RG="$(make_repo rg)"
 git_quiet -C "$RG" worktree add -q "$RG/plain" -b plain-b >/dev/null 2>&1
-WT_BLOCKER_PATH='(unset)'
-WT_BLOCKER_OPERATION='(unset)'
-if wt_worktree_for_branch "$RG" plain-b >/dev/null &&
-	[ "$WT_BLOCKER_PATH" = "$RG/plain" ] &&
-	[ "$WT_BLOCKER_OPERATION" = none ]; then
-	ok "wt_worktree_for_branch records a plain blocker with a VERIFIED 'none'"
+if [ "$(wt_worktree_for_branch "$RG" plain-b)" = "$RG/plain" ]; then
+	ok "wt_worktree_for_branch names the worktree holding a branch (porcelain 'branch' record)"
 else
-	no "plain blocker globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
+	no "plain blocker not identified: got '$(wt_worktree_for_branch "$RG" plain-b || true)'"
 fi
 
-git_quiet -C "$RG" branch bis-b
-git_quiet -C "$RG" worktree add -q "$RG/bis" bis-b >/dev/null 2>&1
-git_quiet -C "$RG/bis" bisect start >/dev/null 2>&1 || true
-if git -C "$RG" worktree list --porcelain | grep -qx "branch refs/heads/bis-b" &&
-	[ -z "$(git -C "$RG/bis" status --porcelain)" ]; then
-	WT_BLOCKER_PATH='(unset)'
-	WT_BLOCKER_OPERATION='(unset)'
-	if wt_worktree_for_branch "$RG" bis-b >/dev/null &&
-		[ "$WT_BLOCKER_PATH" = "$RG/bis" ] &&
-		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
-		ok "a live bisect on an ON-BRANCH worktree is flagged from the same scan"
-	else
-		no "on-branch bisect globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
-	fi
+# A DETACHED record: only the operation state links it back to the branch.
+git_quiet -C "$RG" branch det-b
+git_quiet -C "$RG" worktree add -q --detach "$RG/det" >/dev/null 2>&1
+mkdir -p "$RG/.git/worktrees/det/rebase-merge"
+printf 'refs/heads/det-b\n' >"$RG/.git/worktrees/det/rebase-merge/head-name"
+if git -C "$RG" worktree list --porcelain | grep -qx detached &&
+	[ "$(wt_worktree_for_branch "$RG" det-b)" = "$RG/det" ]; then
+	ok "wt_worktree_for_branch names a DETACHED worktree that holds the branch through a rebase"
 else
-	no "precondition: 'git bisect start' should leave $RG/bis on its branch with a clean status"
+	no "detached rebase blocker not identified"
 fi
+rm -rf "$RG/.git/worktrees/det/rebase-merge"
 
-# An ON-BRANCH bisect of a branch whose NAME BEGINS WITH 40 HEX DIGITS — a legal
-# refname that wt_state_branch must read as an object id. Deriving the state by
-# comparing BISECT_START to the branch name would therefore report "none" here.
-HEXBR=0123456789abcdef0123456789abcdef01234567-br
-git_quiet -C "$RG" branch "$HEXBR"
-git_quiet -C "$RG" worktree add -q "$RG/hexbis" "$HEXBR" >/dev/null 2>&1
-git_quiet -C "$RG/hexbis" bisect start >/dev/null 2>&1 || true
-if git -C "$RG" worktree list --porcelain | grep -qx "branch refs/heads/$HEXBR" &&
-	[ -z "$(git -C "$RG/hexbis" status --porcelain)" ] &&
-	! wt_state_branch "$RG/.git/worktrees/hexbis/BISECT_START" >/dev/null; then
-	WT_BLOCKER_PATH='(unset)'
-	WT_BLOCKER_OPERATION='(unset)'
-	if wt_worktree_for_branch "$RG" "$HEXBR" >/dev/null &&
-		[ "$WT_BLOCKER_PATH" = "$RG/hexbis" ] &&
-		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
-		ok "an on-branch bisect is flagged even when BISECT_START looks like an object id"
-	else
-		no "oid-shaped-branch bisect globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
-	fi
-else
-	no "precondition: '$HEXBR' should be a legal branch, on-branch bisecting, with an oid-shaped BISECT_START"
-fi
-
-# Same shape, different cause: BISECT_START unreadable. Reading it would yield
-# "no operation" again; not reading it keeps the bisect visible.
-git_quiet -C "$RG" branch unread-b
-git_quiet -C "$RG" worktree add -q "$RG/unread" unread-b >/dev/null 2>&1
-git_quiet -C "$RG/unread" bisect start >/dev/null 2>&1 || true
-chmod 000 "$RG/.git/worktrees/unread/BISECT_START"
-if ! cat "$RG/.git/worktrees/unread/BISECT_START" >/dev/null 2>&1; then
-	WT_BLOCKER_PATH='(unset)'
-	WT_BLOCKER_OPERATION='(unset)'
-	if wt_worktree_for_branch "$RG" unread-b >/dev/null &&
-		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
-		ok "an on-branch bisect with an UNREADABLE BISECT_START is still flagged"
-	else
-		no "unreadable-BISECT_START bisect op wrong: op='$WT_BLOCKER_OPERATION'"
-	fi
-else
-	no "precondition: BISECT_START should be unreadable after chmod 000 (are we root?)"
-fi
-chmod 600 "$RG/.git/worktrees/unread/BISECT_START"
-
-# A registered blocker whose directory is gone: nothing can be verified there.
-git_quiet -C "$RG" worktree add -q "$RG/vanished" -b vanished-b >/dev/null 2>&1
-rm -rf "$RG/vanished"
-WT_BLOCKER_PATH='(unset)'
-WT_BLOCKER_OPERATION='(unset)'
-if wt_worktree_for_branch "$RG" vanished-b >/dev/null &&
-	[ "$WT_BLOCKER_PATH" = "$RG/vanished" ] &&
-	[ "$WT_BLOCKER_OPERATION" = unknown ]; then
-	ok "a blocker whose directory is gone reports UNKNOWN, not 'none'"
-else
-	no "vanished blocker globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
-fi
-
-WT_BLOCKER_PATH='(unset)'
-WT_BLOCKER_OPERATION='(unset)'
 git_quiet -C "$RG" branch unheld-b
-if wt_worktree_for_branch "$RG" unheld-b >/dev/null; then
-	no "wt_worktree_for_branch must not claim a blocker for an unheld branch"
-elif [ -z "$WT_BLOCKER_PATH" ] && [ "$WT_BLOCKER_OPERATION" = none ]; then
-	ok "wt_worktree_for_branch clears its globals when no worktree holds the branch"
+if out="$(wt_worktree_for_branch "$RG" unheld-b)"; then
+	no "wt_worktree_for_branch must not claim a blocker for an unheld branch (got '$out')"
+elif [ -z "$out" ]; then
+	ok "wt_worktree_for_branch prints nothing and fails when no worktree holds the branch"
 else
-	no "unheld-branch globals not cleared: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
+	no "unheld branch: expected empty output, got '$out'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -540,6 +446,8 @@ fi
 # Integration: blocked by a SIBLING task worktree keeps the ordinary semantics
 # (failure, empty stdout) but must surface the blocking worktree path rather
 # than swallowing it — and must NOT claim the primary checkout is involved.
+# The hand-over is non-destructive: the caller is pointed AT the worktree, never
+# at a way to get rid of it.
 # ---------------------------------------------------------------------------
 R6="$(make_repo r6)"
 WB6="$R6/.worktrees/$CONTAINER_NAME"
@@ -553,30 +461,32 @@ else
 	# Surfaced by wt-enter itself, not merely left inside git's fatal text.
 	grep -F "$WB6/task-f" "$E6" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 	! grep -qiF "primary" "$E6" || miss="$miss claims-primary"
-	# Nothing is in flight in that worktree, so wt-remove genuinely is the remedy
-	# (and still refuses over unsaved work) — it must be offered here.
-	grep -qF "wt-remove" "$E6" || miss="$miss no-wt-remove-remedy"
+	# The caller is told how to look at the blocker, not how to delete it.
+	grep -qF "git -C $WB6/task-f status" "$E6" || miss="$miss no-inspection-hint"
+	miss="$miss$(destructive_advice "$E6")"
 	[ ! -e "$WB6/task-g" ] || miss="$miss worktree-created"
 	if [ -z "$miss" ]; then
-		ok "wt-enter surfaces the blocking sibling worktree path (and does not blame the primary checkout)"
+		ok "wt-enter surfaces the blocking sibling worktree path and hands over non-destructively"
 	else
 		no "wt-enter sibling-worktree conflict message inadequate:$miss"
 	fi
 fi
 
 # ---------------------------------------------------------------------------
-# THE REMEDY RULE, which the next several cases each probe from a different
-# angle: wt-remove may be offered ONLY for a VERIFIED "no operation". It guards
-# unsaved work and rebase/merge state but has NO bisect guard, and a bisect
-# leaves `git status --porcelain` empty, so nothing else would stop the removal
-# from discarding it. "In flight" and "could not be verified" therefore both get
-# "do not remove", and only a plain idle worktree gets wt-remove.
+# THE NON-DESTRUCTION INVARIANT, which the next several cases each probe from a
+# different angle: whatever state the blocking worktree is in, wt-enter names it
+# and stops. It does not try to decide that a worktree is safe to throw away —
+# that would mean enumerating every state git can leave behind and keeping the
+# list in lockstep with wt-remove's own guards, and each state missed from either
+# list is a deleted worktree. The fixtures below are exactly the states that gap
+# has produced: a rebase, a bisect (twice, because one shape keeps the worktree
+# on its branch with a CLEAN `git status`), and an interrupted revert (same clean
+# shape, and invisible to every guard wt-remove has).
 #
 # Integration: blocked by a worktree with an INTERRUPTED REBASE. git reports such
 # a worktree as `detached` in the porcelain yet still refuses to check its branch
 # out elsewhere, so the diagnosis must consult the operation state instead of
-# concluding "no worktree holds this branch". Same expectations as the sibling
-# case above.
+# concluding "no worktree holds this branch".
 # ---------------------------------------------------------------------------
 R7="$(make_repo r7)"
 WB7="$R7/.worktrees/$CONTAINER_NAME"
@@ -598,9 +508,7 @@ if git -C "$R7" worktree list --porcelain | grep -qx detached; then
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WB7/task-h" "$E7" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E7" || miss="$miss claims-primary"
-		# An unfinished operation must NOT be answered with wt-remove.
-		! grep -qF "wt-remove" "$E7" || miss="$miss points-at-wt-remove"
-		grep -qiF "abort" "$E7" || miss="$miss no-finish-or-abort-remedy"
+		miss="$miss$(destructive_advice "$E7")"
 		[ ! -e "$WB7/task-i" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
 			ok "wt-enter names the blocking worktree even when a rebase leaves it detached"
@@ -613,8 +521,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: blocked by a BISECT — same detached shape as the rebase above, but
-# the remedy must be "finish or abort", not wt-remove.
+# Integration: blocked by a BISECT — same detached shape as the rebase above.
 # ---------------------------------------------------------------------------
 R8="$(make_repo r8)"
 WB8="$R8/.worktrees/$CONTAINER_NAME"
@@ -634,12 +541,10 @@ if git -C "$R8" worktree list --porcelain | grep -qx detached; then
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WB8/task-j" "$E8" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E8" || miss="$miss claims-primary"
-		# wt-remove would delete the worktree and the bisect state with it.
-		! grep -qF "wt-remove" "$E8" || miss="$miss points-at-wt-remove"
-		grep -qiF "bisect reset" "$E8" || miss="$miss no-bisect-remedy"
+		miss="$miss$(destructive_advice "$E8")"
 		[ ! -e "$WB8/task-k" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
-			ok "wt-enter tells a bisect-blocked caller to finish/abort, never to wt-remove the worktree"
+			ok "wt-enter names the blocking worktree when a bisect leaves it detached"
 		else
 			no "wt-enter bisect conflict message inadequate:$miss"
 		fi
@@ -650,8 +555,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # Integration: a bisect not yet given a good/bad commit does NOT detach — the
-# worktree stays ON its branch, so this only works if the operation state is read
-# for plain `branch` records too, not just detached ones.
+# worktree stays ON its branch and `git status` is clean, so nothing wt-remove
+# checks would stop it discarding the bisect. Identification comes free from the
+# `branch` record; what is pinned here is that the advice stays hands-off.
 # ---------------------------------------------------------------------------
 RA="$(make_repo ra)"
 WBA="$RA/.worktrees/$CONTAINER_NAME"
@@ -667,12 +573,10 @@ if git -C "$RA" worktree list --porcelain | grep -qx "branch refs/heads/task-m" 
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WBA/task-m" "$EA" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-		# wt-remove would pass every guard here and take the bisect with it.
-		! grep -qF "wt-remove" "$EA" || miss="$miss points-at-wt-remove"
-		grep -qiF "bisect reset" "$EA" || miss="$miss no-bisect-remedy"
+		miss="$miss$(destructive_advice "$EA")"
 		[ ! -e "$WBA/task-n" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
-			ok "wt-enter warns off wt-remove for a bisect that has not detached the worktree yet"
+			ok "wt-enter stays hands-off for a bisect that has not detached the worktree yet"
 		else
 			no "wt-enter on-branch-bisect conflict message inadequate:$miss"
 		fi
@@ -682,41 +586,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: the same on-branch bisect on an oid-shaped branch name (see the
-# unit case above). This is the shape that used to offer wt-remove, which then
-# deleted the worktree and the live bisect with it.
+# Integration: blocked by a worktree with an INTERRUPTED REVERT. `git revert A B`
+# where B's revert turns out empty stops the sequence with the worktree ON its
+# branch, `git status --porcelain` EMPTY, and nothing but sequencer/ + MERGE_MSG
+# to show for it — none of which appears in wt-remove's guard list. Removing that
+# worktree would take the revert sequence with it and no guard would object, so
+# wt-enter must not point anywhere near removal.
 # ---------------------------------------------------------------------------
-RH="$(make_repo rh)"
-WBH="$RH/.worktrees/$CONTAINER_NAME"
-EH="$WORK_ROOT/rh.err"
-HEXBR2=0123456789abcdef0123456789abcdef01234567-task
-git_quiet -C "$RH" branch "$HEXBR2"
-git_quiet -C "$RH" worktree add -q "$WBH/task-o" "$HEXBR2" >/dev/null 2>&1
-git_quiet -C "$WBH/task-o" bisect start >/dev/null 2>&1 || true
-if git -C "$RH" worktree list --porcelain | grep -qx "branch refs/heads/$HEXBR2" &&
-	[ -z "$(git -C "$WBH/task-o" status --porcelain)" ]; then
-	if out="$(cd "$RH" && bash "$WT_ENTER" task-p "$HEXBR2" 2>"$EH")"; then
-		no "wt-enter must fail when an oid-shaped branch name is held by an on-branch bisect (got '$out')"
+RR="$(make_repo rr)"
+WBR="$RR/.worktrees/$CONTAINER_NAME"
+ER="$WORK_ROOT/rr.err"
+echo x >"$RR/other.txt"
+git_quiet -C "$RR" add -A
+git_quiet -C "$RR" commit -qm "add other"
+echo one >"$RR/seed.txt"
+git_quiet -C "$RR" commit -qam c1
+echo y >"$RR/other.txt"
+git_quiet -C "$RR" commit -qam c2
+echo seed >"$RR/seed.txt" # undoes c1 by hand, so reverting c1 later is empty
+git_quiet -C "$RR" commit -qam "undo c1"
+git_quiet -C "$RR" branch task-u
+git_quiet -C "$RR" worktree add -q "$WBR/task-u" task-u >/dev/null 2>&1
+git_quiet -C "$WBR/task-u" revert --no-edit \
+	"$(git -C "$RR" rev-parse task-u~1)" "$(git -C "$RR" rev-parse task-u~2)" >/dev/null 2>&1 || true
+if [ -e "$RR/.git/worktrees/task-u/sequencer" ] &&
+	[ -z "$(git -C "$WBR/task-u" status --porcelain)" ] &&
+	git -C "$RR" worktree list --porcelain | grep -qx "branch refs/heads/task-u"; then
+	if out="$(cd "$RR" && bash "$WT_ENTER" task-v task-u 2>"$ER")"; then
+		no "wt-enter must fail when the branch is held by an interrupted revert (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
-		grep -F "$WBH/task-o" "$EH" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-		! grep -qF "wt-remove" "$EH" || miss="$miss points-at-wt-remove"
-		grep -qiF "bisect reset" "$EH" || miss="$miss no-bisect-remedy"
+		grep -F "$WBR/task-u" "$ER" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		miss="$miss$(destructive_advice "$ER")"
+		# The revert sequence is still there afterwards.
+		[ -e "$RR/.git/worktrees/task-u/sequencer" ] || miss="$miss revert-state-lost"
+		[ ! -e "$WBR/task-v" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
-			ok "wt-enter warns off wt-remove for a bisect whose branch name looks like an object id"
+			ok "wt-enter stays hands-off for a worktree stopped mid-revert (clean status, no wt-remove guard)"
 		else
-			no "wt-enter oid-shaped-branch bisect message inadequate:$miss"
+			no "wt-enter interrupted-revert conflict message inadequate:$miss"
 		fi
 	fi
 else
-	no "precondition: '$HEXBR2' should be on-branch bisecting with a clean status"
+	no "precondition: the revert should stop mid-sequence in $WBR/task-u with a clean status"
 fi
 
 # ---------------------------------------------------------------------------
 # Integration: the blocker is a SIBLING worktree registered in git's metadata but
-# MISSING on disk. wt-remove is a no-op on an absent dir, so offering it is a
-# closed loop; `git worktree prune` is what actually frees it.
+# MISSING on disk. `git worktree prune` is the remedy here — git's own, it drops
+# a stale record and can destroy nothing — and it must be named, because generic
+# "go and look at that worktree" advice points at a directory that is not there.
 # ---------------------------------------------------------------------------
 RP="$(make_repo rp)"
 WBP="$RP/.worktrees/$CONTAINER_NAME"
@@ -730,7 +650,7 @@ else
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	grep -F "$WBP/task-q" "$EP" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 	grep -qF "worktree prune" "$EP" || miss="$miss no-prune-remedy"
-	! grep -qF "wt-remove" "$EP" || miss="$miss dead-end-wt-remove-advice"
+	miss="$miss$(destructive_advice "$EP")"
 	if [ -z "$miss" ]; then
 		ok "wt-enter advises 'worktree prune' for a registered-but-missing sibling blocker"
 	else
@@ -739,9 +659,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: the blocker's operation state CANNOT be verified — here because
-# the worktree lost its own .git pointer. git still refuses the checkout, so the
-# blocker is real; the advice must degrade rather than fall back to wt-remove.
+# Integration: a blocker whose own git dir cannot be read (it lost its .git
+# pointer). git still refuses the checkout, so the blocker is real and must still
+# be named — from the porcelain alone, without needing to read anything inside it.
 # ---------------------------------------------------------------------------
 RV="$(make_repo rv)"
 WBV="$RV/.worktrees/$CONTAINER_NAME"
@@ -750,17 +670,16 @@ git_quiet -C "$RV" worktree add -q "$WBV/task-s" -b task-s >/dev/null 2>&1
 git_quiet -C "$WBV/task-s" bisect start >/dev/null 2>&1 || true
 rm -f "$WBV/task-s/.git"
 if out="$(cd "$RV" && bash "$WT_ENTER" task-t task-s 2>"$EV")"; then
-	no "wt-enter must fail when an unverifiable sibling holds the branch (got '$out')"
+	no "wt-enter must fail when an unreadable sibling holds the branch (got '$out')"
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	grep -F "$WBV/task-s" "$EV" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-	! grep -qF "wt-remove" "$EV" || miss="$miss points-at-wt-remove"
-	grep -qiF "could NOT be read" "$EV" || miss="$miss no-unverified-warning"
+	miss="$miss$(destructive_advice "$EV")"
 	if [ -z "$miss" ]; then
-		ok "wt-enter refuses to recommend removal when the blocker's state cannot be verified"
+		ok "wt-enter names a blocker whose own git dir cannot be read, and still advises nothing destructive"
 	else
-		no "wt-enter unverifiable-blocker message inadequate:$miss"
+		no "wt-enter unreadable-blocker message inadequate:$miss"
 	fi
 fi
 
@@ -770,8 +689,7 @@ fi
 # leftover). git's own message carries the right remedy there ("prune"/"remove"),
 # and the porcelain still lists that path as holding the branch — so the
 # branch-conflict diagnosis must stay silent rather than tell the caller the path
-# it just asked for is blocked by "another worktree" and hand it a wt-remove that
-# is a no-op on an absent dir (a closed advice loop).
+# it just asked for is blocked by "another worktree".
 # ---------------------------------------------------------------------------
 R9="$(make_repo r9)"
 WB9="$R9/.worktrees/$CONTAINER_NAME"
@@ -785,7 +703,6 @@ else
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	# No tailored branch-conflict diagnosis: git's own remedy must stand alone.
 	! grep -q '^wt-enter: branch ' "$E9" || miss="$miss self-blocker-diagnosis"
-	! grep -qF "wt-remove" "$E9" || miss="$miss dead-end-wt-remove-advice"
 	if [ -z "$miss" ]; then
 		ok "wt-enter leaves git's own remedy standing when the blocker is its own destination"
 	else

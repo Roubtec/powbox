@@ -342,9 +342,9 @@ fi
 #                      back to HEAD, or a branch that squashes to no net change)
 #                      leaves SQUASH_MSG — plus MERGE_MSG and AUTO_MERGE in the
 #                      conflicted variant, SQUASH_MSG alone in the clean one —
-#                      with an EMPTY
-#                      porcelain and `git status` reporting a clean tree, and
-#                      wt-remove removes it (verified end to end, and pinned).
+#                      with an EMPTY porcelain and `git status` reporting a
+#                      clean tree, and wt-remove removes it (verified end to
+#                      end, and pinned).
 #                      What is lost there is the pending MESSAGE of a squash
 #                      that produced no change; git reports nothing in flight,
 #                      and the only alternative is the false refusal above

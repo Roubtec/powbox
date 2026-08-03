@@ -13,9 +13,13 @@
 #     probe text - so adversarial probe text (quotes, $, backticks, backslashes,
 #     |, &&) can never be re-parsed, injected into the diagnostic, or reach a
 #     neighbouring probe;
-#   * every clause of a probe is binding: a failing non-final member of an `&&`
-#     chain, of a bare `;` sequence, or of a `{ ...; }` group aborts the run and
-#     names the probe by index;
+#   * a probe fails the run exactly when its own shell exits non-zero, and
+#     nothing discards that status: a failing non-final member of an `&&` chain
+#     short-circuits the list, whose status is then the probe's own (POSIX
+#     `set -e` still EXEMPTS that member - the guard sees the LIST's status, it
+#     does not abort at the member), while a failing member of a bare `;`
+#     sequence or of a `{ ...; }` group aborts the probe outright. Either way
+#     the run fails and names the probe by index;
 #   * probe text cannot CONSUME the failure guard (a trailing `#` comment used
 #     to swallow a same-line `|| { ...; exit 1; }` tail whole);
 #   * each probe runs in its OWN shell, so `cd`/`export`/variables do not leak
@@ -26,11 +30,17 @@
 #   * the .sh and .ps1 drivers hand docker a byte-identical argument vector.
 #
 # Section K re-tests holes the earlier `if`-condition form left open, each with
-# a control proving the pre-fix form really did leak. Section L is different in
-# kind: it CHARACTERIZES the one limitation that remains accepted (a probe
-# ending in `&`). That assertion pins what the wrapper does, not what it should
-# do - a change that closes it should flip the assertion and the prose, not be
-# reverted.
+# a control proving the pre-fix form really did leak. Note that K3's `;` hole was
+# introduced by that intermediate `if` form itself - the ORIGINAL bare-line join
+# already enforced `;` members - so K3 pins a regression this branch removed, not
+# a pre-existing gap it closed. Section L is different in kind: it CHARACTERIZES
+# a limitation that remains accepted (a probe ending in `&`). That assertion pins
+# what the wrapper does, not what it should do - a change that closes it should
+# flip the assertion and the prose, not be reverted. A second such limitation is
+# documented but not asserted here: a probe MIXING the two binding shapes
+# (`A && B; C`, an `&&` list that is not the probe's last command) still has its
+# short-circuited status overwritten by `C`, exactly as under the original join.
+# No shipped probe uses that shape.
 # shellcheck disable=SC2016  # single-quoted probe/runner/PowerShell text is LITERAL by design here
 # shellcheck disable=SC1003  # trailing backslashes in probe literals are the payload, not an escape
 set -uo pipefail
@@ -253,9 +263,12 @@ else
 	ok "no probe text was re-parsed as code"
 fi
 
-printf 'C. a failing NON-FINAL clause of a NON-FINAL probe aborts the run\n'
-# `[ -n "" ]` is the middle clause: exactly the shape POSIX set -e exempts, on a
-# probe that is not the last line, so its non-zero status was discarded before.
+printf 'C. a failing NON-FINAL clause of a NON-FINAL probe fails the run\n'
+# `[ -n "" ]` is the middle clause: exactly the shape POSIX set -e exempts. The
+# exemption still applies - the probe shell does not abort AT that member - but
+# the short-circuited list is the probe's whole input, so the list's non-zero
+# status is the probe's exit status and the guard catches it. Under the old join
+# a following line discarded that status before anything could look at it.
 run_driver 1 "$TMP/c.out" \
 	"true" \
 	'[ 1 = 1 ] && [ -n "" ] && [ 2 = 2 ]' \
@@ -625,8 +638,11 @@ else
 	bad "the \`if\`-condition join no longer passes on the triple - K2's framing needs updating" "$(cat "$TMP/k2-if.out")"
 fi
 
-# K3. A `;` sequence: `set -e` now binds its non-final members, because the
-# probe is its own shell's whole input rather than an `if` condition.
+# K3. A `;` sequence: `set -e` binds its non-final members - no `&&`/`||`
+# exemption is in play, so the probe shell aborts at the failing member. This is
+# the one case where the failure really does abort rather than propagate as a
+# list status. The `if`-condition form suspended it; the original bare-line join
+# did not (see the controls below).
 run_driver 1 "$TMP/k3.out" \
 	"true" \
 	'false; true' \
@@ -662,7 +678,7 @@ else
 	bad "the \`if\`-condition form aborts on \`false; true\` - K3's framing needs updating" "$(cat "$TMP/k3-if.out")"
 fi
 
-printf 'L. CHARACTERIZATION of the one remaining accepted limitation\n'
+printf 'L. CHARACTERIZATION of an accepted limitation (the async-list one)\n'
 # A probe ending in `&` backgrounds its command; POSIX says an async list's
 # status is always 0, so `set -e` cannot see it and the probe can never fail.
 # Inherent, not a consequence of any join form, and only reachable via a

@@ -316,17 +316,24 @@ fi
 # its own `sh -ec` and reports a failure by INDEX, with the host printing an
 # index → probe manifest when the run fails. Probe text is therefore DATA, never
 # part of a script the container shell parses as a whole. Two things follow, and
-# both are structural rather than a matter of careful escaping: no probe can
-# affect the runner, the diagnostic, or a neighbouring probe — a stray quote, a
-# trailing `#` comment, a `$(…)` or a backtick have nothing to reach; and
-# `set -e` is active for the WHOLE of each probe, so a failing non-final member
-# of an `&&` chain, of a `;` sequence, or of a `{ …; }` group aborts the run.
-# That is what makes these multi-clause assertions real. Joined the original way
-# — every probe a bare line of ONE `set -e` script — POSIX `set -e` exempted a
-# failing element of an `&&` list that was not the FINAL element, so
-# `A && B && C` whose `A` or `B` failed neither exited the shell nor propagated:
-# every non-final clause of every probe, and the overall status of every probe
-# but the last (nothing followed it to discard it), were masked.
+# both are structural rather than a matter of careful escaping: no probe's TEXT
+# can affect the runner, the diagnostic, or a neighbouring probe — a stray
+# quote, a trailing `#` comment, a `$(…)` or a backtick have nothing to reach;
+# and a probe fails the run exactly when its own shell exits non-zero, which
+# nothing discards any more. That second point is worth stating precisely,
+# because it is the rule you write probes against. POSIX `set -e` still EXEMPTS
+# a failing non-final member of an `&&`/`||` list, even when the probe is the
+# shell's whole input; what an `&&` chain gets is that the short-circuited list
+# is the probe's LAST command, so its non-zero status becomes the probe's exit
+# status and the runner's `||` guard sees it. Outside an `&&`/`||` list there is
+# no exemption at all — a failing member of a `;` sequence or of a `{ …; }`
+# group aborts the probe outright. That is what makes these multi-clause
+# assertions real. Joined the original way — every probe a bare line of ONE
+# `set -e` script — the same exemption applied, but nothing caught the status it
+# left behind, so the non-final `&&`/`||` members of every probe, and the
+# overall status of every probe but the last (nothing followed it to discard
+# it), were masked; `;` sequences and `{ …; }` groups were already enforced
+# then, so that shape is not something this change restored.
 # Consequences for probe authors:
 #   * do NOT hand-roll a per-probe `|| { …; exit 1; }` tail — the runner
 #     supplies one, and a second is redundant;
@@ -339,8 +346,11 @@ fi
 #     the driver rejects both, so the manifest stays one line per probe and the
 #     .ps1 mirror never hands `docker` a multi-line argument;
 #   * an `&&` chain is still the clearest shape, but a `;` sequence is binding
-#     too. The one construct that is NOT: a probe ending in `&`, whose async
-#     status POSIX fixes at 0.
+#     too. Two shapes are NOT: a probe ending in `&`, whose async status POSIX
+#     fixes at 0, and a probe that MIXES the two — an `&&`/`||` list that is not
+#     the probe's last top-level command (`A && B; C`), whose short-circuited
+#     status `C` overwrites. Both are equally unenforceable in the original
+#     join; no shipped probe uses either.
 # Quote balance is no longer a hazard to anything but the probe itself: an
 # unbalanced quote makes that probe's own shell fail with a syntax error, named
 # by its index, and cannot reach any other probe.

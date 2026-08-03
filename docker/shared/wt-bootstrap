@@ -137,14 +137,14 @@ for d in "$WT_BASE"/*/; do
 	case "$outcome" in
 	quarantined:*)
 		QUARANTINED+=("$slug")
-		echo "quarantined non-empty orphan (metadata lost): $d -> ${outcome#quarantined:}" >&2
+		printf '%s\n' "quarantined non-empty orphan (metadata lost): $d -> ${outcome#quarantined:}" >&2
 		;;
 	kept)
-		echo "left non-empty orphan in place (could not quarantine): $d" >&2
+		printf '%s\n' "left non-empty orphan in place (could not quarantine): $d" >&2
 		;;
 	*)
 		PRUNED+=("$slug")
-		echo "pruned empty orphaned worktree: $d" >&2
+		printf '%s\n' "pruned empty orphaned worktree: $d" >&2
 		;;
 	esac
 done

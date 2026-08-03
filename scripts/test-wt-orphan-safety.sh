@@ -65,7 +65,10 @@
 #     every path wt-enter echoes back is shell-quoted — inside the commands it
 #     suggests, so advice about a worktree under a spaced path stays pasteable
 #     and safe to paste, AND in its own prose, so a path carrying terminal
-#     control bytes cannot rewrite what the reader sees.
+#     control bytes cannot rewrite what the reader sees. Pinned once more under
+#     bash's `xpg_echo`, arriving from an exported BASHOPTS: `echo` would re-expand
+#     the escapes `printf %q` just produced and hand the terminal the raw byte
+#     back, so the diagnostics have to be emitted with `printf`.
 #
 # WHY each expectation is what it is (git's own precedence, its object-id
 # parsing, its bare stat()) is documented once, in docker/shared/wt-common.sh.
@@ -1047,6 +1050,41 @@ else
 		ok "wt-enter escapes terminal control bytes in a blocker path instead of echoing them raw"
 	else
 		no "wt-enter control-byte blocker message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the SAME message under bash's `xpg_echo` option, which makes the
+# `echo` builtin expand backslash escapes — including the ones `printf %q` has
+# just produced, so `\E` becomes a live ESC byte again and the escaping above
+# buys nothing. The option is not wt-enter's to choose: bash enables everything
+# listed in an exported BASHOPTS before it reads any startup file, so it arrives
+# from the environment, which is why every diagnostic is emitted with `printf`
+# instead. Handed in through `env` because BASHOPTS is READONLY inside a running
+# bash and cannot be set as an assignment prefix here.
+# ---------------------------------------------------------------------------
+EX="$WORK_ROOT/re-xpg.err"
+if out="$(cd "$RE" && env BASHOPTS=xpg_echo bash "$WT_ENTER" task-escx esc-b 2>"$EX")"; then
+	no "wt-enter must fail under xpg_echo when a control-byte-path blocker holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	errtext="$(cat "$EX")"
+	# Precondition: the option really does reach a script invoked this way (else
+	# this case is the previous one over again and proves nothing).
+	env BASHOPTS=xpg_echo bash -c 'shopt -q xpg_echo' || miss="$miss fixture-xpg-echo-not-set"
+	case "$errtext" in *"$ESC"*) miss="$miss raw-control-byte-on-stderr" ;; esac
+	printf -v want_escx "wt-enter: branch 'esc-b' is already checked out in another worktree at %q;" "$ESC_WT"
+	case "$errtext" in
+	*"$want_escx"*) ;;
+	*) miss="$miss no-blocking-path" ;;
+	esac
+	miss="$miss$(destructive_advice "$EX" "$ESC_WT" "$WBE/task-escx" "$RE" esc-b task-escx)"
+	[ ! -e "$WBE/task-escx" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter's escaping survives xpg_echo, which would make 'echo' re-expand it"
+	else
+		no "wt-enter control-byte message under xpg_echo inadequate:$miss"
 	fi
 fi
 

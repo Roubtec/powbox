@@ -17,8 +17,11 @@
 # The branch is NEVER deleted — commits and refs persist in the shared .git.
 set -euo pipefail
 
+# Diagnostics use `printf '%s\n'`, never `echo`, which expands backslash escapes
+# under bash's `xpg_echo` — an option an exported BASHOPTS can hand this script
+# from the environment. See the note at the top of wt-common.sh.
 die() {
-	echo "wt-remove: $*" >&2
+	printf '%s\n' "wt-remove: $*" >&2
 	exit 1
 }
 
@@ -65,12 +68,12 @@ remove_lint_cache() {
 	local cache="$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$SLUG"
 	[ -d "$cache" ] || return 0
 	rm -rf "$cache" 2>/dev/null ||
-		echo "wt-remove: warning: could not remove lint cache $cache" >&2
+		printf '%s\n' "wt-remove: warning: could not remove lint cache $cache" >&2
 }
 
 if [ ! -d "$WT" ]; then
 	remove_lint_cache
-	echo "wt-remove: $WT already absent; nothing to do" >&2
+	printf '%s\n' "wt-remove: $WT already absent; nothing to do" >&2
 	exit 0
 fi
 
@@ -89,13 +92,13 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	remove_lint_cache
 	case "$_outcome" in
 	quarantined:*)
-		echo "wt-remove: $WT was not a live worktree; preserved its contents at ${_outcome#quarantined:} (branch kept)" >&2
+		printf '%s\n' "wt-remove: $WT was not a live worktree; preserved its contents at ${_outcome#quarantined:} (branch kept)" >&2
 		;;
 	kept)
-		echo "wt-remove: $WT is not a live worktree and could not be safely cleared; left in place (branch kept)" >&2
+		printf '%s\n' "wt-remove: $WT is not a live worktree and could not be safely cleared; left in place (branch kept)" >&2
 		;;
 	*)
-		echo "wt-remove: cleared empty orphaned worktree dir $WT (branch kept)" >&2
+		printf '%s\n' "wt-remove: cleared empty orphaned worktree dir $WT (branch kept)" >&2
 		;;
 	esac
 	exit 0
@@ -115,4 +118,4 @@ else
 	git -C "$ROOT" worktree remove "$WT" >&2
 fi
 remove_lint_cache
-echo "wt-remove: removed $WT (branch kept)" >&2
+printf '%s\n' "wt-remove: removed $WT (branch kept)" >&2

@@ -14,6 +14,14 @@
 # uncommitted work, so it must NEVER be deleted merely because its metadata
 # vanished. wt_reap_orphan_dir encodes that: delete only proven-empty dirs, and
 # preserve (move aside) anything with content.
+#
+# Diagnostics are emitted with `printf '%s\n'`, never `echo`. `echo` expands
+# backslash escapes whenever bash's `xpg_echo` option is on — which an inherited,
+# exported BASHOPTS can turn on for this script without it doing anything (bash
+# applies BASHOPTS before reading any startup file; verified). These messages
+# carry paths discovered from git or from the filesystem, so a backslash in one
+# would then be re-interpreted rather than printed; see the note above `shq` in
+# wt-enter for what that costs when the escape came from `printf %q`.
 
 # wt_reap_orphan_dir <dir>
 #   <dir> = <root>/.worktrees/<container>/<slug>, already established NOT to be a
@@ -64,13 +72,13 @@ wt_reap_orphan_dir() {
 	[ ! -e "$dest" ] || dest="$dest.$$"
 
 	if mkdir -p -- "$dest_base" 2>/dev/null && mv -- "$dir" "$dest" 2>/dev/null; then
-		echo "wt: preserved non-empty orphan (not a live worktree; metadata lost): moved $dir -> $dest" >&2
-		echo "wt: recover any uncommitted work from there, then delete it — the branch's committed history is safe in the shared .git." >&2
+		printf '%s\n' "wt: preserved non-empty orphan (not a live worktree; metadata lost): moved $dir -> $dest" >&2
+		printf '%s\n' "wt: recover any uncommitted work from there, then delete it — the branch's committed history is safe in the shared .git." >&2
 		printf 'quarantined:%s\n' "$dest"
 		return 0
 	fi
 
-	echo "wt: warning: could not quarantine non-empty orphan $dir; leaving it in place (refusing to delete possibly-unsaved work)." >&2
+	printf '%s\n' "wt: warning: could not quarantine non-empty orphan $dir; leaving it in place (refusing to delete possibly-unsaved work)." >&2
 	printf 'kept\n'
 	return 0
 }

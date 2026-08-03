@@ -217,8 +217,14 @@ fi
 # The INTERMEDIATE $WS/.claude was created but is not itself a mountpoint, so its
 # ownership is readable right here with no unmount needed. The two mountpoints
 # themselves are asserted on the host once this container exits (see below).
-own="$(stat -c %u:%g "$WS/.claude" 2>/dev/null || echo "?")"
-parent="$(stat -c %u:%g "$WS" 2>/dev/null || echo "??")"
+# Sentinels rather than a bare fallback: the image always has GNU stat, so a
+# failure here is itself a fault and must not read as "both unknown, so equal".
+own="$(stat -c %u:%g "$WS/.claude" 2>/dev/null || echo "UNREADABLE")"
+parent="$(stat -c %u:%g "$WS" 2>/dev/null || echo "UNREADABLE")"
+if [ "$own" = UNREADABLE ] || [ "$parent" = UNREADABLE ]; then
+	echo "FAIL: cannot read the ownership of $WS/.claude and/or $WS inside the container (stat -c failed) - the mountpoint-ownership check cannot be evaluated" >&2
+	exit 1
+fi
 if [ "$own" != "$parent" ]; then
 	echo "FAIL: the created intermediate directory $WS/.claude is owned by $own but its pre-existing parent $WS is owned by $parent - the shadow-mounts.sh mountpoint chown REGRESSED" >&2
 	exit 1
@@ -425,7 +431,7 @@ assert_created_mountpoint_owner() {
 	got="$(owner_of "$dir")" || fail "mountpoint ownership ($label): cannot stat '$dir'"
 	want="$(owner_of "$ancestor")" || fail "mountpoint ownership ($label): cannot stat '$ancestor'"
 	[ "$got" = "$want" ] || fail "mountpoint ownership ($label): '$dir' is owned by $got but its deepest pre-existing ancestor '$ancestor' is owned by $want — the created mountpoint did NOT inherit the tree's ownership. The shadow-mounts.sh mountpoint chown has regressed; on a native-Linux bind mount the host user is left unable to populate or remove that directory."
-	echo "  ok: mountpoint ownership ($label) — <fixture>/${dir#"$FIXTURE"/} inherited $got from its pre-existing ancestor <fixture>/${ancestor#"$FIXTURE"/}"
+	echo "  ok: mountpoint ownership ($label) — <fixture>${dir#"$FIXTURE"} inherited $got from its pre-existing ancestor <fixture>${ancestor#"$FIXTURE"}"
 }
 
 if ! owner_of "$FIXTURE" >/dev/null 2>&1; then

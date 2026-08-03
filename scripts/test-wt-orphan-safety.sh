@@ -140,6 +140,15 @@ no() {
 # is simply NOT neutralised there, which can only produce a false positive — a
 # loud test failure — and never a silent miss.
 #
+# That containment depends on the anchors matching LITERALLY, and they do: in
+# `${text//"…$value…"/…}` the pattern word is QUOTED, which strips every glob
+# character in it of its meaning, so `[`, `*` and `?` inside a branch name or a
+# worktree path match only themselves. Were the pattern left unquoted, `*` would
+# match across the surrounding context — greedily, and across newlines — and one
+# `*` in a blocker path could swallow a destructive command printed between two
+# occurrences of it. Quoting is therefore load-bearing, not tidiness, and the
+# pinning case below is what keeps it that way.
+#
 # The single exemption is git's own `git worktree prune`, which drops a stale
 # record for a directory that is already gone and can destroy nothing. It is
 # applied by deleting just that two-word phrase before scanning — never by
@@ -238,6 +247,40 @@ remove|worktree remove|wt-enter: then run 'git -C $DA_BLOCKER worktree remove' t
 hard|reset --hard|wt-enter: then run 'git -C $DA_BLOCKER reset --hard' to clear it.
 rf|rm -rf|wt-enter: then run 'rm -rf $DA_BLOCKER' to free it.
 EOF
+
+# A dynamic value carrying GLOB metacharacters — a legal branch name, and a legal
+# path. Same two directions, but the failure mode being pinned is the other one:
+# an unquoted pattern would make `*` match across the anchor's context, greedily
+# and across newlines, so the `-C <blocker>` anchor would run from the FIRST
+# `-C /w/wt` to the LAST `/end` and take the `reset --hard` between them with it.
+# Every branch-conflict case above delegates to this detector, so that would
+# disarm all of them at once, silently, for any repository checked out under a
+# path with a `*`, `?` or `[` in it.
+DA_GLOB_BLOCKER='/w/wt*/end'
+da_glob_message() {
+	{
+		printf "wt-enter: branch '%s' is already checked out in another worktree at %s; git refuses to check one branch out twice.\n" "$1" "$DA_GLOB_BLOCKER"
+		printf "wt-enter: look at it yourself: 'git -C %s status', or coordinate with whoever owns that worktree.\n" "$DA_GLOB_BLOCKER"
+		[ -z "${2:-}" ] || printf '%s\n' "$2"
+		# A second occurrence of the anchor, AFTER the (optional) extra line, so a
+		# greedy match has something to run to.
+		printf "wt-enter: running this task on a different branch avoids the conflict entirely (-C /w/wtB/end).\n"
+	} >"$DA_ERR"
+}
+
+da_glob_message 'b[a-z]*'
+if [ -z "$(destructive_advice "$DA_ERR" "$DA_GLOB_BLOCKER" "$DA_ROOT" 'b[a-z]*' task-b)" ]; then
+	ok "glob metacharacters in a branch name and a blocker path are data, not advice"
+else
+	no "destructive_advice false-alarms on glob metacharacters in a branch name or path"
+fi
+
+da_glob_message 'b[a-z]*' "wt-enter: then run 'git -C /w/wtA/end reset --hard' to clear it."
+if [ -n "$(destructive_advice "$DA_ERR" "$DA_GLOB_BLOCKER" "$DA_ROOT" 'b[a-z]*' task-b)" ]; then
+	ok "a suggested 'reset --hard' survives neutralising glob-bearing dynamic values"
+else
+	no "a suggested 'reset --hard' was HIDDEN by a glob metacharacter in a dynamic value (unquoted substitution pattern?)"
+fi
 
 # ---------------------------------------------------------------------------
 # Unit: wt_reap_orphan_dir

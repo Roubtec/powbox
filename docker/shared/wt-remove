@@ -11,15 +11,23 @@
 #   * being invoked from inside the worktree being removed
 #   * a worktree whose own git metadata cannot be located or read, so nothing
 #     below it can be established at all (fail safe: unknown means refuse)
-#   * ANY operation git can leave in progress in that worktree — a rebase
-#     (either backend), a `git am`, a merge, a cherry-pick, a revert, a
+#   * every operation git itself tracks as in progress in that worktree — a
+#     rebase (either backend), a `git am`, a merge, a cherry-pick, a revert, a
 #     cherry-pick/revert SEQUENCE, a bisect, or a `git notes` merge. Several of
 #     those leave `git status --porcelain` EMPTY, so this guard is what stands
 #     between them and deletion; it is keyed on the same per-worktree state files
 #     git itself consults (see the audit above the guard block below). It is
 #     checked BEFORE the uncommitted-changes guard because a conflicted operation
 #     is also dirty, and naming the operation is strictly more useful than naming
-#     the dirt
+#     the dirt.
+#     "What git tracks" is also the LIMIT of the promise, and the audit names the
+#     one shape outside it: an unconcluded `git merge --squash`, which git does
+#     not record as an operation at all (no MERGE_HEAD, `git merge --abort` says
+#     "There is no merge to abort"). Its staged result normally trips the
+#     uncommitted-changes guard; a squash that produced no net change leaves only
+#     a message file, a clean `git status` — and is removed. See SQUASH_MSG in
+#     the audit for the measurements and why guarding it would cost more than it
+#     saves
 #   * a worktree whose status cannot be read, so its cleanliness cannot be
 #     established (fail safe again — an empty `git status` stdout is NOT proof of
 #     a clean tree when the command failed)
@@ -255,28 +263,51 @@ fi
 #                      completed rebase — each time with an EMPTY porcelain and
 #                      nothing whatsoever left in flight
 #   MERGE_MSG, SQUASH_MSG, COMMIT_EDITMSG
-#                      message scratch. COMMIT_EDITMSG is written by every
-#                      `git commit`, so it is present in essentially every
-#                      worktree. MERGE_MSG and SQUASH_MSG have NO observed
-#                      outliving case, and it is easy to assume otherwise: the
-#                      commit that CONCLUDES a `merge --squash` unlinks
-#                      MERGE_MSG, SQUASH_MSG and AUTO_MERGE alike (verified in a
-#                      plain repo AND in a linked worktree), and merge /
-#                      cherry-pick / revert `--abort`, `--quit` and `--continue`
-#                      all clear MERGE_MSG (verified). They are excluded on the
-#                      first reason alone: git does not key "in progress" on
-#                      them (a merge in flight is MERGE_HEAD, which IS guarded),
-#                      and an unconcluded squash merge leaves a DIRTY porcelain
-#                      that the uncommitted-changes guard below holds.
-#                      That leaves exactly ONE shape knowingly removed: an
-#                      unconcluded `merge --squash` whose conflict was resolved
-#                      back to HEAD's own content leaves MERGE_MSG + SQUASH_MSG
-#                      + AUTO_MERGE with an EMPTY porcelain, and `git status`
-#                      itself says "nothing to commit, working tree clean" —
-#                      wt-remove removes it (verified end to end). What is lost
-#                      is the pending message of a squash that produced no
-#                      change, and git reports nothing in flight, so refusing
-#                      there would be refusing on a message file alone
+#                      message scratch that OUTLIVES the operation.
+#                      COMMIT_EDITMSG is written by every `git commit`, so it is
+#                      present in essentially every worktree. MERGE_MSG and
+#                      SQUASH_MSG look at first as though they never outlive
+#                      anything — the commit that CONCLUDES a `merge --squash`
+#                      unlinks MERGE_MSG, SQUASH_MSG and AUTO_MERGE alike
+#                      (verified in a plain repo AND in a linked worktree), and
+#                      `git reset` (--hard, mixed AND --soft), `git stash`, a
+#                      branch switch, and merge / cherry-pick / revert `--abort`,
+#                      `--quit` and `--continue` all clear them (verified).
+#                      But ABANDONING a squash merge with `git restore` does
+#                      NOT. After `git restore --staged --worktree .` — equally
+#                      `git restore --staged .` followed by `git clean -fd` —
+#                      the worktree is FULLY clean (`git status`: "nothing to
+#                      commit, working tree clean"; `git status --short
+#                      --branch`: the branch line and nothing else) while
+#                      SQUASH_MSG and MERGE_MSG are STILL there, and they stay
+#                      there until some later commit/reset/checkout happens to
+#                      unlink them. (`git checkout -- .` and
+#                      `git checkout HEAD -- .` leave them behind too; those two
+#                      just do not unstage, so the porcelain stays dirty and the
+#                      guard below holds the tree anyway.) Verified in a LINKED
+#                      worktree, the only shape this script ever sees.
+#                      Git itself agrees nothing is in flight: a fresh
+#                      `git merge` from that state starts and succeeds (exit 0),
+#                      exactly as a fresh `git notes merge` does beside a
+#                      leftover NOTES_MERGE_WORKTREE below. Guarding SQUASH_MSG
+#                      would therefore refuse a worktree whose squash merge was
+#                      backed out with git's own modern discard command, with
+#                      nothing left to lose — the false-refusal shape this list
+#                      exists to prevent. Both directions are pinned in
+#                      scripts/test-wt-orphan-safety.sh so the exclusion stays
+#                      checkable.
+#                      Excluding them costs exactly ONE shape knowingly removed:
+#                      an unconcluded `merge --squash` is normally caught by the
+#                      uncommitted-changes guard below, because its staged
+#                      result makes the porcelain non-empty — but a squash whose
+#                      result equals HEAD's own content (a conflict resolved
+#                      back to HEAD, or a branch that squashes to no net change)
+#                      leaves SQUASH_MSG + MERGE_MSG + AUTO_MERGE with an EMPTY
+#                      porcelain and `git status` reporting a clean tree, and
+#                      wt-remove removes it (verified end to end, and pinned).
+#                      What is lost there is the pending MESSAGE of a squash
+#                      that produced no change; git reports nothing in flight,
+#                      and the only alternative is the false refusal above
 #   NOTES_MERGE_WORKTREE
 #                      the conflict-editing directory, NOT a state marker: it
 #                      survives both `--commit` and `--abort` as an EMPTY dir, and

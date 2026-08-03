@@ -36,7 +36,14 @@
 #     leaves behind (which is why the guard keys on the markers, not that dir).
 #     The one deliberate NON-guard that is neither a refusal nor a removal is
 #     pinned too: a `locked` worktree is left entirely to git, which declines a
-#     single --force exactly as vanilla does.
+#     single --force exactly as vanilla does. And the SQUASH_MSG exclusion is
+#     pinned from BOTH sides, since it is the one place the guard set stops short
+#     of a state file that looks like an operation: git's own verdict on a squash
+#     merge abandoned with `git restore` (no merge to abort, a fresh merge
+#     starts) despite the surviving SQUASH_MSG, that such a worktree is still
+#     REMOVED — guarding it would false-refuse — and the cost that buys, a
+#     no-net-change squash with a clean status being removed with only its
+#     pending message lost.
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
@@ -1686,6 +1693,129 @@ for nm_end in abort commit; do
 		fi
 	else
 		no "precondition: 'git notes merge --$nm_end' should clear both markers and leave the dir:$miss"
+	fi
+done
+
+# SQUASH_MSG is EXCLUDED from the guard set, and this is where that decision is
+# recorded as an observation rather than as a principle. `git merge --squash`
+# writes SQUASH_MSG but leaves NO operation git tracks — no MERGE_HEAD, and
+# `git merge --abort` answers "There is no merge to abort" — so the guard set,
+# which is keyed on what git itself consults, does not see it. Guarding it anyway
+# was considered and rejected on the measurement below: `git restore` ABANDONS a
+# squash merge WITHOUT clearing SQUASH_MSG, so the marker outlives the operation
+# with a fully clean tree, and a guard would refuse such a worktree until some
+# later commit happened to unlink the file. The cost of not guarding — the one
+# shape knowingly removed — is pinned right after, so it cannot change silently.
+#
+# squash_repo <name> <slug> -> echoes ROOT with worktree <slug> holding an
+# UNCONCLUDED `git merge --squash` of a branch that adds one file.
+squash_repo() {
+	local root slug="$2"
+	root="$(make_repo "$1")"
+	git_quiet -C "$root" branch "$slug-src" >/dev/null 2>&1
+	git_quiet -C "$root" worktree add -q "$root/.worktrees/$CONTAINER_NAME/$slug" -b "$slug-b" >/dev/null 2>&1
+	# Give <slug>-src a commit the worktree's own branch does not have, from a
+	# THIRD worktree so the main checkout stays on its own branch.
+	git_quiet -C "$root" worktree add -q "$root/.src-$slug" "$slug-src" >/dev/null 2>&1
+	echo squashed >"$root/.src-$slug/sq.txt"
+	git_quiet -C "$root/.src-$slug" add -A >/dev/null 2>&1
+	git_quiet -C "$root/.src-$slug" commit -qm "to squash" >/dev/null 2>&1
+	git_quiet -C "$root/.worktrees/$CONTAINER_NAME/$slug" merge --squash "$slug-src" >/dev/null 2>&1 || true
+	printf '%s' "$root"
+}
+
+# (a) GIT'S OWN VERDICT on the abandoned-with-`restore` state, in its own
+#     fixture. This probe MUTATES the worktree (a successful merge writes a
+#     commit and unlinks SQUASH_MSG), which is exactly why it cannot share a
+#     fixture with the removal case below — doing so would hand wt-remove a
+#     worktree with no SQUASH_MSG left and quietly stop testing anything.
+RSQ0="$(squash_repo rc-squash-verdict sqv)"
+SQ0_WT="$RSQ0/.worktrees/$CONTAINER_NAME/sqv"
+SQ0_GD="$RSQ0/.git/worktrees/sqv"
+git_quiet -C "$SQ0_WT" restore --staged --worktree . >/dev/null 2>&1 || true
+miss=""
+[ -e "$SQ0_GD/SQUASH_MSG" ] || miss="$miss SQUASH_MSG-cleared-by-restore"
+[ -z "$(git -C "$SQ0_WT" status --porcelain 2>/dev/null)" ] || miss="$miss porcelain-not-clean"
+# `git merge --abort` is git saying, in its own words, that it is not in a merge.
+git_quiet -C "$SQ0_WT" merge --abort >/dev/null 2>"$WORK_ROOT/rc-sqv-abort.err" &&
+	miss="$miss merge--abort-unexpectedly-succeeded"
+grep -qF 'There is no merge to abort' "$WORK_ROOT/rc-sqv-abort.err" ||
+	miss="$miss merge--abort-did-not-say-there-is-no-merge"
+# And a fresh merge from that state starts and succeeds, the same way a fresh
+# `git notes merge` starts beside a leftover NOTES_MERGE_WORKTREE.
+git_quiet -C "$SQ0_WT" merge --no-edit sqv-src >/dev/null 2>&1 ||
+	miss="$miss fresh-merge-blocked-so-something-IS-in-flight"
+if [ -z "$miss" ]; then
+	ok "git itself treats a squash merge abandoned with 'git restore' as nothing in progress (no merge to abort, a fresh merge starts) even though SQUASH_MSG survives"
+else
+	no "the basis of the SQUASH_MSG exclusion no longer holds:$miss"
+fi
+
+# (b) the FALSE-REFUSAL case proper, on an UNPROBED fixture: that same stale
+#     SQUASH_MSG with a clean tree must still be REMOVED, with and without
+#     --force. This is the observation that decides the exclusion — guarding
+#     SQUASH_MSG would refuse this worktree until some later commit happened to
+#     unlink the file.
+for sq_mode in plain force; do
+	RSQ1="$(squash_repo "rc-squash-restore-$sq_mode" "sqr$sq_mode")"
+	SQ1_WT="$RSQ1/.worktrees/$CONTAINER_NAME/sqr$sq_mode"
+	SQ1_GD="$RSQ1/.git/worktrees/sqr$sq_mode"
+	git_quiet -C "$SQ1_WT" restore --staged --worktree . >/dev/null 2>&1 || true
+	miss=""
+	[ -e "$SQ1_GD/SQUASH_MSG" ] || miss="$miss fixture-SQUASH_MSG-cleared-by-restore"
+	[ -z "$(git -C "$SQ1_WT" status --porcelain 2>/dev/null)" ] || miss="$miss fixture-porcelain-not-clean"
+	if [ -z "$miss" ]; then
+		rc=0
+		if [ "$sq_mode" = plain ]; then
+			(cd "$RSQ1" && bash "$WT_REMOVE" "sqr$sq_mode" 2>"$WORK_ROOT/rc-sqr-$sq_mode.err") || rc=$?
+		else
+			(cd "$RSQ1" && bash "$WT_REMOVE" "sqr$sq_mode" --force 2>"$WORK_ROOT/rc-sqr-$sq_mode.err") || rc=$?
+		fi
+		[ "$rc" -eq 0 ] || miss="$miss rc-$rc-not-0"
+		[ ! -e "$SQ1_WT" ] || miss="$miss worktree-still-present"
+		if [ -z "$miss" ]; then
+			ok "wt-remove ($sq_mode) still removes a worktree whose squash merge was abandoned with 'git restore' — SQUASH_MSG outlives it with a clean tree, so guarding it would false-refuse"
+		else
+			no "wt-remove ($sq_mode) FALSE-REFUSED a worktree carrying only a stale SQUASH_MSG:$miss $(cat "$WORK_ROOT/rc-sqr-$sq_mode.err")"
+		fi
+	else
+		no "precondition: 'git restore --staged --worktree .' should abandon a squash merge leaving a stale SQUASH_MSG and a clean tree ($sq_mode):$miss"
+	fi
+done
+
+# (c) the COST of that exclusion, pinned: an UNCONCLUDED squash whose result
+#     equals HEAD's own content has an EMPTY porcelain, so neither the operation
+#     guard nor the uncommitted-changes guard holds it, and wt-remove removes it
+#     — with and without --force. Only the pending message is lost. Asserted so
+#     the trade-off stays visible and a later change of mind is a test change.
+for sq_mode in plain force; do
+	RSQ2="$(squash_repo "rc-squash-noop-$sq_mode" "sqn$sq_mode")"
+	SQ2_WT="$RSQ2/.worktrees/$CONTAINER_NAME/sqn$sq_mode"
+	SQ2_GD="$RSQ2/.git/worktrees/sqn$sq_mode"
+	# Resolve the squash back to HEAD's own content: drop the staged file, so the
+	# index and the tree match HEAD while SQUASH_MSG still marks a live squash.
+	git_quiet -C "$SQ2_WT" rm -q -f --cached sq.txt >/dev/null 2>&1 || true
+	rm -f "$SQ2_WT/sq.txt"
+	miss=""
+	[ -e "$SQ2_GD/SQUASH_MSG" ] || miss="$miss fixture-SQUASH_MSG-missing"
+	[ -z "$(git -C "$SQ2_WT" status --porcelain 2>/dev/null)" ] || miss="$miss fixture-porcelain-not-clean"
+	if [ -z "$miss" ]; then
+		rc=0
+		if [ "$sq_mode" = plain ]; then
+			(cd "$RSQ2" && bash "$WT_REMOVE" "sqn$sq_mode" 2>"$WORK_ROOT/rc-sqn-$sq_mode.err") || rc=$?
+		else
+			(cd "$RSQ2" && bash "$WT_REMOVE" "sqn$sq_mode" --force 2>"$WORK_ROOT/rc-sqn-$sq_mode.err") || rc=$?
+		fi
+		[ "$rc" -eq 0 ] || miss="$miss rc-$rc-not-0"
+		[ ! -e "$SQ2_WT" ] || miss="$miss worktree-still-present"
+		git -C "$RSQ2" show-ref --verify --quiet "refs/heads/sqn$sq_mode-b" || miss="$miss branch-deleted"
+		if [ -z "$miss" ]; then
+			ok "wt-remove ($sq_mode) removes a worktree holding a no-change 'merge --squash' — the one shape knowingly removed, and only its pending message is lost"
+		else
+			no "the documented no-change squash outcome changed:$miss $(cat "$WORK_ROOT/rc-sqn-$sq_mode.err")"
+		fi
+	else
+		no "precondition: could not fabricate a no-change unconcluded squash merge ($sq_mode):$miss"
 	fi
 done
 

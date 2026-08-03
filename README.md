@@ -550,7 +550,7 @@ shadow-refresh.sh
 
 This re-runs detection and mounts tmpfs over any new directories that were not previously shadowed.
 Already-mounted paths are skipped.
-Dir-mounted mode only — see the `--isolated` warning under [Mid-Session Packages](#mid-session-packages).
+Dir-mounted mode only — under `--isolated` the script skips itself and exits 0 without mounting, so running it there is a harmless no-op ([Mid-Session Packages](#mid-session-packages)).
 
 ### Lifecycle
 

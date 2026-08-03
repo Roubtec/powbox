@@ -6,8 +6,10 @@
 # and ports, create/connect to their own configured databases, resolve the same
 # instance on re-invocation, and stop INDEPENDENTLY — with `down` never touching
 # an unrelated cluster. Also guards: explicit env overrides stay authoritative,
-# `--profile <id>` works outside Git, and `--worktree` outside Git fails loudly
-# instead of guessing.
+# `--profile <id>` works outside Git, `--worktree` outside Git fails loudly
+# instead of guessing, and (task 035) the emitted DATABASE_URL carries
+# `?sslmode=disable` on BOTH the scoped and the default path — including through
+# the `eval "$(pg-dev-up url --export)"` round-trip, where `%q` escapes the `?`.
 #
 # Runs the real repo copy of pg-dev-up directly against the baked PostgreSQL
 # server binaries — no image build. Everything is confined to a private temp
@@ -107,6 +109,14 @@ pg() {
 	shift # drop --
 	(cd "$cwd" && env -u PGDATA -u PGPORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB "${envs[@]}" bash "$PG" "$@")
 }
+
+# Perform the documented `eval "$(pg-dev-up url --export)"` round-trip on an
+# export line ($1) and print the resulting DATABASE_URL. Runs in a CLEAN child
+# shell (DATABASE_URL stripped) so a no-op export cannot be mistaken for a
+# successful round-trip, and so this suite never mutates its own environment.
+# The single quotes are deliberate: the body must expand in the CHILD, not here.
+# shellcheck disable=SC2016
+eval_export() { env -u DATABASE_URL bash -c 'eval "$1"; printf %s "${DATABASE_URL-}"' _ "$1"; }
 
 # Pick a free loopback TCP port from a high range OUTSIDE the scoped allocator's
 # 5433-6432 window (so an explicit-port case can never collide with an
@@ -210,6 +220,19 @@ port_b="${port_b%%/*}"
 
 if [ -n "$port_a" ] && [ -n "$port_b" ]; then ok "both instances reported a URL/port"; else ko "missing URL/port (a='$url_a' b='$url_b')"; fi
 try "distinct ports ($port_a vs $port_b)" test "$port_a" != "$port_b"
+# Task 035: the DSN must state sslmode=disable. The cluster has no SSL, and
+# Go's lib/pq does not fall back to plaintext when the parameter is absent, so a
+# bare URL fails Go integration suites with "SSL is not enabled on the server".
+# Assert it on the SCOPED `up` output here; the unscoped/default path is
+# asserted in the "unscoped invocations" section at the end.
+case "$url_a" in
+*'?sslmode=disable') ok "scoped up URL carries ?sslmode=disable" ;;
+*) ko "scoped up URL missing ?sslmode=disable: $url_a" ;;
+esac
+case "$url_b" in
+*'?sslmode=disable') ok "second scoped up URL carries ?sslmode=disable" ;;
+*) ko "second scoped up URL missing ?sslmode=disable: $url_b" ;;
+esac
 try "distinct data dirs" test "$data_a" != "$data_b"
 case "$data_a" in "$SCOPED_ROOT"/*) ok "A data dir under scoped root" ;; *) ko "A data dir not under scoped root: $data_a" ;; esac
 
@@ -229,6 +252,16 @@ if printf %s "$exp_a" | grep -qF "export DATABASE_URL=postgresql://postgres:post
 else
 	ko "url --export wrong: $exp_a"
 fi
+# Task 035: `%q` backslash-escapes the `?` (a glob character), so the emitted
+# line is not literally comparable to the plain URL — assert the value SURVIVES
+# the documented `eval` round-trip instead of pattern-matching the escaped text.
+# A quoting regression that swallowed or mangled the query string shows up here.
+rt_a="$(eval_export "$exp_a")"
+try "scoped url --export round-trips through eval with the query string" test "$rt_a" = "$url_a2"
+case "$rt_a" in
+*'?sslmode=disable') ok "eval'ed scoped DATABASE_URL keeps ?sslmode=disable" ;;
+*) ko "eval'ed scoped DATABASE_URL lost the query string: $rt_a" ;;
+esac
 
 echo "== independent teardown (down must not touch the other) =="
 pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
@@ -261,7 +294,7 @@ pg "$REPO_A" -- --worktree down >/dev/null 2>&1 || true
 # stays up on its real port, untouched.
 url_pm="$(pg "$REPO_A" PGPORT="$free_port" POSTGRES_DB=app_a -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$data_a")
-try "still on real port after up" test "${url_pm##*:}" = "${free_port}/app_a"
+try "still on real port after up" test "${url_pm##*:}" = "${free_port}/app_a?sslmode=disable"
 mismatch_port="$(pick_free_port)"
 try_not "explicit PGPORT conflicting with a running scope fails" pg "$REPO_A" PGPORT="$mismatch_port" POSTGRES_DB=app_a -- --worktree up
 # The conflict must NOT have stopped, retargeted, or corrupted the running cluster:
@@ -310,8 +343,8 @@ role_present="$(psql "$url_u" -tAc "select rolname from pg_roles where rolname =
 try "explicit POSTGRES_USER role created ($up_user)" test "$role_present" = "$up_user"
 # The URL must carry the explicit user and the percent-encoded password.
 case "$url_u" in
-	postgresql://appu:p%40ss%3Aw%2Frd@127.0.0.1:*/app_a) ok "scoped URL reflects explicit user + encoded password" ;;
-	*) ko "scoped URL missing explicit user/password: $url_u" ;;
+postgresql://appu:p%40ss%3Aw%2Frd@127.0.0.1:*/'app_a?sslmode=disable') ok "scoped URL reflects explicit user + encoded password" ;;
+*) ko "scoped URL missing explicit user/password: $url_u" ;;
 esac
 # The connection actually authenticates AS the configured role.
 who="$(psql "$url_u" -tAc 'select current_user' 2>/dev/null || true)"
@@ -428,7 +461,7 @@ try "rollback did not leave the transient busy port ($busy_port)" test "$rr_port
 # The instance is still fully usable: bring it back up on its restored port.
 url_rb="$(pg "$REPO_E" POSTGRES_DB=app_e -- --worktree up | tail -1)"
 STARTED_DATADIRS+=("$data_e")
-try "instance still startable on its restored port after rollback" test "${url_rb##*:}" = "${prior_port}/app_e"
+try "instance still startable on its restored port after rollback" test "${url_rb##*:}" = "${prior_port}/app_e?sslmode=disable"
 try "instance reachable after rollback" test "$(psql "$url_rb" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_E" -- --worktree down >/dev/null 2>&1 || true
 
@@ -631,9 +664,15 @@ try "restart re-recorded the explicit data dir" test "$rec_g2" = "$resume_data"
 try "restarted instance serves queries" test "$(psql "$url_g3" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_G" -- --worktree down >/dev/null 2>&1 || true
 
-echo "== unscoped invocations keep the historical defaults =="
+echo "== unscoped invocations keep the historical port and credentials =="
 url_plain="$(pg "$WORK" -- url)"
-try "unscoped url unchanged (/5432, default creds)" test "$url_plain" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+try "unscoped URL keeps port 5432 and the default credentials, and adds sslmode=disable" test "$url_plain" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+# Task 035, DEFAULT (unscoped) path: the same single construction site feeds
+# `up`, `url`, and `url --export`, so the parameter and its eval round-trip must
+# hold here too — `url` alone is hermetic (it touches no cluster).
+exp_plain="$(pg "$WORK" -- url --export)"
+rt_plain="$(eval_export "$exp_plain")"
+try "unscoped url --export round-trips through eval" test "$rt_plain" = "$url_plain"
 
 echo
 echo "pg-dev-up scoped: $pass passed, $fail failed."

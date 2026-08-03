@@ -33,7 +33,7 @@
 # being inside a Git repository; outside one, pass `--profile <id>` with a stable
 # identifier rather than guessing. Two different worktrees (or profiles) receive
 # distinct data dirs and ports and stop independently. Ordinary `pg-dev-up up`
-# (no flag) is UNCHANGED: /tmp/pgdata on port 5432.
+# (no flag) keeps the UNSCOPED defaults: /tmp/pgdata on port 5432.
 #
 # Environment overrides (defaults in parentheses):
 #   PGDATA            cluster data directory  (/tmp/pgdata; scoped: <root>/<key>/pgdata)
@@ -53,6 +53,19 @@
 #
 # To match a project's expected credentials, set the env vars before calling,
 # e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
+#
+# The emitted DATABASE_URL always ends in `?sslmode=disable`:
+#   postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable
+# The cluster is initdb'ed without SSL, and Go's lib/pq does NOT fall back to
+# plaintext when the DSN omits sslmode — it fails with "SSL is not enabled on
+# the server" — so a Go integration suite pointed at a bare URL breaks until
+# someone appends the parameter by hand. Loopback-only + trust auth inside the
+# container security boundary makes `disable` the honest description, not a
+# weakening, and it is the one spelling every common client accepts: pgx and
+# libpq/psql attempt TLS and fall back to plaintext, node-postgres (`pg` 8.x)
+# attempts no TLS at all, but all of them honor an explicit `disable`. The URL
+# already carries a query string, so append any extra parameter with `&`, not
+# `?`.
 #
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
@@ -599,9 +612,24 @@ print_url() {
 	db="$(urlencode "$POSTGRES_DB")"
 	# Use $PG_HOST (127.0.0.1), not "localhost": the server binds IPv4 only, so
 	# a client that resolves localhost to ::1 first would fail to connect.
-	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}"
+	#
+	# ?sslmode=disable is not decoration: this cluster is initdb'ed without SSL,
+	# and Go's lib/pq does NOT fall back to plaintext when the DSN omits the
+	# parameter — it fails with "SSL is not enabled on the server", so a Go
+	# integration suite pointed at a bare URL breaks until someone appends it by
+	# hand. Stating it explicitly is the honest description of a loopback-only
+	# trust-auth cluster inside the container security boundary, not a weakening,
+	# and `disable` is the one spelling every common client accepts: pgx and
+	# libpq/psql attempt TLS and fall back to plaintext when the parameter is
+	# absent, node-postgres (`pg` 8.x) attempts no TLS at all (and treats
+	# `prefer`/`require` as verify-full aliases, so those spellings FAIL here),
+	# but all of them honor an explicit `disable`. Single construction site:
+	# `up`, `url`, and `url --export` all emit it.
+	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}?sslmode=disable"
 	if [ "${1:-}" = "--export" ]; then
-		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe.
+		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe
+		# — it backslash-escapes the `?` (a glob character), which eval strips
+		# back to a literal, so the query parameter survives the round-trip.
 		printf 'export DATABASE_URL=%q\n' "$url"
 	else
 		printf '%s\n' "$url"
@@ -749,8 +777,8 @@ cmd_up() {
 		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
 		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
 		# unrelated server that happens to sit on the requested port. Unscoped mode
-		# keeps its historical behavior byte-for-byte (it just reports the requested
-		# port), so existing callers see the same URL as before scoped mode existed.
+		# keeps its historical port behavior — it just reports the requested port
+		# rather than probing for the one the cluster actually listens on.
 		if [ -n "$SCOPED" ]; then
 			actual="$(running_port || true)"
 			if [ -n "$actual" ] && [ "$actual" != "$PGPORT" ]; then
@@ -854,7 +882,15 @@ cmd_check() {
 	"$BINDIR/postgres" --version
 }
 
-usage() { sed -n '2,59p' "$0" | sed 's/^#\{1\} \{0,1\}//; s/^#$//'; }
+# Print the header comment block as help. Derive its extent (line 2 through the
+# first line that is neither a `#` comment nor blank, i.e. everything before
+# `set -euo pipefail`) instead of hard-coding an end line: a hard-coded range
+# silently truncates the help the next time someone adds a paragraph to the
+# header. Blank lines are tolerated as well as bare `#` separators, so a future
+# editor cannot truncate the help by separating paragraphs the other way — but
+# the header must stay one uninterrupted block ending immediately before the
+# first real statement.
+usage() { sed -n '2,${/^\(#\|$\)/!q; s/^#\{1\} \{0,1\}//; p; }' "$0"; }
 
 # Consume a leading scope flag (--worktree / --profile <id>) BEFORE the command;
 # everything after the flag is the command and its own arguments (e.g. the

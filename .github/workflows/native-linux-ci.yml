@@ -1,12 +1,15 @@
 name: Native Linux CI - Tier 0 (static guards)
 
-# Tier 0: fast, Docker-free static guards that run on every pull request EXCEPT
-# those carrying the repo's `non-code` label (docs/tasks-only changes — see the
-# job `if:` below). These reproduce the class of native-Linux defects that
+# Tier 0: fast, Docker-free guards that run on every pull request EXCEPT those
+# carrying the repo's `non-code` label (docs/tasks-only changes — see the job
+# `if:` below). These reproduce the class of native-Linux defects that
 # Windows/WSL masks (git there ignores filemode), in seconds, with no image
 # build. Tier 0 alone would have caught PR #51 (a shell script committed without
-# its exec bit). The heavier image build + smoke test lives in the path-gated
-# Tier 1 workflow (.github/workflows/native-linux-build.yml).
+# its exec bit). Alongside the static linters it runs the hermetic
+# detect-shadows unit suite, which needs no image and guards load-bearing
+# security properties of docker/shared/detect-shadows.sh (see the step). The
+# heavier image build + smoke test lives in the path-gated Tier 1 workflow
+# (.github/workflows/native-linux-build.yml).
 #
 # What stays out of CI (VPS-only) is documented in README.md under
 # "Continuous Integration".
@@ -28,7 +31,7 @@ concurrency:
 
 jobs:
   static-guards:
-    name: Static guards (exec bits, shellcheck, shfmt, PSScriptAnalyzer)
+    name: Static guards (exec bits, shellcheck, shfmt, PSScriptAnalyzer, detect-shadows suite)
     runs-on: ubuntu-latest
     # Skip the static guards when the PR carries the repo's `non-code` label
     # (docs/tasks-only changes that need no rebuild + full CI). This is the real
@@ -149,3 +152,55 @@ jobs:
           if ($errors.Count -gt 0) {
             throw "PSScriptAnalyzer found $($errors.Count) error/parse-severity finding(s) (see ::error annotations above)."
           }
+
+      # scripts/test-detect-shadows.sh parses .powbox.yml through
+      # docker/shared/detect-shadows.sh, which calls yq with JQ filters
+      # (`yq -r '.shadow[]? // empty'`, `yq -r 'has("shadow")'`). That is
+      # python-yq (kislyuk) — a jq wrapper — and it is what the agent image
+      # installs (docker/base/Dockerfile: `pip3 install ... yq`).
+      #
+      # ubuntu-latest preinstalls mikefarah's Go yq (v4.x) instead, which is a
+      # DIFFERENT tool with the same name: it rejects the alternative operator's
+      # `empty` ("invalid input text \"empty\""), and 22 of the suite's 170
+      # assertions fail under it. So install python-yq and make it win on PATH.
+      #
+      # pipx (documented on the runner image) keeps it in its own venv, and only
+      # the `yq` entry point is symlinked into $RUNNER_TEMP/bin — the same dir
+      # the shfmt step prepends via $GITHUB_PATH — so the runner's own python and
+      # pip stay untouched and the correct yq shadows /usr/bin/yq.
+      #
+      # Pinning: the version is pinned (PyPI versions are immutable) but there is
+      # no SHA256 as in the shfmt step above. shfmt is one static binary from one
+      # URL; python-yq is a wheel plus four transitive deps (pyyaml, argcomplete,
+      # tomlkit, xmltodict) whose wheel set is Python-tag and platform specific,
+      # so `--require-hashes` would break the moment ubuntu-latest rolls its
+      # Python. The pin is still strictly stronger than the image's own unpinned
+      # install; bump it alongside the Dockerfile if that ever gets pinned.
+      - name: Install python-yq (jq-backed yq)
+        env:
+          # Matches the version the agent image resolves today.
+          PYTHON_YQ_VERSION: '4.1.2'
+        run: |
+          pipx install "yq==${PYTHON_YQ_VERSION}"
+          bin_dir="$(pipx environment --value PIPX_BIN_DIR)"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -sf "$bin_dir/yq" "$RUNNER_TEMP/bin/yq"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      # The detect-shadows unit suite: the repo's largest pure-shell suite, and a
+      # real regression net for security properties that only this test covers —
+      # the under-workspace-root validation, the symlink skip, the Git-tracked-
+      # content veto and its fail-closed paths, the newline rejection, and the
+      # workspace-glob containment. It is hermetic (throwaway repos in a tmpdir,
+      # no image, no Docker, no root), so it belongs in Tier 0 where an edit to
+      # detect-shadows.sh gets the feedback in seconds instead of waiting for the
+      # path-gated Tier 1 build. commands/smoke-test.sh runs it too (Stage 0g,
+      # in-image, against the same source); this step is the fast path.
+      #
+      # The suite probes its own toolchain and exits with one clear FATAL when the
+      # yq on PATH is the wrong implementation, so a runner-image change that
+      # reorders PATH fails legibly rather than as 22 mystery assertion failures.
+      - name: detect-shadows unit suite
+        run: |
+          echo "yq: $(command -v yq) — $(yq --version)"
+          ./scripts/test-detect-shadows.sh

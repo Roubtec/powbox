@@ -123,6 +123,20 @@ if ! grep -q '^source=plugin-clone$' "$R/dest/a/.powbox-seeded"; then
 else
 	no "rewritten marker no longer spells the channel as source=plugin-clone"
 fi
+# Shape guard for the two-part composition (seed_marker_content's body + this
+# channel's own lines): the body is captured through `$(...)`, which strips ALL
+# trailing newlines, so the composing `printf '%s\n…'` supplies exactly the one
+# separator needed. Pin BOTH halves of that invariant — no blank line may creep
+# in, and no two keys may collide onto one line — because either direction
+# silently breaks the key-anchored parsing every consumer relies on.
+marker_lines="$(cat "$R/dest/a/.powbox-seeded")"
+expected_lines="$(printf 'epoch=\ncommit=\nsource=Roubtec/agent-skills#codex/dev-skills/skills/a\nagent_skills_commit=NEWSHA111\nchannel=plugin-clone')"
+if [ "$(printf '%s\n' "$marker_lines" | grep -c '^$')" -eq 0 ] &&
+	[ "$(printf '%s\n' "$marker_lines" | sed 's/^\(epoch=\|commit=\).*/\1/')" = "$expected_lines" ]; then
+	ok "marker is one key=value per line: no blank lines, no run-together keys"
+else
+	no "marker is one key=value per line: no blank lines, no run-together keys"
+fi
 
 # ================================================================================
 # Test 2: SHA-gated no-op — a second sync at the SAME sha writes NOTHING

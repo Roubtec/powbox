@@ -23,7 +23,7 @@
 #
 # Installed as /usr/local/bin/{pnpm,pn} (replacing the global-npm symlinks) so it
 # transparently covers both the agents' non-interactive Bash and a human shell
-# without depending on a shell rc file.  It *always* exec's the real pnpm, so a
+# without depending on a shell rc file.  It *always* execs the real pnpm, so a
 # shadow-refresh failure (no mount capability, self-hosted mode, etc.) can never
 # block the actual command.
 set -uo pipefail

@@ -40,6 +40,9 @@ set -euo pipefail
 #      two levels are created and the walk has to reach the workspace root), and the
 #      SINGLE-component case on the special durable-bind path (.git/worktrees), which
 #      takes a different branch through shadow-mounts.sh and so is not redundant.
+#      These assertions are deliberately tolerant and are therefore VACUOUS on a
+#      squashing filesystem, under a rootless engine, and when the smoke itself runs
+#      as root; the latter two are detected and announced. See the block itself.
 #
 # Privileges: the durable bind is a `mount --bind`, so the container needs
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile — exactly the launch-time
@@ -454,9 +457,18 @@ esac
 # failing spuriously; on a native-Linux mount a missing chown leaves the directory
 # root-owned while its ancestor is not, and the assertion fires. Equality also
 # subsumes the weaker "must not be root" form whenever the tree's owner is not
-# root. Under a ROOTLESS engine the whole tree maps to the invoker either way, so
-# the check is satisfied but vacuous — the native-Linux CI runner (rootful Docker)
-# is where it has teeth.
+# root.
+#
+# That tolerance has a price, so state the vacuity conditions out loud — all three
+# are cases where these checks CANNOT fail and a green run proves nothing:
+#   * a squashing filesystem (Windows/FUSE) — every path reports one owner;
+#   * a ROOTLESS engine — the container's root maps to the invoker, so even an
+#     unchowned directory lands invoker-owned;
+#   * the smoke itself run as ROOT on the host — the whole fixture is then
+#     root-owned, so ancestor and mountpoint are both root with or without the chown.
+# The last two are detected below and announced; the first cannot be probed
+# portably. Real teeth come from an unprivileged host user on a rootful Linux
+# engine — the native-Linux CI runner, and a stock Linux desktop install.
 
 # GNU (`-c`) vs BSD/macOS (`-f`) stat: a host smoke run may be on either.
 owner_of() {
@@ -473,16 +485,23 @@ assert_created_mountpoint_owner() {
 }
 
 if ! owner_of "$FIXTURE" >/dev/null 2>&1; then
+	# note_skip, not a bare echo: this is a genuine no-coverage case, so it belongs in
+	# the umbrella banner rather than scrolling past in the log — the same idiom the
+	# runtime self-skips above use. It is a PARTIAL skip (the rest of the stage still
+	# runs), and a later whole-stage note_skip legitimately overwrites it, that being
+	# the more severe outcome. Practically unreachable — every supported host has GNU
+	# or BSD stat — but silence here would be indistinguishable from a real pass.
+	note_skip "mountpoint-ownership assertions skipped: this host's stat supports neither 'stat -c' nor 'stat -f'"
 	echo "  note: skipping the mountpoint-ownership assertions — this host's stat supports neither 'stat -c' nor 'stat -f'."
 else
-	# Say out loud when the assertions below cannot fail. Under a rootless engine the
-	# container's root IS the invoking user, so a directory root creates already lands
-	# invoker-owned and these equality checks pass whether or not the chown exists — a
-	# green local run is then not evidence of coverage. Rootful Docker (the native-Linux
-	# CI runner, and a stock Linux desktop install) is where they have teeth. Purely
-	# informational: never a skip, and never a failure, since the engine may not answer.
+	# Say out loud when the assertions below cannot fail (see the vacuity conditions
+	# above). Both notes are purely informational: never a skip, never a failure — the
+	# engine may not answer, and a vacuous pass is still a pass.
 	if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
 		echo "  note: this container engine is ROOTLESS — the mountpoint-ownership assertions below are satisfied vacuously (the container's root maps to you, so an unchowned directory would still look invoker-owned). Real coverage comes from a rootful engine, e.g. the native-Linux CI runner."
+	fi
+	if [ "$(id -u)" = 0 ]; then
+		echo "  note: this smoke is running as ROOT on the host — the whole fixture is root-owned, so the mountpoint-ownership assertions below are satisfied vacuously (ancestor and mountpoint are both root with or without the chown). Real coverage comes from an unprivileged host user."
 	fi
 	assert_created_mountpoint_owner "$FIXTURE/proj/bin" "$FIXTURE/proj" "single created component, tmpfs path"
 	assert_created_mountpoint_owner "$FIXTURE/.claude/worktrees" "$FIXTURE" "multi-component creation"

@@ -192,14 +192,18 @@ else {
 # outlives the container as a root-owned directory on the host's own checkout. The Bash
 # smoke prefers the same in-image run (the code under test calls GNU-only `realpath -m/-e`,
 # so its host fallback is Linux-only); Windows has no native bash at all, so run it in the
-# image or record a skip.
+# image or record a skip. Like Stage 0g the in-image run is pointed at the BAKED copy
+# (SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh) - that is the file sudo actually runs in a
+# live container, so a stale baked copy is caught here rather than by Stage 1's presence probe.
+# The /repo source is covered by the Bash smoke's Linux host fallback and by running the suite
+# directly; unlike Stage 0g it has no Tier 0 CI step yet (that is task 059).
 if (-not $imagePresent) {
   Write-Warning "Skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) - image '$Image' not found (no native bash on Windows to run it hermetically)."
   $skipped.Add("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent)")
 }
 else {
-  Write-Host "Running shadow-mounts mountpoint-ownership unit test (in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-shadow-mounts-chown.sh
+  Write-Host "Running shadow-mounts mountpoint-ownership unit test (baked script in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" -e SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh --entrypoint /bin/bash $Image /repo/scripts/test-shadow-mounts-chown.sh
   if ($LASTEXITCODE -ne 0) {
     throw "shadow-mounts mountpoint-ownership unit test failed. See container output above."
   }

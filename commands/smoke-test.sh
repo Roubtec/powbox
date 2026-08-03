@@ -243,11 +243,28 @@ fi
 # failing a macOS host smoke on a toolchain difference. It stays unconditional on
 # every Linux host and in CI, so it cannot decay into a permanent skip.
 #
+# Like Stage 0g, the in-image run points the suite at the BAKED copy (via
+# SHADOW_MOUNTS_SH), not at /repo/docker/shared/shadow-mounts.sh: /usr/local/bin/
+# shadow-mounts.sh is what actually runs under sudo in a live container, so a
+# STALE baked copy is caught by a real suite instead of being waved through by
+# Stage 1's `command -v` presence probe. The baked file is COPY --chmod=755, so
+# the unprivileged container user can read it — the suite only ever COPIES it and
+# rewrites the /workspace literal, never executes the baked path itself.
+#
+# The /repo SOURCE is covered by the host-fallback branch below (a Linux host that
+# has not built the image yet) and by running the suite directly, which AGENTS.md →
+# "Validating Changes" lists as an in-container gate. Unlike Stage 0g there is no
+# Tier 0 CI step for it yet; wiring every hermetic scripts/test-*.sh into Tier 0 is
+# tasks/059-wire-pure-shell-suites-into-ci.md, and this stage is deliberately not
+# front-running it.
+#
 # The privileged end-to-end counterpart (real root, real bind mount, real
 # ownership on disk) is Stage 6's scripts/smoke-test-worktree-metadata.sh.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-	echo "Running shadow-mounts mountpoint-ownership unit test (in $IMAGE) ..."
-	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-shadow-mounts-chown.sh
+	echo "Running shadow-mounts mountpoint-ownership unit test (baked script in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-shadow-mounts-chown.sh
 elif [ "$(uname -s)" = Linux ]; then
 	echo "Running shadow-mounts mountpoint-ownership unit test (host source — image '$IMAGE' absent) ..."
 	"${ROOT_DIR}/scripts/test-shadow-mounts-chown.sh"

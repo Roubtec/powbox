@@ -11,6 +11,9 @@
 # writing into bin/obj).  The fix is the chown block: every component the mkdir
 # creates inherits the uid:gid of the DEEPEST ALREADY-EXISTING ancestor, before
 # the mount goes on top, with at most ONE warning per run when that fails.
+# BOTH routes to a mount are covered: the ordinary tmpfs one and the
+# `.git/worktrees` durable-BIND branch, which reaches its mount through
+# bind_git_worktrees and could otherwise lose the chown unnoticed.
 #
 # The privileged end-to-end path (real root, real tmpfs, a real bind-mounted
 # checkout) is covered in the smoke tier by scripts/smoke-test-worktree-metadata.sh.
@@ -29,9 +32,14 @@
 #     owners — that is what makes "the DEEPEST existing ancestor" assertable at
 #     all, since an unprivileged test cannot create differently-owned dirs.
 #
-# Needs only bash + coreutils.  No image, no Docker, no root.
+# Needs only bash + coreutils.  No image, no Docker, no root.  $TMPDIR may contain
+# spaces, quotes, '#', '&' or backslashes; ':' and newlines are refused up front
+# (see the WORK_ROOT guard).
 #
 # Usage: scripts/test-shadow-mounts-chown.sh
+#   SHADOW_MOUNTS_SH=<path>  test that copy instead of ../docker/shared/shadow-mounts.sh
+#                            (commands/smoke-test.sh Stage 0h points it at the BAKED
+#                            /usr/local/bin/shadow-mounts.sh inside the image).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,7 +65,21 @@ WORK_ROOT="$(mktemp -d)"
 WORK_ROOT="$(realpath "$WORK_ROOT")"
 trap 'rm -rf "$WORK_ROOT"' EXIT
 
-# The relocated /workspace.  Kept short and free of shell/sed metacharacters.
+# $TMPDIR is the user's to choose, so WORK_ROOT may legitimately contain spaces,
+# quotes, '#', '&' and backslashes — everything below is written to survive those.
+# Exactly two characters it genuinely cannot carry, so refuse LOUDLY rather than
+# misbehave: ':' would split the PATH entry that puts the shims in front, and a
+# newline cannot survive the one-record-per-line fixture files.
+NL='
+'
+case "$WORK_ROOT" in
+*:* | *"$NL"*)
+	echo "FATAL: the temporary directory '$WORK_ROOT' contains ':' or a newline; this suite puts its shim dir on PATH and keeps line-based fixtures, so neither can be represented. Set TMPDIR to a path without them." >&2
+	exit 1
+	;;
+esac
+
+# The relocated /workspace.
 WS_ROOT="$WORK_ROOT/workspace"
 mkdir -p "$WS_ROOT"
 
@@ -69,15 +91,37 @@ FAKE_NODE_GID=4002
 # Only the `workspace_root=` assignment is functional; the /workspace strings in
 # the diagnostics are cosmetic and deliberately left alone.
 #
-# The generated assignment single-quotes the relocated root so a TMPDIR with
-# spaces still produces a valid `realpath` argument.  The sed EXPRESSION still
-# interpolates $WS_ROOT unquoted, which is safe because the delimiter is '#' and
-# a mktemp -d path cannot contain '#' or a newline; the FATAL below is the
-# backstop either way — an unrelocated copy never runs.
+# The rewrite is a pure-bash line substitution, deliberately NOT sed: a sed
+# expression would interpolate $WS_ROOT into a pattern and a replacement, where
+# '#', '&', '\' and the delimiter itself are metacharacters — so a $TMPDIR
+# containing any of them would silently produce broken or injected shell text.
+# Here the path never reaches a pattern language at all: `printf %q` renders it in
+# bash's own re-input-safe form, and that token is placed inside `$( … )`, where
+# quoting restarts, so it is parsed exactly as one argument.  The FATAL below is
+# the backstop either way — an unrelocated copy never runs.
 SUT="$WORK_ROOT/shadow-mounts.sh"
-sed "s#^workspace_root=.*#workspace_root=\"\$(realpath -- '${WS_ROOT}')\"#" "$SRC" >"$SUT"
-if ! grep -qF "realpath -- '${WS_ROOT}'" "$SUT"; then
-	echo "FATAL: could not relocate the /workspace root in $SRC — the 'workspace_root=' assignment this suite rewrites has moved or been renamed. Fix the sed above; do NOT let the suite run against an unrelocated copy (it would operate on the real /workspace)." >&2
+printf -v ws_quoted '%q' "$WS_ROOT"
+relocation="workspace_root=\"\$(realpath -- $ws_quoted)\""
+relocated=0
+: >"$SUT"
+# `|| [ -n "$line" ]` so a final line without a trailing newline is not dropped.
+while IFS= read -r line || [ -n "$line" ]; do
+	case "$line" in
+	workspace_root=*)
+		printf '%s\n' "$relocation" >>"$SUT"
+		relocated=$((relocated + 1))
+		;;
+	*)
+		printf '%s\n' "$line" >>"$SUT"
+		;;
+	esac
+done <"$SRC"
+if [ "$relocated" -ne 1 ]; then
+	echo "FATAL: expected exactly one 'workspace_root=' assignment to relocate in $SRC, found $relocated — the assignment this suite rewrites has moved, been renamed, or been duplicated. Fix the rewrite above; do NOT let the suite run against an unrelocated copy (it would operate on the real /workspace)." >&2
+	exit 1
+fi
+if ! grep -qF -- "$relocation" "$SUT"; then
+	echo "FATAL: the relocated 'workspace_root=' line is not present in $SUT — refusing to run." >&2
 	exit 1
 fi
 if grep -qE '^workspace_root=.*realpath /workspace' "$SUT"; then
@@ -100,16 +144,28 @@ if [ "$1" = "-g" ] && [ "$2" = "node" ]; then printf '%s\n' "$FAKE_NODE_GID"; ex
 exec /usr/bin/id "$@"
 SHIM
 
-# stat: answer `-c %u:%g <path>` from $OWNER_MAP (one "<path> <uid>:<gid>" per
-# line); anything unlisted falls back to $DEFAULT_OWNER.  Other invocations go to
-# the real stat.  Fails (like the real stat on a missing path) when the path is
-# listed as "MISSING", which drives the chown_failed branch.
+# stat: answer `-c %u:%g <path>` from $OWNER_MAP; anything unlisted falls back to
+# $DEFAULT_OWNER.  Other invocations go to the real stat.  Fails (like the real
+# stat on a missing path) when the path is listed as "MISSING", which drives the
+# chown_failed branch.
+#
+# Record format: one per line, OWNER FIRST — "<uid>:<gid> <path>" (or
+# "MISSING <path>").  Owner-first, split on the FIRST space, path = the whole
+# remainder: a $TMPDIR containing spaces then still yields the right path, whereas
+# a path-first `read -r p o` would split it into two fields and every lookup would
+# fall through to $DEFAULT_OWNER (a silently vacuous suite).  Even `read -r o p`
+# would be wrong, since read strips leading/trailing IFS whitespace from the last
+# field.  A path containing a NEWLINE cannot be expressed in a line-based fixture
+# at all — hence the WORK_ROOT guard near the top.
 cat >"$BIN/stat" <<'SHIM'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%u:%g" ] && [ "$#" -eq 3 ]; then
 	printf 'stat %s\n' "$3" >>"$SHIM_LOG"
 	if [ -n "${OWNER_MAP:-}" ] && [ -f "$OWNER_MAP" ]; then
-		while read -r p o; do
+		while IFS= read -r rec; do
+			[ -n "$rec" ] || continue
+			o="${rec%% *}"
+			p="${rec#* }"
 			if [ "$p" = "$3" ]; then
 				[ "$o" = "MISSING" ] && exit 1
 				printf '%s\n' "$o"
@@ -155,12 +211,17 @@ fi
 exit 1
 SHIM
 
-# findmnt: reached only on the .git/worktrees durable-bind path.  Reporting
-# nothing makes bind_git_worktrees return 1, so the caller falls back to tmpfs —
-# the ownership logic under test runs identically either way.
+# findmnt: reached only on the .git/worktrees durable-bind path, where
+# bind_git_worktrees asks for the sibling .worktrees fstype to decide whether a
+# PERSISTENT volume is present.  $FAKE_FINDMNT_FSTYPE is what selects the branch:
+# a non-tmpfs answer (e.g. "ext4") takes the durable bind, while the default —
+# reporting nothing — is read as "no persistent volume" and falls back to tmpfs.
 cat >"$BIN/findmnt" <<'SHIM'
 #!/usr/bin/env bash
 printf 'findmnt %s\n' "$*" >>"$SHIM_LOG"
+if [ -n "${FAKE_FINDMNT_FSTYPE:-}" ]; then
+	printf '%s\n' "$FAKE_FINDMNT_FSTYPE"
+fi
 exit 0
 SHIM
 
@@ -184,6 +245,7 @@ run_sut() {
 		DEFAULT_OWNER="${DEFAULT_OWNER:-1000:1000}" \
 		MOUNTPOINTS="${MOUNTPOINTS:-}" \
 		FAKE_CHOWN_FAIL="${FAKE_CHOWN_FAIL:-}" \
+		FAKE_FINDMNT_FSTYPE="${FAKE_FINDMNT_FSTYPE:-}" \
 		FAKE_NODE_UID="$FAKE_NODE_UID" \
 		FAKE_NODE_GID="$FAKE_NODE_GID" \
 		bash "$SUT" "$@" >/dev/null 2>"$ERR" || true
@@ -214,10 +276,9 @@ echo "Test: a single created component inherits its existing parent's ownership"
 ws="$(reset_fixture single)"
 mkdir -p "$ws/proj"
 OWNER_MAP="$WORK_ROOT/owners-single"
-cat >"$OWNER_MAP" <<EOF
-$ws/proj 4242:4242
-$ws 7:7
-EOF
+# printf, not a heredoc: an unquoted heredoc would process backslash escapes in
+# the interpolated path, so a $TMPDIR containing '\' would be silently mangled.
+printf '%s %s\n' 4242:4242 "$ws/proj" 7:7 "$ws" >"$OWNER_MAP"
 run_sut single "$ws/proj/bin"
 if [ "$(count chown)" = "1" ]; then
 	ok "exactly one chown for the one created component"
@@ -265,10 +326,7 @@ echo "Test: a multi-component creation chowns EVERY new level"
 # and both must inherit <ws>'s ownership.
 ws="$(reset_fixture multi)"
 OWNER_MAP="$WORK_ROOT/owners-multi"
-cat >"$OWNER_MAP" <<EOF
-$ws 4242:4242
-$WS_ROOT 7:7
-EOF
+printf '%s %s\n' 4242:4242 "$ws" 7:7 "$WS_ROOT" >"$OWNER_MAP"
 run_sut multi "$ws/.claude/worktrees"
 if [ "$(count chown)" = "2" ]; then
 	ok "exactly two chowns for the two created components"
@@ -293,10 +351,7 @@ echo "Test: a three-level creation still uses the deepest existing ancestor"
 ws="$(reset_fixture deep)"
 mkdir -p "$ws/proj"
 OWNER_MAP="$WORK_ROOT/owners-deep"
-cat >"$OWNER_MAP" <<EOF
-$ws/proj 4242:4242
-$ws 7:7
-EOF
+printf '%s %s\n' 4242:4242 "$ws/proj" 7:7 "$ws" >"$OWNER_MAP"
 run_sut deep "$ws/proj/a/b/c"
 if [ "$(count chown)" = "3" ]; then
 	ok "three created levels produce three chowns"
@@ -312,6 +367,66 @@ if ! calls chown | grep -q '7:7'; then
 	ok "no level inherits a shallower ancestor's ownership"
 else
 	ko "a level inherited the wrong ancestor: $(calls chown)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: the durable .git/worktrees BIND branch chowns the created mountpoint too"
+# A target ending in /.git/worktrees does NOT reach the tmpfs line: when the sibling
+# .worktrees is a PERSISTENT (non-tmpfs) mount, shadow-mounts.sh binds that volume's
+# .gitworktrees over it instead.  That is a second route to a mount, so the
+# mountpoint chown has to be pinned there as well — a regression that moved the
+# chown down into the tmpfs branch would leave every durable .git/worktrees
+# mountpoint root-owned and pass every other case in this file.
+# Driving this branch is also what makes the findmnt shim reachable at all: it
+# answers the fstype probe that chooses durable-bind over tmpfs.
+ws="$(reset_fixture gitwt)"
+mkdir -p "$ws/.git"
+OWNER_MAP="$WORK_ROOT/owners-gitwt"
+printf '%s %s\n' 4242:4242 "$ws/.git" 7:7 "$ws" >"$OWNER_MAP"
+# .worktrees is a mountpoint (it stands in for the persistent volume) but the
+# TARGET is not, so the target is still processed rather than skipped.
+MOUNTPOINTS="$ws/.worktrees"
+FAKE_FINDMNT_FSTYPE=ext4
+run_sut gitwt "$ws/.git/worktrees"
+MOUNTPOINTS=""
+FAKE_FINDMNT_FSTYPE=""
+OWNER_MAP=""
+if calls findmnt | grep -qF -- "-T $ws/.worktrees"; then
+	ok "the durable-bind branch really was entered (findmnt probed the .worktrees fstype)"
+else
+	ko "findmnt was not reached, so this case never exercised the bind branch: $(calls findmnt)"
+fi
+if calls chown | grep -qF -- "chown -h 4242:4242 $ws/.git/worktrees"; then
+	ok "the created .git/worktrees mountpoint inherits its existing .git parent's ownership"
+else
+	ko "expected 'chown -h 4242:4242 $ws/.git/worktrees', got: $(calls chown)"
+fi
+if calls mount | grep -qF -- "mount --bind $ws/.worktrees/.gitworktrees $ws/.git/worktrees"; then
+	ok "the mount is the durable bind from the volume, not a tmpfs"
+else
+	ko "expected a --bind of the volume's .gitworktrees, got: $(calls mount)"
+fi
+if ! calls mount | grep -qF -- "-t tmpfs"; then
+	ok "the target did not silently fall back to tmpfs"
+else
+	ko "the target fell back to tmpfs: $(calls mount)"
+fi
+# bind_git_worktrees separately chowns its bind SOURCE to node (git runs as node).
+# That is a different chown with a different target and no -h; assert it explicitly
+# so the two are never conflated, and so a future change to either is visible here.
+if calls chown | grep -qF -- "chown $FAKE_NODE_UID:$FAKE_NODE_GID $ws/.worktrees/.gitworktrees"; then
+	ok "the bind SOURCE is still chowned to node, distinct from the mountpoint chown"
+else
+	ko "expected the bind source to be chowned to node, got: $(calls chown)"
+fi
+# Same ordering invariant as the tmpfs path: the mountpoint chown must land on the
+# underlying directory, so it has to precede the bind that covers it.
+chown_line="$(grep -n '^chown -h ' "$LOG" | head -n1 | cut -d: -f1 || true)"
+mount_line="$(grep -n '^mount ' "$LOG" | head -n1 | cut -d: -f1 || true)"
+if [ -n "$chown_line" ] && [ -n "$mount_line" ] && [ "$chown_line" -lt "$mount_line" ]; then
+	ok "on the bind branch too the chown is emitted BEFORE the mount"
+else
+	ko "expected chown before mount on the bind branch; log was: $(cat "$LOG")"
 fi
 
 # ---------------------------------------------------------------------------
@@ -376,7 +491,7 @@ fi
 echo "Test: an unreadable ancestor warns once and never guesses an owner"
 ws="$(reset_fixture statfail)"
 OWNER_MAP="$WORK_ROOT/owners-statfail"
-printf '%s MISSING\n' "$ws" >"$OWNER_MAP"
+printf 'MISSING %s\n' "$ws" >"$OWNER_MAP"
 run_sut statfail "$ws/nested/bin"
 OWNER_MAP=""
 if [ "$(count chown)" = "0" ]; then

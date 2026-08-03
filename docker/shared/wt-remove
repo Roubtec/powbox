@@ -4,18 +4,27 @@
 #
 # Usage: wt-remove <slug> [--force]
 #
-# Guards (all hard refusals, exit 1, worktree left in place):
-#   * uncommitted changes (`git status --porcelain` non-empty) — even with
-#     --force; commit/push or move them aside first, never delete evidence
+# Guards (all hard refusals, exit 1, worktree left in place), checked in this
+# order so the most specific diagnosis is the one the caller gets:
 #   * ANY operation git can leave in progress in that worktree — a rebase
 #     (either backend), a `git am`, a merge, a cherry-pick, a revert, a
 #     cherry-pick/revert SEQUENCE, or a bisect. Several of those leave
 #     `git status --porcelain` EMPTY, so this guard is what stands between them
 #     and deletion; it is keyed on the same per-worktree state files git itself
-#     consults (see the audit above the guard block below)
-#   * a worktree whose own git metadata cannot be located or read, so its
-#     operation state cannot be established (fail safe: unknown means refuse)
+#     consults (see the audit above the guard block below). It is checked FIRST
+#     because a conflicted operation is also dirty, and naming the operation is
+#     strictly more useful than naming the dirt
+#   * uncommitted changes (`git status --porcelain` non-empty) — even with
+#     --force; commit/push or move them aside first, never delete evidence
+#   * a worktree whose own git metadata cannot be located or read, or whose
+#     status cannot be read at all, so its operation state or cleanliness
+#     cannot be established (fail safe: unknown means refuse — an empty
+#     `git status` stdout is NOT proof of a clean tree when the command failed)
 #   * being invoked from inside the worktree being removed
+# Both the state files and the status are read through the worktree's OWN git
+# dir, resolved from the repository's registrations — never as `git -C <wt>`,
+# which resolves upward into the enclosing checkout for a worktree that lost its
+# `.git` pointer and would then answer about a different tree entirely.
 # NONE of these can be bypassed with --force: --force is passed through to
 # `git worktree remove` ONLY after every check above passes (for e.g. ignored
 # build artifacts git refuses to auto-remove).
@@ -111,6 +120,14 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	# work, and a dead-metadata dir can't be status-checked, so reap it safely:
 	# empty dirs are removed; a non-empty dir is preserved (moved aside), never
 	# rm -rf'd. The branch is always kept.
+	#
+	# This ONE probe is deliberately still `git -C "$WT"`, and its upward
+	# resolution is harmless HERE: a worktree that has lost its `.git` pointer
+	# resolves against the enclosing repo and so answers "true", i.e. it does NOT
+	# take this reaping branch and instead falls through to the guards below —
+	# which read the worktree's own metadata explicitly and refuse on anything
+	# they cannot prove. That is the safe direction; nothing downstream trusts
+	# this answer for WHICH tree it is looking at.
 	_outcome="$(wt_reap_orphan_dir "$WT")"
 	git -C "$ROOT" worktree prune
 	remove_lint_cache
@@ -128,19 +145,23 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	exit 0
 fi
 
-[ -z "$(git -C "$WT" status --porcelain)" ] ||
-	die "worktree has uncommitted changes; commit (and push) them, or move them aside, before removal: $WT"
-
-# refuse_operation <human label> — the ONE refusal shape for "git left something
-# in flight here". It names WHICH operation and WHERE, and then points at
-# inspection and at the worktree's owner. It deliberately does NOT say how to
-# clear the state: every `--abort` discards the conflict resolution done so far
-# and `bisect reset` discards the search, and whether that is acceptable is the
-# owner's call, not this script's. (wt-enter had exactly this class of advice
-# removed from it; it is not to be reintroduced on the removing side.)
+# refuse_operation <human label> [<extra inspection command>] — the ONE refusal
+# shape for "git left something in flight here". It names WHICH operation and
+# WHERE, and then points at inspection and at the worktree's owner. It
+# deliberately does NOT say how to clear the state: every `--abort` discards the
+# conflict resolution done so far and `bisect reset` discards the search, and
+# whether that is acceptable is the owner's call, not this script's. (wt-enter
+# had exactly this class of advice removed from it; it is not to be reintroduced
+# on the removing side.)
+#
+# The optional second argument is an EXTRA inspection command for the states
+# `git status` alone reports poorly — only the bisect ones pass it, so a merge or
+# a rebase refusal no longer carries an irrelevant `bisect log` hint.
 refuse_operation() {
+	local extra=""
+	[ -z "${2:-}" ] || extra=" (and '$2')"
 	printf '%s\n' "wt-remove: $1 is in progress in the worktree at $(shq "$WT"); 'git status' does not always show it, and removing the worktree would take it with it. Nothing was changed." >&2
-	printf '%s\n' "wt-remove: look at it yourself: 'git -C $(shq "$WT") status' (plus 'git -C $(shq "$WT") bisect log' if a bisect may be running), or coordinate with whoever owns that worktree. Nothing here decides what happens to work in flight, and this refusal stands however the command was invoked." >&2
+	printf '%s\n' "wt-remove: look at it yourself: 'git -C $(shq "$WT") status'$extra, or coordinate with whoever owns that worktree. Nothing here decides what happens to work in flight, and this refusal stands however the command was invoked." >&2
 	exit 1
 }
 
@@ -157,11 +178,21 @@ refuse_operation() {
 # state" means we cannot prove this tree is safe to delete, so we refuse.
 # Pre-set so an inherited GITDIR can never stand in for an answer wt_read_path
 # did not give (it leaves the variable untouched when the resolver says nothing).
+#
+# Every dynamic path below is rendered with `shq` and placed in an `at <path>`
+# position, for two reasons. `shq` is the same reason wt-enter has it: a path is
+# arbitrary bytes chosen by somebody else, and a raw ESC in a diagnostic hands
+# the reader's terminal a live control sequence. The `at ` anchor is what the
+# test suite's `destructive_advice` detector neutralises dynamic values in — a
+# path printed in some other position would not be neutralised there, so a
+# worktree legitimately named `abort` or `force` would false-alarm the detector.
+# Both properties are pinned by the control-byte cases in
+# scripts/test-wt-orphan-safety.sh.
 GITDIR=""
 wt_read_path GITDIR wt_worktree_gitdir "$ROOT" "$WT" ||
-	die "cannot locate the git metadata of $WT from this repository's registrations, so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)"
+	die "cannot locate the git metadata for the worktree at $(shq "$WT") from this repository's registrations, so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)"
 if ! { [ -d "$GITDIR" ] && [ -r "$GITDIR" ] && [ -x "$GITDIR" ]; }; then
-	die "cannot read the git metadata at $GITDIR, so $WT's in-progress operations cannot be checked; refusing to remove it (nothing was changed)"
+	die "cannot read the git metadata at $(shq "$GITDIR") for the worktree at $(shq "$WT"), so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)"
 fi
 
 # The guard set, audited against git's own state-file semantics (wt-status.c:
@@ -217,9 +248,37 @@ for state in rebase-apply rebase-merge MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD s
 	CHERRY_PICK_HEAD) refuse_operation "a cherry-pick (CHERRY_PICK_HEAD)" ;;
 	REVERT_HEAD) refuse_operation "a revert (REVERT_HEAD)" ;;
 	sequencer) refuse_operation "a cherry-pick/revert sequence (sequencer/)" ;;
-	BISECT_LOG | BISECT_START) refuse_operation "a bisect ($state)" ;;
+	BISECT_LOG | BISECT_START) refuse_operation "a bisect ($state)" "git -C $(shq "$WT") bisect log" ;;
 	esac
 done
+
+# Uncommitted changes. This runs AFTER the operation guard on purpose: a
+# conflicted merge, revert, cherry-pick or rebase is BOTH dirty and in flight,
+# and "uncommitted changes" would be a strictly worse thing to be told about it
+# than the name of the operation and where to look at it. The tree is refused
+# either way; only the diagnostic differs.
+#
+# Read with the worktree's OWN git dir, never as `git -C "$WT"`. That is the
+# same trap the state lookup above avoids, and it bites here too: task worktrees
+# live INSIDE the main working tree, so a worktree that has lost its `.git`
+# pointer still satisfies `git -C "$WT"` — against the ENCLOSING repo, which
+# typically IGNORES .worktrees/ and so reports a clean porcelain for a worktree
+# full of uncommitted work (verified end to end). The explicit --git-dir /
+# --work-tree pair pins the identity by construction; there is nothing left for
+# git to resolve upward.
+#
+# The exit status is captured SEPARATELY from the output, because an empty
+# stdout is not proof of a clean tree: `git status` exits 128 with EMPTY stdout
+# when it cannot read the index, and testing only `-z` on the output would have
+# read that as "clean" and gone on to delete the worktree. Same fail-safe
+# direction as the metadata checks above — an unknown means we cannot prove this
+# tree is safe to delete.
+PORCELAIN=""
+if ! PORCELAIN="$(git --git-dir="$GITDIR" --work-tree="$WT" status --porcelain 2>/dev/null)"; then
+	die "cannot read the status of the worktree at $(shq "$WT"), so it cannot be shown to be free of uncommitted changes; refusing to remove it (nothing was changed)"
+fi
+[ -z "$PORCELAIN" ] ||
+	die "worktree has uncommitted changes; commit (and push) them, or move them aside, before removing the worktree at $(shq "$WT")"
 
 if [ -n "$FORCE" ]; then
 	git -C "$ROOT" worktree remove --force "$WT" >&2

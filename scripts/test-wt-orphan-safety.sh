@@ -1008,11 +1008,20 @@ fi
 # route, and task 039 removed that class of advice from wt-enter.
 #
 # wt_remove_must_refuse <expected phrase> <root> <slug> <state marker path>
+#                       [clean|dirty]
 #   Echo a `miss` fragment (empty when all is well), in the same shape the
 #   wt-enter cases use.
+#
+#   The last argument declares what the fixture's porcelain is expected to be,
+#   and is asserted rather than assumed. `clean` (the default) is the shape this
+#   guard exists for — nothing the pre-existing uncommitted-changes check would
+#   already have caught, so the operation guard is provably what refused. `dirty`
+#   is the opposite shape, an operation stopped ON a conflict: BOTH guards would
+#   refuse, and the point of the case is WHICH diagnosis comes out, so it
+#   additionally requires that the message does NOT fall back to naming the dirt.
 # ---------------------------------------------------------------------------
 wt_remove_must_refuse() {
-	local phrase="$1" root="$2" slug="$3" marker="$4"
+	local phrase="$1" root="$2" slug="$3" marker="$4" expect="${5:-clean}"
 	local wt="$root/.worktrees/$CONTAINER_NAME/$slug"
 	local err="$WORK_ROOT/wtrm-$slug.err" miss="" mode rc
 
@@ -1024,8 +1033,11 @@ wt_remove_must_refuse() {
 		printf '%s' " fixture-state-missing"
 		return 0
 	}
-	# The whole point: nothing the porcelain guard would already have caught.
-	[ -z "$(git -C "$wt" status --porcelain)" ] || miss="$miss fixture-porcelain-not-clean"
+	case "$expect" in
+	clean) [ -z "$(git -C "$wt" status --porcelain)" ] || miss="$miss fixture-porcelain-not-clean" ;;
+	dirty) [ -n "$(git -C "$wt" status --porcelain)" ] || miss="$miss fixture-porcelain-not-dirty" ;;
+	*) miss="$miss fixture-bad-porcelain-expectation" ;;
+	esac
 
 	for mode in plain force; do
 		rc=0
@@ -1038,6 +1050,10 @@ wt_remove_must_refuse() {
 		[ -d "$wt" ] || miss="$miss $mode-worktree-gone"
 		[ -e "$marker" ] || miss="$miss $mode-state-lost"
 		grep -qF "$phrase" "$err" || miss="$miss $mode-operation-not-named"
+		if [ "$expect" = dirty ]; then
+			! grep -qF "uncommitted changes" "$err" ||
+				miss="$miss $mode-named-the-dirt-instead-of-the-operation"
+		fi
 		miss="$miss$(destructive_advice "$err" "$wt" "$root" "$slug")"
 	done
 	printf '%s' "$miss"
@@ -1075,6 +1091,37 @@ if git -C "$RB2" worktree list --porcelain | grep -qx "branch refs/heads/bis-b";
 	fi
 else
 	no "precondition: 'git bisect start' should leave the worktree on its branch"
+fi
+
+# --- bisect, HALF TORN DOWN: BISECT_START with NO BISECT_LOG ----------------
+# The guard names BISECT_START alongside BISECT_LOG deliberately, and this is the
+# only fixture that can prove that half load-bearing: both cases above carry BOTH
+# files, so deleting `BISECT_START` from wt-remove's state list would leave them
+# passing. Here git itself no longer considers a bisect to be running (`git
+# status` reports a plain detached HEAD and the porcelain is empty) — but
+# BISECT_START is where the branch to come back to is recorded, and
+# BISECT_TERMS/BISECT_NAMES still sit beside it, so what the search had
+# established exists nowhere else once the worktree is gone. That makes this a
+# deliberate over-reach relative to git's own reading, in the only direction that
+# is cheap: refusing costs a re-run, removing costs the state.
+RB3="$(make_repo rb-startonly)"
+for i in 1 2 3; do
+	echo "rev $i" >"$RB3/seed.txt"
+	git_quiet -C "$RB3" commit -qam "c$i"
+done
+git_quiet -C "$RB3" branch bis-s
+git_quiet -C "$RB3" worktree add -q "$RB3/.worktrees/$CONTAINER_NAME/bis-s" bis-s >/dev/null 2>&1
+git_quiet -C "$RB3/.worktrees/$CONTAINER_NAME/bis-s" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+rm -f "$RB3/.git/worktrees/bis-s/BISECT_LOG"
+if [ ! -e "$RB3/.git/worktrees/bis-s/BISECT_LOG" ] && [ -e "$RB3/.git/worktrees/bis-s/BISECT_START" ]; then
+	miss="$(wt_remove_must_refuse "a bisect (BISECT_START)" "$RB3" bis-s "$RB3/.git/worktrees/bis-s/BISECT_START")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a half-torn-down bisect: BISECT_START with no BISECT_LOG"
+	else
+		no "wt-remove BISECT_START-only guard inadequate:$miss"
+	fi
+else
+	no "precondition: the half-torn-down fixture should hold BISECT_START and no BISECT_LOG"
 fi
 
 # --- multi-commit revert stopped on an EMPTY revert -------------------------
@@ -1228,6 +1275,37 @@ else
 	no "wt-remove git-am guard inadequate:$miss"
 fi
 
+# --- an operation stopped ON its conflict: DIRTY *and* in flight -------------
+# Every fixture above resolves its conflict back to a clean porcelain, which is
+# what isolates the operation guard — and is also why the ORDER of the two guards
+# was invisible to them. The ordinary way to meet a stopped operation is with the
+# conflict still open, i.e. both guards firing at once, and then the diagnosis
+# matters: "worktree has uncommitted changes; commit them" is advice that cannot
+# be followed mid-merge and says nothing about the merge, while naming the merge
+# tells the caller what is actually there. So the operation guard runs first, and
+# this case is what holds it there.
+RS7="$(make_repo rs-conflict)"
+printf 'a\n' >"$RS7/f.txt"
+git_quiet -C "$RS7" add -A
+git_quiet -C "$RS7" commit -qm f1
+git_quiet -C "$RS7" checkout -q -b cf-side
+printf 'b\n' >"$RS7/f.txt"
+git_quiet -C "$RS7" commit -qam s1
+git_quiet -C "$RS7" checkout -q main
+printf 'c\n' >"$RS7/f.txt"
+git_quiet -C "$RS7" commit -qam m1
+git_quiet -C "$RS7" branch cf-h
+git_quiet -C "$RS7" worktree add -q "$RS7/.worktrees/$CONTAINER_NAME/cf-h" cf-h >/dev/null 2>&1
+# Left UNRESOLVED this time: the index carries the conflict, so the porcelain is
+# non-empty and the pre-existing uncommitted-changes guard would also fire.
+git_quiet -C "$RS7/.worktrees/$CONTAINER_NAME/cf-h" merge cf-side >/dev/null 2>&1 || true
+miss="$(wt_remove_must_refuse "a merge (MERGE_HEAD)" "$RS7" cf-h "$RS7/.git/worktrees/cf-h/MERGE_HEAD" dirty)"
+if [ -z "$miss" ]; then
+	ok "wt-remove names the OPERATION, not the dirt, for a merge stopped on an open conflict"
+else
+	no "wt-remove conflicted-merge diagnosis inadequate:$miss"
+fi
+
 # --- fail safe: state that cannot be READ must refuse, not permit -----------
 # The opposite of wt-enter's bias, and correctly so: there an unknown blocker
 # degrades to git's own message and costs nothing, here an unknown means we
@@ -1238,20 +1316,50 @@ fi
 #
 # fs_case <label> <root> <slug> <before-hook> <after-hook> — break the metadata,
 # run wt-remove both ways, restore, and report.
+#
+# Each refusal is also held to the two properties every wt-remove diagnostic has
+# to have, which these paths are the natural place to pin because they are the
+# only ones that print the ADMIN dir as well as the worktree: the worktree is
+# NAMED (escaped, in the `at <path>` position the destructive_advice detector
+# neutralises dynamic values in), and no terminal control byte reaches stderr
+# raw. The control-byte repo below is what makes those two assertions bite; for
+# an ordinary path they hold trivially and cost nothing.
 fs_case() {
 	local label="$1" root="$2" slug="$3" break_cmd="$4" restore_cmd="$5"
 	local wt="$root/.worktrees/$CONTAINER_NAME/$slug" miss="" rc rcf
+	# NB: no `label` here — that is this function's own first parameter.
+	local gitdir="$root/.git/worktrees/$slug" errtext want mode tag
 	eval "$break_cmd"
 	rc=0
 	(cd "$root" && bash "$WT_REMOVE" "$slug" 2>"$WORK_ROOT/fs-$slug.err") || rc=$?
 	rcf=0
 	(cd "$root" && bash "$WT_REMOVE" "$slug" --force 2>"$WORK_ROOT/fs-$slug-force.err") || rcf=$?
-	eval "$restore_cmd"
+	# Tolerant on purpose: restoring the fixture is hygiene, and a helper that
+	# FAILS this case has typically removed the very worktree the restore points
+	# into. That must be reported as a failed assertion below, not as a `set -e`
+	# abort that takes the rest of the suite (and the summary) with it.
+	eval "$restore_cmd" 2>/dev/null || :
 	[ "$rc" -ne 0 ] || miss="$miss REMOVED-ANYWAY"
 	[ "$rcf" -ne 0 ] || miss="$miss force-REMOVED-ANYWAY"
 	[ -d "$wt" ] || miss="$miss worktree-gone"
-	grep -qF "refusing to remove it" "$WORK_ROOT/fs-$slug.err" || miss="$miss no-refusal-wording"
-	miss="$miss$(destructive_advice "$WORK_ROOT/fs-$slug.err" "$wt" "$root" "$slug")"
+	# The worktree is named in the escaped spelling. Both invocations are held to
+	# it: --force must not reach a different, laxer message.
+	printf -v want "at %q" "$wt"
+	for mode in "" "-force"; do
+		tag="${mode:-plain}"
+		errtext="$(cat "$WORK_ROOT/fs-$slug$mode.err")"
+		grep -qF "refusing to remove it" "$WORK_ROOT/fs-$slug$mode.err" ||
+			miss="$miss $tag-no-refusal-wording"
+		case "$errtext" in *$'\033'*) miss="$miss $tag-raw-control-byte-on-stderr" ;; esac
+		case "$errtext" in
+		*"$want"*) ;;
+		*) miss="$miss $tag-worktree-not-named" ;;
+		esac
+		# The admin dir is a dynamic value these messages echo back too, so it is
+		# neutralised alongside the others — and BEFORE the root, which is a prefix
+		# of it and would otherwise consume the anchor first.
+		miss="$miss$(destructive_advice "$WORK_ROOT/fs-$slug$mode.err" "$wt" "$gitdir" "$root" "$slug")"
+	done
 	if [ -z "$miss" ]; then
 		ok "$label"
 	else
@@ -1279,6 +1387,97 @@ fs_case "wt-remove refuses when a worktree's admin git dir is unreadable (fail s
 	"$RF2" shut \
 	"chmod 111 '$RF2/.git/worktrees/shut'" \
 	"chmod 700 '$RF2/.git/worktrees/shut'"
+
+# (c) `git status` itself FAILS. The sharpest shape of the fail-open trap: an
+# unreadable index makes git exit non-zero with a COMPLETELY EMPTY stdout, so a
+# guard written as `[ -z "$(git ... status --porcelain)" ]` reads the failure as
+# "clean" and proceeds to delete a worktree it never checked. The exit status has
+# to be captured separately from the output, and this is the case that says so.
+RF3="$(make_repo rf-status)"
+git_quiet -C "$RF3" worktree add -q "$RF3/.worktrees/$CONTAINER_NAME/noidx" -b noidx-b >/dev/null 2>&1
+# Precondition: the fixture really does produce the empty-stdout failure (if git
+# ever started reporting something on stdout here, this case would be proving the
+# ordinary non-empty-porcelain path instead and would need rebuilding).
+chmod 000 "$RF3/.git/worktrees/noidx/index"
+fs_probe_out="$(git --git-dir="$RF3/.git/worktrees/noidx" --work-tree="$RF3/.worktrees/$CONTAINER_NAME/noidx" status --porcelain 2>/dev/null)" && fs_probe_rc=0 || fs_probe_rc=$?
+chmod 644 "$RF3/.git/worktrees/noidx/index"
+if [ "$fs_probe_rc" -ne 0 ] && [ -z "$fs_probe_out" ]; then
+	fs_case "wt-remove refuses when the worktree's status cannot be read (empty stdout is not proof of clean)" \
+		"$RF3" noidx \
+		"chmod 000 '$RF3/.git/worktrees/noidx/index'" \
+		"chmod 644 '$RF3/.git/worktrees/noidx/index'"
+else
+	no "precondition: an unreadable index should make 'git status --porcelain' fail with empty stdout (rc=$fs_probe_rc, out='$fs_probe_out')"
+fi
+
+# (d) The worktree has LOST ITS `.git` POINTER while holding real uncommitted
+# work. This is the shape that makes reading the porcelain as `git -C "$wt"`
+# unsafe rather than merely untidy: task worktrees live INSIDE the main working
+# tree, so the probe resolves UPWARD into the enclosing checkout — which ignores
+# `.worktrees/` in any real powbox repo — and reports a perfectly clean porcelain
+# for a worktree full of uncommitted changes. Verified end to end on this
+# fixture: `git -C "$wt" status --porcelain` prints NOTHING while seed.txt is
+# modified. Reading through the registered git dir cannot make that mistake, and
+# the refusal must name the uncommitted changes rather than fall through.
+RF4="$(make_repo rf-nopointer)"
+printf '.worktrees/\n' >"$RF4/.gitignore"
+git_quiet -C "$RF4" add -A
+git_quiet -C "$RF4" commit -qm "ignore .worktrees, as a real powbox repo does"
+git_quiet -C "$RF4" worktree add -q "$RF4/.worktrees/$CONTAINER_NAME/nopt" -b nopt-b >/dev/null 2>&1
+NOPT="$RF4/.worktrees/$CONTAINER_NAME/nopt"
+printf 'work that exists nowhere else\n' >"$NOPT/seed.txt"
+rm -f "$NOPT/.git"
+miss=""
+# Preconditions: the upward probe really is the misleading one here, and the
+# enclosing checkout really is clean (else something else is being measured).
+[ -n "$(git --git-dir="$RF4/.git/worktrees/nopt" --work-tree="$NOPT" status --porcelain)" ] ||
+	miss="$miss fixture-worktree-not-actually-dirty"
+[ -z "$(git -C "$NOPT" status --porcelain)" ] ||
+	miss="$miss fixture-upward-probe-not-misleading"
+for mode in plain force; do
+	rc=0
+	if [ "$mode" = plain ]; then
+		(cd "$RF4" && bash "$WT_REMOVE" nopt 2>"$WORK_ROOT/rf4-$mode.err") || rc=$?
+	else
+		(cd "$RF4" && bash "$WT_REMOVE" nopt --force 2>"$WORK_ROOT/rf4-$mode.err") || rc=$?
+	fi
+	[ "$rc" -ne 0 ] || miss="$miss $mode-REMOVED-ANYWAY"
+	[ -d "$NOPT" ] || miss="$miss $mode-worktree-gone"
+	grep -qx "work that exists nowhere else" "$NOPT/seed.txt" 2>/dev/null ||
+		miss="$miss $mode-uncommitted-work-lost"
+	grep -qF "uncommitted changes" "$WORK_ROOT/rf4-$mode.err" ||
+		miss="$miss $mode-dirt-not-named"
+	miss="$miss$(destructive_advice "$WORK_ROOT/rf4-$mode.err" "$NOPT" "$RF4" nopt)"
+done
+if [ -z "$miss" ]; then
+	ok "wt-remove reads the porcelain through the worktree's OWN git dir, not upward into the enclosing checkout"
+else
+	no "wt-remove porcelain-identity guard inadequate:$miss"
+fi
+
+# (e) The SAME two metadata refusals under a repo path carrying TERMINAL CONTROL
+# BYTES. These messages print the admin git dir as well as the worktree, and both
+# are attacker-chosen bytes: a raw ESC echoed back is a live ANSI sequence in the
+# reader's terminal, in a message whose whole job is to be trusted about what
+# must not be destroyed. fs_case asserts escaped-and-named on every refusal it
+# drives; this repo is what gives that assertion something to catch.
+CTRL_ESC=$'\033'
+RF5="$(make_repo "rf-esc-${CTRL_ESC}[31mRED")"
+git_quiet -C "$RF5" worktree add -q "$RF5/.worktrees/$CONTAINER_NAME/escreg" -b escreg-b >/dev/null 2>&1
+git_quiet -C "$RF5" worktree add -q "$RF5/.worktrees/$CONTAINER_NAME/escdir" -b escdir-b >/dev/null 2>&1
+case "$RF5" in
+*"$CTRL_ESC"*)
+	fs_case "wt-remove escapes control bytes when a worktree's registration cannot be read" \
+		"$RF5" escreg \
+		"chmod 000 \"\$RF5/.git/worktrees/escreg/gitdir\"" \
+		"chmod 644 \"\$RF5/.git/worktrees/escreg/gitdir\""
+	fs_case "wt-remove escapes control bytes when a worktree's admin git dir is unreadable" \
+		"$RF5" escdir \
+		"chmod 111 \"\$RF5/.git/worktrees/escdir\"" \
+		"chmod 700 \"\$RF5/.git/worktrees/escdir\""
+	;;
+*) no "precondition: the control-byte repo path should carry an ESC byte" ;;
+esac
 
 # --- and NO false refusals: a clean worktree is still removed with no friction
 # wt-remove is called by the batch skills after every PR is opened, so a guard

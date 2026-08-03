@@ -1,7 +1,7 @@
 # Container Environment
 
 You are running inside an isolated Docker container. Whether your workspace under `/workspace` reaches the host depends on the launch mode: in **dir-mounted** mode (the default) it is a host bind mount, so edits land on the user's disk; in **self-hosted** mode (`--isolated`) it is a container-local Docker volume holding a clone, so nothing written there is visible to the user and work normally leaves only by `git push` / a PR.
-Check the mode at runtime with the `POWBOX_WORKSPACE_HOST_PATH` env var — set and non-empty means a host bind mount (its value is the workspace's host path), unset means container-local. Use it before you promise the user a local file — and note that a dev project's `node_modules` and `.worktrees` are container-local volumes mounted *over* a bind mount, so a file inside a task worktree is not on the user's disk either. The workspace is not the only host-derived path: `--ctx` folders are bind-mounted at `/ctx/<name>` (read-only unless launched `:rw`), as is the host git/gh config (read-only). You have full autonomy (`${AGENT_AUTONOMY_FLAG}`) — the container and its network firewall are your safety boundary.
+Check the mode at runtime with the `POWBOX_WORKSPACE_HOST_PATH` env var — set and non-empty means a host bind mount (its value is the workspace's host path), unset means container-local. Use it before you promise the user a local file — and note that a dev project's `.worktrees` is a container-local volume mounted *over* a bind mount, so a file inside a task worktree is not on the user's disk either. `/ctx/<name>` folders are host bind mounts too (read-only unless launched `:rw`). You have full autonomy (`${AGENT_AUTONOMY_FLAG}`) — the container and its network firewall are your safety boundary.
 
 Your identity for this session is in `$CONTAINER_NAME` (also available via the `cid` command).
 
@@ -43,7 +43,7 @@ Peer opinions are **best-effort**: if the binary is missing, the login preflight
 ### Scratchpad discipline
 
 The session scratchpad is **one directory shared by every concurrently running subagent** — "session-specific" means the session, not the subagent.
-So every file parallel work writes there MUST carry a per-task unique name (suffix the worktree slug or the PR number) or live in a `mktemp -d` subdirectory — a `$$` PID suffix does not survive to the next tool call, which gets a fresh shell.
+So every file parallel work writes there MUST carry a per-task unique name (suffix the worktree slug or the PR number) or live in a `mktemp -d -p <scratchpad>` subdirectory — a `$$` PID suffix does not survive to the next tool call, which gets a fresh shell.
 Fixed names have already crossed streams here: two reviewers both writing `verify.log`, one then validating the other's worktree.
 When you fan work out, state this rule in each subagent's prompt — that is the only way it learns it has siblings.
 
@@ -81,10 +81,10 @@ Parallel, worktree-isolated work uses three baked helpers on `PATH`. Skills and 
 | `/ctx` | Optional context mount root; external folders are mounted under `/ctx/<name>` via `--ctx` or `ctx:` config |
 | `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
-| `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-container pnpm store, JS/powbox gate only (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
+| `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-container pnpm store, dir-mounted JS/powbox gate only (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
 | `/home/node/.local/share/containers` | Per-container rootless Podman storage, keyed by agent + project (Claude and Codex get separate stores for the same repo) — images and named volumes persist here (Docker volume) |
 
-Under `--isolated` the `node_modules`, `.worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — never run `shadow-refresh.sh` there (it has no self-hosted guard and would mask real content).
+Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — never run `shadow-refresh.sh` there (it has no self-hosted guard and would mask real content).
 
 ## Network
 

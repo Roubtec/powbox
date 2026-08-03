@@ -309,8 +309,9 @@ fi
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/…` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
-# Every probe below is wrapped by the driver (scripts/smoke-test-image.sh) in an
-# explicit `|| { printf … 'SMOKE PROBE <n> FAILED' >&2; exit 1; }` tail, so a
+# Every probe below is emitted by the driver (scripts/smoke-test-image.sh) as the
+# condition of its own `if`, with the failure guard on the FOLLOWING line
+# (`then :; else printf … 'SMOKE PROBE <n> FAILED' >&2; exit 1; fi`), so a
 # multi-clause `&&` probe is binding in EVERY clause, and a failure names the
 # probe by index — the driver prints an index → probe manifest when the run
 # fails. That wrapper is what makes these assertions real: the driver
@@ -318,15 +319,26 @@ fi
 # failing element of an `&&` list that is not the final element, so a bare
 # `A && B && C` whose `A` or `B` fails neither exits the shell nor propagates —
 # the list's non-zero status is simply discarded when the shell moves to the next
-# line. Before the wrapper only the last clause of the LAST probe was enforced.
+# line. Before the wrapper, a failing FINAL clause did trip `set -e` on any
+# probe, and a probe's overall status was observable only on the LAST probe
+# (nothing followed it to discard it); every non-final clause of every probe, and
+# the overall status of every probe but the last, were masked.
+# The guard is on its own line on purpose: appended to the probe's own line it
+# could be consumed by the probe text — `false # note` would become
+# `false # note || { …; exit 1; }`, guard and all inside the comment.
 # Consequences for probe authors: do NOT hand-roll a per-probe
-# `|| { …; exit 1; }` tail (the driver supplies one, and a second is redundant),
-# and keep every probe single-line — a newline would leave all but its last line
-# unguarded, so the driver rejects it outright. Pipeline-shaped probes
-# (`X | grep -q Y`) are unaffected either way: the wrapper reads the status the
-# pipeline already reports, and `set -o pipefail` is deliberately not set (it
-# would make each producer's status binding, including the SIGPIPE `grep -q`
-# provokes by closing the pipe on its first match). scripts/test-smoke-probe-wrapper.sh
+# `|| { …; exit 1; }` tail (the driver supplies one, and a second is redundant);
+# keep every probe single-line and free of a trailing line continuation — the
+# driver rejects both outright; and keep quotes balanced, which the driver does
+# NOT validate (an unterminated quote fails closed but can misreport the index).
+# Because the diagnostic carries only an index, it quotes the probe's source text
+# and not any runtime value it saw — re-run the probe from the manifest to get
+# that. Pipeline-shaped probes (`X | grep -q Y`) are unaffected either way: the
+# wrapper reads the status the pipeline already reports, and `set -o pipefail` is
+# deliberately not set — it is not POSIX, and it would make each producer's
+# status binding, including the SIGPIPE `grep -q` provokes by closing the pipe on
+# its first match, an exposure that depends on how much the producer emits and so
+# could flip a probe green→141 with no code change. scripts/test-smoke-probe-wrapper.sh
 # unit-tests the wrapping, its injection-proofness, and .sh/.ps1 parity.
 # The dotnet probes pin the two pieces of the SDK layer that can regress
 # silently.

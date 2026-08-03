@@ -8,14 +8,20 @@
 # can be asserted end to end.
 #
 # What it pins:
-#   * every probe is emitted VERBATIM, followed by a fixed index-only failure
-#     tail - so adversarial probe text (quotes, $, backticks, backslashes, |,
-#     &&) can never be re-parsed or injected into the diagnostic;
+#   * every probe is emitted VERBATIM as the condition of its own `if`, with the
+#     index-only failure guard on the FOLLOWING line - so adversarial probe text
+#     (quotes, $, backticks, backslashes, |, &&) can never be re-parsed or
+#     injected into the diagnostic;
+#   * probe text cannot CONSUME the guard: a trailing `#` comment swallowed a
+#     same-line `|| { ...; exit 1; }` tail whole, silently restoring the masking
+#     this wrapper exists to remove, and that is now a failing regression case;
 #   * a failing NON-FINAL clause of a NON-FINAL probe aborts the run (the
 #     original defect) and names the probe by index;
-#   * newline-bearing and empty probes are rejected before docker is invoked;
+#   * newline-bearing, empty and line-continuation probes are rejected before
+#     docker is invoked;
 #   * the .sh and .ps1 drivers emit byte-identical scripts.
 # shellcheck disable=SC2016  # single-quoted probe/PowerShell text is LITERAL by design here
+# shellcheck disable=SC1003  # trailing backslashes in probe literals are the payload, not an escape
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -78,12 +84,17 @@ run_driver() {
 	return $?
 }
 
-# The exact tail the driver must append. Kept here as an independent
-# restatement so a change to the driver's wrapping shape shows up as a test
-# failure rather than being silently mirrored.
-tail_for() {
-	printf "|| { printf '%%s\\\\n' 'SMOKE PROBE %s FAILED' >&2; exit 1; }" "$1"
+# The exact guard line the driver must emit after each probe. Kept here as an
+# independent restatement so a change to the driver's wrapping shape shows up as
+# a test failure rather than being silently mirrored.
+guard_for() {
+	printf "then :; else printf '%%s\\\\n' 'SMOKE PROBE %s FAILED' >&2; exit 1; fi" "$1"
 }
+
+# Line numbers the probe/guard pair for probe <n> must occupy: line 1 is the
+# leading `set -e`, then two lines per probe.
+probe_lineno() { echo $((2 * $1)); }
+guard_lineno() { echo $((2 * $1 + 1)); }
 
 # ---------------------------------------------------------------------------
 # Adversarial probe corpus. Nothing here resembles today's probe set by
@@ -110,9 +121,16 @@ adversarial=(
 	# a probe that is itself already `|| { ...; exit 1; }`-tailed (the .NET
 	# shape) - double-wrapping must stay syntactically valid
 	'[ 1 = 1 ] && [ 2 = 2 ] || { printf "%s\n" "inner tail" >&2; exit 1; }'
+	# a probe whose LAST token is a comment - with a same-line tail this ate the
+	# whole guard; the guard must survive on its own line (the failing twin of
+	# this shape is section C2)
+	'[ 1 = 1 ] && [ 2 = 2 ] # trailing comment eats a same-line tail'
+	# a comment ending in an EVEN backslash run: a literal backslash, not a line
+	# continuation, so it must be accepted
+	'true # even backslash run \\'
 )
 
-printf 'A. verbatim emission + index-only tail (adversarial probes)\n'
+printf 'A. verbatim emission + index-only guard line (adversarial probes)\n'
 run_driver 0 "$TMP/a.out" "${adversarial[@]}"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -134,27 +152,35 @@ else
 	n=0
 	for probe in "${adversarial[@]}"; do
 		n=$((n + 1))
-		expected="${probe} $(tail_for "$n")"
-		if grep -Fxq -- "$expected" "$CAPTURE"; then
-			ok "probe $n emitted verbatim with its index-only tail"
+		got_probe="$(sed -n "$(probe_lineno "$n")p" "$CAPTURE")"
+		got_guard="$(sed -n "$(guard_lineno "$n")p" "$CAPTURE")"
+		if [ "$got_probe" = "if ${probe}" ]; then
+			ok "probe $n emitted verbatim as its own \`if\` condition"
 		else
-			bad "probe $n was not emitted verbatim" "expected: $expected" "captured script:" "$(cat "$CAPTURE")"
+			bad "probe $n was not emitted verbatim" "expected: if ${probe}" "got:      $got_probe"
+		fi
+		# The guard MUST be a separate line, so no probe-internal construct
+		# (a `#` comment above all) can reach it.
+		if [ "$got_guard" = "$(guard_for "$n")" ]; then
+			ok "probe $n's guard is on its own line, unreachable from the probe text"
+		else
+			bad "probe $n's guard line is wrong" "expected: $(guard_for "$n")" "got:      $got_guard"
 		fi
 	done
 
 	# The diagnostic must never contain probe text - that is what makes the
 	# wrapping injection-proof rather than merely escaped.
-	if grep -n "SMOKE PROBE" "$CAPTURE" | grep -qvE "SMOKE PROBE [0-9]+ FAILED' >&2; exit 1; }$"; then
+	if grep -n "SMOKE PROBE" "$CAPTURE" | grep -qvE "SMOKE PROBE [0-9]+ FAILED' >&2; exit 1; fi$"; then
 		bad "a SMOKE PROBE diagnostic carries something other than a bare index"
 	else
 		ok "every emitted diagnostic is 'SMOKE PROBE <n> FAILED' and nothing else"
 	fi
 
-	# One line per probe plus the leading `set -e`.
-	want_lines=$((${#adversarial[@]} + 1))
+	# Two lines per probe (condition + guard) plus the leading `set -e`.
+	want_lines=$((2 * ${#adversarial[@]} + 1))
 	got_lines="$(wc -l <"$CAPTURE")"
 	if [ "$got_lines" -eq "$want_lines" ]; then
-		ok "emitted script has exactly one line per probe ($got_lines)"
+		ok "emitted script has exactly two lines per probe ($got_lines)"
 	else
 		bad "emitted line count mismatch" "want $want_lines, got $got_lines"
 	fi
@@ -205,6 +231,67 @@ if grep -Fq '2  [ 1 = 1 ] && [ -n "" ] && [ 2 = 2 ]' "$TMP/c.out"; then
 	ok "manifest maps the index back to the probe text"
 else
 	bad "manifest did not list probe 2 verbatim" "$(cat "$TMP/c.out")"
+fi
+
+printf 'C2. a trailing `#` comment cannot consume the failure guard\n'
+# Regression for the same-line `<probe> || { ...; exit 1; }` form: `false # note`
+# became `false # note || { ...; exit 1; }`, the guard was commented out, and the
+# failure was discarded - the exact masking this wrapper exists to remove. The
+# corpus in section A carries comment-bearing probes but only PASSING ones, which
+# is why that shape slipped through; these must FAIL.
+run_driver 1 "$TMP/c2.out" \
+	"true" \
+	"false # a trailing comment must not swallow the guard" \
+	"true"
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "SMOKE PROBE 2 FAILED" "$TMP/c2.out"; then
+	ok "a failing comment-tailed probe fails the run and names index 2"
+else
+	bad "comment-tailed probe did not fail the run (rc=$rc)" "$(cat "$TMP/c2.out")"
+fi
+
+# Same thing on the shape that actually appears in the probe list: a multi-clause
+# `&&` chain whose middle clause fails, with a trailing comment after it.
+run_driver 1 "$TMP/c3.out" \
+	"true" \
+	'[ 1 = 1 ] && [ -n "" ] && [ 2 = 2 ] # note about this probe' \
+	"true"
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "SMOKE PROBE 2 FAILED" "$TMP/c3.out"; then
+	ok "masked middle clause is still caught when the probe ends in a comment"
+else
+	bad "comment-tailed && chain did not fail the run (rc=$rc)" "$(cat "$TMP/c3.out")"
+fi
+
+# Guard against this test becoming a tautology, the same way D guards C: the
+# PREVIOUS wrapping form must genuinely have masked it. Note the shape matters -
+# a BARE `false # note` still tripped `set -e` on its own (the comment cost only
+# the diagnostic), whereas an `&&` chain with a trailing comment lost the guard
+# AND kept the `set -e` exemption, i.e. a real false PASS. That is the case
+# below, and it is the shape the Stage 1 list is full of.
+cat >"$TMP/old-form.sh" <<'OLDFORM'
+set -e
+true
+[ 1 = 1 ] && [ -n "" ] && [ 2 = 2 ] # note || { printf '%s\n' 'SMOKE PROBE 2 FAILED' >&2; exit 1; }
+true
+OLDFORM
+if /bin/sh "$TMP/old-form.sh" >"$TMP/old-form.out" 2>&1; then
+	ok "the old same-line tail really was consumed by the comment (regression is real)"
+else
+	bad "the old same-line tail no longer masks this - C2 may be vacuous" "$(cat "$TMP/old-form.out")"
+fi
+# The same list WITHOUT the comment was caught by the old form - so it is the
+# comment, not the chain, that made the difference.
+cat >"$TMP/old-form-nc.sh" <<'OLDFORMNC'
+set -e
+true
+[ 1 = 1 ] && [ -n "" ] && [ 2 = 2 ] || { printf '%s\n' 'SMOKE PROBE 2 FAILED' >&2; exit 1; }
+true
+OLDFORMNC
+if /bin/sh "$TMP/old-form-nc.sh" >"$TMP/old-form-nc.out" 2>&1; then
+	bad "the comment-free old form also masked - C2 is not isolating the comment"
+else
+	ok "the comment alone is what defeated the old same-line tail"
 fi
 
 printf 'D. the pre-fix behaviour is genuinely what C exercises\n'
@@ -291,6 +378,34 @@ else
 	bad "CR-bearing probe not rejected (rc=$rc)" "$(cat "$TMP/g3.out")"
 fi
 
+# A trailing ODD backslash run is a line continuation: it would splice the guard
+# line into the probe's own line and break it. Rejected up front so the failure
+# is an explanatory message rather than an opaque `sh` syntax error.
+rm -f "$CAPTURE"
+SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "true" 'printf x \' >"$TMP/g4.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "line continuation" "$TMP/g4.out"; then
+	ok "line-continuation probe rejected"
+else
+	bad "line-continuation probe not rejected (rc=$rc)" "$(cat "$TMP/g4.out")"
+fi
+if [ ! -e "$CAPTURE" ]; then
+	ok "docker was never invoked for the line-continuation list"
+else
+	bad "docker ran despite a rejected line-continuation probe"
+fi
+
+# ...but an EVEN run is a literal backslash and must still be accepted (covered
+# green in section A/B; asserted here as the explicit boundary).
+rm -f "$CAPTURE"
+SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "true" 'true # even \\' >"$TMP/g5.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "even trailing backslash run accepted (literal, not a continuation)"
+else
+	bad "even trailing backslash run was rejected (rc=$rc)" "$(cat "$TMP/g5.out")"
+fi
+
 printf 'H. the .ps1 driver emits a byte-identical script\n'
 if command -v pwsh >/dev/null 2>&1; then
 	rm -f "$CAPTURE"
@@ -334,6 +449,20 @@ PS
 		else
 			bad ".ps1 rejected the probe for the wrong reason" "$(cat "$TMP/h2.out")"
 		fi
+	fi
+
+	# Line-continuation rejection parity.
+	rm -f "$CAPTURE"
+	cat >"$TMP/reject-bs.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+& "$DRIVER_PS1" -Image fake-image:latest -Commands @('true', 'printf x \')
+PS
+	if pwsh -NoProfile -File "$TMP/reject-bs.ps1" >"$TMP/h3.out" 2>&1; then
+		bad ".ps1 accepted a line-continuation probe" "$(cat "$TMP/h3.out")"
+	elif grep -q "line continuation" "$TMP/h3.out"; then
+		ok ".ps1 rejects a line-continuation probe with the same rationale"
+	else
+		bad ".ps1 rejected the continuation probe for the wrong reason" "$(cat "$TMP/h3.out")"
 	fi
 else
 	printf '  skip  pwsh unavailable - .sh/.ps1 parity not checked here\n'

@@ -493,7 +493,7 @@ A package scaffolded *during* a session (create `packages/foo`, write its `packa
 
 To close that race, `pnpm` (and its `pn` short alias) is a thin wrapper baked into the image: before any node_modules-writing subcommand (`install`, `add`, `update`, …) it re-runs detection so a freshly added package's `node_modules` is tmpfs-shadowed *before* pnpm writes into it, then delegates to the real pnpm.
 Detection is idempotent, so already-shadowed paths are skipped and the steady-state cost is one cheap scan; the wrapper always execs the real pnpm, so neither a shadow failure (e.g. no mount capability) nor a deliberate skip ever blocks the command — self-hosted mode is the latter: there is no host filesystem to shadow, so the wrapper returns before refreshing and `shadow-refresh.sh` itself exits 0 without mounting.
-You can still run `shadow-refresh.sh` by hand at any time — under `--isolated` it carries the same self-hosted skip as the wrapper and exits 0 without mounting, so it is always safe to run.
+You can still run `shadow-refresh.sh` by hand at any time — it mirrors the entrypoint's own skip conditions, exiting 0 without mounting when `POWBOX_SELF_HOSTED=1` (`--isolated`) or `POWBOX_IMAGE_STORE_ROLE=writer`, so it is always safe to run. That safety rests on those explicit guards: the container holds `CAP_SYS_ADMIN` in both modes and nothing downstream re-checks emptiness, so an unguarded hand-run would successfully tmpfs over a populated directory rather than fail ([docs/entrypoint-and-runtime.md](docs/entrypoint-and-runtime.md)).
 
 One case the wrapper cannot fully fix is scaffolding a JS project mid-session in a folder that was launched as **non-dev** (no `package.json`, `pnpm-workspace.yaml`, committed `.powbox.yml`, or `.powbox.local.yml` with a top-level `shadow:` key at launch, so the launcher mounted no isolated root `node_modules` volume for it; a local config with only `ctx:` still counts as non-dev). The wrapper can re-shadow a new subpackage but cannot retrofit the missing **root** mount, so a root `pnpm install` there would still land `node_modules` on the host bind mount. Rather than do this silently, the wrapper prints one loud warning and proceeds — relaunch the agent (the folder now has a `package.json`, so the next launch mounts an isolated volume).
 
@@ -550,7 +550,7 @@ shadow-refresh.sh
 
 This re-runs detection and mounts tmpfs over any new directories that were not previously shadowed.
 Already-mounted paths are skipped.
-Dir-mounted mode only — under `--isolated` the script skips itself and exits 0 without mounting, so running it there is a harmless no-op ([Mid-Session Packages](#mid-session-packages)).
+Effective in dir-mounted mode only — under `--isolated` the script skips itself and exits 0 without mounting, so running it there is a harmless no-op ([Mid-Session Packages](#mid-session-packages)).
 
 ### Lifecycle
 

@@ -36,6 +36,15 @@ die() {
 	exit 1
 }
 
+# shq <string> — render <string> as ONE shell-safe token, for the inspection
+# commands the diagnostics below suggest. Repository and worktree paths are not
+# guaranteed to be free of spaces or shell metacharacters (a human-created
+# worktree can live anywhere), and a suggested command is only useful if it can
+# be pasted verbatim — and only safe if pasting it cannot run something else.
+# `printf %q` leaves an ordinary path byte-identical, so the common case still
+# reads as a plain path.
+shq() { printf '%q' "$1"; }
+
 # Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so
 # tests exercise the checked-out version; fall back to the baked one. BASH_SOURCE
 # resolves to the full script path even when invoked via PATH, so dirname is safe.
@@ -156,7 +165,7 @@ worktree_add() {
 		else
 			echo "wt-enter: branch '$BRANCH' is already checked out in another worktree at $blocker; git refuses to check one branch out twice." >&2
 			if [ ! -d "$blocker" ]; then
-				echo "wt-enter: nothing was changed. That worktree is registered in git's metadata but MISSING on disk. Run 'git -C $ROOT worktree prune' to drop the stale record, then rerun wt-enter." >&2
+				echo "wt-enter: nothing was changed. That worktree is registered in git's metadata but MISSING on disk. Run 'git -C $(shq "$ROOT") worktree prune' to drop the stale record, then rerun wt-enter." >&2
 			else
 				# No remedy is suggested, whatever state that worktree is in:
 				# git may have left a rebase, am, cherry-pick, revert or bisect
@@ -164,7 +173,7 @@ worktree_add() {
 				# see which — or decide what it is worth. Naming it and handing
 				# over is what cannot go wrong.
 				echo "wt-enter: nothing was changed. That worktree may hold uncommitted work, or an unfinished rebase, am, cherry-pick, revert or bisect that 'git status' does not show — so wt-enter neither touches it nor tells you what to do with it." >&2
-				echo "wt-enter: look at it yourself: 'git -C $blocker status' (plus 'git -C $blocker bisect log' if a bisect may be running), or coordinate with whoever owns that worktree. Rerun wt-enter once '$BRANCH' is free." >&2
+				echo "wt-enter: look at it yourself: 'git -C $(shq "$blocker") status' (plus 'git -C $(shq "$blocker") bisect log' if a bisect may be running), or coordinate with whoever owns that worktree. Rerun wt-enter once '$BRANCH' is free." >&2
 				echo "wt-enter: running this task on a different branch avoids the conflict entirely." >&2
 			fi
 		fi

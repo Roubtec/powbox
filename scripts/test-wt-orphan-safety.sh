@@ -33,7 +33,13 @@
 #     state, pinned to what real git does with the same state — it decides
 #     whether a DETACHED worktree is nevertheless identified as the blocker.
 #   * wt-common.sh wt_worktree_for_branch reporting the blocking worktree's path
-#     (and only that) for both porcelain record kinds.
+#     (and only that) for both porcelain record kinds, and wt_primary_checkout
+#     naming the MAIN working tree (pinned directly: the integration case cannot
+#     tell a broken implementation apart, since in an ordinary repo the main tree
+#     is the repo root wt-enter already knows).
+#   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
+#     the paths inside the commands wt-enter suggests are shell-quoted, so advice
+#     about a worktree under a spaced path stays pasteable and safe to paste.
 #
 # WHY each expectation is what it is (git's own precedence, its object-id
 # parsing, its bare stat()) is documented once, in docker/shared/wt-common.sh.
@@ -75,22 +81,35 @@ no() {
 	echo "NOT OK - $1" >&2
 }
 
-# destructive_advice <errfile> — echo a `miss` fragment when wt-enter's stderr
-# points the caller at anything that could DISCARD the blocking worktree or the
-# in-flight work inside it. This is the invariant every branch-conflict case below
-# re-checks, because the class of bug it guards (advice that throws away state
-# `git status` does not show) has recurred once per state git can leave behind.
+# destructive_advice <errfile> [<dynamic-value>...] — echo a `miss` fragment when
+# wt-enter's stderr points the caller at anything that could DISCARD the blocking
+# worktree or the in-flight work inside it. This is the invariant every
+# branch-conflict case below re-checks, because the class of bug it guards (advice
+# that throws away state `git status` does not show) has recurred once per state
+# git can leave behind.
 #
 # "Clear the operation yourself" counts, not just "delete the worktree": every
 # `rebase|am|cherry-pick|revert --abort` discards the conflict resolution done so
-# far, and `reset --hard`, `checkout -f`, `clean -fd` and `branch -D` each discard
-# work the blocking worktree may be the only copy of. So the patterns below are
-# command shapes, matched over wt-enter's own lines and git's diagnostics both.
-# Prose is deliberately NOT matched (a grep cannot tell "wt-enter will not discard
-# anything" from "discard it"); wt-enter states its refusals in prose and offers
-# remedies as commands, so command shapes are where advice actually lives. Short
-# flags are matched as CLUSTERS rather than whole tokens, so `-fd`, `-df`, `-rf`
-# and `-fx` are all caught by the one pattern.
+# far, and `reset --hard`, `checkout -f`, `clean -fd`, `restore`, `switch -f` and
+# `branch -D` each discard work the blocking worktree may be the only copy of. So
+# the patterns below are command shapes. Prose is deliberately NOT matched (a grep
+# cannot tell "wt-enter will not discard anything" from "discard it"); wt-enter
+# states its refusals in prose and offers remedies as commands, so command shapes
+# are where advice actually lives. Short flags are matched as CLUSTERS rather than
+# whole tokens, so `-fd`, `-df`, `-rf` and `-fx` are all caught by the one
+# pattern, and the classes spell both cases rather than leaning on `grep -i`.
+# Subcommands are matched WITHOUT requiring a leading `git`, because the real
+# invocation carries `-C <path>` in between (`git -C … restore --worktree .`);
+# `abort` and `restore` are matched as bare words for the same reason, and can be,
+# now that the values wt-enter echoes back are neutralised first.
+#
+# Every DYNAMIC value wt-enter echoes back — the branch name, the blocker path,
+# the repo root — is neutralised BEFORE matching, because those are data, not
+# advice: a branch legitimately named `abort-retry` or `force-push-fix`, or a
+# worktree path containing `--force`, must not be read as a suggested command.
+# Callers therefore pass every value that reached the message. Fixed message text
+# and git's own diagnostics stay in scope: whoever printed it, a command that
+# could destroy the blocker is something a human should look at.
 #
 # The single exemption is git's own `git worktree prune`, which drops a stale
 # record for a directory that is already gone and can destroy nothing. It is
@@ -98,8 +117,20 @@ no() {
 # skipping the line that carries it — so a message naming `prune` is still checked
 # for everything else it says.
 destructive_advice() {
-	LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' "$1" |
-		grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-z]*[rf]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-z]*f|clean[[:space:]]+-[a-z]*[fdx]|branch[[:space:]]+-[dD]\b|--force\b' &&
+	local errfile="$1" text value quoted
+	shift
+	text="$(cat -- "$errfile" 2>/dev/null)" || return 0
+	for value in "$@"; do
+		[ -n "$value" ] || continue
+		# Both spellings: wt-enter prints these values bare in prose and
+		# shell-quoted inside the commands it suggests.
+		printf -v quoted '%q' "$value"
+		text="${text//"$value"/<dynamic>}"
+		text="${text//"$quoted"/<dynamic>}"
+	done
+	printf '%s\n' "$text" |
+		LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' |
+		grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-zA-Z]*[rRfF]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-zA-Z]*[fF]|checkout[[:space:]]+--[[:space:]]|switch[[:space:]]+-[a-zA-Z]*[fF]|--discard-changes\b|\brestore\b|clean[[:space:]]+-[a-zA-Z]*[fFdDxX]|branch[[:space:]]+-[dD]\b|bisect[[:space:]]+reset\b|--skip\b|--quit\b|--delete\b|--force\b' &&
 		echo " destructive-advice"
 	return 0
 }
@@ -348,6 +379,39 @@ else
 fi
 rm -rf "$RG/.git/worktrees/det/rebase-merge"
 
+# ---------------------------------------------------------------------------
+# Unit: wt_primary_checkout names the repository's MAIN working tree. wt-enter
+# uses it to decide whether the blocker is the shared checkout, so it is pinned
+# directly: the integration case below would also pass on a broken (always-fail)
+# implementation, because in an ordinary repo the main working tree is the repo
+# root wt-enter already knows.
+# ---------------------------------------------------------------------------
+if out="$(wt_primary_checkout "$RG")" && [ "$out" = "$RG" ]; then
+	ok "wt_primary_checkout names the main working tree"
+else
+	no "wt_primary_checkout on the main tree: got '${out:-}', expected '$RG'"
+fi
+
+# Asked from INSIDE a linked worktree it must still answer the MAIN tree, never
+# the one it was asked from — git lists the main working tree first regardless.
+if out="$(wt_primary_checkout "$RG/plain")" && [ "$out" = "$RG" ]; then
+	ok "wt_primary_checkout answers the main tree even when queried from a linked worktree"
+else
+	no "wt_primary_checkout from a linked worktree: got '${out:-}', expected '$RG'"
+fi
+
+# Outside a repository it must FAIL (and print nothing) rather than invent a
+# path, so wt-enter falls back instead of comparing against a bogus answer.
+notrepo="$WORK_ROOT/not-a-repo"
+mkdir -p "$notrepo"
+if out="$(wt_primary_checkout "$notrepo")"; then
+	no "wt_primary_checkout must fail outside a repository (got '$out')"
+elif [ -z "$out" ]; then
+	ok "wt_primary_checkout fails and prints nothing outside a repository"
+else
+	no "wt_primary_checkout outside a repository: expected empty output, got '$out'"
+fi
+
 git_quiet -C "$RG" branch unheld-b
 if out="$(wt_worktree_for_branch "$RG" unheld-b)"; then
 	no "wt_worktree_for_branch must not claim a blocker for an unheld branch (got '$out')"
@@ -440,16 +504,25 @@ R5="$(make_repo r5)"
 E5="$WORK_ROOT/r5.err"
 # make_repo leaves the primary checkout on 'main', so requesting a worktree on
 # 'main' is blocked by the primary checkout itself.
-if out="$(cd "$R5" && bash "$WT_ENTER" task-e main 2>"$E5")"; then
+rc5=0
+out="$(cd "$R5" && bash "$WT_ENTER" task-e main 2>"$E5")" || rc5=$?
+if [ "$rc5" -eq 0 ]; then
 	no "wt-enter must fail when the branch is checked out in the primary checkout (got '$out')"
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	# git's own status is PROPAGATED, not flattened: `git worktree add` fails
+	# fatally with 128, and a caller distinguishing git's refusal from wt-enter's
+	# own usage/validation errors (which `die` with 1) needs that to survive.
+	[ "$rc5" -eq 128 ] || miss="$miss exit-status-$rc5"
 	grep -qiF "primary" "$E5" || miss="$miss no-primary-wording"
 	# The path must appear on wt-enter's OWN line, not only in git's fatal.
 	grep -F "$R5" "$E5" | grep -q '^wt-enter:' || miss="$miss no-primary-path"
 	grep -qiF "shared" "$E5" || miss="$miss no-shared-warning"
 	grep -qiF "coordinate" "$E5" || miss="$miss no-coordination-hint"
+	# The shared main checkout is the worst thing to be told to discard, so the
+	# non-destruction invariant is pinned for this message too.
+	miss="$miss$(destructive_advice "$E5" "$R5/.worktrees/$CONTAINER_NAME/task-e" "$R5" task-e main)"
 	# Nothing may be silently remediated: the main checkout stays on 'main' and
 	# no worktree is left behind.
 	[ "$(git -C "$R5" branch --show-current)" = "main" ] || miss="$miss primary-branch-moved"
@@ -472,22 +545,94 @@ R6="$(make_repo r6)"
 WB6="$R6/.worktrees/$CONTAINER_NAME"
 E6="$WORK_ROOT/r6.err"
 git_quiet -C "$R6" worktree add -q "$WB6/task-f" -b task-f >/dev/null 2>&1
-if out="$(cd "$R6" && bash "$WT_ENTER" task-g task-f 2>"$E6")"; then
+rc6=0
+out="$(cd "$R6" && bash "$WT_ENTER" task-g task-f 2>"$E6")" || rc6=$?
+if [ "$rc6" -eq 0 ]; then
 	no "wt-enter must fail when the branch is checked out in a sibling worktree (got '$out')"
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	# git's fatal status (128) is propagated rather than flattened to 1.
+	[ "$rc6" -eq 128 ] || miss="$miss exit-status-$rc6"
 	# Surfaced by wt-enter itself, not merely left inside git's fatal text.
 	grep -F "$WB6/task-f" "$E6" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 	! grep -qiF "primary" "$E6" || miss="$miss claims-primary"
 	# The caller is told how to look at the blocker, not how to delete it.
 	grep -qF "git -C $WB6/task-f status" "$E6" || miss="$miss no-inspection-hint"
-	miss="$miss$(destructive_advice "$E6")"
+	miss="$miss$(destructive_advice "$E6" "$WB6/task-f" "$WB6/task-g" "$R6" task-f task-g)"
 	[ ! -e "$WB6/task-g" ] || miss="$miss worktree-created"
 	if [ -z "$miss" ]; then
 		ok "wt-enter surfaces the blocking sibling worktree path and hands over non-destructively"
 	else
 		no "wt-enter sibling-worktree conflict message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the blocker path and the branch name are DATA, not advice. A
+# branch called 'abort-the-migration' puts the word 'abort' into the message
+# purely because wt-enter quotes back what it was asked for — the diagnosis is
+# byte-for-byte the same one the case above passes. Pinned so the non-destruction
+# check cannot degrade into a text search that fails on legitimate names.
+# ---------------------------------------------------------------------------
+RN="$(make_repo rn)"
+WBN="$RN/.worktrees/$CONTAINER_NAME"
+EN="$WORK_ROOT/rn.err"
+NOISY_BRANCH="abort-the-migration"
+git_quiet -C "$RN" worktree add -q "$WBN/task-w" -b "$NOISY_BRANCH" >/dev/null 2>&1
+if out="$(cd "$RN" && bash "$WT_ENTER" task-x "$NOISY_BRANCH" 2>"$EN")"; then
+	no "wt-enter must fail when a branch named '$NOISY_BRANCH' is checked out elsewhere (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	grep -F "$WBN/task-w" "$EN" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	# Precondition: the noisy word really is in the output (else this proves nothing).
+	grep -qF "$NOISY_BRANCH" "$EN" || miss="$miss branch-name-not-echoed"
+	miss="$miss$(destructive_advice "$EN" "$WBN/task-w" "$WBN/task-x" "$RN" "$NOISY_BRANCH" task-x)"
+	[ ! -e "$WBN/task-x" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "a branch name containing 'abort' is treated as data, not as destructive advice"
+	else
+		no "wt-enter noisy-branch-name case inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the suggested inspection commands must be SHELL-SAFE. A worktree
+# can live under a path containing spaces (or shell metacharacters), and advice
+# that cannot be pasted verbatim is not advice — while advice that pastes into
+# something OTHER than the intended command is worse than none. The emitted
+# command must therefore carry the path as one quoted token.
+# ---------------------------------------------------------------------------
+RS="$(make_repo "r s'p")"
+WBS="$RS/.worktrees/$CONTAINER_NAME"
+ES="$WORK_ROOT/rs.err"
+git_quiet -C "$RS" worktree add -q "$WBS/task-y" -b task-y >/dev/null 2>&1
+if out="$(cd "$RS" && bash "$WT_ENTER" task-z task-y 2>"$ES")"; then
+	no "wt-enter must fail when a blocker under a spaced path holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	printf -v want_status 'git -C %q status' "$WBS/task-y"
+	grep -qF "$want_status" "$ES" || miss="$miss no-quoted-inspection-hint"
+	# The raw, unquoted form must NOT be what is offered: pasting it would run
+	# `git -C <first-word>` and treat the rest of the path as arguments.
+	! grep -qF "git -C $WBS/task-y status" "$ES" || miss="$miss unquoted-path"
+	# End-to-end: take the command wt-enter actually printed and RUN it (as
+	# `rev-parse` rather than `status`, so the answer is comparable). Pasting it
+	# must reach the blocking worktree and nothing else.
+	hint_cmd="$(LC_ALL=C sed -n "s/^wt-enter: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$ES" | head -1)"
+	if [ -n "$hint_cmd" ]; then
+		got="$(eval "${hint_cmd% status} rev-parse --show-toplevel" 2>/dev/null || true)"
+		[ "$got" = "$WBS/task-y" ] || miss="$miss inspection-command-not-pasteable"
+	else
+		miss="$miss no-inspection-command"
+	fi
+	miss="$miss$(destructive_advice "$ES" "$WBS/task-y" "$WBS/task-z" "$RS" task-y task-z)"
+	if [ -z "$miss" ]; then
+		ok "wt-enter shell-quotes the paths in the commands it suggests"
+	else
+		no "wt-enter spaced-path message inadequate:$miss"
 	fi
 fi
 
@@ -527,7 +672,7 @@ if git -C "$R7" worktree list --porcelain | grep -qx detached; then
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WB7/task-h" "$E7" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E7" || miss="$miss claims-primary"
-		miss="$miss$(destructive_advice "$E7")"
+		miss="$miss$(destructive_advice "$E7" "$WB7/task-h" "$WB7/task-i" "$R7" task-h task-i)"
 		[ ! -e "$WB7/task-i" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
 			ok "wt-enter names the blocking worktree even when a rebase leaves it detached"
@@ -560,7 +705,7 @@ if git -C "$R8" worktree list --porcelain | grep -qx detached; then
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WB8/task-j" "$E8" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E8" || miss="$miss claims-primary"
-		miss="$miss$(destructive_advice "$E8")"
+		miss="$miss$(destructive_advice "$E8" "$WB8/task-j" "$WB8/task-k" "$R8" task-j task-k)"
 		[ ! -e "$WB8/task-k" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
 			ok "wt-enter names the blocking worktree when a bisect leaves it detached"
@@ -592,7 +737,7 @@ if git -C "$RA" worktree list --porcelain | grep -qx "branch refs/heads/task-m" 
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WBA/task-m" "$EA" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-		miss="$miss$(destructive_advice "$EA")"
+		miss="$miss$(destructive_advice "$EA" "$WBA/task-m" "$WBA/task-n" "$RA" task-m task-n)"
 		[ ! -e "$WBA/task-n" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
 			ok "wt-enter stays hands-off for a bisect that has not detached the worktree yet"
@@ -637,7 +782,7 @@ if [ -e "$RR/.git/worktrees/task-u/sequencer" ] &&
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -F "$WBR/task-u" "$ER" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-		miss="$miss$(destructive_advice "$ER")"
+		miss="$miss$(destructive_advice "$ER" "$WBR/task-u" "$WBR/task-v" "$RR" task-u task-v)"
 		# The revert sequence is still there afterwards.
 		[ -e "$RR/.git/worktrees/task-u/sequencer" ] || miss="$miss revert-state-lost"
 		[ ! -e "$WBR/task-v" ] || miss="$miss worktree-created"
@@ -669,7 +814,7 @@ else
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	grep -F "$WBP/task-q" "$EP" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
 	grep -qF "worktree prune" "$EP" || miss="$miss no-prune-remedy"
-	miss="$miss$(destructive_advice "$EP")"
+	miss="$miss$(destructive_advice "$EP" "$WBP/task-q" "$WBP/task-r" "$RP" task-q task-r)"
 	if [ -z "$miss" ]; then
 		ok "wt-enter advises 'worktree prune' for a registered-but-missing sibling blocker"
 	else
@@ -694,7 +839,7 @@ else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	grep -F "$WBV/task-s" "$EV" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
-	miss="$miss$(destructive_advice "$EV")"
+	miss="$miss$(destructive_advice "$EV" "$WBV/task-s" "$WBV/task-t" "$RV" task-s task-t)"
 	if [ -z "$miss" ]; then
 		ok "wt-enter names a blocker whose own git dir cannot be read, and still advises nothing destructive"
 	else
@@ -715,11 +860,15 @@ WB9="$R9/.worktrees/$CONTAINER_NAME"
 E9="$WORK_ROOT/r9.err"
 git_quiet -C "$R9" worktree add -q "$WB9/task-l" -b task-l >/dev/null 2>&1
 rm -rf "$WB9/task-l" # registered in .git/worktrees, gone from disk
-if out="$(cd "$R9" && bash "$WT_ENTER" task-l task-l 2>"$E9")"; then
+rc9=0
+out="$(cd "$R9" && bash "$WT_ENTER" task-l task-l 2>"$E9")" || rc9=$?
+if [ "$rc9" -eq 0 ]; then
 	no "wt-enter must fail when its destination is registered but missing (got '$out')"
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	# git's own remedy stands — and so does its status.
+	[ "$rc9" -eq 128 ] || miss="$miss exit-status-$rc9"
 	# No tailored branch-conflict diagnosis: git's own remedy must stand alone.
 	! grep -q '^wt-enter: branch ' "$E9" || miss="$miss self-blocker-diagnosis"
 	if [ -z "$miss" ]; then

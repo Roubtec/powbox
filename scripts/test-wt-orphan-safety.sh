@@ -41,9 +41,12 @@
 #     of a state file that looks like an operation: git's own verdict on a squash
 #     merge abandoned with `git restore` (no merge to abort, a fresh merge
 #     starts) despite the surviving SQUASH_MSG, that such a worktree is still
-#     REMOVED — guarding it would false-refuse — and the cost that buys, a
-#     no-net-change squash with a clean status being removed with only its
-#     pending message lost.
+#     REMOVED — guarding it would false-refuse — that `git checkout HEAD -- .`
+#     reaches that same stale-marker-with-a-clean-tree state for a squash that
+#     modified a TRACKED file (a second false-refusal shape, on its own fixture
+#     because the add-a-file fixture cannot reach it), and the cost all that
+#     buys, a no-net-change squash with a clean status being removed with only
+#     its pending message lost.
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
@@ -1707,17 +1710,31 @@ done
 # later commit happened to unlink the file. The cost of not guarding — the one
 # shape knowingly removed — is pinned right after, so it cannot change silently.
 #
-# squash_repo <name> <slug> -> echoes ROOT with worktree <slug> holding an
-# UNCONCLUDED `git merge --squash` of a branch that adds one file.
+# squash_repo <name> <slug> [<shape>] -> echoes ROOT with worktree <slug>
+# holding an UNCONCLUDED `git merge --squash`.
+#
+# <shape> decides WHAT the squashed branch changed, and that matters: the discard
+# command which abandons the squash into a clean tree is shape-dependent.
+#   add (default) the branch ADDS sq.txt. `git checkout HEAD -- .` cannot unstage
+#                 it (the path is absent from HEAD), so the porcelain stays `A`.
+#   mod           the branch MODIFIES the tracked seed.txt. `git checkout
+#                 HEAD -- .` DOES unstage that (it writes HEAD's blob into the
+#                 index), so this is the shape that reaches the same clean tree
+#                 with a surviving SQUASH_MSG that `git restore` reaches — the
+#                 second false-refusal shape, pinned in (d) below.
 squash_repo() {
-	local root slug="$2"
+	local root slug="$2" shape="${3:-add}"
 	root="$(make_repo "$1")"
 	git_quiet -C "$root" branch "$slug-src" >/dev/null 2>&1
 	git_quiet -C "$root" worktree add -q "$root/.worktrees/$CONTAINER_NAME/$slug" -b "$slug-b" >/dev/null 2>&1
 	# Give <slug>-src a commit the worktree's own branch does not have, from a
 	# THIRD worktree so the main checkout stays on its own branch.
 	git_quiet -C "$root" worktree add -q "$root/.src-$slug" "$slug-src" >/dev/null 2>&1
-	echo squashed >"$root/.src-$slug/sq.txt"
+	if [ "$shape" = mod ]; then
+		echo squashed >"$root/.src-$slug/seed.txt"
+	else
+		echo squashed >"$root/.src-$slug/sq.txt"
+	fi
 	git_quiet -C "$root/.src-$slug" add -A >/dev/null 2>&1
 	git_quiet -C "$root/.src-$slug" commit -qm "to squash" >/dev/null 2>&1
 	git_quiet -C "$root/.worktrees/$CONTAINER_NAME/$slug" merge --squash "$slug-src" >/dev/null 2>&1 || true
@@ -1818,6 +1835,45 @@ for sq_mode in plain force; do
 		no "precondition: could not fabricate a no-change unconcluded squash merge ($sq_mode):$miss"
 	fi
 done
+
+# (d) the SECOND false-refusal shape, on the `mod` fixture: `git checkout
+#     HEAD -- .` also abandons a squash into a clean tree with SQUASH_MSG
+#     surviving, because it writes HEAD's blob into the index and so unstages a
+#     MODIFIED tracked file. Pinned separately from (b) because the `add` fixture
+#     structurally cannot reach it — `checkout HEAD -- .` leaves an added path
+#     staged, which the porcelain guard then holds. Without this case the
+#     audit comment's claim about `checkout HEAD -- .` rests on nothing the suite
+#     runs. Both halves of that claim are asserted: `git checkout -- .` must
+#     leave the tree DIRTY (guard holds it) and `git checkout HEAD -- .` must
+#     leave it CLEAN (guard must not hold it). --force adds no dimension here —
+#     (b) already pins that the refusal-or-not is mode-independent — so this runs
+#     plain only.
+RSQ3="$(squash_repo rc-squash-cohead sqc mod)"
+SQ3_WT="$RSQ3/.worktrees/$CONTAINER_NAME/sqc"
+SQ3_GD="$RSQ3/.git/worktrees/sqc"
+miss=""
+# Half one: the non-unstaging spelling leaves the porcelain dirty.
+git_quiet -C "$SQ3_WT" checkout -- . >/dev/null 2>&1 || true
+[ -n "$(git -C "$SQ3_WT" status --porcelain 2>/dev/null)" ] ||
+	miss="$miss checkout--dot-unexpectedly-cleaned-the-tree"
+# Half two: the HEAD spelling unstages, landing on a clean tree + stale marker.
+git_quiet -C "$SQ3_WT" checkout HEAD -- . >/dev/null 2>&1 || true
+[ -e "$SQ3_GD/SQUASH_MSG" ] || miss="$miss fixture-SQUASH_MSG-cleared-by-checkout-HEAD"
+[ -z "$(git -C "$SQ3_WT" status --porcelain 2>/dev/null)" ] || miss="$miss fixture-porcelain-not-clean"
+if [ -z "$miss" ]; then
+	rc=0
+	(cd "$RSQ3" && bash "$WT_REMOVE" sqc 2>"$WORK_ROOT/rc-sqc.err") || rc=$?
+	[ "$rc" -eq 0 ] || miss="$miss rc-$rc-not-0"
+	[ ! -e "$SQ3_WT" ] || miss="$miss worktree-still-present"
+	git -C "$RSQ3" show-ref --verify --quiet refs/heads/sqc-b || miss="$miss branch-deleted"
+	if [ -z "$miss" ]; then
+		ok "wt-remove still removes a worktree whose squash merge was abandoned with 'git checkout HEAD -- .' — it unstages a modified tracked file, so that is a SECOND stale-SQUASH_MSG shape a guard would false-refuse"
+	else
+		no "wt-remove FALSE-REFUSED a worktree carrying only a stale SQUASH_MSG after 'git checkout HEAD -- .':$miss $(cat "$WORK_ROOT/rc-sqc.err")"
+	fi
+else
+	no "precondition: 'git checkout -- .' should leave a modify-shape squash dirty and 'git checkout HEAD -- .' should clean it while SQUASH_MSG survives:$miss"
+fi
 
 # ---------------------------------------------------------------------------
 # Integration: wt-enter names the PRIMARY checkout when it is what blocks the

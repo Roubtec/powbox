@@ -10,7 +10,18 @@
 # point:
 #   * being invoked from inside the worktree being removed
 #   * a worktree whose own git metadata cannot be located or read, so nothing
-#     below it can be established at all (fail safe: unknown means refuse)
+#     below it can be established at all (fail safe: unknown means refuse).
+#     That refusal covers metadata broken in a way git can still work THROUGH —
+#     an unreadable registration, or an admin dir at mode 111. Metadata broken
+#     badly enough that `git rev-parse` inside the worktree fails outright (the
+#     admin dir gone, or at mode 000, so it is not even traversable) is not a
+#     refusal: the dir no longer reads as a live worktree at all and takes the
+#     orphan-reap path below, which QUARANTINES it — the tree is MOVED intact to
+#     .worktrees/.orphaned/, never deleted, the branch is kept, and the message
+#     says where it went. Verified with a mid-bisect worktree holding an
+#     uncommitted file: nothing was destroyed. What quarantine cannot promise is
+#     the OPERATION state — the admin dir is git's to prune, so BISECT_LOG and
+#     friends survive only when the breakage also blocks the prune
 #   * every operation git itself tracks as in progress in that worktree — a
 #     rebase (either backend), a `git am`, a merge, a cherry-pick, a revert, a
 #     cherry-pick/revert SEQUENCE, a bisect, or a `git notes` merge. Several of
@@ -274,18 +285,45 @@ fi
 #                      branch switch, and merge / cherry-pick / revert `--abort`,
 #                      `--quit` and `--continue` all clear them (verified).
 #                      But ABANDONING a squash merge with `git restore` does
-#                      NOT. After `git restore --staged --worktree .` — equally
-#                      `git restore --staged .` followed by `git clean -fd` —
-#                      the worktree is FULLY clean (`git status`: "nothing to
+#                      NOT. After `git restore --staged --worktree .` the
+#                      worktree is FULLY clean (`git status`: "nothing to
 #                      commit, working tree clean"; `git status --short
 #                      --branch`: the branch line and nothing else) while
-#                      SQUASH_MSG and MERGE_MSG are STILL there, and they stay
-#                      there until some later commit/reset/checkout happens to
-#                      unlink them. (`git checkout -- .` and
-#                      `git checkout HEAD -- .` leave them behind too; those two
-#                      just do not unstage, so the porcelain stays dirty and the
-#                      guard below holds the tree anyway.) Verified in a LINKED
-#                      worktree, the only shape this script ever sees.
+#                      SQUASH_MSG is STILL there — plus MERGE_MSG and AUTO_MERGE
+#                      when the squash CONFLICTED; a clean `merge --squash`
+#                      writes only SQUASH_MSG (verified for all three squash
+#                      shapes below). They stay there until some later
+#                      commit/reset/BRANCH-SWITCH happens to unlink them; a
+#                      path-form checkout does not (see next).
+#                      That is measured across the three shapes a squash can
+#                      take — one that ADDS a new file, one that MODIFIES a
+#                      tracked file, and a CONFLICTED one — because WHICH discard
+#                      command reaches this clean-tree-plus-SQUASH_MSG state
+#                      depends on the shape:
+#
+#   `git restore --staged --worktree .`   clean in ALL three. The primary form,
+#                                         and the one pinned in the suite.
+#   `git checkout -- .`                   dirty in all three: it does not
+#                                         unstage, so the porcelain guard below
+#                                         holds the tree anyway.
+#   `git checkout HEAD -- .`              UNSTAGES — it writes HEAD's blob into
+#                                         the index — so for the MODIFY and
+#                                         CONFLICT shapes it lands in exactly the
+#                                         same clean tree with a surviving
+#                                         SQUASH_MSG. Only for the ADD shape does
+#                                         it leave `A` staged (the path is absent
+#                                         from HEAD) and the porcelain guard hold
+#                                         the tree.
+#   `git restore --staged .` + `clean -fd`  clean ONLY for the ADD shape:
+#                                         `clean` removes untracked files, so a
+#                                         modified tracked file is left ` M`.
+#
+#                      So `checkout HEAD -- .` is a SECOND false-refusal shape a
+#                      SQUASH_MSG guard would hit, which only strengthens the
+#                      exclusion; it is pinned on its own fixture (the ADD shape
+#                      the other cases use structurally cannot reach it).
+#                      Verified in a LINKED worktree, the only shape this script
+#                      ever sees.
 #                      Git itself agrees nothing is in flight: a fresh
 #                      `git merge` from that state starts and succeeds (exit 0),
 #                      exactly as a fresh `git notes merge` does beside a
@@ -302,7 +340,9 @@ fi
 #                      result makes the porcelain non-empty — but a squash whose
 #                      result equals HEAD's own content (a conflict resolved
 #                      back to HEAD, or a branch that squashes to no net change)
-#                      leaves SQUASH_MSG + MERGE_MSG + AUTO_MERGE with an EMPTY
+#                      leaves SQUASH_MSG — plus MERGE_MSG and AUTO_MERGE in the
+#                      conflicted variant, SQUASH_MSG alone in the clean one —
+#                      with an EMPTY
 #                      porcelain and `git status` reporting a clean tree, and
 #                      wt-remove removes it (verified end to end, and pinned).
 #                      What is lost there is the pending MESSAGE of a squash

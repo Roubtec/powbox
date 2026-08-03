@@ -34,6 +34,11 @@
 #   * wt-common.sh wt_branch_held_by_operation against fabricated operation
 #     state, pinned to what real git does with the same state — it decides
 #     whether a DETACHED worktree is nevertheless identified as the blocker.
+#   * wt-common.sh wt_worktree_gitdir locating that state from the COMMON
+#     repository metadata rather than from inside the worktree: a blocker whose
+#     directory has been DELETED still holds its branch and is still prunable, and
+#     is exactly the one no probe run inside it can reach; the main working tree
+#     resolves to the common dir; an unregistered path answers "unknown".
 #   * wt-common.sh wt_worktree_for_branch reporting the blocking worktree's path
 #     (and only that) for both porcelain record kinds, and wt_primary_checkout
 #     naming the MAIN working tree (pinned directly: the integration case cannot
@@ -56,7 +61,10 @@
 #     live blocker gets misreported as a stale record and 'worktree prune'
 #     recommended for it. A path ENDING in a newline is pinned the same way and
 #     covers the other half of that defect: the answer's own handoff, where a
-#     command substitution would strip the byte the `-z` read preserved.
+#     command substitution would strip the byte the `-z` read preserved. Both
+#     halves are pinned for a DETACHED blocker too, where the path is what the
+#     worktree's own operation state has to be located by, and losing the byte
+#     costs the entire diagnosis instead of degrading it.
 #   * wt-common.sh wt_worktree_locked, which is what lets that withholding
 #     happen: it reads the porcelain `locked` attribute, keeps a free-form
 #     multi-line lock reason inside its own record, and degrades to "not locked"
@@ -394,6 +402,10 @@ break_metadata() {
 	rm -rf "$1/.git/worktrees/$2"
 }
 
+# Sentinel for the resolver cases below: pre-set the out-variable before each call
+# so "left untouched" stays distinguishable from "answered empty".
+UNSET_MARK='(no answer)'
+
 # ---------------------------------------------------------------------------
 # Unit: wt_branch_held_by_operation must read a DETACHED worktree's operation
 # state the way GIT reads it, because git is what decides whether the branch may
@@ -411,7 +423,7 @@ mkdir -p "$GDU/rebase-merge" "$GDU/rebase-apply"
 printf 'refs/heads/foo\n' >"$GDU/rebase-merge/head-name"
 printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
 : >"$GDU/rebase-apply/applying"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	no "a git am beside a stale rebase-merge must not count as holding the branch (git allows the checkout)"
 else
 	ok "operation state honours git's rebase-apply-before-rebase-merge precedence"
@@ -421,7 +433,7 @@ rm -rf "$GDU/rebase-merge" "$GDU/rebase-apply"
 # A real apply-backend rebase (no `applying` marker): git REFUSES.
 mkdir -p "$GDU/rebase-apply"
 printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	ok "an apply-backend rebase is recognised as holding the branch"
 else
 	no "apply-backend rebase not recognised as holding the branch"
@@ -433,7 +445,7 @@ rm -rf "$GDU/rebase-apply"
 mkdir -p "$GDU/rebase-merge"
 printf 'refs/heads/foo\n' >"$GDU/rebase-merge/head-name"
 printf 'junk\n' >"$GDU/rebase-apply"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	no "a non-directory rebase-apply must stop the scan like git's stat() does (git allows the checkout)"
 else
 	ok "a non-directory rebase-apply degrades to unknown instead of falling through"
@@ -443,7 +455,7 @@ rm -f "$GDU/rebase-apply"
 # DANGLING-SYMLINK rebase-apply: stat() follows and fails, so git falls through
 # to rebase-merge and REFUSES.
 ln -s /nonexistent-rebase-apply-target "$GDU/rebase-apply"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	ok "a dangling-symlink rebase-apply falls through to rebase-merge, as stat() does"
 else
 	no "a dangling-symlink rebase-apply must not hide the rebase-merge state (git refuses the checkout)"
@@ -454,7 +466,7 @@ rm -rf "$GDU/rebase-apply" "$GDU/rebase-merge"
 # prefix on read): git REFUSES.
 : >"$GDU/BISECT_LOG"
 printf 'refs/heads/foo\n' >"$GDU/BISECT_START"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	ok "a BISECT_START written in refs/heads/ form is recognised (git strips the prefix too)"
 else
 	no "BISECT_START in refs/heads/ form not recognised as holding the branch"
@@ -465,7 +477,7 @@ fi
 # unusable in git anyway). Comparing the raw value would be wrong either way.
 HEXB=0123456789abcdef0123456789abcdef01234567
 printf '%s\n' "$HEXB" >"$GDU/BISECT_START"
-if wt_branch_held_by_operation "$RU/w" "$HEXB"; then
+if wt_branch_held_by_operation "$RU" "$RU/w" "$HEXB"; then
 	no "a full object id in BISECT_START must not match a same-named branch"
 else
 	ok "a full object id in BISECT_START is treated as a detached start, not a branch"
@@ -473,7 +485,7 @@ fi
 
 # get_oid_hex() is CASE-INSENSITIVE: a mixed-case object id is a detached start.
 printf '%s\n' "0123456789ABCDEF0123456789abcdef01234567" >"$GDU/BISECT_START"
-if wt_branch_held_by_operation "$RU/w" "0123456789ABCDEF0123456789abcdef01234567"; then
+if wt_branch_held_by_operation "$RU" "$RU/w" "0123456789ABCDEF0123456789abcdef01234567"; then
 	no "a mixed-case object id in BISECT_START must not match a same-named branch"
 else
 	ok "object-id recognition in BISECT_START is case-insensitive, as git's is"
@@ -485,7 +497,7 @@ for oidish in \
 	0123456789abcdef0123456789abcdef0123456789abc \
 	0123456789abcdef0123456789abcdef01234567zz; do
 	printf '%s\n' "$oidish" >"$GDU/BISECT_START"
-	if wt_branch_held_by_operation "$RU/w" "$oidish"; then
+	if wt_branch_held_by_operation "$RU" "$RU/w" "$oidish"; then
 		no "BISECT_START '$oidish' (${#oidish} chars) must not match a same-named branch (git allows the checkout)"
 	else
 		ok "a ${#oidish}-char BISECT_START opening with a full object id is treated as an id, not a branch"
@@ -496,7 +508,7 @@ done
 # threshold must not over-reach and lose a real diagnosis.
 HEX39=0123456789abcdef0123456789abcdef0123456
 printf '%s\n' "$HEX39" >"$GDU/BISECT_START"
-if wt_branch_held_by_operation "$RU/w" "$HEX39"; then
+if wt_branch_held_by_operation "$RU" "$RU/w" "$HEX39"; then
 	ok "a hex branch name shorter than the hash width is still recognised as held"
 else
 	no "a 39-hex branch name in BISECT_START must still count as holding the branch"
@@ -506,7 +518,7 @@ fi
 # must not mask a live bisect: git REFUSES.
 printf 'refs/heads/foo\n' >"$GDU/BISECT_START"
 printf 'junk\n' >"$GDU/rebase-apply"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	ok "a non-directory rebase-apply does not mask a live bisect"
 else
 	no "a live bisect must still be recognised beside a non-directory rebase-apply"
@@ -517,7 +529,7 @@ rm -f "$GDU/rebase-apply"
 # so the caller falls back to git's own error instead of guessing.
 rm -f "$GDU/BISECT_START"
 mkdir -p "$GDU/BISECT_START"
-if wt_branch_held_by_operation "$RU/w" foo; then
+if wt_branch_held_by_operation "$RU" "$RU/w" foo; then
 	no "an unreadable BISECT_START must degrade to unknown, not report the branch as held"
 else
 	ok "unreadable operation state degrades to unknown"
@@ -534,7 +546,7 @@ rm -f "$RO/.worktrees/$CONTAINER_NAME/inside/.git"
 mkdir -p "$RO/.git/rebase-merge"
 printf 'refs/heads/main\n' >"$RO/.git/rebase-merge/head-name"
 if git -C "$RO/.worktrees/$CONTAINER_NAME/inside" rev-parse --absolute-git-dir >/dev/null 2>&1; then
-	if wt_branch_held_by_operation "$RO/.worktrees/$CONTAINER_NAME/inside" main; then
+	if wt_branch_held_by_operation "$RO" "$RO/.worktrees/$CONTAINER_NAME/inside" main; then
 		no "a worktree without its .git pointer must not have the ENCLOSING repo's state read as its own"
 	else
 		ok "operation state is read from the worktree's OWN git dir, never the enclosing repo's"
@@ -543,6 +555,51 @@ else
 	no "precondition: rev-parse should still resolve upwards from a worktree that lost its .git"
 fi
 rm -rf "$RO/.git/rebase-merge"
+
+# ---------------------------------------------------------------------------
+# Unit: wt_worktree_gitdir locates a worktree's OWN state from the common
+# metadata, which is the only place it can be read from when the worktree's
+# directory is not there to run git in. git keeps refusing the branch such a
+# record holds, and `worktree prune` is the remedy — the one wt-enter withholds
+# entirely when the blocker cannot be identified.
+# ---------------------------------------------------------------------------
+RD="$(make_repo rd)"
+git_quiet -C "$RD" branch gone-b
+GONE_WT="$RD/.worktrees/$CONTAINER_NAME/gone"
+git_quiet -C "$RD" worktree add -q "$GONE_WT" gone-b >/dev/null 2>&1
+GDD="$RD/.git/worktrees/gone"
+: >"$GDD/BISECT_LOG"
+printf 'gone-b\n' >"$GDD/BISECT_START"
+rm -rf "$GONE_WT" # registered, state intact, directory gone
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_gitdir "$RD" "$GONE_WT" && [ "$out" = "$GDD" ]; then
+	ok "wt_worktree_gitdir resolves the admin git dir of a worktree deleted from disk"
+else
+	no "wt_worktree_gitdir lost a deleted worktree's admin git dir: got '$out', expected '$GDD'"
+fi
+if wt_branch_held_by_operation "$RD" "$GONE_WT" gone-b; then
+	ok "a deleted worktree's surviving operation state still marks the branch as held"
+else
+	no "the operation state of a deleted-but-registered worktree was not read"
+fi
+
+# The MAIN working tree has no admin dir of its own — its git dir IS the common
+# dir — and it can be the detached blocker too, so it must still resolve.
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_gitdir "$RD" "$RD" && [ "$out" = "$RD/.git" ]; then
+	ok "wt_worktree_gitdir names the common dir for the MAIN working tree"
+else
+	no "wt_worktree_gitdir mis-resolved the main working tree: got '$out', expected '$RD/.git'"
+fi
+
+# A path that is not a registered worktree must answer "unknown", never some
+# neighbouring record's state.
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_gitdir "$RD" "$RD/never-registered"; then
+	no "wt_worktree_gitdir answered '$out' for a path that is not a registered worktree"
+else
+	ok "wt_worktree_gitdir returns unknown for a path that is not a registered worktree"
+fi
 
 # ---------------------------------------------------------------------------
 # Unit: wt_worktree_for_branch identifies the blocking worktree — a PATH, and
@@ -554,7 +611,6 @@ rm -rf "$RO/.git/rebase-merge"
 # the trailing-newline cases below meaningful. `out` is pre-set to a SENTINEL
 # before each call so "left untouched" is distinguishable from "answered empty".
 # ---------------------------------------------------------------------------
-UNSET_MARK='(no answer)'
 RG="$(make_repo rg)"
 git_quiet -C "$RG" worktree add -q "$RG/plain" -b plain-b >/dev/null 2>&1
 out="$UNSET_MARK"
@@ -786,6 +842,20 @@ else
 	no "wt_worktree_for_branch truncated a trailing-newline path: got '$out', expected '$WTT'"
 fi
 
+# The same byte reaches wt_worktree_gitdir, which used to cross-check the path
+# against `rev-parse --show-toplevel` read through `$( )`: the trailing newline
+# came off the reply, the two paths compared unequal, and a perfectly good
+# worktree resolved to "unknown" — losing the whole diagnosis for every DETACHED
+# blocker under such a path. Matching the registered `gitdir` file has no such
+# step. (git sanitizes the admin dir's own NAME, so it cannot be checked for.)
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_gitdir "$NLT_ROOT" "$WTT" && [ -d "$out" ] &&
+	[ "$(cat "$out/gitdir")" = "$WTT/.git" ]; then
+	ok "wt_worktree_gitdir resolves the admin git dir of a worktree whose path ENDS in a newline"
+else
+	no "wt_worktree_gitdir could not resolve a trailing-newline worktree's admin git dir: got '$out'"
+fi
+
 # Same non-hypothetical: strip the trailing newline and the path is not there,
 # which is what turns a live blocker into a "registered but missing" record.
 if [ -e "${WTT%$'\n'}" ]; then
@@ -905,6 +975,42 @@ else
 	else
 		no "wt-enter primary-checkout conflict message inadequate:$miss"
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the same, with the primary checkout DETACHED by a bisect. It is
+# still holding 'main' as far as git is concerned, but the porcelain says
+# `detached`, so the answer has to come from the primary's own operation state —
+# and the main working tree is the one checkout with no admin dir of its own (its
+# git dir IS the common dir), i.e. the branch of the lookup that has no `gitdir`
+# file to match. Getting it wrong loses the loudest message wt-enter has.
+# ---------------------------------------------------------------------------
+RY="$(make_repo ry)"
+EY="$WORK_ROOT/ry.err"
+for i in 1 2 3; do
+	echo "rev $i" >"$RY/seed.txt"
+	git_quiet -C "$RY" commit -qam "c$i"
+done
+git_quiet -C "$RY" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+if git -C "$RY" worktree list --porcelain | grep -qx detached; then
+	if out="$(cd "$RY" && bash "$WT_ENTER" task-y main 2>"$EY")"; then
+		no "wt-enter must fail when a bisecting primary checkout holds the branch (got '$out')"
+	else
+		miss=""
+		[ -z "$out" ] || miss="$miss stdout-not-empty"
+		grep -qiF "primary" "$EY" || miss="$miss no-primary-wording"
+		grep -F "$RY" "$EY" | grep -q '^wt-enter:' || miss="$miss no-primary-path"
+		grep -qiF "coordinate" "$EY" || miss="$miss no-coordination-hint"
+		miss="$miss$(destructive_advice "$EY" "$RY/.worktrees/$CONTAINER_NAME/task-y" "$RY" task-y main)"
+		[ ! -e "$RY/.worktrees/$CONTAINER_NAME/task-y" ] || miss="$miss worktree-created"
+		if [ -z "$miss" ]; then
+			ok "wt-enter names the primary checkout even when a bisect leaves it detached"
+		else
+			no "wt-enter detached-primary conflict message inadequate:$miss"
+		fi
+	fi
+else
+	no "precondition: bisect did not leave the primary checkout of $RY detached"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1381,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Integration: registered-but-missing AND detached — a worktree that was left
+# mid-bisect and then deleted from disk. Git reads the state that survives in the
+# admin dir and keeps refusing the branch, and `worktree prune` really would clear
+# the record (pinned below with `prune -n`), so this is the case where the prune
+# remedy is both correct and the only thing to say. It is also the case a probe
+# run INSIDE the blocker cannot reach: there is no directory left to run git in,
+# so the blocker went unnamed and the remedy unoffered.
+# ---------------------------------------------------------------------------
+RM="$(make_repo rm-gone)"
+WBM="$RM/.worktrees/$CONTAINER_NAME"
+EM="$WORK_ROOT/rm-gone.err"
+for i in 1 2 3; do
+	echo "rev $i" >"$RM/seed.txt"
+	git_quiet -C "$RM" commit -qam "c$i"
+done
+git_quiet -C "$RM" branch task-w
+git_quiet -C "$RM" worktree add -q "$WBM/task-w" task-w >/dev/null 2>&1
+git_quiet -C "$WBM/task-w" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+if git -C "$RM" worktree list --porcelain | grep -qx detached; then
+	rm -rf "$WBM/task-w" # detached by the bisect, now gone from disk
+	if git -C "$RM" worktree prune -n -v 2>&1 | grep -qF "worktrees/task-w"; then
+		if out="$(cd "$RM" && bash "$WT_ENTER" task-x task-w 2>"$EM")"; then
+			no "wt-enter must fail when a deleted mid-bisect worktree holds the branch (got '$out')"
+		else
+			miss=""
+			[ -z "$out" ] || miss="$miss stdout-not-empty"
+			grep -F "$WBM/task-w" "$EM" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+			grep -qF "worktree prune" "$EM" || miss="$miss no-prune-remedy"
+			! grep -qiF "primary" "$EM" || miss="$miss claims-primary"
+			miss="$miss$(destructive_advice "$EM" "$WBM/task-w" "$WBM/task-x" "$RM" task-w task-x)"
+			[ ! -e "$WBM/task-x" ] || miss="$miss worktree-created"
+			if [ -z "$miss" ]; then
+				ok "wt-enter names a deleted mid-bisect blocker and offers the prune remedy for it"
+			else
+				no "wt-enter deleted-detached-blocker message inadequate:$miss"
+			fi
+		fi
+	else
+		no "precondition: 'worktree prune -n' should report the deleted $WBM/task-w record as prunable"
+	fi
+else
+	no "precondition: bisect did not leave $WBM/task-w detached"
+fi
+
+# ---------------------------------------------------------------------------
 # Integration: the same registered-but-missing sibling, but LOCKED. git skips
 # locked worktrees when pruning, so the remedy the case above earns is exactly
 # wrong here: pasting it changes nothing and the caller comes straight back to a
@@ -1408,6 +1559,53 @@ else
 	else
 		no "wt-enter trailing-newline blocker message inadequate:$miss"
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: a trailing-newline path AND a DETACHED blocker, which is where the
+# byte used to cost the entire diagnosis rather than degrade it. A `branch` record
+# names the blocker by itself, so the case above survived on the porcelain read
+# alone; a bisect makes the record `detached`, the answer has to come from the
+# worktree's own operation state, and locating that state used to compare the path
+# against a `$( )`-read toplevel — which this path can never equal. wt-enter then
+# printed git's fatal and nothing of its own.
+# ---------------------------------------------------------------------------
+NLD_ROOT="$(make_repo rnld)"
+NLD_WT="$WORK_ROOT/nld-blocker"$'\n'
+END="$WORK_ROOT/rnld.err"
+for i in 1 2 3; do
+	echo "rev $i" >"$NLD_ROOT/seed.txt"
+	git_quiet -C "$NLD_ROOT" commit -qam "c$i"
+done
+git_quiet -C "$NLD_ROOT" branch nld-b
+git_quiet -C "$NLD_ROOT" worktree add -q "$NLD_WT" nld-b >/dev/null 2>&1
+git_quiet -C "$NLD_WT" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
+if git -C "$NLD_ROOT" worktree list --porcelain | grep -qx detached; then
+	if out="$(cd "$NLD_ROOT" && bash "$WT_ENTER" task-nld nld-b 2>"$END")"; then
+		no "wt-enter must fail when a detached blocker under a trailing-newline path holds the branch (got '$out')"
+	else
+		miss=""
+		[ -z "$out" ] || miss="$miss stdout-not-empty"
+		errtext="$(cat "$END")"
+		printf -v want_nld "wt-enter: branch 'nld-b' is already checked out in another worktree at %q;" "$NLD_WT"
+		case "$errtext" in
+		*"$want_nld"*) ;;
+		*) miss="$miss no-blocking-path" ;;
+		esac
+		# The blocker is alive: no stale-record remedy may be aimed at it.
+		case "$errtext" in
+		*"worktree prune"*) miss="$miss prune-advised-for-live-blocker" ;;
+		esac
+		miss="$miss$(destructive_advice "$END" "$NLD_WT" "$NLD_ROOT/.worktrees/$CONTAINER_NAME/task-nld" "$NLD_ROOT" nld-b task-nld)"
+		[ ! -e "$NLD_ROOT/.worktrees/$CONTAINER_NAME/task-nld" ] || miss="$miss worktree-created"
+		if [ -z "$miss" ]; then
+			ok "wt-enter still diagnoses a DETACHED blocker whose path ENDS in a newline"
+		else
+			no "wt-enter trailing-newline detached-blocker message inadequate:$miss"
+		fi
+	fi
+else
+	no "precondition: bisect did not leave the trailing-newline worktree detached"
 fi
 
 # ---------------------------------------------------------------------------

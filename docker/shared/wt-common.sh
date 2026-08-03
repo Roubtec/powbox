@@ -179,29 +179,63 @@ wt_primary_checkout() {
 	return 1
 }
 
-# wt_worktree_gitdir <worktree>
-#   Print the absolute git dir belonging to <worktree> ITSELF; return 1 when that
-#   cannot be established, so callers can tell "read it" from "did not read it".
-#   The toplevel cross-check is load-bearing: task worktrees live INSIDE the main
-#   working tree ($ROOT/.worktrees/...), so a worktree that has lost its own .git
-#   pointer still makes `rev-parse` succeed — against the ENCLOSING repo, whose
-#   operation state belongs to a different checkout (verified: git keeps refusing
-#   the second checkout there, so the blocker is real while its state is not ours
-#   to read). An unreachable git dir needs no separate probe: it already fails
-#   rev-parse (verified — such a worktree drops out of `git worktree list` too).
-#   The two answers are asked for SEPARATELY rather than split out of one
-#   newline-separated reply, for the same reason the porcelain is read with `-z`:
-#   a worktree path may contain a newline, and splitting on newlines would hand
-#   back a fragment of the toplevel and fail the cross-check for a perfectly good
-#   worktree. (A path ENDING in a newline still degrades, since `$(…)` strips
-#   trailing newlines — but only to `return 1`, i.e. "not read", which is this
-#   function's documented safe direction.)
+# wt_worktree_gitdir <root> <worktree>
+#   Emit the absolute path of the ADMINISTRATIVE git dir holding <worktree>'s own
+#   per-worktree state, NUL-terminated (read it with wt_read_path); return 1 when
+#   it cannot be established, so callers can tell "read it" from "did not read
+#   it".
+#
+#   It is resolved from the COMMON repository metadata and never by running git
+#   INSIDE <worktree>, because <worktree> need not be usable — or even present:
+#     * A worktree DELETED from disk keeps its registration and its state files,
+#       and git keeps refusing a second checkout of the branch that state holds
+#       (verified with a deleted bisect worktree: `git worktree add` still fails,
+#       and `worktree prune` would clear the record — which is precisely the
+#       remedy wt-enter offers for a registered-but-missing blocker). `git -C
+#       <worktree>` cannot run there at all, so asking it left the blocker
+#       unidentified and that remedy unoffered.
+#     * A worktree that has lost its own .git pointer still satisfies `git -C
+#       <worktree> rev-parse` — task worktrees sit INSIDE the main working tree
+#       ($ROOT/.worktrees/...), so the answer describes the ENCLOSING repo, whose
+#       operation state belongs to a different checkout. Guarding that with a
+#       `--show-toplevel` cross-check cost the whole diagnosis whenever the path
+#       ENDED in a newline, because `$(…)` strips it and the two paths then
+#       compare unequal (verified end to end: a detached bisect worktree at
+#       `nl<LF>` left wt-enter with git's bare fatal and no diagnosis at all).
+#       The registration needs no such cross-check — it names the worktree by
+#       construction — and it answers about the worktree's OWN state in both
+#       cases, which is the same file git consults.
+#
+#   Each LINKED worktree's admin dir carries a `gitdir` file holding
+#   "<worktree>/.git", and that file is what identifies it: git SANITIZES the
+#   admin dir's own name (a newline in the path becomes `-`), so the name cannot
+#   be derived back from the path. Its content is compared through `$(…)` even
+#   here, which stays exact for a path ending in a newline: command substitution
+#   strips only TRAILING newlines and the value compared against always ends in
+#   `.git` (verified).
+#   The MAIN working tree has no admin dir — its git dir IS the common dir — so it
+#   is matched separately, and only after the linked ones, keeping the common case
+#   to a single `git worktree list`.
 wt_worktree_gitdir() {
-	local gitdir top
-	gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
-	top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
-	[ "$top" = "$1" ] || return 1
-	printf '%s\n' "$gitdir"
+	local root="$1" wt="$2" common entry primary
+	# git's answer is newline-TERMINATED, so it is read out of band and stripped
+	# of exactly one newline instead of going through `$(…)`, which would also eat
+	# a trailing newline belonging to the path itself. A git that cannot answer
+	# leaves this empty, which is the same "unknown" an explicit status check gave.
+	IFS= read -r -d '' common < <(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || :
+	common="${common%$'\n'}"
+	[ -n "$common" ] || return 1
+	for entry in "$common"/worktrees/*/gitdir; do
+		[ -r "$entry" ] || continue
+		[ "$(cat -- "$entry" 2>/dev/null)" = "$wt/.git" ] || continue
+		printf '%s\0' "${entry%/gitdir}"
+		return 0
+	done
+	if wt_read_path primary wt_primary_checkout "$root" && [ "$primary" = "$wt" ]; then
+		printf '%s\0' "$common"
+		return 0
+	fi
+	return 1
 }
 
 # wt_state_branch <file>
@@ -244,7 +278,7 @@ wt_state_branch() {
 	printf '%s\n' "$raw"
 }
 
-# wt_branch_held_by_operation <worktree> <branch>
+# wt_branch_held_by_operation <root> <worktree> <branch>
 #   Return 0 when the worktree at <worktree> — which `git worktree list
 #   --porcelain` reports as DETACHED — is nevertheless holding <branch> through
 #   an in-progress rebase or bisect. Git counts such a branch as checked out and
@@ -270,12 +304,15 @@ wt_state_branch() {
 #   skip on to rebase-merge and report a false "held". `-e` follows symlinks just
 #   as stat() does, so a DANGLING symlink correctly falls through to rebase-merge
 #   (git refuses there).
+#   <root> is any path inside the repository; it is what the per-worktree state is
+#   located FROM (see wt_worktree_gitdir), so a blocker whose own directory is
+#   gone is still readable.
 #   Returns 1 for "not held OR unreadable": an unidentified detached blocker costs
 #   nothing but git's own error message, and git itself allows the second checkout
 #   when it cannot read the state either (verified with an unreadable head-name).
 wt_branch_held_by_operation() {
-	local wt="$1" branch="$2" gitdir head
-	gitdir="$(wt_worktree_gitdir "$wt")" || return 1
+	local root="$1" wt="$2" branch="$3" gitdir head
+	wt_read_path gitdir wt_worktree_gitdir "$root" "$wt" || return 1
 	if [ -e "$gitdir/rebase-apply" ]; then
 		if [ ! -e "$gitdir/rebase-apply/applying" ] &&
 			head="$(wt_state_branch "$gitdir/rebase-apply/head-name")" &&
@@ -322,7 +359,7 @@ wt_worktree_for_branch() {
 		detached)
 			# stdin is closed for the probe: it runs git itself, and the
 			# undelimited records still queued on our stdin are not its to read.
-			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch" </dev/null; then
+			if [ -n "$path" ] && wt_branch_held_by_operation "$root" "$path" "$branch" </dev/null; then
 				printf '%s\0' "$path"
 				return 0
 			fi

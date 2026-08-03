@@ -36,13 +36,24 @@ die() {
 	exit 1
 }
 
-# shq <string> — render <string> as ONE shell-safe token, for the inspection
-# commands the diagnostics below suggest. Repository and worktree paths are not
-# guaranteed to be free of spaces or shell metacharacters (a human-created
-# worktree can live anywhere), and a suggested command is only useful if it can
-# be pasted verbatim — and only safe if pasting it cannot run something else.
-# `printf %q` leaves an ordinary path byte-identical, so the common case still
-# reads as a plain path.
+# shq <string> — render <string> as ONE shell-safe token. Repository and worktree
+# paths are not guaranteed to be free of spaces or shell metacharacters (a
+# human-created worktree can live anywhere), and a suggested command is only
+# useful if it can be pasted verbatim — and only safe if pasting it cannot run
+# something else. `printf %q` leaves an ordinary path byte-identical, so the
+# common case still reads as a plain path.
+#
+# EVERY discovered path goes through it, the bare ones in prose included, not
+# just the ones inside a suggested command. `%q` also renders a non-printable
+# byte as an escape (ESC becomes `\E` inside `$'…'`), and a path is one of the
+# few places arbitrary bytes reach this script from outside: the blocker below is
+# whatever someone else named their worktree. Echoed raw, an ESC in it is a live
+# ANSI sequence on the reader's terminal — enough to recolour, overwrite or
+# fabricate the lines around it, i.e. to forge advice wt-enter never gave, in the
+# one message whose whole job is to be trusted about what must not be destroyed.
+# git sanitizes such bytes in its own fatal (verified) but emits them raw in the
+# machine-readable porcelain these diagnostics are built from, so the escaping
+# has to happen here.
 shq() { printf '%q' "$1"; }
 
 # Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so
@@ -167,11 +178,11 @@ worktree_add() {
 	if wt_read_path blocker wt_worktree_for_branch "$ROOT" "$BRANCH" && [ "$blocker" != "$WT" ]; then
 		wt_read_path primary wt_primary_checkout "$ROOT" || primary="$ROOT"
 		if [ "$blocker" = "$primary" ] || [ "$blocker" = "$ROOT" ]; then
-			echo "wt-enter: branch '$BRANCH' is checked out in the repository's PRIMARY (main) working tree at $blocker — not in a task worktree." >&2
+			echo "wt-enter: branch '$BRANCH' is checked out in the repository's PRIMARY (main) working tree at $(shq "$blocker") — not in a task worktree." >&2
 			echo "wt-enter: that checkout is SHARED with humans and with any peer agent in this container; someone may be working on '$BRANCH' there right now." >&2
 			echo "wt-enter: nothing was changed. Do NOT detach or switch the main checkout blindly — either run this task on a different branch, or coordinate with whoever owns that checkout before moving it off '$BRANCH', then rerun wt-enter." >&2
 		else
-			echo "wt-enter: branch '$BRANCH' is already checked out in another worktree at $blocker; git refuses to check one branch out twice." >&2
+			echo "wt-enter: branch '$BRANCH' is already checked out in another worktree at $(shq "$blocker"); git refuses to check one branch out twice." >&2
 			if [ ! -d "$blocker" ]; then
 				if wt_worktree_locked "$ROOT" "$blocker"; then
 					# Gone from disk, but NOT a stale record: git keeps a LOCKED

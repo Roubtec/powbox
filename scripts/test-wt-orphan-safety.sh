@@ -62,8 +62,10 @@
 #     multi-line lock reason inside its own record, and degrades to "not locked"
 #     when git cannot be asked.
 #   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
-#     the paths inside the commands wt-enter suggests are shell-quoted, so advice
-#     about a worktree under a spaced path stays pasteable and safe to paste.
+#     every path wt-enter echoes back is shell-quoted — inside the commands it
+#     suggests, so advice about a worktree under a spaced path stays pasteable
+#     and safe to paste, AND in its own prose, so a path carrying terminal
+#     control bytes cannot rewrite what the reader sees.
 #
 # WHY each expectation is what it is (git's own precedence, its object-id
 # parsing, its bare stat()) is documented once, in docker/shared/wt-common.sh.
@@ -147,7 +149,8 @@ no() {
 #   '<value>'        single-quoted prose — git's `fatal: '<branch>' is already
 #                    used by worktree at '<path>'`, and wt-enter's `branch
 #                    '<branch>'` / `once '<branch>' is free`
-#   at <value>       the blocker path, bare, in wt-enter's prose (paths only)
+#   at <value>       the blocker path in wt-enter's prose (paths only), which it
+#                    shell-quotes there too
 #   -C <value>       the argument of a suggested `git -C … status`, in the bare
 #                    and the shell-quoted spelling wt-enter actually prints
 #
@@ -187,10 +190,16 @@ destructive_advice() {
 		text="${text//"'$quoted'"/'<dynamic>'}"
 		text="${text//"-C $value"/-C <dynamic>}"
 		text="${text//"-C $quoted"/-C <dynamic>}"
-		# Only a path is ever printed bare after `at `, and anchoring this one to
-		# absolute paths keeps a short branch name out of the substitution.
+		# Only a path is ever printed after `at `, and anchoring this one to
+		# absolute paths keeps a short branch name out of the substitution. Both
+		# spellings again: wt-enter shell-quotes the path in this position too
+		# (the two coincide for a plain path), and the bare spelling stays in the
+		# list so the anchor keeps holding for any message that does not.
 		case "$value" in
-		/*) text="${text//"at $value"/at <dynamic>}" ;;
+		/*)
+			text="${text//"at $value"/at <dynamic>}"
+			text="${text//"at $quoted"/at <dynamic>}"
+			;;
 		esac
 	done
 	printf '%s\n' "$text" |
@@ -299,6 +308,24 @@ if [ -n "$(destructive_advice "$DA_ERR" "$DA_GLOB_BLOCKER" "$DA_ROOT" 'b[a-z]*' 
 	ok "a suggested 'reset --hard' survives neutralising glob-bearing dynamic values"
 else
 	no "a suggested 'reset --hard' was HIDDEN by a glob metacharacter in a dynamic value (unquoted substitution pattern?)"
+fi
+
+# A blocker path that must be QUOTED to be printed at all — it contains a space —
+# and whose own bytes read as a destructive flag. wt-enter shell-quotes the path
+# in the `at ` position too, so that anchor has to know the quoted spelling:
+# without it, a worktree somebody legitimately named `wt --force` raises a false
+# alarm on every branch-conflict case at once. (git's own fatal prints the same
+# path bare inside single quotes, which the first anchor already covers — so this
+# pins the second spelling specifically.)
+DA_Q_BLOCKER='/w/wt --force/end'
+{
+	printf "fatal: '%s' is already used by worktree at '%s'\n" nb "$DA_Q_BLOCKER"
+	printf "wt-enter: branch '%s' is already checked out in another worktree at %q; git refuses to check one branch out twice.\n" nb "$DA_Q_BLOCKER"
+} >"$DA_ERR"
+if [ -z "$(destructive_advice "$DA_ERR" "$DA_Q_BLOCKER" "$DA_ROOT" nb)" ]; then
+	ok "a blocker path needing shell-quoting is data in the 'at' position too"
+else
+	no "destructive_advice false-alarms on a shell-quoted blocker path in the 'at' position"
 fi
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1007,50 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Integration: a blocker path carrying TERMINAL CONTROL BYTES must not reach the
+# terminal raw, in ANY position — the bare prose one included, which is the only
+# place a discovered path was ever printed unquoted. A worktree path is arbitrary
+# bytes chosen by somebody else, and an ESC echoed back verbatim is a live ANSI
+# sequence in the reader's terminal: enough to recolour, overwrite or fabricate
+# the lines around it, i.e. to forge advice wt-enter never gave — in the one
+# message whose whole job is to be trusted about what must not be destroyed. git
+# sanitizes such bytes in its own fatal, but prints them RAW in the porcelain
+# these diagnostics are built from, so the escaping is wt-enter's to do. Escaped,
+# not dropped: the blocker still has to be named.
+# ---------------------------------------------------------------------------
+ESC=$'\033'
+RE="$(make_repo re)"
+WBE="$RE/.worktrees/$CONTAINER_NAME"
+EE="$WORK_ROOT/re.err"
+ESC_WT="$WORK_ROOT/esc-blocker-${ESC}[31mRED"
+git_quiet -C "$RE" worktree add -q "$ESC_WT" -b esc-b >/dev/null 2>&1
+if out="$(cd "$RE" && bash "$WT_ENTER" task-esc esc-b 2>"$EE")"; then
+	no "wt-enter must fail when a blocker under a control-byte path holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	errtext="$(cat "$EE")"
+	# Precondition: the fixture really does carry the byte (else this proves nothing).
+	case "$ESC_WT" in *"$ESC"*) ;; *) miss="$miss fixture-has-no-control-byte" ;; esac
+	# Nothing on stderr may carry it, whoever printed the line.
+	case "$errtext" in *"$ESC"*) miss="$miss raw-control-byte-on-stderr" ;; esac
+	# The blocker is still NAMED — in the escaped spelling, with the `;` pinning
+	# that nothing was trimmed off the end of it.
+	printf -v want_esc "wt-enter: branch 'esc-b' is already checked out in another worktree at %q;" "$ESC_WT"
+	case "$errtext" in
+	*"$want_esc"*) ;;
+	*) miss="$miss no-blocking-path" ;;
+	esac
+	miss="$miss$(destructive_advice "$EE" "$ESC_WT" "$WBE/task-esc" "$RE" esc-b task-esc)"
+	[ ! -e "$WBE/task-esc" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter escapes terminal control bytes in a blocker path instead of echoing them raw"
+	else
+		no "wt-enter control-byte blocker message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # THE NON-DESTRUCTION INVARIANT, which the next several cases each probe from a
 # different angle: whatever state the blocking worktree is in, wt-enter names it
 # and stops. It does not try to decide that a worktree is safe to throw away —
@@ -1248,8 +1319,10 @@ else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	errtext="$(cat "$EZ")"
-	# wt-enter's OWN sibling-conflict line, carrying the path in full.
-	want_nl="wt-enter: branch 'nl-b' is already checked out in another worktree at $WTZ;"
+	# wt-enter's OWN sibling-conflict line, carrying the path in full — in the
+	# shell-quoted spelling, which is also what keeps the newline from splitting
+	# the diagnosis across two lines on the way out.
+	printf -v want_nl "wt-enter: branch 'nl-b' is already checked out in another worktree at %q;" "$WTZ"
 	case "$errtext" in
 	*"$want_nl"*) ;;
 	*) miss="$miss no-blocking-path" ;;
@@ -1282,7 +1355,7 @@ else
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
 	errtext="$(cat "$ET")"
 	# The `;` right after the path is what pins that NOTHING was trimmed off it.
-	want_nlt="wt-enter: branch 'nlt-b' is already checked out in another worktree at $WTT;"
+	printf -v want_nlt "wt-enter: branch 'nlt-b' is already checked out in another worktree at %q;" "$WTT"
 	case "$errtext" in
 	*"$want_nlt"*) ;;
 	*) miss="$miss no-blocking-path" ;;

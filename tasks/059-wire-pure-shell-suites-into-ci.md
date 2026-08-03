@@ -21,11 +21,13 @@ Included:
 - Enumerate every `scripts/test-*.sh` that is genuinely hermetic (no image, no daemon, no network, no sudo/mount) and wire the full set, rather than hand-picking — the current five look arbitrary and that is how the gap arose.
 - Make the wiring **self-maintaining**: a newly added `scripts/test-*.sh` should be picked up automatically (glob + run), or a guard should fail when a suite exists that no runner references. A hand-maintained list will drift again — this task exists because it already did.
 - Explicitly classify any suite that is *not* hermetic (needs an image, a daemon, root, or the network) and route it to Tier 1 or document why it stays manual.
+- **Reconcile with the already-queued `tasks/053-wire-detect-shadows-suite-and-cover-mountpoint-ownership.md` before starting.** Its items 1 and 3 do for `test-detect-shadows.sh` alone exactly what this task does for the whole set — wire it into `commands/smoke-test.sh` Stage 0, and decide whether it also belongs in Tier 0 — so the two overlap on the same files (`commands/smoke-test.sh`, `.github/workflows/native-linux-ci.yml`) and on the same placement decision. **Do not schedule 053 and 059 in the same batch**: concurrent worktrees would land conflicting edits to those files and could wire the same suite twice, which is the hazard the bullet above forbids. Resolve it one of two ways and say which in the PR: land 053 first and let this task generalize its wiring to every hermetic suite (preferred — 053's item 2, the `shadow-mounts.sh` mountpoint-ownership coverage, is unrelated to this task and should not be delayed by it), or fold 053's items 1 and 3 into this task and re-scope 053 down to item 2 alone.
 - Update `AGENTS.md` → "Validating Changes" and the README CI description to say what is enforced where, so the docs stop implying more coverage than exists (or less).
 
 Out of scope:
 
 - Writing new tests or changing any existing suite's assertions.
+- Task 053's item 2 (automated coverage for the `shadow-mounts.sh` mountpoint-ownership `chown`) — that stays with 053 regardless of how the overlap above is resolved.
 - Changing the Tier 0 / Tier 1 split itself, or the `non-code` label behavior.
 - Making `shfmt` blocking (task 049 owns the extensionless-helper house style; that work is in flight and any gap it covers is non-blocking here).
 
@@ -35,7 +37,8 @@ Out of scope:
 - `.github/workflows/native-linux-build.yml` — Tier 1 build + smoke, skipped on `non-code`-labelled PRs.
 - `commands/smoke-test.sh` — Stage 0 is the hermetic stage; `commands/smoke-test.ps1` is its PowerShell sibling and must stay in step (CRLF, ASCII).
 - `AGENTS.md` → "Validating Changes" — currently names three suites as examples; it should describe the enforced set.
-- Suites present at time of writing: `test-sensitive-host-path.sh`, `test-detect-shadows.sh`, `test-pnpm-shadow-wrapper.sh`, `test-wt-orphan-safety.sh`, `test-pg-dev-up-scoped.sh`, `test-sync-codex-skills.sh`, `test-claude-hook-skew.sh`, `test-seed-marker-source.sh`, `test-shadow-refresh-guard.sh`, `test-gh-review-threads.sh`, `test-podman-compose-healthcheck.sh`, `test-peer-review-run.sh`.
+- `tasks/053-wire-detect-shadows-suite-and-cover-mountpoint-ownership.md` — queued, and its items 1 and 3 overlap this task's scope on the same files; see the reconciliation bullet in Scope before scheduling either.
+- Suites present at time of writing: `test-sensitive-host-path.sh`, `test-detect-shadows.sh`, `test-pnpm-shadow-wrapper.sh`, `test-wt-orphan-safety.sh`, `test-pg-dev-up-scoped.sh`, `test-sync-codex-skills.sh`, `test-claude-hook-skew.sh`, `test-context-mount-config.sh`, `test-seed-marker-source.sh`, `test-shadow-refresh-guard.sh`, `test-gh-review-threads.sh`, `test-podman-compose-healthcheck.sh`, `test-peer-review-run.sh`. Re-enumerate from `scripts/test-*.sh` at implementation time rather than trusting this list — the set grows, which is the whole point of the self-maintaining requirement above.
 
 ## Target files or areas
 

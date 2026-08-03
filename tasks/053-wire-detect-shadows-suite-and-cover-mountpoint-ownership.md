@@ -26,6 +26,8 @@ Raised by the independent reviewer during the PR #121 review round; deferred out
    Do this item **first** — but it is not the one-line step it looks like: the suite exercises the `.powbox.yml` branches, so the runner needs **`yq`** (mikefarah) as well as `jq` and `git`. Confirm whether `ubuntu-latest` still ships `yq`; if not, install it with a pinned version + upstream SHA256 exactly as the existing `Install shfmt` step does, and say which in the PR.
    Consider also making `scripts/test-detect-shadows.sh` fail fast with a clear message when `yq`/`jq` are missing, so a bare host run diagnoses itself instead of producing confusing assertion failures.
 
+**Overlaps `tasks/059-wire-pure-shell-suites-into-ci.md`.** Items 1 and 3 above are the single-suite case of what 059 does for every hermetic `scripts/test-*.sh`, and they touch the same files (`commands/smoke-test.sh`, `.github/workflows/native-linux-ci.yml`). Do not schedule 053 and 059 in the same batch — see 059's reconciliation bullet for the two acceptable orderings. Item 2 is unaffected either way.
+
 Out of scope:
 
 - Changing any behavior in `detect-shadows.sh` or `shadow-mounts.sh`.

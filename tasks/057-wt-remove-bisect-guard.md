@@ -11,6 +11,8 @@ Plain `git worktree remove` behaves the same way, so the helper's stated contrac
 
 Task 039 (PR #125) addressed the half it owned: `wt-enter` no longer *advises* removal at all. That is the braces. This task is the belt — the guard belongs in the helper that does the removing, so a caller who reaches for `wt-remove` directly is protected too.
 
+**Prerequisite: land PR #125 (task 039, branch `task/039-wt-enter-primary-checkout`) first.** That PR is what adds the `scripts/test-wt-orphan-safety.sh` fixtures this task builds on — interrupted rebase, bisect (detached and on-branch), interrupted revert — and the `destructive_advice` detector the acceptance criteria below name. None of them exist on `main` today; they live only on #125's branch, which is still open. Do not schedule this task until #125 is merged (or, at minimum, branch this work off #125's head and note the dependency in the PR) — otherwise the fixtures and the detector have to be written from scratch here and the acceptance criteria as written are unsatisfiable.
+
 Note the same review also found an interrupted `git revert` (`sequencer/` + `MERGE_MSG`, clean status) slipping through, which is why the scope below is an audit rather than a single `BISECT_LOG` check.
 
 ## Scope
@@ -34,7 +36,7 @@ Out of scope:
 - `docker/shared/wt-remove:104-110` — the current guard block.
 - `docker/shared/wt-common.sh` — where task 039 put its state-file readers; a `wt-remove`-side guard should reuse or mirror that resolution rather than re-deriving the git dir. Note 039's readers resolve the worktree's git dir with `git -C <wt> rev-parse --absolute-git-dir` **and cross-check the resolved toplevel**, because task worktrees live inside the main working tree, so a worktree that lost its `.git` pointer otherwise resolves against the *enclosing* repo and would report the wrong state.
 - `git`'s own `wt-status.c` (`wt_status_check_rebase` / `wt_status_check_bisect`) and `worktree.c` (`find_shared_symref`) — the authority for which state files mean "operation in progress", including the `rebase-apply` + `applying` marker that distinguishes `git am` from a rebase.
-- `scripts/test-wt-orphan-safety.sh` — the suite to extend; it already has fixtures for interrupted rebase, bisect (detached and on-branch), and mid-revert, plus a `destructive_advice` detector.
+- `scripts/test-wt-orphan-safety.sh` — the suite to extend. **On PR #125's branch** (not yet on `main` — see the prerequisite above) it gains fixtures for interrupted rebase, bisect (detached and on-branch), and interrupted revert, plus a `destructive_advice` detector; reuse those rather than rebuilding them. The suite already honours a `POWBOX_WT_REMOVE` override, which is how the new cases are shown to be load-bearing against the pre-change helper.
 
 ## Target files or areas
 
@@ -55,7 +57,7 @@ Out of scope:
 - A worktree with a bisect in progress is **not** removed, with or without `--force`, and the refusal names the bisect — verified by test.
 - The same holds for every other state the audit identifies (at minimum a multi-commit `revert`/`cherry-pick` `sequencer/` and `REVERT_HEAD`).
 - A clean worktree is still removed normally, and `--force` still works for ignored build artifacts after the clean checks pass — verified by test.
-- The refusal message points at inspection only; the suite's `destructive_advice` detector passes on it.
+- The refusal message points at inspection only, and the suite's `destructive_advice` detector passes on it (the detector arrives with PR #125 — see the prerequisite; if #125 has somehow not landed, this task must add an equivalent detector rather than drop the criterion).
 - `wt-remove`'s header contract, `container-agent.md.tmpl`'s bullet, and any README mention all match the new behavior.
 
 ## Validation

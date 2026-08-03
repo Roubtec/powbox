@@ -1196,7 +1196,7 @@ run_attempt() {
 	fi
 
 	# Launch the provider as its OWN process group (set -m gives each job its own
-	# group) so the whole tree can be reaped by group id. The subshell exec's into
+	# group) so the whole tree can be reaped by group id. The subshell execs into
 	# the provider and is the group leader.
 	FWD_LINES=0
 	set -m

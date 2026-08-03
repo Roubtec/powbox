@@ -23,9 +23,11 @@
 #
 # Installed as /usr/local/bin/{pnpm,pn} (replacing the global-npm symlinks) so it
 # transparently covers both the agents' non-interactive Bash and a human shell
-# without depending on a shell rc file.  It *always* execs the real pnpm, so a
-# shadow-refresh failure (no mount capability, self-hosted mode, etc.) can never
-# block the actual command.
+# without depending on a shell rc file.  It *always* execs the real pnpm, so
+# neither a shadow-refresh failure (no mount capability, etc.) nor a deliberate
+# skip can ever block the actual command.  Self-hosted mode is the latter: the
+# wrapper returns before refreshing (see refresh_shadows) and shadow-refresh.sh
+# itself exits 0 without mounting.
 set -uo pipefail
 
 # npm always unpacks a global package at lib/node_modules/<name>, so this directory

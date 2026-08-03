@@ -68,9 +68,15 @@ FAKE_NODE_GID=4002
 # --- the relocated copy of the script under test ------------------------------
 # Only the `workspace_root=` assignment is functional; the /workspace strings in
 # the diagnostics are cosmetic and deliberately left alone.
+#
+# The generated assignment single-quotes the relocated root so a TMPDIR with
+# spaces still produces a valid `realpath` argument.  The sed EXPRESSION still
+# interpolates $WS_ROOT unquoted, which is safe because the delimiter is '#' and
+# a mktemp -d path cannot contain '#' or a newline; the FATAL below is the
+# backstop either way — an unrelocated copy never runs.
 SUT="$WORK_ROOT/shadow-mounts.sh"
-sed "s#^workspace_root=.*#workspace_root=\"\$(realpath ${WS_ROOT})\"#" "$SRC" >"$SUT"
-if ! grep -qF "realpath ${WS_ROOT}" "$SUT"; then
+sed "s#^workspace_root=.*#workspace_root=\"\$(realpath -- '${WS_ROOT}')\"#" "$SRC" >"$SUT"
+if ! grep -qF "realpath -- '${WS_ROOT}'" "$SUT"; then
 	echo "FATAL: could not relocate the /workspace root in $SRC — the 'workspace_root=' assignment this suite rewrites has moved or been renamed. Fix the sed above; do NOT let the suite run against an unrelocated copy (it would operate on the real /workspace)." >&2
 	exit 1
 fi
@@ -133,15 +139,18 @@ printf 'mount %s\n' "$*" >>"$SHIM_LOG"
 exit 0
 SHIM
 
-# mountpoint -q <path>: true only for paths listed in $MOUNTPOINTS.
+# mountpoint -q <path>: true only for paths listed in $MOUNTPOINTS, ONE PER LINE
+# (not whitespace-separated — a TMPDIR containing a space would otherwise split a
+# fixture path into two entries and silently stop matching).
 cat >"$BIN/mountpoint" <<'SHIM'
 #!/usr/bin/env bash
 target="${!#}"
 printf 'mountpoint %s\n' "$target" >>"$SHIM_LOG"
 if [ -n "${MOUNTPOINTS:-}" ]; then
-	for m in $MOUNTPOINTS; do
+	while IFS= read -r m; do
+		[ -n "$m" ] || continue
 		[ "$m" = "$target" ] && exit 0
-	done
+	done <<<"$MOUNTPOINTS"
 fi
 exit 1
 SHIM

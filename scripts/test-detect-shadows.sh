@@ -8,18 +8,25 @@
 # (including symlink escape) and confirms the pnpm/npm workspace logic is
 # unchanged.
 #
-# Runs directly against the repo copy of detect-shadows.sh — no image build
-# needed.  Requires bash, git, jq, and yq on PATH (all present in the agent
+# Runs directly against the repo copy of detect-shadows.sh by default — no image
+# build needed.  Requires bash, git, jq, and yq on PATH (all present in the agent
 # image).  The yq must be the JQ-BACKED python-yq, not mikefarah's Go yq — see
 # deps_ok below; the interface is probed up front so an incompatible one fails
 # with one clear FATAL instead of a scatter of confusing assertion failures.
+#
+# Scripts under test are overridable so the same suite can be pointed at the
+# BAKED /usr/local/bin copies inside the image instead of the repo source, the
+# way scripts/test-wt-orphan-safety.sh takes POWBOX_WT_*.  commands/smoke-test.sh
+# uses that for its in-image run, so a stale baked detect-shadows.sh is caught by
+# a real suite rather than only by Stage 1's `command -v` presence probe; Tier 0
+# CI runs the same suite unset, i.e. against the repo source.
 #
 # Usage: scripts/test-detect-shadows.sh [--check-deps]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DETECT="$SCRIPT_DIR/../docker/shared/detect-shadows.sh"
-DOCTOR="$SCRIPT_DIR/../docker/shared/pnpm-shadow-doctor"
+DETECT="${POWBOX_DETECT_SHADOWS:-$SCRIPT_DIR/../docker/shared/detect-shadows.sh}"
+DOCTOR="${POWBOX_PNPM_SHADOW_DOCTOR:-$SCRIPT_DIR/../docker/shared/pnpm-shadow-doctor}"
 
 # yq_capable — behavioral capability probe for the jq-backed `yq -r <jq filter>`
 # interface (python-yq) that detect-shadows.sh relies on.  It exercises the two

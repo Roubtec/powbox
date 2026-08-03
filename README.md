@@ -945,9 +945,11 @@ workflows keep cost proportional to the change:
   image and is the only regression net for `detect-shadows.sh`'s security
   properties (under-workspace-root validation, symlink skip, Git-tracked-content
   veto, newline rejection, workspace-glob containment). That suite needs the
-  **jq-backed python-yq**, so the job installs it via `pipx` and puts it ahead of
-  the runner image's preinstalled mikefarah Go `yq`, which cannot parse the jq
-  filters `detect-shadows.sh` issues.
+  **jq-backed python-yq**, so the job installs it into a throwaway venv from
+  `.github/requirements/python-yq.txt` — the whole dependency closure pinned and
+  SHA256-verified via `pip --require-hashes`, the same pinned-and-hashed contract
+  as the `shfmt` step — and puts it ahead of the runner image's preinstalled
+  mikefarah Go `yq`, which cannot parse the jq filters `detect-shadows.sh` issues.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
   builds the agent image and runs `./commands/smoke-test.sh` under
   `POWBOX_SMOKE_REQUIRE_IMAGE=1` so no stage self-skips into a false green. It

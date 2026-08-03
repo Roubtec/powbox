@@ -166,15 +166,18 @@ else {
 # workspace-glob containment. It needs git, jq and a JQ-BACKED yq (python-yq -
 # detect-shadows.sh issues jq filters such as `.shadow[]? // empty`, which mikefarah's
 # Go yq rejects), none of which a Windows host has natively, so run it INSIDE the agent
-# image with the repo mounted read-only. Self-skips (recorded in $skipped) when the
-# image is absent; Tier 0 CI runs the same suite on every PR.
+# image with the repo mounted read-only, pointed at the BAKED /usr/local/bin copies
+# (POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR - the shape Stage 0c uses for the
+# wt-* helpers) so a stale baked detect-shadows.sh is caught by a real suite rather than
+# by Stage 1's presence probe. Self-skips (recorded in $skipped) when the image is absent;
+# Tier 0 CI runs the same suite against the /repo source on every PR.
 if (-not $imagePresent) {
   Write-Warning "Skipping detect-shadows unit suite (Stage 0g) - image '$Image' not found (no native bash/yq/jq on Windows to run it hermetically)."
   $skipped.Add("Stage 0g: detect-shadows unit suite (image absent)")
 }
 else {
-  Write-Host "Running detect-shadows unit suite (in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-detect-shadows.sh
+  Write-Host "Running detect-shadows unit suite (baked scripts in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" -e POWBOX_DETECT_SHADOWS=/usr/local/bin/detect-shadows.sh -e POWBOX_PNPM_SHADOW_DOCTOR=/usr/local/bin/pnpm-shadow-doctor --entrypoint /bin/bash $Image /repo/scripts/test-detect-shadows.sh
   if ($LASTEXITCODE -ne 0) {
     throw "detect-shadows unit suite failed. See container output above."
   }
@@ -187,7 +190,9 @@ else {
 # inherits the DEEPEST EXISTING ancestor's uid:gid before the mount goes on top, with
 # exactly one warning per run when that fails. Without the chown, a created mountpoint
 # outlives the container as a root-owned directory on the host's own checkout. The Bash
-# smoke runs it on the host; Windows has no native bash, so run it in the image.
+# smoke prefers the same in-image run (the code under test calls GNU-only `realpath -m/-e`,
+# so its host fallback is Linux-only); Windows has no native bash at all, so run it in the
+# image or record a skip.
 if (-not $imagePresent) {
   Write-Warning "Skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) - image '$Image' not found (no native bash on Windows to run it hermetically)."
   $skipped.Add("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent)")

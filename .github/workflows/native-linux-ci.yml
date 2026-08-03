@@ -164,27 +164,28 @@ jobs:
       # `empty` ("invalid input text \"empty\""), and 22 of the suite's 170
       # assertions fail under it. So install python-yq and make it win on PATH.
       #
-      # pipx (documented on the runner image) keeps it in its own venv, and only
-      # the `yq` entry point is symlinked into $RUNNER_TEMP/bin — the same dir
-      # the shfmt step prepends via $GITHUB_PATH — so the runner's own python and
-      # pip stay untouched and the correct yq shadows /usr/bin/yq.
+      # Pinned AND SHA256-verified, the same contract as the `Install shfmt` step
+      # above: .github/requirements/python-yq.txt pins python-yq and its whole
+      # dependency closure (pyyaml, argcomplete, tomlkit, xmltodict) with `==` and
+      # carries every upstream PyPI SHA256 for each, and `--require-hashes` fails
+      # the build on any mismatch. Listing every published file per version (all
+      # wheel tags plus the sdist) keeps it independent of the runner's arch and
+      # Python minor; a Python newer than the pinned wheel tags falls back to the
+      # hashed sdist and builds from source rather than breaking. See that file's
+      # header for the regeneration recipe and the version-drift note.
       #
-      # Pinning: the version is pinned (PyPI versions are immutable) but there is
-      # no SHA256 as in the shfmt step above. shfmt is one static binary from one
-      # URL; python-yq is a wheel plus four transitive deps (pyyaml, argcomplete,
-      # tomlkit, xmltodict) whose wheel set is Python-tag and platform specific,
-      # so `--require-hashes` would break the moment ubuntu-latest rolls its
-      # Python. The pin is still strictly stronger than the image's own unpinned
-      # install; bump it alongside the Dockerfile if that ever gets pinned.
-      - name: Install python-yq (jq-backed yq)
-        env:
-          # Matches the version the agent image resolves today.
-          PYTHON_YQ_VERSION: '4.1.2'
+      # A plain venv rather than pipx: pip's --require-hashes needs a requirements
+      # file, which pipx cannot pass through cleanly. Only the `yq` entry point is
+      # symlinked into $RUNNER_TEMP/bin — the same dir the shfmt step prepends via
+      # $GITHUB_PATH — so the runner's own python and pip stay untouched and the
+      # correct yq shadows /usr/bin/yq.
+      - name: Install python-yq (jq-backed yq, hash-verified)
         run: |
-          pipx install "yq==${PYTHON_YQ_VERSION}"
-          bin_dir="$(pipx environment --value PIPX_BIN_DIR)"
+          python3 -m venv "$RUNNER_TEMP/python-yq"
+          "$RUNNER_TEMP/python-yq/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes -r .github/requirements/python-yq.txt
           mkdir -p "$RUNNER_TEMP/bin"
-          ln -sf "$bin_dir/yq" "$RUNNER_TEMP/bin/yq"
+          ln -sf "$RUNNER_TEMP/python-yq/bin/yq" "$RUNNER_TEMP/bin/yq"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
       # The detect-shadows unit suite: the repo's largest pure-shell suite, and a

@@ -38,9 +38,16 @@ if ($Commands.Count -eq 0) {
 # text can reach past it to the `then`/`else` line. Keeping `set -e` semantics
 # identical is why it is an `if` condition specifically: `set -e` is suspended inside
 # an `if` condition just as it is in the first element of an `||` list, so
-# `A && B && C` behaves exactly as it did - but a probe that strings commands
-# together with `;` inside a `{ ...; }` group still has its non-final members
-# unenforced. Write such a probe as an `&&` chain instead.
+# `A && B && C` behaves exactly as it did. That same suspension is the ONE shape
+# where this form enforces LESS than before: a probe that strings commands together
+# with `;` - bare, or inside a `{ ...; }` group; the braces make no difference - has
+# its non-final members unenforced here, whereas both a bare `set -e` line and a
+# same-line `|| { ...; exit 1; }` tail did abort on them. Verified in dash:
+# `if false; true` / `then ...; else ...; fi` takes the THEN branch at rc=0, while
+# `false; true` as a bare line under `set -e` exits 1. Which is exactly why the
+# instruction is: write every probe as an `&&` chain. A probe ending in `&` is
+# unenforced too - an async list's status is always 0 - but that is unchanged from
+# before, not a new loss.
 #
 # The guard embeds only a probe INDEX, never the probe text. Probe strings carry
 # single quotes, double quotes, `$`, backticks, backslashes, `|` and `&&`; splicing
@@ -61,11 +68,18 @@ if ($Commands.Count -eq 0) {
 #     guard (a syntax error in practice, i.e. fail-closed, but with an opaque
 #     message; rejecting it here says what is actually wrong).
 # Quote balance inside a probe stays the AUTHOR's responsibility: an unterminated
-# quote swallows the following line(s) into the probe's argument. That always fails
-# closed - it can never turn a failure into a pass - but it can misattribute the
-# reported index, so a red run whose index looks wrong is worth a quoting check. It
-# is not validated here because the only cheap check (`sh -n`) has no equivalent in
-# this .ps1 mirror, and the two drivers must emit byte-identical scripts.
+# quote swallows the following line(s) into the probe's argument. ONE unbalanced
+# probe fails closed - nothing later re-closes the quote, so `sh` hits EOF and the
+# run dies with an (opaque, but red) syntax error. TWO do NOT: the second's quote
+# re-balances the first, and the first probe's guard AND its assertion vanish inside
+# the swallowed string, so a failing probe can report a PASS. Verified with probes
+# `[ -n "" ] "` / `" ; true` / `true`: the one surviving `if` condition ends in
+# `true`, and the run exits 0 with only a stray `[: missing ]` on stderr. So keep
+# quotes balanced - a red run whose index looks wrong, and a green run you did not
+# expect, are both worth a quoting check. It is not validated here because REJECTION
+# must be identical in the .sh driver and the only cheap check (`sh -n`) has no
+# PowerShell equivalent: a probe one driver refused and the other ran is a worse hole
+# than this one. (Emission parity is not the reason - a check here emits no bytes.)
 #
 # Deliberately NOT `set -o pipefail`. Two reasons, neither of them "it would break
 # today's probes": (1) pipefail is not POSIX - it happens to work in the image's

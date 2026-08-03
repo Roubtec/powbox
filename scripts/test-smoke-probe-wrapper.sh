@@ -20,6 +20,12 @@
 #   * newline-bearing, empty and line-continuation probes are rejected before
 #     docker is invoked;
 #   * the .sh and .ps1 drivers emit byte-identical scripts.
+#
+# Section J is different in kind: it CHARACTERIZES the accepted limitations the
+# drivers' comment blocks document (unbalanced quotes, `;` sequences, a trailing
+# `&`). Those assertions pin what the wrapper does, not what it should do - a
+# change that closes one of those holes should flip the assertion and the prose,
+# not be reverted.
 # shellcheck disable=SC2016  # single-quoted probe/PowerShell text is LITERAL by design here
 # shellcheck disable=SC1003  # trailing backslashes in probe literals are the payload, not an escape
 set -uo pipefail
@@ -487,6 +493,88 @@ elif diff -u <(strip_quotes "$sh_probes") <(strip_quotes "$ps_probes") >"$TMP/pr
 	ok "Stage 1 probe payloads match ($(wc -l <"$sh_probes") probes)"
 else
 	bad "Stage 1 probe lists diverged between .sh and .ps1" "$(head -40 "$TMP/probe.diff")"
+fi
+
+printf 'J. CHARACTERIZATION of the accepted limitations (NOT desired behaviour)\n'
+# Everything in this section pins a hole the drivers' comment blocks document as
+# an accepted limitation. These assertions describe what the wrapper DOES, not
+# what it SHOULD do: a future change that closes one of these holes is an
+# improvement, and the right response is to flip the assertion, not to revert.
+# They exist so the documented hazards are pinned by a test rather than only
+# described in prose, and so a silent DRIFT in either direction is visible.
+
+# J1. Unbalanced quotes: a SINGLE offender fails closed. The quote is never
+# re-closed, so `sh` reaches EOF inside the string and the whole run dies.
+run_driver 1 "$TMP/j1.out" \
+	'[ -n "" ] "' \
+	"true"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	ok "one unbalanced probe fails closed (rc=$rc)"
+else
+	bad "one unbalanced probe did not fail the run" "$(cat "$TMP/j1.out")"
+fi
+
+# J2. ...but TWO of them re-balance each other, and probe 1's guard AND its
+# failing assertion disappear inside the swallowed string, so the run reports a
+# PASS. This is the hazard the comment blocks warn about; keep quotes balanced.
+run_driver 1 "$TMP/j2.out" \
+	'[ -n "" ] "' \
+	'" ; true' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q "Smoke test passed" "$TMP/j2.out"; then
+	ok "ACCEPTED HOLE: two unbalanced probes swallow probe 1's guard and pass"
+else
+	bad "two-unbalanced-probe swallow no longer reproduces (rc=$rc) - if the driver now rejects or catches this, update the comment blocks in scripts/smoke-test-image.{sh,ps1}, commands/smoke-test.{sh,ps1} and docs/architecture.md, then flip this assertion" "$(cat "$TMP/j2.out")"
+fi
+
+# J3. A `;` sequence: the `if` condition suspends `set -e` for its non-final
+# members, so a failing one is NOT enforced. This is the one shape where the
+# wrapper enforces LESS than the pre-fix bare line did - hence "write probes as
+# `&&` chains". No shipped probe has this shape.
+run_driver 1 "$TMP/j3.out" \
+	"true" \
+	'false; true' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "ACCEPTED HOLE: a failing non-final member of a \`;\` sequence is unenforced"
+else
+	bad "a \`;\`-sequence member became binding (rc=$rc) - a welcome change, but update the comment blocks and flip this assertion" "$(cat "$TMP/j3.out")"
+fi
+# The braces are irrelevant - a `{ ...; }` group behaves identically, so the
+# carve-out must not be written as if grouping were the trigger.
+run_driver 1 "$TMP/j3b.out" \
+	"true" \
+	'{ false; true; }' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "same for a \`{ ...; }\` group (grouping is not what causes it)"
+else
+	bad "grouped \`;\` sequence behaved differently from the bare one (rc=$rc)" "$(cat "$TMP/j3b.out")"
+fi
+# ...and the claim that this is a NARROWING is not vacuous: the pre-fix bare line
+# really did abort on the same sequence.
+if /bin/sh -c $'set -e\ntrue\nfalse; true\ntrue\n'; then
+	bad "a bare \`set -e\` line no longer aborts on \`false; true\` - the \"enforces less\" note in the drivers is then wrong"
+else
+	ok "a bare \`set -e\` line does abort on it, so the narrowing note is accurate"
+fi
+
+# J4. A probe ending in `&` backgrounds its command; an async list's status is
+# always 0, so it can never fail. Unchanged from the pre-fix join (a bare `false &`
+# line did not trip `set -e` either), and only reachable via a nonsense probe.
+run_driver 1 "$TMP/j4.out" \
+	"true" \
+	'false &' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "ACCEPTED HOLE: a probe ending in \`&\` always reports success"
+else
+	bad "a backgrounded probe became binding (rc=$rc) - update the comment blocks and flip this assertion" "$(cat "$TMP/j4.out")"
 fi
 
 printf '\n%d check(s), %d failure(s)\n' "$checks" "$failures"

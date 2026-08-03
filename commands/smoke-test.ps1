@@ -252,8 +252,13 @@ else {
 # Consequences for probe authors: do NOT hand-roll a per-probe
 # `|| { ...; exit 1; }` tail (the driver supplies one, and a second is redundant);
 # keep every probe single-line and free of a trailing line continuation - the
-# driver rejects both outright; and keep quotes balanced, which the driver does
-# NOT validate (an unterminated quote fails closed but can misreport the index).
+# driver rejects both outright; write each probe as an `&&` chain, because the
+# `if` condition suspends `set -e` for the non-final members of a `;` sequence
+# (the one shape this form enforces LESS than a bare line did) and a probe ending
+# in `&` reports 0 whatever it did; and keep quotes balanced, which the driver
+# does NOT validate - ONE unbalanced probe fails closed on an EOF syntax error,
+# but TWO re-balance each other and silently swallow the first one's guard AND
+# its assertion, turning a failure into a pass.
 # Because the diagnostic carries only an index, it quotes the probe's source text
 # and not any runtime value it saw - re-run the probe from the manifest to get
 # that. Pipeline-shaped probes (`X | grep -q Y`) are unaffected either way: the

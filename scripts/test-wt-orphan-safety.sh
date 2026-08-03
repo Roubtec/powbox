@@ -18,18 +18,22 @@
 #   * wt-remove's OPERATION-IN-PROGRESS guard (task 039 found the hole, task 057
 #     closed it): the helper promises to remove a worktree but never work, and
 #     `git status --porcelain` is EMPTY for a bisect, a `git am`, a rebase paused
-#     at a `break`, a cherry-pick/revert SEQUENCE stopped on an empty patch, and
-#     any conflict resolved back to HEAD's content — so each of those was, or
-#     could have been, deleted silently. Every state git can leave behind is
-#     fabricated with REAL git and pinned: the removal must be refused WITH and
-#     WITHOUT --force, the worktree and its state files must survive untouched,
-#     the refusal must NAME the operation, and it must pass the same
-#     destructive_advice detector wt-enter's messages do — naming `--abort` or
-#     `bisect reset` is the same loss by another route. The fail-safe direction
-#     is pinned too (metadata that cannot be read ⇒ refuse, the opposite of
-#     wt-enter's bias), as is the absence of FALSE refusals: a clean worktree is
-#     still removed, --force still reaches git once the clean checks pass, and a
-#     bisect in the MAIN checkout does not leak into a task worktree's verdict.
+#     at a `break`, a cherry-pick/revert SEQUENCE stopped on an empty patch, a
+#     conflicted `git notes merge` (whose conflict lives entirely in the admin
+#     dir, so `git status` says nothing at all), and any conflict resolved back to
+#     HEAD's content — so each of those was, or could have been, deleted silently.
+#     Every state git can leave behind is fabricated with REAL git and pinned: the
+#     removal must be refused WITH and WITHOUT --force, the worktree and its state
+#     files must survive untouched, the refusal must NAME the operation, and it
+#     must pass the same destructive_advice detector wt-enter's messages do —
+#     naming `--abort` or `bisect reset` is the same loss by another route. The
+#     fail-safe direction is pinned too (metadata that cannot be read ⇒ refuse,
+#     the opposite of wt-enter's bias), as is the absence of FALSE refusals: a
+#     clean worktree is still removed, --force still reaches git once the clean
+#     checks pass, a bisect in the MAIN checkout does not leak into a task
+#     worktree's verdict, and a notes merge CONCLUDED with either --commit or
+#     --abort still removes cleanly despite the NOTES_MERGE_WORKTREE dir git
+#     leaves behind (which is why the guard keys on the markers, not that dir).
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
@@ -1181,6 +1185,66 @@ else
 	no "precondition: a single-commit revert should leave no sequencer/ (else REVERT_HEAD is not what is under test)"
 fi
 
+# --- a conflicted `git notes merge` -----------------------------------------
+# The gap the round-3 audit found. A notes merge is the one operation whose whole
+# conflict lives in the worktree's ADMIN dir and nowhere in the working tree at
+# all, so `git status --porcelain` is empty and `git status` says nothing
+# whatsoever — there is not even a "You have unmerged paths" line to notice.
+# Removing the worktree takes NOTES_MERGE_WORKTREE, i.e. the unresolved notes,
+# with it.
+#
+# The markers are strictly PER-WORKTREE (verified: the same merge run in the main
+# checkout writes them into `.git/`, not into `.git/worktrees/<slug>/`), so
+# guarding them cannot make a sibling's notes merge block this removal.
+notes_merge_repo() { # <name> -> echoes ROOT, with worktree <slug> mid-notes-merge
+	local root slug="$2"
+	root="$(make_repo "$1")"
+	git_quiet -C "$root" branch "$slug-b" >/dev/null 2>&1
+	git_quiet -C "$root" worktree add -q "$root/.worktrees/$CONTAINER_NAME/$slug" "$slug-b" >/dev/null 2>&1
+	git_quiet -C "$root" notes --ref=A add -m "note from A" HEAD >/dev/null 2>&1
+	git_quiet -C "$root" notes --ref=B add -m "note from B" HEAD >/dev/null 2>&1
+	git_quiet -C "$root/.worktrees/$CONTAINER_NAME/$slug" notes --ref=A merge B >/dev/null 2>&1 || true
+	printf '%s' "$root"
+}
+
+RS8="$(notes_merge_repo rs-notes nm)"
+GD8="$RS8/.git/worktrees/nm"
+if [ -e "$GD8/NOTES_MERGE_PARTIAL" ] && [ -e "$GD8/NOTES_MERGE_REF" ] &&
+	[ -n "$(ls -A "$GD8/NOTES_MERGE_WORKTREE" 2>/dev/null)" ]; then
+	miss="$(wt_remove_must_refuse "a 'git notes' merge (NOTES_MERGE_PARTIAL)" "$RS8" nm "$GD8/NOTES_MERGE_PARTIAL")"
+	# The unresolved notes themselves, not just the marker, have to survive.
+	[ -n "$(ls -A "$GD8/NOTES_MERGE_WORKTREE" 2>/dev/null)" ] ||
+		miss="$miss unresolved-notes-lost"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a worktree with a conflicted 'git notes merge' (clean status, nothing in the working tree at all)"
+	else
+		no "wt-remove notes-merge guard inadequate:$miss"
+	fi
+else
+	no "precondition: a conflicting notes merge should leave NOTES_MERGE_PARTIAL, NOTES_MERGE_REF and a non-empty NOTES_MERGE_WORKTREE in the worktree's admin dir"
+fi
+
+# NOTES_MERGE_REF alone. Both markers are guarded because `git notes merge
+# --commit` needs BOTH — with NOTES_MERGE_PARTIAL gone it dies with "failed to
+# read ref NOTES_MERGE_PARTIAL" (verified) — so this half-torn-down shape is one
+# where the notes CANNOT be recovered by concluding the merge and the conflict
+# directory is the only copy left. It is also the only fixture that can prove the
+# NOTES_MERGE_REF half of the guard load-bearing: the case above carries both
+# files, so dropping REF from wt-remove's state list would leave it passing.
+RS9="$(notes_merge_repo rs-notesref nmr)"
+GD9="$RS9/.git/worktrees/nmr"
+rm -f "$GD9/NOTES_MERGE_PARTIAL"
+if [ ! -e "$GD9/NOTES_MERGE_PARTIAL" ] && [ -e "$GD9/NOTES_MERGE_REF" ]; then
+	miss="$(wt_remove_must_refuse "a 'git notes' merge (NOTES_MERGE_REF)" "$RS9" nmr "$GD9/NOTES_MERGE_REF")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a half-torn-down notes merge: NOTES_MERGE_REF with no NOTES_MERGE_PARTIAL"
+	else
+		no "wt-remove NOTES_MERGE_REF-only guard inadequate:$miss"
+	fi
+else
+	no "precondition: the half-torn-down notes fixture should hold NOTES_MERGE_REF and no NOTES_MERGE_PARTIAL"
+fi
+
 # --- the states that were ALREADY guarded, re-pinned in their CLEAN shapes ---
 # They are in the guard set because git's own wt-status.c reads them, and each is
 # reachable with an empty porcelain — the shape in which only the guard stands
@@ -1378,9 +1442,14 @@ fs_case "wt-remove refuses when a worktree's registration cannot be read (fail s
 	"chmod 000 '$RF1/.git/worktrees/opaque/gitdir'" \
 	"chmod 644 '$RF1/.git/worktrees/opaque/gitdir'"
 
-# (b) The admin dir resolves but is not READABLE, so the state files inside it
-# cannot be enumerated or probed. An `-e` test would answer "absent" for every
-# one of them — i.e. "nothing in flight" — which is the wrong direction.
+# (b) The admin dir resolves but is not READABLE, so its state files cannot be
+# enumerated. Mode 111 is still traversable, so an `-e` probe BY NAME does answer
+# correctly here — which is exactly why the guard requires `-r` as well and not
+# just `-x`: a dir that cannot be listed is one whose contents nobody, including
+# git itself, can establish, and "we could not read the state" has to mean refuse
+# rather than "nothing in flight". Dropping the `-r` would also leave a mode-000
+# dir (not traversable, `-e` then answers "absent" for every state file) resting
+# on `-x` alone.
 RF2="$(make_repo rf-admindir)"
 git_quiet -C "$RF2" worktree add -q "$RF2/.worktrees/$CONTAINER_NAME/shut" -b shut-b >/dev/null 2>&1
 fs_case "wt-remove refuses when a worktree's admin git dir is unreadable (fail safe)" \
@@ -1532,6 +1601,46 @@ if [ -z "$(git -C "$RC3/.worktrees/$CONTAINER_NAME/art" status --porcelain)" ] &
 else
 	no "wt-remove --force did not remove a clean worktree with ignored artifacts: $(cat "$WORK_ROOT/rc3.err")"
 fi
+
+# A CONCLUDED notes merge must still remove. This is the case that decides WHICH
+# notes marker the guard may probe, and it is not academic: `NOTES_MERGE_WORKTREE`
+# — the directory git's own error message points the user at — SURVIVES both
+# termination paths as an empty dir, and git treats an empty one as "no merge in
+# progress" (a fresh `git notes merge` starts fine beside it). Guarding it with
+# `-e` would refuse every worktree that had ever finished a notes merge, forever.
+# NOTES_MERGE_PARTIAL and NOTES_MERGE_REF are cleared by BOTH paths, which is why
+# they are what the guard keys on; both paths are pinned here so a later widening
+# of the guard to the directory cannot pass unnoticed.
+for nm_end in abort commit; do
+	RC4="$(notes_merge_repo "rc-notes-$nm_end" "nm$nm_end")"
+	NM_WT="$RC4/.worktrees/$CONTAINER_NAME/nm$nm_end"
+	NM_GD="$RC4/.git/worktrees/nm$nm_end"
+	if [ "$nm_end" = commit ]; then
+		# Resolve the conflicted note, then conclude the merge for real.
+		for nm_f in "$NM_GD/NOTES_MERGE_WORKTREE"/*; do
+			[ -e "$nm_f" ] || continue
+			printf 'resolved\n' >"$nm_f"
+		done
+	fi
+	git_quiet -C "$NM_WT" notes merge "--$nm_end" >/dev/null 2>&1 || true
+	miss=""
+	[ ! -e "$NM_GD/NOTES_MERGE_PARTIAL" ] || miss="$miss fixture-PARTIAL-not-cleared"
+	[ ! -e "$NM_GD/NOTES_MERGE_REF" ] || miss="$miss fixture-REF-not-cleared"
+	# The precondition that makes this case worth having: the directory is still
+	# there. If git ever starts removing it, this assertion is the thing that says
+	# the exclusion can be revisited.
+	[ -d "$NM_GD/NOTES_MERGE_WORKTREE" ] || miss="$miss fixture-dir-no-longer-survives"
+	if [ -z "$miss" ]; then
+		if (cd "$RC4" && bash "$WT_REMOVE" "nm$nm_end" 2>"$WORK_ROOT/rc4-$nm_end.err") &&
+			[ ! -e "$NM_WT" ]; then
+			ok "wt-remove still removes a worktree whose notes merge was concluded with --$nm_end (the leftover NOTES_MERGE_WORKTREE dir is not state)"
+		else
+			no "wt-remove FALSE-REFUSED a worktree after 'git notes merge --$nm_end': $(cat "$WORK_ROOT/rc4-$nm_end.err")"
+		fi
+	else
+		no "precondition: 'git notes merge --$nm_end' should clear both markers and leave the dir:$miss"
+	fi
+done
 
 # ---------------------------------------------------------------------------
 # Integration: wt-enter names the PRIMARY checkout when it is what blocks the

@@ -4,23 +4,27 @@
 #
 # Usage: wt-remove <slug> [--force]
 #
-# Guards (all hard refusals, exit 1, worktree left in place), checked in this
-# order so the most specific diagnosis is the one the caller gets:
+# Guards (all hard refusals, exit 1, worktree left in place), in the order the
+# code below actually checks them — each one is a precondition for the next, so
+# the earliest that fires is also the most specific diagnosis available at that
+# point:
+#   * being invoked from inside the worktree being removed
+#   * a worktree whose own git metadata cannot be located or read, so nothing
+#     below it can be established at all (fail safe: unknown means refuse)
 #   * ANY operation git can leave in progress in that worktree — a rebase
 #     (either backend), a `git am`, a merge, a cherry-pick, a revert, a
-#     cherry-pick/revert SEQUENCE, or a bisect. Several of those leave
-#     `git status --porcelain` EMPTY, so this guard is what stands between them
-#     and deletion; it is keyed on the same per-worktree state files git itself
-#     consults (see the audit above the guard block below). It is checked FIRST
-#     because a conflicted operation is also dirty, and naming the operation is
-#     strictly more useful than naming the dirt
+#     cherry-pick/revert SEQUENCE, a bisect, or a `git notes` merge. Several of
+#     those leave `git status --porcelain` EMPTY, so this guard is what stands
+#     between them and deletion; it is keyed on the same per-worktree state files
+#     git itself consults (see the audit above the guard block below). It is
+#     checked BEFORE the uncommitted-changes guard because a conflicted operation
+#     is also dirty, and naming the operation is strictly more useful than naming
+#     the dirt
+#   * a worktree whose status cannot be read, so its cleanliness cannot be
+#     established (fail safe again — an empty `git status` stdout is NOT proof of
+#     a clean tree when the command failed)
 #   * uncommitted changes (`git status --porcelain` non-empty) — even with
 #     --force; commit/push or move them aside first, never delete evidence
-#   * a worktree whose own git metadata cannot be located or read, or whose
-#     status cannot be read at all, so its operation state or cleanliness
-#     cannot be established (fail safe: unknown means refuse — an empty
-#     `git status` stdout is NOT proof of a clean tree when the command failed)
-#   * being invoked from inside the worktree being removed
 # Both the state files and the status are read through the worktree's OWN git
 # dir, resolved from the repository's registrations — never as `git -C <wt>`,
 # which resolves upward into the enclosing checkout for a worktree that lost its
@@ -29,7 +33,8 @@
 # `git worktree remove` ONLY after every check above passes (for e.g. ignored
 # build artifacts git refuses to auto-remove).
 #
-# A refusal NAMES the operation and points at INSPECTION only. It never suggests
+# A refusal NAMES the operation, and the state file it was found by, and points
+# at INSPECTION only. It never suggests
 # a way to discard the work — `--abort`, `reset --hard`, `bisect reset` and
 # friends each throw away state that may exist nowhere else, and deciding that is
 # not this script's call. If a maintainer genuinely wants a mid-operation
@@ -101,12 +106,24 @@ remove_lint_cache() {
 	local cache="$ROOT/.worktrees/.golangci-cache/$CONTAINER_NAME/$SLUG"
 	[ -d "$cache" ] || return 0
 	rm -rf "$cache" 2>/dev/null ||
-		printf '%s\n' "wt-remove: warning: could not remove lint cache $cache" >&2
+		printf '%s\n' "wt-remove: warning: could not remove lint cache at $(shq "$cache")" >&2
 }
 
+# EVERY dynamic path this script prints — the ordinary success and orphan-reap
+# lines here just as much as the refusals further down — is rendered with `shq`
+# and placed in an `at <path>` position, for two reasons. `shq` is the same
+# reason wt-enter has it: a path is arbitrary bytes chosen by somebody else, and
+# a raw ESC in a diagnostic hands the reader's terminal a live control sequence.
+# The `at ` anchor is what the test suite's `destructive_advice` detector
+# neutralises dynamic values in — a path printed in some other position would not
+# be neutralised there, so a worktree legitimately named `abort` or `force` would
+# false-alarm the detector. Both properties are pinned by the control-byte cases
+# in scripts/test-wt-orphan-safety.sh. Applying this to the benign messages too
+# is not decoration: it is what keeps the rule checkable by inspection instead of
+# by remembering which lines are "diagnostics".
 if [ ! -d "$WT" ]; then
 	remove_lint_cache
-	printf '%s\n' "wt-remove: $WT already absent; nothing to do" >&2
+	printf '%s\n' "wt-remove: already absent at $(shq "$WT"); nothing to do" >&2
 	exit 0
 fi
 
@@ -133,13 +150,13 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	remove_lint_cache
 	case "$_outcome" in
 	quarantined:*)
-		printf '%s\n' "wt-remove: $WT was not a live worktree; preserved its contents at ${_outcome#quarantined:} (branch kept)" >&2
+		printf '%s\n' "wt-remove: not a live worktree at $(shq "$WT"); preserved its contents at $(shq "${_outcome#quarantined:}") (branch kept)" >&2
 		;;
 	kept)
-		printf '%s\n' "wt-remove: $WT is not a live worktree and could not be safely cleared; left in place (branch kept)" >&2
+		printf '%s\n' "wt-remove: not a live worktree at $(shq "$WT") and could not be safely cleared; left in place (branch kept)" >&2
 		;;
 	*)
-		printf '%s\n' "wt-remove: cleared empty orphaned worktree dir $WT (branch kept)" >&2
+		printf '%s\n' "wt-remove: cleared an empty orphaned worktree dir at $(shq "$WT") (branch kept)" >&2
 		;;
 	esac
 	exit 0
@@ -179,15 +196,9 @@ refuse_operation() {
 # Pre-set so an inherited GITDIR can never stand in for an answer wt_read_path
 # did not give (it leaves the variable untouched when the resolver says nothing).
 #
-# Every dynamic path below is rendered with `shq` and placed in an `at <path>`
-# position, for two reasons. `shq` is the same reason wt-enter has it: a path is
-# arbitrary bytes chosen by somebody else, and a raw ESC in a diagnostic hands
-# the reader's terminal a live control sequence. The `at ` anchor is what the
-# test suite's `destructive_advice` detector neutralises dynamic values in — a
-# path printed in some other position would not be neutralised there, so a
-# worktree legitimately named `abort` or `force` would false-alarm the detector.
-# Both properties are pinned by the control-byte cases in
-# scripts/test-wt-orphan-safety.sh.
+# The admin dir joins the worktree path as a dynamic value these messages echo
+# back, so it gets the same `shq` + `at <path>` treatment as everything else this
+# script prints (see the rule stated above the already-absent check).
 GITDIR=""
 wt_read_path GITDIR wt_worktree_gitdir "$ROOT" "$WT" ||
 	die "cannot locate the git metadata for the worktree at $(shq "$WT") from this repository's registrations, so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)"
@@ -221,19 +232,54 @@ fi
 #   BISECT_LOG         bisect (the file git keys on)
 #   BISECT_START       bisect, guarded ALONGSIDE the log so a half-written or
 #                      half-torn-down bisect still refuses
+#   NOTES_MERGE_PARTIAL, NOTES_MERGE_REF
+#                      a conflicted `git notes merge`. Both are guarded because
+#                      `git notes merge --commit` needs BOTH to conclude — with
+#                      either one missing it dies (`failed to read ref
+#                      NOTES_MERGE_PARTIAL` / `unable to resolve reference
+#                      NOTES_MERGE_REF`, verified) — so a half-torn-down notes
+#                      merge is exactly the state that must not be deleted. Both
+#                      appear only while the merge is unconcluded and BOTH
+#                      `--commit` and `--abort` remove BOTH (verified), so a
+#                      finished or abandoned notes merge still removes cleanly
 #
-# NOT guarded, deliberately: MERGE_MSG and AUTO_MERGE. Neither is an
-# in-progress marker to git, and AUTO_MERGE was observed SURVIVING a completed
-# multi-commit revert — guarding it would refuse worktrees that hold nothing.
-# The other bisect files (BISECT_TERMS, BISECT_NAMES, BISECT_EXPECTED_REV,
-# BISECT_ANCESTORS_OK, BISECT_RUN) are subsumed: `git bisect start` writes
-# BISECT_LOG and BISECT_START too, and `git bisect reset` clears them all.
+# NOT guarded, deliberately. Every name here really does appear in a worktree's
+# own admin dir, and every one was rejected for the same reason: it is not what
+# git keys "in progress" on, and it OUTLIVES the operation, so guarding it would
+# refuse worktrees that hold nothing in flight.
+#   MERGE_MSG, SQUASH_MSG, COMMIT_EDITMSG, AUTO_MERGE
+#                      message/scratch state. AUTO_MERGE was observed surviving a
+#                      completed multi-commit revert, and MERGE_MSG + SQUASH_MSG
+#                      + AUTO_MERGE were observed surviving the commit that
+#                      CONCLUDES a `merge --squash` (clean porcelain afterwards).
+#                      A conflicted squash merge itself leaves a DIRTY porcelain,
+#                      so the uncommitted-changes guard below is what holds it —
+#                      and the only resolution that makes it clean again is one
+#                      identical to HEAD, i.e. one that produced nothing
+#   NOTES_MERGE_WORKTREE
+#                      the conflict-editing directory, NOT a state marker: it
+#                      survives both `--commit` and `--abort` as an EMPTY dir, and
+#                      git itself treats an empty one as "no merge in progress"
+#                      (a fresh `git notes merge` starts fine next to it). `-e`
+#                      would therefore refuse forever after the first notes merge
+#   REBASE_HEAD, MERGE_MODE
+#                      subsumed: they only ever appear beside `rebase-apply`/
+#                      `rebase-merge` and `MERGE_HEAD` respectively, and are
+#                      cleared with them
+#   BISECT_TERMS, BISECT_NAMES, BISECT_EXPECTED_REV, BISECT_ANCESTORS_OK,
+#   BISECT_RUN         subsumed: `git bisect start` writes BISECT_LOG and
+#                      BISECT_START too, and `git bisect reset` clears them all
+#   locked, config.worktree
+#                      not operations. `locked` is `git worktree lock`, which
+#                      holds no work — a locked but clean worktree stays
+#                      removable with --force, matching vanilla semantics;
+#                      `config.worktree` is per-worktree config (sparse-checkout)
 #
 # Probed with `-e`, not `-d`, matching git's bare stat(): a NON-directory
 # `rebase-apply` is still state git stops at, and `-e` follows symlinks exactly
 # as stat() does. A state file that exists but cannot be read still satisfies
 # `-e`, which is the fail-safe direction.
-for state in rebase-apply rebase-merge MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD sequencer BISECT_LOG BISECT_START; do
+for state in rebase-apply rebase-merge MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD sequencer BISECT_LOG BISECT_START NOTES_MERGE_PARTIAL NOTES_MERGE_REF; do
 	[ -e "$GITDIR/$state" ] || continue
 	case "$state" in
 	rebase-apply)
@@ -249,6 +295,11 @@ for state in rebase-apply rebase-merge MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD s
 	REVERT_HEAD) refuse_operation "a revert (REVERT_HEAD)" ;;
 	sequencer) refuse_operation "a cherry-pick/revert sequence (sequencer/)" ;;
 	BISECT_LOG | BISECT_START) refuse_operation "a bisect ($state)" "git -C $(shq "$WT") bisect log" ;;
+	# No extra inspection command here on purpose: `git notes merge` offers only
+	# --commit and --abort, both of which CONCLUDE the merge, and the unresolved
+	# conflict lives in the worktree's own NOTES_MERGE_WORKTREE dir, which the
+	# refusal names by marker instead. Naming the marker is the whole hint.
+	NOTES_MERGE_PARTIAL | NOTES_MERGE_REF) refuse_operation "a 'git notes' merge ($state)" ;;
 	esac
 done
 
@@ -286,4 +337,4 @@ else
 	git -C "$ROOT" worktree remove "$WT" >&2
 fi
 remove_lint_cache
-printf '%s\n' "wt-remove: removed $WT (branch kept)" >&2
+printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT") (branch kept)" >&2

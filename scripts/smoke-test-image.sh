@@ -9,84 +9,112 @@ if [ "$#" -eq 0 ]; then
 	exit 1
 fi
 
-# Every probe is concatenated into ONE `sh -lc` script prefixed with `set -e`, and
-# each is emitted as the CONDITION of its own `if`, with the failure guard on the
-# NEXT line:
+# Probes are DATA, never syntax. They are handed to the container shell as
+# POSITIONAL ARGUMENTS and executed by the fixed one-line runner in $RUNNER
+# below, which is the only text this driver ever builds:
 #
-#     if <probe>
-#     then :; else printf '%s\n' 'SMOKE PROBE <n> FAILED' >&2; exit 1; fi
+#     docker run --entrypoint /bin/sh <image> -lc "$RUNNER" smoke-probes "$@"
 #
-# The guard is what makes a multi-clause probe binding: POSIX `set -e` exempts a
-# failing element of an `&&`/`||` list that is not the FINAL element, so a bare
-# `A && B && C` whose `A` or `B` fails neither exits the shell nor propagates — the
-# list's non-zero status is simply discarded when the shell moves to the next line.
-# A failing FINAL clause did trip `set -e` on any probe, and the whole list's status
-# was observable on the last probe only (nothing followed it to discard it); every
-# non-final clause of every probe, and the overall status of every probe but the
-# last, were masked. With the guard, any failing clause of any probe aborts the run.
+#     i=0; for p in "$@"; do i=$((i + 1));
+#       sh -ec "$p" || { printf "%s\n" "SMOKE PROBE $i FAILED" >&2; exit 1; }; done
 #
-# The guard lives on its own LINE, not appended to the probe's line, and that is
-# load-bearing rather than cosmetic. A same-line `<probe> || { …; exit 1; }` tail can
-# be consumed by the probe text itself: `false # note` becomes
-# `false # note || { …; exit 1; }`, the tail is inside the comment, and the failure is
-# discarded again — exactly the masking this wrapper exists to remove. Because a `#`
-# comment (and any other line-scoped construct) ends at the newline, no probe text can
-# reach past it to the `then`/`else` line. Keeping `set -e` semantics identical is why
-# it is an `if` condition specifically: `set -e` is suspended inside an `if` condition
-# just as it is in the first element of an `||` list, so `A && B && C` behaves exactly
-# as it did. That same suspension is the ONE shape where this form enforces LESS than
-# before: a probe that strings commands together with `;` — bare, or inside a `{ …; }`
-# group; the braces make no difference — has its non-final members unenforced here,
-# whereas both a bare `set -e` line and a same-line `|| { …; exit 1; }` tail did abort
-# on them. Verified in dash: `if false; true` / `then …; else …; fi` takes the THEN
-# branch at rc=0, while `false; true` as a bare line under `set -e` exits 1. Which is
-# exactly why the instruction is: write every probe as an `&&` chain. A probe ending
-# in `&` is unenforced too — an async list's status is always 0 — but that is
-# unchanged from before, not a new loss.
+# Two properties follow, and both are structural rather than a matter of careful
+# escaping:
 #
-# The guard embeds only a probe INDEX, never the probe text. Probe strings carry
-# single quotes, double quotes, `$`, backticks, backslashes, `|` and `&&`; splicing
-# them into a quoted `printf` argument inside the same script would let the probe
-# text be re-parsed by the container shell (mangled diagnostics at best, arbitrary
-# execution at worst). An index is a bare integer and cannot be misparsed, and the
-# host prints the index -> probe manifest below when the run fails, which also
-# closes the old "the driver cannot say which probe failed" gap. The flip side is
-# that the diagnostic quotes the probe's SOURCE text, not any runtime value it
-# observed: probes that used to hand-roll a tail printing e.g. the offending
-# `$DOTNET_*` values no longer do. Accepted deliberately — an injection-proof
-# diagnostic is worth more than a richer one, and the manifest still points at the
-# exact probe to re-run by hand.
+#  1. No probe text can reach the runner, another probe, or the diagnostic. A
+#     probe never becomes part of a script the container shell parses as a
+#     whole: it arrives in `"$@"` and is parsed only by its own `sh -ec`. An
+#     unbalanced quote, a trailing `#` comment, a stray backslash, a `$(...)`,
+#     a backtick — none of them can swallow the failure guard, splice a
+#     following line, re-balance a neighbouring probe, or be re-parsed into the
+#     failure message. The message carries the probe INDEX and nothing else,
+#     and the host prints the index → probe manifest below when the run fails,
+#     which is also what closes the old "the driver cannot say which probe
+#     failed" gap.
+#  2. Every clause of a probe is binding. `set -e` is active inside each probe's
+#     own `sh -ec`, and the probe is that shell's whole input rather than an
+#     `if` condition or an `&&` operand, so none of the POSIX `set -e`
+#     exemptions apply to it: a failing non-final member of an `&&` chain, of a
+#     bare `;` sequence, or of a `{ …; }` group each abort that probe, and the
+#     `||` guard turns the probe's own non-zero status into a named failure.
 #
-# Two probe shapes are rejected up front rather than shipped as silent holes:
-#   * a newline or carriage return — every line but the last would be unguarded;
-#   * a trailing odd-numbered backslash run — that is a line continuation, which
-#     would splice the `then`/`else` line into the probe's own line and break the
-#     guard (a syntax error in practice, i.e. fail-closed, but with an opaque
-#     message; rejecting it here says what is actually wrong).
-# Quote balance inside a probe stays the AUTHOR's responsibility: an unterminated
-# quote swallows the following line(s) into the probe's argument. ONE unbalanced
-# probe fails closed — nothing later re-closes the quote, so `sh` hits EOF and the
-# run dies with an (opaque, but red) syntax error. TWO do NOT: the second's quote
-# re-balances the first, and the first probe's guard AND its assertion vanish inside
-# the swallowed string, so a failing probe can report a PASS. Verified with probes
-# `[ -n "" ] "` / `" ; true` / `true`: the one surviving `if` condition ends in
-# `true`, and the run exits 0 with only a stray `[: missing ]` on stderr. So keep
-# quotes balanced — a red run whose index looks wrong, and a green run you did not
-# expect, are both worth a quoting check. It is not validated here because REJECTION
-# must be identical in the .ps1 mirror and the only cheap check (`sh -n`) has no
-# PowerShell equivalent: a probe one driver refused and the other ran is a worse hole
-# than this one. (Emission parity is not the reason — a check here emits no bytes.)
+# What this replaced, and why the intermediate form was not enough. The original
+# join put every probe on a bare line of ONE `set -e` script. POSIX `set -e`
+# exempts a failing element of an `&&`/`||` list that is not the FINAL element,
+# so `A && B && C` whose `A` or `B` failed neither exited the shell nor
+# propagated — the list's non-zero status was simply discarded when the shell
+# moved to the next line. A failing FINAL clause did trip `set -e`, and a
+# probe's overall status was observable on the LAST probe only (nothing followed
+# it to discard it); every non-final clause of every probe, and the overall
+# status of every probe but the last, were masked. Wrapping each probe as the
+# CONDITION of its own `if` made the probe's overall status binding, but it kept
+# the probe inside the aggregate script's syntax, and that cost two things this
+# form gets back. An `if` condition ALSO suspends `set -e`, so the non-final
+# members of a `;` sequence went from enforced (a bare `set -e` line did abort
+# on them) to unenforced — a genuine narrowing, not an inherited hole. And two
+# probes carrying unbalanced quotes still re-balanced each other ACROSS the
+# join, swallowing the first probe's guard and its assertion, so a failing probe
+# reported a pass; measured on the triple `[ -n "" ] "` / `" ; true` / `true`,
+# the bare-line join aborted at rc=2 while the `if` join exited 0. Both shapes
+# are closed here: neither is a hole this driver still carries.
 #
-# Deliberately NOT `set -o pipefail`. Two reasons, neither of them "it would break
-# today's probes": (1) pipefail is not POSIX — it happens to work in the image's
-# dash 0.5.12, but the emitted script is otherwise plain POSIX sh; (2) it would make
-# every `X | grep -q Y` probe newly sensitive to `X`'s exit status, including the
-# SIGPIPE (141) `grep -q` provokes by closing the pipe on its first match — and that
-# exposure is OUTPUT-SIZE dependent, so it is nondeterministic in the worst way: a
-# probe whose producer one day emits enough to fill the pipe buffer flips from green
-# to 141 with no code change at all. Producer-side masking stays out of scope.
+# The price is real and deliberate: each probe runs in its OWN shell, so `cd`,
+# `export` and plain shell variables do NOT carry from one probe to the next.
+# Only filesystem effects persist (same container, probes run in order). Probes
+# must therefore be self-contained, and every shipped Stage 1 probe already is —
+# the ones that `cd` do their own `cd` to an absolute path, the golangci fixture
+# probe hands the probes after it a DIRECTORY rather than a shell state, and the
+# ccache probe's `export CCACHE_DIR` is consumed inside that same probe. The
+# container shell is still a LOGIN shell (`sh -lc`), so /etc/profile and
+# /etc/profile.d run exactly once and every probe's `sh -ec` inherits the
+# resulting environment — PATH included, which is precisely what the
+# `$HOME/go/bin` GOBIN probe is there to prove.
+#
+# One limitation remains, and it is inherent rather than accepted-for-now: a
+# probe whose last element is an ASYNC list (`… &`) always reports 0, because
+# that is what POSIX says an async list's status is, and `set -e` cannot see it
+# either. Only a nonsense probe would end in `&`.
+#
+# The diagnostic names the probe's SOURCE text through the manifest, not any
+# runtime value the probe observed: probes that used to hand-roll a tail
+# printing e.g. the offending `$DOTNET_*` values no longer do. Accepted
+# deliberately — the manifest names the exact probe to re-run by hand.
+#
+# Three probe shapes are still rejected up front. None of them can corrupt the
+# run any more — that is the whole point of passing probes as argv — so the
+# reasons are now diagnosability and the Windows argument path, and rejection is
+# kept identical in the .ps1 mirror so a probe one driver refuses is never run
+# by the other:
+#   * an empty or whitespace-only probe — always an authoring mistake;
+#   * a newline or carriage return — the failure manifest prints one line per
+#     probe, and the .ps1 mirror would have to hand `docker` a multi-line
+#     native-command argument, which is the shakiest corner of PowerShell's
+#     argument quoting on Windows. Keeping probes single-line keeps both simple;
+#   * a trailing ODD-numbered backslash run — a line continuation with nothing
+#     to continue, i.e. a probe that lost its second half. `sh -ec` does not
+#     error on it: it drops the backslash and runs the TRUNCATED command
+#     (verified in dash 0.5.12 — `sh -ec 'printf x \'` prints `x` and exits 0),
+#     so a truncated probe would silently pass. Rejecting it is the only way
+#     that stays visible.
+#
+# Deliberately NOT `set -o pipefail`, in the runner or in the per-probe shell.
+# Two reasons, neither of them "it would break today's probes": (1) pipefail is
+# not POSIX — it happens to work in the image's dash 0.5.12, but the runner is
+# otherwise plain POSIX sh; (2) it would make every `X | grep -q Y` probe newly
+# sensitive to `X`'s exit status, including the SIGPIPE (141) `grep -q` provokes
+# by closing the pipe on its first match — and that exposure is OUTPUT-SIZE
+# dependent, so it is nondeterministic in the worst way: a probe whose producer
+# one day emits enough to fill the pipe buffer flips from green to 141 with no
+# code change at all. Producer-side masking stays out of scope.
+#
+# $RUNNER is FIXED text. `$@`, `$p` and `$i` below belong to the CONTAINER
+# shell and are expanded there, never here; the .ps1 mirror carries the same
+# string byte for byte, and scripts/test-smoke-probe-wrapper.sh asserts that the
+# two drivers hand `docker` a byte-identical argument vector.
+# shellcheck disable=SC2016
+RUNNER='i=0; for p in "$@"; do i=$((i + 1)); sh -ec "$p" || { printf "%s\n" "SMOKE PROBE $i FAILED" >&2; exit 1; }; done'
+
 NL=$'\n'
-SCRIPT=$'set -e\n'
 idx=0
 for cmd in "$@"; do
 	idx=$((idx + 1))
@@ -96,7 +124,7 @@ for cmd in "$@"; do
 	fi
 	case "$cmd" in
 	*"$NL"* | *$'\r'*)
-		printf 'smoke-test-image.sh: probe %d contains a newline or carriage return; probes must be single-line so the failure wrapper guards the whole probe.\n' "$idx" >&2
+		printf 'smoke-test-image.sh: probe %d contains a newline or carriage return; probes must be single-line so the failure manifest stays one line per probe and the .ps1 mirror never hands docker a multi-line argument.\n' "$idx" >&2
 		printf '  probe: %s\n' "$cmd" >&2
 		exit 1
 		;;
@@ -104,17 +132,15 @@ for cmd in "$@"; do
 	# Trailing run of backslashes; an odd count is a line continuation.
 	trailing_bs="${cmd##*[!\\]}"
 	if [ $((${#trailing_bs} % 2)) -eq 1 ]; then
-		printf 'smoke-test-image.sh: probe %d ends in a line continuation (odd trailing backslash); that would splice the failure guard into the probe line and break it.\n' "$idx" >&2
+		printf 'smoke-test-image.sh: probe %d ends in a line continuation (odd trailing backslash) with nothing to continue; the probe shell would silently run the truncated command and pass.\n' "$idx" >&2
 		printf '  probe: %s\n' "$cmd" >&2
 		exit 1
 	fi
-	SCRIPT+="if ${cmd}"$'\n'
-	SCRIPT+="then :; else printf '%s\n' 'SMOKE PROBE ${idx} FAILED' >&2; exit 1; fi"$'\n'
 done
 
 echo "Smoke testing image: $IMAGE"
 rc=0
-docker run --rm --entrypoint /bin/sh "$IMAGE" -lc "$SCRIPT" || rc=$?
+docker run --rm --entrypoint /bin/sh "$IMAGE" -lc "$RUNNER" smoke-probes "$@" || rc=$?
 if [ "$rc" -ne 0 ]; then
 	{
 		printf '\nSmoke test FAILED (exit %d). Probe manifest - match the index in the "SMOKE PROBE <n> FAILED" line above:\n' "$rc"

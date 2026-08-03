@@ -212,9 +212,10 @@ else {
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
-# plants a stub tool in ~/go/bin and runs it by bare name: these commands run
-# under a login shell (`sh -lc`), which resets PATH from /etc/profile, so the
-# probe passing proves the baked profile.d snippet restores $HOME/go/bin -
+# plants a stub tool in ~/go/bin and runs it by bare name: the container shell
+# is a login shell (`sh -lc`), which resets PATH from /etc/profile, and each
+# probe's own shell inherits that environment, so the probe passing proves the
+# baked profile.d snippet restores $HOME/go/bin -
 # the documented "`go install` and it's runnable" contract. The golangci-lint
 # probes pin the cache-scoping wrapper contract: the PATH name resolves to the
 # wrapper (real binary off PATH in /usr/local/libexec), a fixture worktree under
@@ -232,42 +233,50 @@ else {
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/...` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
-# Every probe below is emitted by the driver (scripts/smoke-test-image.ps1) as the
-# condition of its own `if`, with the failure guard on the FOLLOWING line
-# (`then :; else printf ... 'SMOKE PROBE <n> FAILED' >&2; exit 1; fi`), so a
-# multi-clause `&&` probe is binding in EVERY clause, and a failure names the
-# probe by index - the driver prints an index -> probe manifest when the run
-# fails. That wrapper is what makes these assertions real: the driver
-# concatenates every probe into ONE `set -e` script, and POSIX `set -e` exempts a
-# failing element of an `&&` list that is not the final element, so a bare
-# `A && B && C` whose `A` or `B` fails neither exits the shell nor propagates -
-# the list's non-zero status is simply discarded when the shell moves to the next
-# line. Before the wrapper, a failing FINAL clause did trip `set -e` on any
-# probe, and a probe's overall status was observable only on the LAST probe
-# (nothing followed it to discard it); every non-final clause of every probe, and
-# the overall status of every probe but the last, were masked.
-# The guard is on its own line on purpose: appended to the probe's own line it
-# could be consumed by the probe text - `false # note` would become
-# `false # note || { ...; exit 1; }`, guard and all inside the comment.
-# Consequences for probe authors: do NOT hand-roll a per-probe
-# `|| { ...; exit 1; }` tail (the driver supplies one, and a second is redundant);
-# keep every probe single-line and free of a trailing line continuation - the
-# driver rejects both outright; write each probe as an `&&` chain, because the
-# `if` condition suspends `set -e` for the non-final members of a `;` sequence
-# (the one shape this form enforces LESS than a bare line did) and a probe ending
-# in `&` reports 0 whatever it did; and keep quotes balanced, which the driver
-# does NOT validate - ONE unbalanced probe fails closed on an EOF syntax error,
-# but TWO re-balance each other and silently swallow the first one's guard AND
-# its assertion, turning a failure into a pass.
-# Because the diagnostic carries only an index, it quotes the probe's source text
-# and not any runtime value it saw - re-run the probe from the manifest to get
-# that. Pipeline-shaped probes (`X | grep -q Y`) are unaffected either way: the
-# wrapper reads the status the pipeline already reports, and `set -o pipefail` is
-# deliberately not set - it is not POSIX, and it would make each producer's
-# status binding, including the SIGPIPE `grep -q` provokes by closing the pipe on
-# its first match, an exposure that depends on how much the producer emits and so
-# could flip a probe green->141 with no code change. scripts/test-smoke-probe-wrapper.sh
-# unit-tests the wrapping, its injection-proofness, and .sh/.ps1 parity.
+# Every probe below is handed to the driver (scripts/smoke-test-image.ps1) as a
+# separate ARGUMENT, and the driver passes it to the container the same way: as
+# one element of `"$@"` for a fixed one-line runner that executes each probe in
+# its own `sh -ec` and reports a failure by INDEX, with the host printing an
+# index -> probe manifest when the run fails. Probe text is therefore DATA, never
+# part of a script the container shell parses as a whole. Two things follow, and
+# both are structural rather than a matter of careful escaping: no probe can
+# affect the runner, the diagnostic, or a neighbouring probe - a stray quote, a
+# trailing `#` comment, a `$(...)` or a backtick have nothing to reach; and
+# `set -e` is active for the WHOLE of each probe, so a failing non-final member
+# of an `&&` chain, of a `;` sequence, or of a `{ ...; }` group aborts the run.
+# That is what makes these multi-clause assertions real. Joined the original way
+# - every probe a bare line of ONE `set -e` script - POSIX `set -e` exempted a
+# failing element of an `&&` list that was not the FINAL element, so
+# `A && B && C` whose `A` or `B` failed neither exited the shell nor propagated:
+# every non-final clause of every probe, and the overall status of every probe
+# but the last (nothing followed it to discard it), were masked.
+# Consequences for probe authors:
+#   * do NOT hand-roll a per-probe `|| { ...; exit 1; }` tail - the runner
+#     supplies one, and a second is redundant;
+#   * make every probe SELF-CONTAINED. Each runs in its own shell, so `cd`,
+#     `export` and plain variables do NOT carry to the next probe; only
+#     filesystem effects do, which is how the golangci fixture probe hands the
+#     three probes after it a worktree. `cd` to an absolute path in the probe
+#     that needs it;
+#   * keep every probe single-line and free of a trailing line continuation -
+#     the driver rejects both, so the manifest stays one line per probe and this
+#     driver never hands `docker` a multi-line argument;
+#   * an `&&` chain is still the clearest shape, but a `;` sequence is binding
+#     too. The one construct that is NOT: a probe ending in `&`, whose async
+#     status POSIX fixes at 0.
+# Quote balance is no longer a hazard to anything but the probe itself: an
+# unbalanced quote makes that probe's own shell fail with a syntax error, named
+# by its index, and cannot reach any other probe.
+# Because the diagnostic carries only an index, it names the probe's source text
+# through the manifest and not any runtime value it saw - re-run the probe from
+# the manifest to get that. Pipeline-shaped probes (`X | grep -q Y`) are
+# unaffected: the runner reads the status the pipeline already reports, and
+# `set -o pipefail` is deliberately not set - it is not POSIX, and it would make
+# each producer's status binding, including the SIGPIPE `grep -q` provokes by
+# closing the pipe on its first match, an exposure that depends on how much the
+# producer emits and so could flip a probe green->141 with no code change.
+# scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
+# injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
 # The dotnet probes pin the two pieces of the SDK layer that can regress
 # silently.
 # The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up

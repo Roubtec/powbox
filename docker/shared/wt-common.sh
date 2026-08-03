@@ -14,6 +14,14 @@
 # uncommitted work, so it must NEVER be deleted merely because its metadata
 # vanished. wt_reap_orphan_dir encodes that: delete only proven-empty dirs, and
 # preserve (move aside) anything with content.
+#
+# Diagnostics are emitted with `printf '%s\n'`, never `echo`. `echo` expands
+# backslash escapes whenever bash's `xpg_echo` option is on — which an inherited,
+# exported BASHOPTS can turn on for this script without it doing anything (bash
+# applies BASHOPTS before reading any startup file; verified). These messages
+# carry paths discovered from git or from the filesystem, so a backslash in one
+# would then be re-interpreted rather than printed; see the note above `shq` in
+# wt-enter for what that costs when the escape came from `printf %q`.
 
 # wt_reap_orphan_dir <dir>
 #   <dir> = <root>/.worktrees/<container>/<slug>, already established NOT to be a
@@ -64,13 +72,333 @@ wt_reap_orphan_dir() {
 	[ ! -e "$dest" ] || dest="$dest.$$"
 
 	if mkdir -p -- "$dest_base" 2>/dev/null && mv -- "$dir" "$dest" 2>/dev/null; then
-		echo "wt: preserved non-empty orphan (not a live worktree; metadata lost): moved $dir -> $dest" >&2
-		echo "wt: recover any uncommitted work from there, then delete it — the branch's committed history is safe in the shared .git." >&2
+		printf '%s\n' "wt: preserved non-empty orphan (not a live worktree; metadata lost): moved $dir -> $dest" >&2
+		printf '%s\n' "wt: recover any uncommitted work from there, then delete it — the branch's committed history is safe in the shared .git." >&2
 		printf 'quarantined:%s\n' "$dest"
 		return 0
 	fi
 
-	echo "wt: warning: could not quarantine non-empty orphan $dir; leaving it in place (refusing to delete possibly-unsaved work)." >&2
+	printf '%s\n' "wt: warning: could not quarantine non-empty orphan $dir; leaving it in place (refusing to delete possibly-unsaved work)." >&2
 	printf 'kept\n'
 	return 0
+}
+
+# The resolvers below exist so callers can DIAGNOSE a "branch is already used by
+# worktree at ..." failure without parsing git's fatal message: that text is
+# localizable and unstable, whereas `git worktree list --porcelain` is a
+# documented, machine-readable format. They emit a single absolute path on stdout
+# NUL-terminated (nothing on failure) and return non-zero when they cannot
+# answer, so a caller can always fall back to git's own error. Read them with
+# wt_read_path, never with `$(…)` — see the delimiter note below.
+# (wt_worktree_locked is the one exception to the shape: it answers a QUESTION
+# about an already-resolved path, so it prints nothing and reports through its
+# exit status alone.)
+#
+# They IDENTIFY the blocking worktree and stop there, deliberately: they do not
+# classify it as safe to delete, and no caller may use them to pick a remedy that
+# discards a worktree. Whether one may be thrown away depends on every state git
+# can leave behind (rebase, am, cherry-pick, revert/sequencer, merge, bisect, ...)
+# and would have to stay in lockstep with wt-remove's own guards; naming the
+# blocker and handing over needs no such list and can destroy nothing.
+#
+# Every claim below about what git does was established by fabricating the state
+# and observing whether `git worktree add` then refuses. That rationale lives
+# HERE only; scripts/test-wt-orphan-safety.sh pins the outcomes without
+# restating it.
+#
+# The porcelain is always read NUL-delimited (`--porcelain -z`), never
+# line-delimited. A worktree path may legally contain a NEWLINE, and the
+# line-based format emits it raw and unescaped: the tail of such a path then
+# reads as a separate attribute and the parser answers a TRUNCATED path (observed
+# with a blocker at `odd<LF>path`, which came back as `odd` — a path that does not
+# exist, so wt-enter went on to report the blocker as missing on disk and offered
+# `worktree prune`, the one remedy that is wrong there). `-z` terminates every
+# attribute with a NUL instead, and NUL is the one byte a path cannot contain, so
+# every other byte survives intact; an empty attribute ends a record.
+#
+# The records are consumed straight from a pipeline rather than through a command
+# substitution because a bash variable CANNOT hold a NUL byte — `$(…)` silently
+# drops them and would splice the whole listing into one field. That loses git's
+# exit status, which costs nothing here: a `git worktree list` that fails (or is
+# too old to know `-z`) produces no records at all, the loop ends without a match,
+# and the function returns 1 — the same "unknown, fall back to git's own error"
+# answer the explicit status check used to give.
+#
+# The ANSWER is handed back the same way, NUL-terminated and read out-of-band,
+# because `$(…)` would undo the `-z` read one step later: command substitution
+# strips TRAILING newlines, so a blocker at `odd<LF>` comes back as `odd` — again
+# a path that is not on disk, and again wt-enter calling a live worktree missing
+# and offering `worktree prune` (reproduced end to end). A newline is the only
+# path byte `$(…)` can eat, and only at the end, but that is exactly the byte the
+# porcelain read was hardened against, so the value never travels through a
+# command substitution at all: wt_read_path takes it off a process substitution
+# with the same `IFS= read -r -d ''` the porcelain loops use. Losing the exit
+# status costs nothing here either — a resolver that cannot answer prints
+# nothing, the read hits EOF without its delimiter and fails, and the caller
+# takes the same "unknown" branch.
+
+# wt_read_path <var> <resolver> [<args>...]
+#   Run <resolver> and store the single NUL-terminated path it emits in <var>,
+#   whole, whatever bytes it contains. Returns 1 — leaving <var> untouched — when
+#   the resolver answers nothing, i.e. exactly when the resolver itself would
+#   have returned non-zero, so callers branch on this instead:
+#       wt_read_path blocker wt_worktree_for_branch "$root" "$branch" || ...
+#   `IFS=` is load-bearing: `read` strips leading and trailing IFS whitespace,
+#   and the default IFS contains the newline (and the space) that this whole
+#   exercise exists to preserve. Its own locals are `__wt_`-prefixed so that a
+#   caller's variable is never shadowed by one of them, and a <var> carrying that
+#   prefix is REFUSED with status 2 rather than obeyed: `printf -v` would write
+#   the answer into the helper's OWN local, leave the caller's variable at
+#   whatever it held before, and still return 0 — a silently wrong answer no
+#   caller can branch on. The refusal is deliberately silent; the non-zero status
+#   is the whole signal, and it lands the caller on the same "unknown" branch a
+#   resolver that answers nothing does, instead of proceeding on a stale value.
+wt_read_path() {
+	case "$1" in __wt_*) return 2 ;; esac
+	local __wt_out_var="$1" __wt_path
+	shift
+	IFS= read -r -d '' __wt_path < <("$@") || return 1
+	printf -v "$__wt_out_var" '%s' "$__wt_path"
+}
+
+# wt_primary_checkout <root>
+#   Emit the absolute path of the repository's PRIMARY (main) working tree,
+#   NUL-terminated (read it with wt_read_path). `git worktree list --porcelain`
+#   always lists the main working tree first, so the first `worktree ` attribute
+#   is it. Returns 1 if git cannot be queried.
+wt_primary_checkout() {
+	local field
+	while IFS= read -r -d '' field; do
+		case "$field" in
+		"worktree "*)
+			printf '%s\0' "${field#worktree }"
+			return 0
+			;;
+		esac
+	done < <(git -C "$1" worktree list --porcelain -z 2>/dev/null)
+	return 1
+}
+
+# wt_worktree_gitdir <root> <worktree>
+#   Emit the absolute path of the ADMINISTRATIVE git dir holding <worktree>'s own
+#   per-worktree state, NUL-terminated (read it with wt_read_path); return 1 when
+#   it cannot be established, so callers can tell "read it" from "did not read
+#   it".
+#
+#   It is resolved from the COMMON repository metadata and never by running git
+#   INSIDE <worktree>, because <worktree> need not be usable — or even present:
+#     * A worktree DELETED from disk keeps its registration and its state files,
+#       and git keeps refusing a second checkout of the branch that state holds
+#       (verified with a deleted bisect worktree: `git worktree add` still fails,
+#       and `worktree prune` would clear the record — which is precisely the
+#       remedy wt-enter offers for a registered-but-missing blocker). `git -C
+#       <worktree>` cannot run there at all, so asking it left the blocker
+#       unidentified and that remedy unoffered.
+#     * A worktree that has lost its own .git pointer still satisfies `git -C
+#       <worktree> rev-parse` — task worktrees sit INSIDE the main working tree
+#       ($ROOT/.worktrees/...), so the answer describes the ENCLOSING repo, whose
+#       operation state belongs to a different checkout. Guarding that with a
+#       `--show-toplevel` cross-check cost the whole diagnosis whenever the path
+#       ENDED in a newline, because `$(…)` strips it and the two paths then
+#       compare unequal (verified end to end: a detached bisect worktree at
+#       `nl<LF>` left wt-enter with git's bare fatal and no diagnosis at all).
+#       The registration needs no such cross-check — it names the worktree by
+#       construction — and it answers about the worktree's OWN state in both
+#       cases, which is the same file git consults.
+#
+#   Each LINKED worktree's admin dir carries a `gitdir` file holding
+#   "<worktree>/.git", and that file is what identifies it: git SANITIZES the
+#   admin dir's own name (a newline in the path becomes `-`), so the name cannot
+#   be derived back from the path. Its content is compared through `$(…)` even
+#   here, which stays exact for a path ending in a newline: command substitution
+#   strips only TRAILING newlines and the value compared against always ends in
+#   `.git` (verified).
+#   The MAIN working tree has no admin dir — its git dir IS the common dir — so it
+#   is matched separately, and only after the linked ones, keeping the common case
+#   to a single `git worktree list`.
+wt_worktree_gitdir() {
+	local root="$1" wt="$2" common entry primary
+	# git's answer is newline-TERMINATED, so it is read out of band and stripped
+	# of exactly one newline instead of going through `$(…)`, which would also eat
+	# a trailing newline belonging to the path itself. A git that cannot answer
+	# leaves this empty, which is the same "unknown" an explicit status check gave.
+	IFS= read -r -d '' common < <(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || :
+	common="${common%$'\n'}"
+	[ -n "$common" ] || return 1
+	for entry in "$common"/worktrees/*/gitdir; do
+		[ -r "$entry" ] || continue
+		[ "$(cat -- "$entry" 2>/dev/null)" = "$wt/.git" ] || continue
+		printf '%s\0' "${entry%/gitdir}"
+		return 0
+	done
+	if wt_read_path primary wt_primary_checkout "$root" && [ "$primary" = "$wt" ]; then
+		printf '%s\0' "$common"
+		return 0
+	fi
+	return 1
+}
+
+# wt_state_branch <file>
+#   Print the BARE branch name recorded in a per-worktree operation-state file,
+#   mirroring git's own reader (wt-status.c: get_branch()), which tolerates the
+#   several formats these files can hold:
+#     "refs/heads/<b>" -> "<b>"    (rebase's head-name spelling; git accepts it
+#                                   in BISECT_START too, where it writes "<b>")
+#     "detached HEAD"  -> nothing, return 1 (rebase from a detached HEAD)
+#     an object id     -> nothing, return 1 (a bisect from a detached HEAD records
+#                                   the commit, which git abbreviates before
+#                                   comparing — never match it to a branch name)
+#     anything else    -> verbatim (bisect's bare "<b>"; any other "refs/..." can
+#                                   never equal a branch short-name anyway)
+#
+#   The object-id test mirrors get_oid_hex() CONSERVATIVELY: git parses hex
+#   case-INsensitively and consumes exactly the hash width without requiring
+#   end-of-string, so 41+ hex digits, or 40 followed by junk, is an object id to
+#   git and it ALLOWS a second checkout of a same-named branch — an
+#   `^[0-9a-f]{40}$` test would have called those held. Hence: any value BEGINNING
+#   with 40 hex digits of either case. That over-reaches in a SHA-256 repository,
+#   but only towards "no blocker identified", which costs no more than git's own
+#   error message; the opposite error would be a false "held".
+#   Returns 1 (printing nothing) when the file is missing, unreadable or empty, so
+#   a partially-read state is never compared against truncated content.
+wt_state_branch() {
+	local raw
+	raw="$(cat -- "$1" 2>/dev/null)" || return 1
+	[ -n "$raw" ] || return 1
+	case "$raw" in
+	"detached HEAD") return 1 ;;
+	refs/heads/*)
+		printf '%s\n' "${raw#refs/heads/}"
+		return 0
+		;;
+	esac
+	if printf '%s' "$raw" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{40}'; then
+		return 1
+	fi
+	printf '%s\n' "$raw"
+}
+
+# wt_branch_held_by_operation <root> <worktree> <branch>
+#   Return 0 when the worktree at <worktree> — which `git worktree list
+#   --porcelain` reports as DETACHED — is nevertheless holding <branch> through
+#   an in-progress rebase or bisect. Git counts such a branch as checked out and
+#   refuses to check it out again (worktree.c: find_shared_symref() consults
+#   is_worktree_being_rebased() / is_worktree_being_bisected() for detached
+#   worktrees), so without this the resolver would miss exactly the case where an
+#   interrupted operation, not a plain checkout, is the blocker. ONLY detached
+#   records need this; a `branch` record already names the blocker by itself.
+#
+#   Reads the same per-worktree state files git reads, in git's own precedence
+#   (wt-status.c: wt_status_check_rebase / wt_status_check_bisect):
+#     rebase-apply/   apply backend, checked FIRST. A sibling `applying` marker
+#                     makes it a `git am`, which holds no branch and stops git
+#                     consulting rebase-merge at all — git then ALLOWS the second
+#                     checkout, so probing rebase-merge first would be a FALSE
+#                     "held".
+#     rebase-merge/   merge/interactive backend, only when rebase-apply is absent.
+#     BISECT_START    bisect, only when BISECT_LOG marks one in progress; probed
+#                     independently of the rebase state, as git does.
+#   Probed with `-e`, not `-d`, because git decides with a bare stat(): a
+#   NON-directory `rebase-apply` still stops git at the apply backend, where it
+#   finds no branch and ALLOWS the second checkout, whereas a `-d` probe would
+#   skip on to rebase-merge and report a false "held". `-e` follows symlinks just
+#   as stat() does, so a DANGLING symlink correctly falls through to rebase-merge
+#   (git refuses there).
+#   <root> is any path inside the repository; it is what the per-worktree state is
+#   located FROM (see wt_worktree_gitdir), so a blocker whose own directory is
+#   gone is still readable.
+#   Returns 1 for "not held OR unreadable": an unidentified detached blocker costs
+#   nothing but git's own error message, and git itself allows the second checkout
+#   when it cannot read the state either (verified with an unreadable head-name).
+wt_branch_held_by_operation() {
+	local root="$1" wt="$2" branch="$3" gitdir head
+	wt_read_path gitdir wt_worktree_gitdir "$root" "$wt" || return 1
+	if [ -e "$gitdir/rebase-apply" ]; then
+		if [ ! -e "$gitdir/rebase-apply/applying" ] &&
+			head="$(wt_state_branch "$gitdir/rebase-apply/head-name")" &&
+			[ "$head" = "$branch" ]; then
+			return 0
+		fi
+	elif [ -e "$gitdir/rebase-merge" ]; then
+		if head="$(wt_state_branch "$gitdir/rebase-merge/head-name")" &&
+			[ "$head" = "$branch" ]; then
+			return 0
+		fi
+	fi
+	if [ -e "$gitdir/BISECT_LOG" ] &&
+		head="$(wt_state_branch "$gitdir/BISECT_START")" &&
+		[ "$head" = "$branch" ]; then
+		return 0
+	fi
+	return 1
+}
+
+# wt_worktree_for_branch <root> <branch>
+#   Emit the absolute path of the worktree that currently has <branch> checked
+#   out, NUL-terminated (read it with wt_read_path), or return 1 (emitting
+#   nothing) when no worktree holds it. A worktree
+#   with a rebase/bisect in progress reports as `detached` in the porcelain even
+#   though git still refuses to check its branch out elsewhere, so detached
+#   records are cross-checked against the operation state (see
+#   wt_branch_held_by_operation). A non-zero return still means "unknown" rather
+#   than a guarantee of "no conflict": callers must fall back to git's own error.
+#   The answer is a PATH and nothing else — what state that worktree is in, and
+#   what should be done about it, is for its owner to look at (see the note above
+#   the resolvers).
+wt_worktree_for_branch() {
+	local root="$1" branch="$2" field path=""
+	while IFS= read -r -d '' field; do
+		case "$field" in
+		"worktree "*) path="${field#worktree }" ;;
+		"branch "*)
+			if [ "${field#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
+				printf '%s\0' "$path"
+				return 0
+			fi
+			;;
+		detached)
+			# stdin is closed for the probe: it runs git itself, and the
+			# undelimited records still queued on our stdin are not its to read.
+			if [ -n "$path" ] && wt_branch_held_by_operation "$root" "$path" "$branch" </dev/null; then
+				printf '%s\0' "$path"
+				return 0
+			fi
+			;;
+		esac
+	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)
+	return 1
+}
+
+# wt_worktree_locked <root> <worktree>
+#   Return 0 when the record for <worktree> carries a `locked` attribute, 1
+#   otherwise — including when git cannot be asked, so the answer degrades
+#   towards "not locked", i.e. towards whatever a caller already said for an
+#   ordinary record. Prints nothing: the status is the whole answer.
+#
+#   It exists because "the directory is gone" does NOT imply "the record is
+#   stale". `git worktree prune` deliberately SKIPS a locked worktree (verified:
+#   with the directory deleted, `worktree prune -n -v` reports nothing, the
+#   record survives, and `git worktree add` keeps refusing the branch), and
+#   locking is exactly how one marks a worktree that lives on removable or
+#   temporarily-unmounted storage which still holds its work. Recommending
+#   `prune` there is advice that cannot work, aimed at a checkout that is not
+#   actually stale — so a caller must ask this before offering it.
+#
+#   Read from the same NUL-delimited porcelain as the resolvers above, for the
+#   same reason: the attribute is `locked` bare, or `locked <reason>` where the
+#   reason is a human-written string that git leaves UNQUOTED in `-z` mode and
+#   may contain newlines (verified) — one NUL-terminated field either way, but
+#   several "lines".
+wt_worktree_locked() {
+	local root="$1" want="$2" field path=""
+	while IFS= read -r -d '' field; do
+		case "$field" in
+		"worktree "*) path="${field#worktree }" ;;
+		locked | "locked "*)
+			[ "$path" = "$want" ] || continue
+			return 0
+			;;
+		esac
+	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)
+	return 1
 }

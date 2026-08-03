@@ -18,15 +18,53 @@
 #   * neither exists                      -> create branch off <base> (-b)
 # An orphaned dir (stale from a recycled container) is pruned and recreated.
 #
+# When <branch> cannot be attached because it is already checked out elsewhere,
+# the blocking worktree is named — and, when it is the repository's PRIMARY
+# checkout (shared with humans and peer agents), the error says so explicitly
+# instead of leaving git's bare "already used by worktree at ..." to be misread
+# as a stale worktree. Nothing is ever auto-detached or auto-switched, and no
+# remedy that could DISCARD the blocking worktree is ever suggested (see the
+# note above worktree_add).
+#
 # stdout is ONLY the worktree path, so callers can `WT="$(wt-enter ...)"`;
 # diagnostics go to stderr. Non-zero exit means the caller must STOP and
 # report, never improvise a checkout.
 set -euo pipefail
 
 die() {
-	echo "wt-enter: $*" >&2
+	printf '%s\n' "wt-enter: $*" >&2
 	exit 1
 }
+
+# shq <string> — render <string> as ONE shell-safe token. Repository and worktree
+# paths are not guaranteed to be free of spaces or shell metacharacters (a
+# human-created worktree can live anywhere), and a suggested command is only
+# useful if it can be pasted verbatim — and only safe if pasting it cannot run
+# something else. `printf %q` leaves an ordinary path byte-identical, so the
+# common case still reads as a plain path.
+#
+# EVERY discovered path goes through it, the bare ones in prose included, not
+# just the ones inside a suggested command. `%q` also renders a non-printable
+# byte as an escape (ESC becomes `\E` inside `$'…'`), and a path is one of the
+# few places arbitrary bytes reach this script from outside: the blocker below is
+# whatever someone else named their worktree. Echoed raw, an ESC in it is a live
+# ANSI sequence on the reader's terminal — enough to recolour, overwrite or
+# fabricate the lines around it, i.e. to forge advice wt-enter never gave, in the
+# one message whose whole job is to be trusted about what must not be destroyed.
+# git sanitizes such bytes in its own fatal (verified) but emits them raw in the
+# machine-readable porcelain these diagnostics are built from, so the escaping
+# has to happen here.
+#
+# Its result — and every other diagnostic in this script — is emitted with
+# `printf '%s\n'`, NEVER `echo`. With bash's `xpg_echo` option on, `echo` expands
+# backslash escapes, so it re-interprets the very sequences `%q` just produced and
+# `\E` goes back to being a live ESC byte on the reader's terminal (verified: the
+# escaped form prints, then prints raw again with the option set). That option
+# needs no cooperation from this script to be on — bash enables everything listed
+# in an exported BASHOPTS before it reads any startup file, so an ordinary
+# environment can hand it to us — and `printf` has no such mode, which is what
+# makes the escaping above hold whatever the shell was configured to do.
+shq() { printf '%q' "$1"; }
 
 # Shared worktree helpers (safe orphan reaping). Prefer the sibling copy so
 # tests exercise the checked-out version; fall back to the baked one. BASH_SOURCE
@@ -83,30 +121,119 @@ if [ -d "$WT" ]; then
 	_outcome="$(wt_reap_orphan_dir "$WT")"
 	case "$_outcome" in
 	quarantined:*)
-		echo "wt-enter: preserved orphan at ${_outcome#quarantined:}; recreating $WT fresh" >&2
+		printf '%s\n' "wt-enter: preserved orphan at ${_outcome#quarantined:}; recreating $WT fresh" >&2
 		;;
 	kept)
 		die "orphaned dir $WT holds unsaved work that could not be quarantined; move it aside manually, then retry"
 		;;
 	*)
-		echo "wt-enter: cleared empty orphaned worktree dir $WT" >&2
+		printf '%s\n' "wt-enter: cleared empty orphaned worktree dir $WT" >&2
 		;;
 	esac
 	unset _outcome
 	git -C "$ROOT" worktree prune
 fi
 
+# worktree_add <git worktree add args...>
+#   Run `git worktree add` and, when it fails, diagnose the one failure agents
+#   routinely misread: <branch> is already checked out in another worktree. The
+#   blocking worktree is identified from `git worktree list --porcelain` (a
+#   documented machine format) — never by matching git's localizable fatal text —
+#   and the message is tailored when the blocker is the PRIMARY checkout, which
+#   is shared with humans and peer agents and must not be detached blindly.
+#   Nothing is remediated automatically. git's own output is redirected — not
+#   captured — so stdout stays path-only for callers while git keeps streaming
+#   live to a terminal on fd 2; only its exit status is taken, and preserved.
+#
+#   The diagnosis NAMES the blocker and stops there: it never suggests removing
+#   or otherwise discarding that worktree, not even conditionally, and it does not
+#   prescribe how to clear what is in flight there either — "finish or abort it"
+#   is the same loss by another route, since every `--abort` throws away whatever
+#   conflict resolution has been done. Deciding that a worktree is safe to delete
+#   would mean enumerating every state git can leave behind (rebase, am,
+#   cherry-pick, revert/sequencer, merge, bisect, ...) and keeping that list in
+#   lockstep with wt-remove's independently maintained guards; the gap between the
+#   two lists is a deleted worktree, and it has bitten more than once. The one
+#   remedy offered is git's own `worktree prune`, for a blocker whose directory is
+#   already gone AND whose record git would actually prune — it drops a stale
+#   record and can destroy nothing. A LOCKED record is the exception and is asked
+#   about explicitly (wt_worktree_locked): git skips locked worktrees when
+#   pruning, so there the advice would not work, and the missing directory is a
+#   deliberate state — storage unmounted, work intact elsewhere — rather than a
+#   stale one. Everything else is "go look at it yourself, or ask whoever owns
+#   it", which is non-destructive by construction and needs no such list.
+#
+#   The diagnosis is deliberately SUPPRESSED when the resolved blocker is the
+#   destination worktree itself: `git worktree add` also fails when $WT is
+#   registered but missing on disk (a hand-deleted dir, or a pre-durable-metadata
+#   leftover), and git's own message then already carries the right remedy
+#   ("prune"/"remove"). Appending "that branch is used by another worktree at
+#   <the very path you asked for>" would displace correct advice with a dead end.
+worktree_add() {
+	local rc=0 blocker primary
+	# `>&2` (rather than a command substitution) keeps both of git's streams
+	# unbuffered and tty-attached, so progress rendering still works; folding
+	# git's stdout into ours would break the path-only stdout contract.
+	git -C "$ROOT" worktree add "$@" >&2 || rc=$?
+	[ "$rc" -ne 0 ] || return 0
+
+	# A non-zero return from the resolver means "unknown" (git's failure had
+	# some other cause, or no worktree could be identified) — then git's own
+	# message above is all we have, and that is fine. So is a blocker that IS
+	# the destination (see the note above). Both paths are taken out-of-band via
+	# wt_read_path rather than `$(…)`, which would strip a TRAILING newline off
+	# the path and hand the `-d` test below a directory that is not there — the
+	# very "registered but MISSING" misdiagnosis this resolver exists to avoid
+	# (see the delimiter note in wt-common.sh).
+	if wt_read_path blocker wt_worktree_for_branch "$ROOT" "$BRANCH" && [ "$blocker" != "$WT" ]; then
+		wt_read_path primary wt_primary_checkout "$ROOT" || primary="$ROOT"
+		if [ "$blocker" = "$primary" ] || [ "$blocker" = "$ROOT" ]; then
+			printf '%s\n' "wt-enter: branch '$BRANCH' is checked out in the repository's PRIMARY (main) working tree at $(shq "$blocker") — not in a task worktree." >&2
+			printf '%s\n' "wt-enter: that checkout is SHARED with humans and with any peer agent in this container; someone may be working on '$BRANCH' there right now." >&2
+			printf '%s\n' "wt-enter: nothing was changed. Do NOT detach or switch the main checkout blindly — either run this task on a different branch, or coordinate with whoever owns that checkout before moving it off '$BRANCH', then rerun wt-enter." >&2
+		else
+			printf '%s\n' "wt-enter: branch '$BRANCH' is already checked out in another worktree at $(shq "$blocker"); git refuses to check one branch out twice." >&2
+			if [ ! -d "$blocker" ]; then
+				if wt_worktree_locked "$ROOT" "$blocker"; then
+					# Gone from disk, but NOT a stale record: git keeps a LOCKED
+					# worktree out of pruning on purpose, and locking is how one
+					# marks a checkout parked on removable or unmounted storage
+					# that still holds its work. The prune remedy below is not
+					# merely useless here — it would name a cleanup for something
+					# that is not stale, on the one record whose owner went out of
+					# their way to say "leave this alone".
+					printf '%s\n' "wt-enter: nothing was changed. That directory is not present here, but the worktree is LOCKED, so it is NOT a stale record: git keeps locked worktrees out of pruning, and a lock usually means the checkout lives on removable or currently-unmounted storage that still holds its work." >&2
+					printf '%s\n' "wt-enter: look at it yourself: 'git -C $(shq "$ROOT") worktree list -v' shows the lock and the reason its owner gave, or coordinate with whoever locked it. Rerun wt-enter once '$BRANCH' is free." >&2
+					printf '%s\n' "wt-enter: running this task on a different branch avoids the conflict entirely." >&2
+				else
+					printf '%s\n' "wt-enter: nothing was changed. That worktree is registered in git's metadata but MISSING on disk. Run 'git -C $(shq "$ROOT") worktree prune' to drop the stale record, then rerun wt-enter." >&2
+				fi
+			else
+				# No remedy is suggested, whatever state that worktree is in:
+				# git may have left a rebase, am, cherry-pick, revert or bisect
+				# there that `git status` does not flag, and only its owner can
+				# see which — or decide what it is worth. Naming it and handing
+				# over is what cannot go wrong.
+				printf '%s\n' "wt-enter: nothing was changed. That worktree may hold uncommitted work, or an unfinished rebase, am, cherry-pick, revert or bisect that 'git status' does not show — so wt-enter neither touches it nor tells you what to do with it." >&2
+				printf '%s\n' "wt-enter: look at it yourself: 'git -C $(shq "$blocker") status' (plus 'git -C $(shq "$blocker") bisect log' if a bisect may be running), or coordinate with whoever owns that worktree. Rerun wt-enter once '$BRANCH' is free." >&2
+				printf '%s\n' "wt-enter: running this task on a different branch avoids the conflict entirely." >&2
+			fi
+		fi
+	fi
+	exit "$rc"
+}
+
 mkdir -p "$WT_BASE"
 if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
 	# Existing branch (interrupted run / post-cleanup rerun): attach, never -b.
 	# git itself refuses if the branch is checked out in another worktree.
-	git -C "$ROOT" worktree add "$WT" "$BRANCH" >&2
+	worktree_add "$WT" "$BRANCH"
 else
 	[ -n "$BASE" ] ||
 		die "branch '$BRANCH' does not exist and no <base> was given (this stage must not create it)"
 	git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null ||
 		die "base ref '$BASE' does not resolve to a commit"
-	git -C "$ROOT" worktree add "$WT" -b "$BRANCH" "$BASE" >&2
+	worktree_add "$WT" -b "$BRANCH" "$BASE"
 fi
 
 TOP="$(git -C "$WT" rev-parse --show-toplevel)"

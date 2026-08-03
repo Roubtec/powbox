@@ -93,22 +93,39 @@ wt_reap_orphan_dir() {
 # and observing whether `git worktree add` then refuses. That rationale lives
 # HERE only; scripts/test-wt-orphan-safety.sh pins the outcomes without
 # restating it.
+#
+# The porcelain is always read NUL-delimited (`--porcelain -z`), never
+# line-delimited. A worktree path may legally contain a NEWLINE, and the
+# line-based format emits it raw and unescaped: the tail of such a path then
+# reads as a separate attribute and the parser answers a TRUNCATED path (observed
+# with a blocker at `odd<LF>path`, which came back as `odd` — a path that does not
+# exist, so wt-enter went on to report the blocker as missing on disk and offered
+# `worktree prune`, the one remedy that is wrong there). `-z` terminates every
+# attribute with a NUL instead, and NUL is the one byte a path cannot contain, so
+# every other byte survives intact; an empty attribute ends a record.
+#
+# The records are consumed straight from a pipeline rather than through a command
+# substitution because a bash variable CANNOT hold a NUL byte — `$(…)` silently
+# drops them and would splice the whole listing into one field. That loses git's
+# exit status, which costs nothing here: a `git worktree list` that fails (or is
+# too old to know `-z`) produces no records at all, the loop ends without a match,
+# and the function returns 1 — the same "unknown, fall back to git's own error"
+# answer the explicit status check used to give.
 
 # wt_primary_checkout <root>
 #   Print the absolute path of the repository's PRIMARY (main) working tree.
 #   `git worktree list --porcelain` always lists the main working tree first, so
-#   the first `worktree ` line is it. Returns 1 if git cannot be queried.
+#   the first `worktree ` attribute is it. Returns 1 if git cannot be queried.
 wt_primary_checkout() {
-	local out line
-	out="$(git -C "$1" worktree list --porcelain 2>/dev/null)" || return 1
-	while IFS= read -r line; do
-		case "$line" in
+	local field
+	while IFS= read -r -d '' field; do
+		case "$field" in
 		"worktree "*)
-			printf '%s\n' "${line#worktree }"
+			printf '%s\n' "${field#worktree }"
 			return 0
 			;;
 		esac
-	done <<<"$out"
+	done < <(git -C "$1" worktree list --porcelain -z 2>/dev/null)
 	return 1
 }
 
@@ -122,11 +139,17 @@ wt_primary_checkout() {
 #   the second checkout there, so the blocker is real while its state is not ours
 #   to read). An unreachable git dir needs no separate probe: it already fails
 #   rev-parse (verified — such a worktree drops out of `git worktree list` too).
+#   The two answers are asked for SEPARATELY rather than split out of one
+#   newline-separated reply, for the same reason the porcelain is read with `-z`:
+#   a worktree path may contain a newline, and splitting on newlines would hand
+#   back a fragment of the toplevel and fail the cross-check for a perfectly good
+#   worktree. (A path ENDING in a newline still degrades, since `$(…)` strips
+#   trailing newlines — but only to `return 1`, i.e. "not read", which is this
+#   function's documented safe direction.)
 wt_worktree_gitdir() {
-	local out gitdir top
-	out="$(git -C "$1" rev-parse --absolute-git-dir --show-toplevel 2>/dev/null)" || return 1
-	gitdir="${out%%$'\n'*}"
-	top="${out##*$'\n'}"
+	local gitdir top
+	gitdir="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+	top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
 	[ "$top" = "$1" ] || return 1
 	printf '%s\n' "$gitdir"
 }
@@ -235,24 +258,25 @@ wt_branch_held_by_operation() {
 #   what should be done about it, is for its owner to look at (see the note above
 #   the resolvers).
 wt_worktree_for_branch() {
-	local root="$1" branch="$2" out line path=""
-	out="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || return 1
-	while IFS= read -r line; do
-		case "$line" in
-		"worktree "*) path="${line#worktree }" ;;
+	local root="$1" branch="$2" field path=""
+	while IFS= read -r -d '' field; do
+		case "$field" in
+		"worktree "*) path="${field#worktree }" ;;
 		"branch "*)
-			if [ "${line#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
+			if [ "${field#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
 				printf '%s\n' "$path"
 				return 0
 			fi
 			;;
 		detached)
-			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch"; then
+			# stdin is closed for the probe: it runs git itself, and the
+			# undelimited records still queued on our stdin are not its to read.
+			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch" </dev/null; then
 				printf '%s\n' "$path"
 				return 0
 			fi
 			;;
 		esac
-	done <<<"$out"
+	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)
 	return 1
 }

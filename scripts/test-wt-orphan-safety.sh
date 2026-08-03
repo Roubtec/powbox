@@ -39,9 +39,15 @@
 #     is the repo root wt-enter already knows).
 #   * the non-destruction DETECTOR itself (destructive_advice below), because
 #     every case above delegates to it: a hostile dynamic value — a branch named
-#     `abort`, `force`, `remove`, `hard`, `rf` or `restore` — must still be
-#     treated as data, WITHOUT disarming the detector for a separate destructive
-#     command in the same message.
+#     `abort`, `force`, `remove`, `hard`, `rf` or `restore`, or a name/path
+#     carrying glob metacharacters — must still be treated as data, WITHOUT
+#     disarming the detector for a separate destructive command in the same
+#     message.
+#   * that a worktree path containing a NEWLINE survives the porcelain read
+#     whole, at unit level for both resolvers and end-to-end through wt-enter —
+#     a line-based read answers the path's prefix, which is not on disk, so the
+#     live blocker gets misreported as a stale record and 'worktree prune'
+#     recommended for it.
 #   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
 #     the paths inside the commands wt-enter suggests are shell-quoted, so advice
 #     about a worktree under a spaced path stays pasteable and safe to paste.
@@ -564,6 +570,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Unit: a worktree path containing a NEWLINE must come back WHOLE. A newline is
+# a legal path byte and `git worktree list --porcelain` prints it raw, so a
+# line-based reader silently answers the prefix — a path that does not exist,
+# which downstream reads as "registered but missing" and earns the caller the one
+# remedy that is wrong there ('worktree prune'). Both resolvers are pinned, for
+# the main record and for a linked one, since they read the same listing.
+# ---------------------------------------------------------------------------
+NL="$(printf 'odd\npath')"
+RZ="$(make_repo "$NL")" # the MAIN working tree's own path carries the newline
+if out="$(wt_primary_checkout "$RZ")" && [ "$out" = "$RZ" ]; then
+	ok "wt_primary_checkout returns a main-tree path containing a newline intact"
+else
+	no "wt_primary_checkout truncated a newline path: got '${out:-}', expected '$RZ'"
+fi
+
+WTZ="$WORK_ROOT/nl-blocker-$NL" # a LINKED worktree, newline in its own path
+git_quiet -C "$RZ" worktree add -q "$WTZ" -b nl-b >/dev/null 2>&1
+if out="$(wt_worktree_for_branch "$RZ" nl-b)" && [ "$out" = "$WTZ" ]; then
+	ok "wt_worktree_for_branch returns a blocker path containing a newline intact"
+else
+	no "wt_worktree_for_branch truncated a newline path: got '${out:-}', expected '$WTZ'"
+fi
+
+# The truncation this guards is not hypothetical: the prefix is a path that is
+# not there, so a caller acting on it would diagnose the wrong failure entirely.
+if [ -e "${WTZ%%$'\n'*}" ]; then
+	no "precondition: the truncated prefix of the newline path should not exist"
+else
+	ok "the truncated prefix of a newline worktree path is a non-existent path"
+fi
+
+# ---------------------------------------------------------------------------
 # Integration: wt-enter reuses a LIVE worktree (durable-metadata happy path)
 # ---------------------------------------------------------------------------
 R1="$(make_repo r1)"
@@ -986,6 +1024,43 @@ else
 		ok "wt-enter names a blocker whose own git dir cannot be read, and still advises nothing destructive"
 	else
 		no "wt-enter unreadable-blocker message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the blocker sits under a path containing a NEWLINE. End to end,
+# this is where a line-based read of the porcelain does real damage: the blocker
+# resolves to the path's prefix, which is not on disk, so wt-enter takes the
+# registered-but-missing branch and tells the caller to 'worktree prune' — advice
+# for a stale record, aimed at a worktree that is very much alive. The full path
+# must be named and the prune remedy must NOT appear.
+# (Substring assertions use bash `case` rather than grep: a pattern containing a
+# newline is two patterns to grep, which would match either half on its own.)
+# ---------------------------------------------------------------------------
+EZ="$WORK_ROOT/rz.err"
+if out="$(cd "$RZ" && bash "$WT_ENTER" task-nl nl-b 2>"$EZ")"; then
+	no "wt-enter must fail when a blocker under a newline path holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	errtext="$(cat "$EZ")"
+	# wt-enter's OWN sibling-conflict line, carrying the path in full.
+	want_nl="wt-enter: branch 'nl-b' is already checked out in another worktree at $WTZ;"
+	case "$errtext" in
+	*"$want_nl"*) ;;
+	*) miss="$miss no-blocking-path" ;;
+	esac
+	# The symptom of a truncated parse: the live blocker misreported as a stale
+	# record, with git's prune remedy offered for it.
+	case "$errtext" in
+	*"worktree prune"*) miss="$miss prune-advised-for-live-blocker" ;;
+	esac
+	miss="$miss$(destructive_advice "$EZ" "$WTZ" "$RZ/.worktrees/$CONTAINER_NAME/task-nl" "$RZ" nl-b task-nl)"
+	[ ! -e "$RZ/.worktrees/$CONTAINER_NAME/task-nl" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter names a blocking worktree whose path contains a newline, in full"
+	else
+		no "wt-enter newline-path blocker message inadequate:$miss"
 	fi
 fi
 

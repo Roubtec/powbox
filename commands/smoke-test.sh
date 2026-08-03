@@ -318,7 +318,9 @@ fi
 # part of a script the container shell parses as a whole. Two things follow, and
 # both are structural rather than a matter of careful escaping: no probe's TEXT
 # can affect the runner, the diagnostic, or a neighbouring probe — a stray
-# quote, a trailing `#` comment, a `$(…)` or a backtick have nothing to reach;
+# quote, a trailing `#` comment, a `$(…)` or a backtick have nothing to reach
+# (TEXT, not OUTPUT: a probe can still PRINT a line that mimics the diagnostic,
+# but it cannot make the run report one — the verdict is the exit status);
 # and a probe fails the run exactly when its own shell exits non-zero, which
 # nothing discards any more. That second point is worth stating precisely,
 # because it is the rule you write probes against, so learn the general rule
@@ -330,15 +332,18 @@ fi
 # because its own status then becomes the probe's exit status and the runner's
 # `||` guard sees it, and UNENFORCED when anything follows it, which overwrites
 # that status. (`! X` inverts as POSIX says; an `if` whose condition is false
-# with no `else` is 0 by definition, so an `if` condition never fails a probe.)
+# with no `else` is 0 by definition, as is a `while`/`until` whose body never
+# runs, so an `if`/`while`/`until` condition never fails a probe.)
 # Nothing outside that exempt set is suspended at all — a failing member of a
-# `;` sequence or of a `{ …; }` group aborts the probe outright. That is what
+# bare `;` sequence or of a `{ …; }` group aborts the probe outright ("bare" is
+# load-bearing: a `{ …; }` group in a NON-FINAL `&&`/`||` position inherits the
+# exemption throughout — `{ false; echo X; } && true` exits 0). That is what
 # makes these multi-clause assertions real. Joined the original way — every
 # probe a bare line of ONE `set -e` script — the same exemption applied, but
 # nothing caught the status it left behind, so the non-final `&&`/`||` members
 # of every probe, and the overall status of every probe but the last (nothing
-# followed it to discard it), were masked; `;` sequences and `{ …; }` groups
-# were already enforced then, so that shape is not something this change
+# followed it to discard it), were masked; bare `;` sequences and `{ …; }`
+# groups were already enforced then, so that shape is not something this change
 # restored.
 # Consequences for probe authors:
 #   * do NOT hand-roll a per-probe `|| { …; exit 1; }` tail — the runner

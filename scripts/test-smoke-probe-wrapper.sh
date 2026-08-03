@@ -34,13 +34,16 @@
 # introduced by that intermediate `if` form itself - the ORIGINAL bare-line join
 # already enforced `;` members - so K3 pins a regression this branch removed, not
 # a pre-existing gap it closed. Section L is different in kind: it CHARACTERIZES
-# a limitation that remains accepted (a probe ending in `&`). That assertion pins
-# what the wrapper does, not what it should do - a change that closes it should
-# flip the assertion and the prose, not be reverted. A second such limitation is
-# documented but not asserted here: a probe MIXING the two binding shapes
-# (`A && B; C`, an `&&` list that is not the probe's last command) still has its
-# short-circuited status overwritten by `C`, exactly as under the original join.
-# No shipped probe uses that shape.
+# the three limitations that remain accepted - a probe ending in `&` (L1), an
+# `&&`/`||` list that is not the probe's LAST command (`A && B; C`, L2), and a
+# `!`-negated pipeline in that same non-final position (`! X; Y`, L3). Each
+# carries a control showing the limitation is inherent rather than introduced by
+# a join form (the pre-fix bare-line join did not catch it either), and L2/L3
+# add a CONTRAST check proving the same construct IS binding as the probe's last
+# command - the positional rule the comment blocks state. Those assertions pin
+# what the wrapper does, not what it should do - a change that closes any of
+# them should flip the assertion and the prose, not be reverted. No shipped
+# probe uses any of the three shapes.
 # shellcheck disable=SC2016  # single-quoted probe/runner/PowerShell text is LITERAL by design here
 # shellcheck disable=SC1003  # trailing backslashes in probe literals are the payload, not an escape
 set -uo pipefail
@@ -753,12 +756,12 @@ else
 fi
 
 # L3: a `!`-negated pipeline that is NOT the probe's last command (`! X; Y`).
-# The third `set -e` exemption a probe can plausibly reach (the `if`/`while`
-# condition is the fourth, but its own status is 0 when the condition is false,
-# so it cannot fail a probe from any position). A probe written as
-# `! command -v sometool; <more assertions>` silently passes its negated
-# assertion even when `sometool` IS present - exactly the defect class this
-# driver exists to eliminate, which is why the comment blocks name it.
+# The third `set -e` exemption a probe can plausibly reach (the
+# `if`/`while`/`until` condition is the fourth, but its own status is 0 when the
+# condition is false, so it cannot fail a probe from any position). A probe
+# written as `! command -v sometool; <more assertions>` silently passes its
+# negated assertion even when `sometool` IS present - exactly the defect class
+# this driver exists to eliminate, which is why the comment blocks name it.
 run_driver 1 "$TMP/l3.out" \
 	"true" \
 	'! true; true' \

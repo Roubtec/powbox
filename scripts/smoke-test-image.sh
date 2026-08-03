@@ -30,9 +30,13 @@ fi
 #     re-parsed into the failure message. The message carries the probe INDEX
 #     and nothing else, and the host prints the index → probe manifest below
 #     when the run fails, which is also what closes the old "the driver cannot
-#     say which probe failed" gap. (Runtime effects are a separate matter: see
-#     the per-probe isolation note below for what one probe can still hand the
-#     next.)
+#     say which probe failed" gap. The claim is about probe TEXT, not probe
+#     OUTPUT: a probe is free to PRINT a line that mimics the diagnostic
+#     (`printf "%s\n" "SMOKE PROBE 99 FAILED" >&2; true` puts exactly that in
+#     the run output while the run still exits 0), but it cannot make the runner
+#     emit one or change the verdict — that follows from the exit status alone.
+#     (Runtime effects are a separate matter: see the per-probe isolation note
+#     below for what one probe can still hand the next.)
 #  2. A probe fails the run exactly when its own shell exits non-zero — and
 #     nothing discards that status any more. Be precise about `set -e` here,
 #     because this is the rule a probe author writes against, so state the
@@ -47,13 +51,17 @@ fi
 #     runner's `||` guard sees it; it is UNENFORCED when anything follows it,
 #     which overwrites that status. ("Its own status" stays POSIX: `! X`
 #     inverts, and an `if` whose condition is false with no `else` is 0 by
-#     definition — so an `if` condition never fails a probe in either position.)
+#     definition, as is a `while`/`until` whose body never runs — so an
+#     `if`/`while`/`until` condition never fails a probe in either position.)
 #     Nothing outside that exempt set is suspended at all: a failing member of a
 #     bare `;` sequence or of a `{ …; }` group aborts the probe shell at that
-#     member. So the `&&`-chain and pipeline shapes the probes actually use are
-#     binding — a pipeline reports its LAST command's status, and producer-side
-#     masking inside one is a separate matter (see the pipefail note below). The
-#     shape to AVOID is an exempt construct that is NOT the probe's last
+#     member. "Bare" is load-bearing there: a `{ …; }` group in a NON-FINAL
+#     `&&`/`||` position inherits the exemption throughout —
+#     `{ false; echo X; } && true` exits 0 and still prints `X`. So the
+#     `&&`-chain and pipeline shapes the probes actually use are binding — a
+#     pipeline reports its LAST command's status, and producer-side masking
+#     inside one is a separate matter (see the pipefail note below). The shape
+#     to AVOID is an exempt construct that is NOT the probe's last
 #     top-level command — `A && B; C`, or `! X; Y` — whose failure is discarded
 #     exactly as it was before this change. No shipped probe has that shape.
 #

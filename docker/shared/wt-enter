@@ -155,9 +155,13 @@ worktree_add() {
 	# A non-zero return from the resolver means "unknown" (git's failure had
 	# some other cause, or no worktree could be identified) — then git's own
 	# message above is all we have, and that is fine. So is a blocker that IS
-	# the destination (see the note above).
-	if blocker="$(wt_worktree_for_branch "$ROOT" "$BRANCH")" && [ "$blocker" != "$WT" ]; then
-		primary="$(wt_primary_checkout "$ROOT" || printf '%s\n' "$ROOT")"
+	# the destination (see the note above). Both paths are taken out-of-band via
+	# wt_read_path rather than `$(…)`, which would strip a TRAILING newline off
+	# the path and hand the `-d` test below a directory that is not there — the
+	# very "registered but MISSING" misdiagnosis this resolver exists to avoid
+	# (see the delimiter note in wt-common.sh).
+	if wt_read_path blocker wt_worktree_for_branch "$ROOT" "$BRANCH" && [ "$blocker" != "$WT" ]; then
+		wt_read_path primary wt_primary_checkout "$ROOT" || primary="$ROOT"
 		if [ "$blocker" = "$primary" ] || [ "$blocker" = "$ROOT" ]; then
 			echo "wt-enter: branch '$BRANCH' is checked out in the repository's PRIMARY (main) working tree at $blocker — not in a task worktree." >&2
 			echo "wt-enter: that checkout is SHARED with humans and with any peer agent in this container; someone may be working on '$BRANCH' there right now." >&2

@@ -47,7 +47,9 @@
 #     whole, at unit level for both resolvers and end-to-end through wt-enter —
 #     a line-based read answers the path's prefix, which is not on disk, so the
 #     live blocker gets misreported as a stale record and 'worktree prune'
-#     recommended for it.
+#     recommended for it. A path ENDING in a newline is pinned the same way and
+#     covers the other half of that defect: the answer's own handoff, where a
+#     command substitution would strip the byte the `-z` read preserved.
 #   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
 #     the paths inside the commands wt-enter suggests are shell-quoted, so advice
 #     about a worktree under a spaced path stays pasteable and safe to paste.
@@ -505,13 +507,20 @@ rm -rf "$RO/.git/rebase-merge"
 # Unit: wt_worktree_for_branch identifies the blocking worktree — a PATH, and
 # nothing else — for both porcelain record kinds, and claims nothing when no
 # worktree holds the branch.
+#
+# The resolvers answer NUL-terminated and are therefore read with wt_read_path
+# throughout, never `$( )`, which is both how wt-enter reads them and what keeps
+# the trailing-newline cases below meaningful. `out` is pre-set to a SENTINEL
+# before each call so "left untouched" is distinguishable from "answered empty".
 # ---------------------------------------------------------------------------
+UNSET_MARK='(no answer)'
 RG="$(make_repo rg)"
 git_quiet -C "$RG" worktree add -q "$RG/plain" -b plain-b >/dev/null 2>&1
-if [ "$(wt_worktree_for_branch "$RG" plain-b)" = "$RG/plain" ]; then
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_for_branch "$RG" plain-b && [ "$out" = "$RG/plain" ]; then
 	ok "wt_worktree_for_branch names the worktree holding a branch (porcelain 'branch' record)"
 else
-	no "plain blocker not identified: got '$(wt_worktree_for_branch "$RG" plain-b || true)'"
+	no "plain blocker not identified: got '$out'"
 fi
 
 # A DETACHED record: only the operation state links it back to the branch.
@@ -519,8 +528,9 @@ git_quiet -C "$RG" branch det-b
 git_quiet -C "$RG" worktree add -q --detach "$RG/det" >/dev/null 2>&1
 mkdir -p "$RG/.git/worktrees/det/rebase-merge"
 printf 'refs/heads/det-b\n' >"$RG/.git/worktrees/det/rebase-merge/head-name"
+out="$UNSET_MARK"
 if git -C "$RG" worktree list --porcelain | grep -qx detached &&
-	[ "$(wt_worktree_for_branch "$RG" det-b)" = "$RG/det" ]; then
+	wt_read_path out wt_worktree_for_branch "$RG" det-b && [ "$out" = "$RG/det" ]; then
 	ok "wt_worktree_for_branch names a DETACHED worktree that holds the branch through a rebase"
 else
 	no "detached rebase blocker not identified"
@@ -534,39 +544,44 @@ rm -rf "$RG/.git/worktrees/det/rebase-merge"
 # implementation, because in an ordinary repo the main working tree is the repo
 # root wt-enter already knows.
 # ---------------------------------------------------------------------------
-if out="$(wt_primary_checkout "$RG")" && [ "$out" = "$RG" ]; then
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$RG" && [ "$out" = "$RG" ]; then
 	ok "wt_primary_checkout names the main working tree"
 else
-	no "wt_primary_checkout on the main tree: got '${out:-}', expected '$RG'"
+	no "wt_primary_checkout on the main tree: got '$out', expected '$RG'"
 fi
 
 # Asked from INSIDE a linked worktree it must still answer the MAIN tree, never
 # the one it was asked from — git lists the main working tree first regardless.
-if out="$(wt_primary_checkout "$RG/plain")" && [ "$out" = "$RG" ]; then
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$RG/plain" && [ "$out" = "$RG" ]; then
 	ok "wt_primary_checkout answers the main tree even when queried from a linked worktree"
 else
-	no "wt_primary_checkout from a linked worktree: got '${out:-}', expected '$RG'"
+	no "wt_primary_checkout from a linked worktree: got '$out', expected '$RG'"
 fi
 
-# Outside a repository it must FAIL (and print nothing) rather than invent a
-# path, so wt-enter falls back instead of comparing against a bogus answer.
+# Outside a repository it must FAIL, emitting NOTHING at all (not even a stray
+# terminator) rather than invent a path, so wt-enter falls back instead of
+# comparing against a bogus answer — and so `out` is left as the caller had it.
 notrepo="$WORK_ROOT/not-a-repo"
 mkdir -p "$notrepo"
-if out="$(wt_primary_checkout "$notrepo")"; then
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$notrepo"; then
 	no "wt_primary_checkout must fail outside a repository (got '$out')"
-elif [ -z "$out" ]; then
-	ok "wt_primary_checkout fails and prints nothing outside a repository"
+elif [ "$out" = "$UNSET_MARK" ] && [ "$(wt_primary_checkout "$notrepo" | wc -c)" -eq 0 ]; then
+	ok "wt_primary_checkout fails and emits nothing outside a repository"
 else
-	no "wt_primary_checkout outside a repository: expected empty output, got '$out'"
+	no "wt_primary_checkout outside a repository: expected no answer, got '$out'"
 fi
 
 git_quiet -C "$RG" branch unheld-b
-if out="$(wt_worktree_for_branch "$RG" unheld-b)"; then
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_for_branch "$RG" unheld-b; then
 	no "wt_worktree_for_branch must not claim a blocker for an unheld branch (got '$out')"
-elif [ -z "$out" ]; then
-	ok "wt_worktree_for_branch prints nothing and fails when no worktree holds the branch"
+elif [ "$out" = "$UNSET_MARK" ] && [ "$(wt_worktree_for_branch "$RG" unheld-b | wc -c)" -eq 0 ]; then
+	ok "wt_worktree_for_branch emits nothing and fails when no worktree holds the branch"
 else
-	no "unheld branch: expected empty output, got '$out'"
+	no "unheld branch: expected no answer, got '$out'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -579,18 +594,20 @@ fi
 # ---------------------------------------------------------------------------
 NL="$(printf 'odd\npath')"
 RZ="$(make_repo "$NL")" # the MAIN working tree's own path carries the newline
-if out="$(wt_primary_checkout "$RZ")" && [ "$out" = "$RZ" ]; then
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$RZ" && [ "$out" = "$RZ" ]; then
 	ok "wt_primary_checkout returns a main-tree path containing a newline intact"
 else
-	no "wt_primary_checkout truncated a newline path: got '${out:-}', expected '$RZ'"
+	no "wt_primary_checkout truncated a newline path: got '$out', expected '$RZ'"
 fi
 
 WTZ="$WORK_ROOT/nl-blocker-$NL" # a LINKED worktree, newline in its own path
 git_quiet -C "$RZ" worktree add -q "$WTZ" -b nl-b >/dev/null 2>&1
-if out="$(wt_worktree_for_branch "$RZ" nl-b)" && [ "$out" = "$WTZ" ]; then
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_for_branch "$RZ" nl-b && [ "$out" = "$WTZ" ]; then
 	ok "wt_worktree_for_branch returns a blocker path containing a newline intact"
 else
-	no "wt_worktree_for_branch truncated a newline path: got '${out:-}', expected '$WTZ'"
+	no "wt_worktree_for_branch truncated a newline path: got '$out', expected '$WTZ'"
 fi
 
 # The truncation this guards is not hypothetical: the prefix is a path that is
@@ -599,6 +616,44 @@ if [ -e "${WTZ%%$'\n'*}" ]; then
 	no "precondition: the truncated prefix of the newline path should not exist"
 else
 	ok "the truncated prefix of a newline worktree path is a non-existent path"
+fi
+
+# ---------------------------------------------------------------------------
+# Unit: a path ENDING in a newline is the second half of the same defect, and
+# the porcelain read alone does not cover it: `$( )` strips TRAILING newlines,
+# so handing the answer back through a command substitution re-truncates the
+# path the `-z` read just preserved. Hence the NUL-terminated answer and
+# wt_read_path — pinned here for both resolvers.
+#
+# The repo path is built directly rather than taken from make_repo's own `echo`,
+# which is itself read with `$( )` and would drop the trailing byte on the way
+# in. Nothing about the fixture may depend on the thing under test.
+# ---------------------------------------------------------------------------
+NLT_NAME=$'tail\n' # trailing newline, kept out of any `$( )`
+NLT_ROOT="$WORK_ROOT/$NLT_NAME"
+make_repo "$NLT_NAME" >/dev/null
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$NLT_ROOT" && [ "$out" = "$NLT_ROOT" ]; then
+	ok "wt_primary_checkout returns a main-tree path ENDING in a newline intact"
+else
+	no "wt_primary_checkout truncated a trailing-newline path: got '$out', expected '$NLT_ROOT'"
+fi
+
+WTT="$WORK_ROOT/nlt-blocker"$'\n' # a LINKED worktree whose path ends in a newline
+git_quiet -C "$NLT_ROOT" worktree add -q "$WTT" -b nlt-b >/dev/null 2>&1
+out="$UNSET_MARK"
+if wt_read_path out wt_worktree_for_branch "$NLT_ROOT" nlt-b && [ "$out" = "$WTT" ]; then
+	ok "wt_worktree_for_branch returns a blocker path ENDING in a newline intact"
+else
+	no "wt_worktree_for_branch truncated a trailing-newline path: got '$out', expected '$WTT'"
+fi
+
+# Same non-hypothetical: strip the trailing newline and the path is not there,
+# which is what turns a live blocker into a "registered but missing" record.
+if [ -e "${WTT%$'\n'}" ]; then
+	no "precondition: the trailing-newline-stripped blocker path should not exist"
+else
+	ok "a blocker path with its trailing newline stripped is a non-existent path"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1116,37 @@ else
 		ok "wt-enter names a blocking worktree whose path contains a newline, in full"
 	else
 		no "wt-enter newline-path blocker message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the blocker's path ENDS in a newline. Identical symptom, different
+# byte: here it is the handoff out of the resolver, not the porcelain read, that
+# can eat the last byte — `$( )` strips trailing newlines — and the misdiagnosis
+# lands in exactly the same place ('worktree prune' aimed at a live worktree).
+# ---------------------------------------------------------------------------
+ET="$WORK_ROOT/rt.err"
+if out="$(cd "$NLT_ROOT" && bash "$WT_ENTER" task-nlt nlt-b 2>"$ET")"; then
+	no "wt-enter must fail when a blocker under a trailing-newline path holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	errtext="$(cat "$ET")"
+	# The `;` right after the path is what pins that NOTHING was trimmed off it.
+	want_nlt="wt-enter: branch 'nlt-b' is already checked out in another worktree at $WTT;"
+	case "$errtext" in
+	*"$want_nlt"*) ;;
+	*) miss="$miss no-blocking-path" ;;
+	esac
+	case "$errtext" in
+	*"worktree prune"*) miss="$miss prune-advised-for-live-blocker" ;;
+	esac
+	miss="$miss$(destructive_advice "$ET" "$WTT" "$NLT_ROOT/.worktrees/$CONTAINER_NAME/task-nlt" "$NLT_ROOT" nlt-b task-nlt)"
+	[ ! -e "$NLT_ROOT/.worktrees/$CONTAINER_NAME/task-nlt" ] || miss="$miss worktree-created"
+	if [ -z "$miss" ]; then
+		ok "wt-enter names a blocking worktree whose path ENDS in a newline, in full"
+	else
+		no "wt-enter trailing-newline blocker message inadequate:$miss"
 	fi
 fi
 

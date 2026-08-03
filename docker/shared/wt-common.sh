@@ -78,9 +78,10 @@ wt_reap_orphan_dir() {
 # The resolvers below exist so callers can DIAGNOSE a "branch is already used by
 # worktree at ..." failure without parsing git's fatal message: that text is
 # localizable and unstable, whereas `git worktree list --porcelain` is a
-# documented, machine-readable format. They print a single absolute path on
-# stdout (nothing on failure) and return non-zero when they cannot answer, so a
-# caller can always fall back to git's own error.
+# documented, machine-readable format. They emit a single absolute path on stdout
+# NUL-terminated (nothing on failure) and return non-zero when they cannot
+# answer, so a caller can always fall back to git's own error. Read them with
+# wt_read_path, never with `$(…)` — see the delimiter note below.
 #
 # They IDENTIFY the blocking worktree and stop there, deliberately: they do not
 # classify it as safe to delete, and no caller may use them to pick a remedy that
@@ -111,17 +112,49 @@ wt_reap_orphan_dir() {
 # too old to know `-z`) produces no records at all, the loop ends without a match,
 # and the function returns 1 — the same "unknown, fall back to git's own error"
 # answer the explicit status check used to give.
+#
+# The ANSWER is handed back the same way, NUL-terminated and read out-of-band,
+# because `$(…)` would undo the `-z` read one step later: command substitution
+# strips TRAILING newlines, so a blocker at `odd<LF>` comes back as `odd` — again
+# a path that is not on disk, and again wt-enter calling a live worktree missing
+# and offering `worktree prune` (reproduced end to end). A newline is the only
+# path byte `$(…)` can eat, and only at the end, but that is exactly the byte the
+# porcelain read was hardened against, so the value never travels through a
+# command substitution at all: wt_read_path takes it off a process substitution
+# with the same `IFS= read -r -d ''` the porcelain loops use. Losing the exit
+# status costs nothing here either — a resolver that cannot answer prints
+# nothing, the read hits EOF without its delimiter and fails, and the caller
+# takes the same "unknown" branch.
+
+# wt_read_path <var> <resolver> [<args>...]
+#   Run <resolver> and store the single NUL-terminated path it emits in <var>,
+#   whole, whatever bytes it contains. Returns non-zero — leaving <var> untouched
+#   — when the resolver answers nothing, i.e. exactly when the resolver itself
+#   would have returned non-zero, so callers branch on this instead:
+#       wt_read_path blocker wt_worktree_for_branch "$root" "$branch" || ...
+#   `IFS=` is load-bearing: `read` strips leading and trailing IFS whitespace,
+#   and the default IFS contains the newline (and the space) that this whole
+#   exercise exists to preserve. Its own locals are `__wt_`-prefixed so that a
+#   caller's variable is never shadowed by one of them; <var> must therefore not
+#   itself carry that prefix.
+wt_read_path() {
+	local __wt_out_var="$1" __wt_path
+	shift
+	IFS= read -r -d '' __wt_path < <("$@") || return 1
+	printf -v "$__wt_out_var" '%s' "$__wt_path"
+}
 
 # wt_primary_checkout <root>
-#   Print the absolute path of the repository's PRIMARY (main) working tree.
-#   `git worktree list --porcelain` always lists the main working tree first, so
-#   the first `worktree ` attribute is it. Returns 1 if git cannot be queried.
+#   Emit the absolute path of the repository's PRIMARY (main) working tree,
+#   NUL-terminated (read it with wt_read_path). `git worktree list --porcelain`
+#   always lists the main working tree first, so the first `worktree ` attribute
+#   is it. Returns 1 if git cannot be queried.
 wt_primary_checkout() {
 	local field
 	while IFS= read -r -d '' field; do
 		case "$field" in
 		"worktree "*)
-			printf '%s\n' "${field#worktree }"
+			printf '%s\0' "${field#worktree }"
 			return 0
 			;;
 		esac
@@ -247,8 +280,9 @@ wt_branch_held_by_operation() {
 }
 
 # wt_worktree_for_branch <root> <branch>
-#   Print the absolute path of the worktree that currently has <branch> checked
-#   out, or return 1 (printing nothing) when no worktree holds it. A worktree
+#   Emit the absolute path of the worktree that currently has <branch> checked
+#   out, NUL-terminated (read it with wt_read_path), or return 1 (emitting
+#   nothing) when no worktree holds it. A worktree
 #   with a rebase/bisect in progress reports as `detached` in the porcelain even
 #   though git still refuses to check its branch out elsewhere, so detached
 #   records are cross-checked against the operation state (see
@@ -264,7 +298,7 @@ wt_worktree_for_branch() {
 		"worktree "*) path="${field#worktree }" ;;
 		"branch "*)
 			if [ "${field#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
-				printf '%s\n' "$path"
+				printf '%s\0' "$path"
 				return 0
 			fi
 			;;
@@ -272,7 +306,7 @@ wt_worktree_for_branch() {
 			# stdin is closed for the probe: it runs git itself, and the
 			# undelimited records still queued on our stdin are not its to read.
 			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch" </dev/null; then
-				printf '%s\n' "$path"
+				printf '%s\0' "$path"
 				return 0
 			fi
 			;;

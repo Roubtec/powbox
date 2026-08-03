@@ -309,17 +309,27 @@ fi
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/…` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
+# Every probe below is wrapped by the driver (scripts/smoke-test-image.sh) in an
+# explicit `|| { printf … 'SMOKE PROBE <n> FAILED' >&2; exit 1; }` tail, so a
+# multi-clause `&&` probe is binding in EVERY clause, and a failure names the
+# probe by index — the driver prints an index → probe manifest when the run
+# fails. That wrapper is what makes these assertions real: the driver
+# concatenates every probe into ONE `set -e` script, and POSIX `set -e` exempts a
+# failing element of an `&&` list that is not the final element, so a bare
+# `A && B && C` whose `A` or `B` fails neither exits the shell nor propagates —
+# the list's non-zero status is simply discarded when the shell moves to the next
+# line. Before the wrapper only the last clause of the LAST probe was enforced.
+# Consequences for probe authors: do NOT hand-roll a per-probe
+# `|| { …; exit 1; }` tail (the driver supplies one, and a second is redundant),
+# and keep every probe single-line — a newline would leave all but its last line
+# unguarded, so the driver rejects it outright. Pipeline-shaped probes
+# (`X | grep -q Y`) are unaffected either way: the wrapper reads the status the
+# pipeline already reports, and `set -o pipefail` is deliberately not set (it
+# would make each producer's status binding, including the SIGPIPE `grep -q`
+# provokes by closing the pipe on its first match). scripts/test-smoke-probe-wrapper.sh
+# unit-tests the wrapping, its injection-proofness, and .sh/.ps1 parity.
 # The dotnet probes pin the two pieces of the SDK layer that can regress
-# silently. Both end in `|| { echo "SMOKE PROBE FAILED: …" >&2; exit 1; }`, and
-# that tail is load-bearing rather than decorative: the driver concatenates every
-# probe into ONE `set -e` script (scripts/smoke-test-image.sh), and POSIX `set -e`
-# exempts a failing element of an `&&` list that is not the final element. A
-# multi-clause `&&` chain on a non-final line therefore fails, is not exited on,
-# and is discarded when the shell moves to the next probe — every clause but the
-# last becomes unenforced. The explicit `exit 1` makes all of them binding, and
-# the message names the failing probe, which the driver cannot otherwise report.
-# Do not "simplify" the tail away. (Other multi-clause probes above predate this
-# and share the flaw; a central fix in the driver is tracked in tasks/002d.)
+# silently.
 # The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up
 # RUN does and asserts both marker files exist under $HOME/.dotnet, are owned by
 # the runtime user, and that $HOME/.dotnet is writable by it — which pins that
@@ -405,8 +415,8 @@ fi
 	"opa version >/dev/null" \
 	'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"' \
 	"dotnet --version >/dev/null" \
-	'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ] || { echo "SMOKE PROBE FAILED: .NET first-use sentinels for SDK [$sdk] under $HOME/.dotnet" >&2; exit 1; }' \
-	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ] || { echo "SMOKE PROBE FAILED: .NET env opt-outs [$DOTNET_CLI_TELEMETRY_OPTOUT|$DOTNET_NOLOGO|$DOTNET_GENERATE_ASPNET_CERTIFICATE|$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE]" >&2; exit 1; }' \
+	'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ]' \
+	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]' \
 	"file --version >/dev/null" \
 	"printf test | xxd >/dev/null" \
 	"envsubst --version >/dev/null" \

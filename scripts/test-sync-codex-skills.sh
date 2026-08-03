@@ -86,7 +86,13 @@ new_case() {
 
 # ================================================================================
 # Test 1: a powbox-owned (marked) copy at an OLD sha is refreshed to the clone sha,
-#         content is updated, and the marker records the synced sha + source.
+#         content is updated, and the marker records the synced sha, the writing
+#         channel, and the UPSTREAM source path of that specific skill.
+#
+#         The pre-seeded fixture markers deliberately use the LEGACY spelling
+#         (`source=plugin-clone`, no upstream path) that images before this split
+#         wrote: an old marker must still classify as powbox-owned and refresh —
+#         every consumer parses by key, never by line number or count.
 # ================================================================================
 R="$(new_case t1)"
 # Pre-seed dest with marked copies at an OLD sha and stale content.
@@ -97,10 +103,39 @@ done
 run_sync "$R/clone" "$R/dest" "NEWSHA111"
 if [ "$(cat "$R/dest/a/SKILL.md")" = "shared skill a v1" ] &&
 	[ "$(marker_sha "$R/dest/a")" = "NEWSHA111" ] &&
-	grep -q '^source=plugin-clone$' "$R/dest/a/.powbox-seeded"; then
-	ok "marked stale copy refreshed to clone content + sha, source=plugin-clone"
+	grep -q '^channel=plugin-clone$' "$R/dest/a/.powbox-seeded"; then
+	ok "legacy marker refreshed to clone content + sha, channel=plugin-clone"
 else
-	no "marked stale copy refreshed to clone content + sha, source=plugin-clone"
+	no "legacy marker refreshed to clone content + sha, channel=plugin-clone"
+fi
+# The `source=` line names the item's own upstream path in agent-skills — the
+# "where do I fix this?" answer — and is per-skill, not per-run.
+if grep -q '^source=Roubtec/agent-skills#codex/dev-skills/skills/a$' "$R/dest/a/.powbox-seeded" &&
+	grep -q '^source=Roubtec/agent-skills#codex/dev-skills/skills/b$' "$R/dest/b/.powbox-seeded"; then
+	ok "marker records the per-skill upstream source path (repo#path/<name>)"
+else
+	no "marker records the per-skill upstream source path (repo#path/<name>)"
+fi
+# The legacy channel spelling must be GONE from a rewritten marker: `source=` now
+# means the upstream path, so a stale `source=plugin-clone` would be ambiguous.
+if ! grep -q '^source=plugin-clone$' "$R/dest/a/.powbox-seeded"; then
+	ok "rewritten marker no longer spells the channel as source=plugin-clone"
+else
+	no "rewritten marker no longer spells the channel as source=plugin-clone"
+fi
+# Shape guard for the two-part composition (seed_marker_content's body + this
+# channel's own lines): the body is captured through `$(...)`, which strips ALL
+# trailing newlines, so the composing `printf '%s\n…'` supplies exactly the one
+# separator needed. Pin BOTH halves of that invariant — no blank line may creep
+# in, and no two keys may collide onto one line — because either direction
+# silently breaks the key-anchored parsing every consumer relies on.
+marker_lines="$(cat "$R/dest/a/.powbox-seeded")"
+expected_lines="$(printf 'epoch=\ncommit=\nsource=Roubtec/agent-skills#codex/dev-skills/skills/a\nagent_skills_commit=NEWSHA111\nchannel=plugin-clone')"
+if [ "$(printf '%s\n' "$marker_lines" | grep -c '^$')" -eq 0 ] &&
+	[ "$(printf '%s\n' "$marker_lines" | sed 's/^\(epoch=\|commit=\).*/\1/')" = "$expected_lines" ]; then
+	ok "marker is one key=value per line: no blank lines, no run-together keys"
+else
+	no "marker is one key=value per line: no blank lines, no run-together keys"
 fi
 
 # ================================================================================

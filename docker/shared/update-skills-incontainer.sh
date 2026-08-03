@@ -20,6 +20,10 @@
 # copy":
 #   - marked  -> safe to refresh (overwrite) and to prune when no longer baked
 #   - unmarked-> user-authored or hand-forked; never touched silently
+# It also records the item's UPSTREAM source (`source=<owner>/<repo>#<path>`),
+# fed by the per-kind source root in the driver table below. Nothing here parses
+# a marker by line number or count — presence is what ownership turns on — so a
+# two-line marker written by an older image still classifies correctly.
 #
 # Output protocol: one TAB-separated record per line on STDOUT, consumed by the
 # launcher which renders all human-facing text. Warnings go to STDERR.
@@ -36,8 +40,30 @@
 #                                                  default false)
 set -euo pipefail
 
+# The shared seed primitives (marker semantics + atomic per-item copy). Path is
+# overridable for out-of-container unit testing (mirrors sync-codex-skills.sh);
+# the launchers never set it, so a real run always sources the baked library.
+POWBOX_SEED_SKILLS_LIB="${POWBOX_SEED_SKILLS_LIB:-/usr/local/bin/seed-skills.sh}"
 # shellcheck source=docker/shared/seed-skills.sh
-. /usr/local/bin/seed-skills.sh
+# shellcheck disable=SC1090
+. "$POWBOX_SEED_SKILLS_LIB"
+
+# BUILD-SKEW GUARD. The launcher bind-mounts THIS worker from the checkout but
+# takes seed-skills.sh from the IMAGE, so a newer worker routinely runs against
+# an older baked library — here, one predating the marker's `source=` upstream
+# provenance. Without this, `set -u` would abort the whole refresh on the first
+# unset source-root constant. Degrade instead: an absent helper/constant yields
+# markers WITHOUT a source= line, exactly what that older image wrote anyway.
+# The degradation is announced on STDERR (which the launcher forwards) so a
+# new-checkout/old-image mismatch surfaces instead of silently shipping
+# source-less markers; rebuilding the agent image restores the provenance.
+if ! declare -F seed_source_ref >/dev/null 2>&1; then
+	echo "Warning: the image-baked seed-skills.sh predates source= provenance; markers will omit it (rebuild the agent image)." >&2
+	seed_source_ref() { :; }
+fi
+: "${POWBOX_SEED_SOURCE_CODEX_SKILLS:=-}"
+: "${POWBOX_SEED_SOURCE_CLAUDE_SKILLS:=-}"
+: "${POWBOX_SEED_SOURCE_CLAUDE_WORKFLOWS:=-}"
 
 MODE="${POWBOX_SEED_MODE:-apply}"
 ADOPT_ALL="${POWBOX_ADOPT_ALL:-false}"
@@ -96,7 +122,7 @@ item_prune() {
 # Classify (and, in apply mode, act on) one agent's baked items of one kind
 # against its on-volume dir. Returns nonzero if any copy/delete failed.
 process_items() {
-	local agent="$1" kind="$2" src="$3" dest="$4" meta="$5"
+	local agent="$1" kind="$2" src="$3" dest="$4" meta="$5" source_root="${6:--}"
 
 	# NOTE: an absent baked source dir is NOT an early exit. When powbox stops
 	# baking a whole kind (e.g. Claude skills and workflows moved to the
@@ -105,8 +131,9 @@ process_items() {
 	# set is then simply empty, the seed/refresh loop below iterates nothing, and
 	# the orphan sweep still classifies every marked on-volume item as an orphan
 	# so --prune retires it.
+	# The marker body is built PER ITEM (inside the loop below): its `source=`
+	# line names that item's own upstream path, so it cannot be hoisted.
 	local marker rc=0 name target
-	marker="$(seed_marker_content "$meta")"
 	if [ "$MODE" = apply ] && [ -d "$src" ]; then
 		mkdir -p "$dest"
 	fi
@@ -123,6 +150,7 @@ process_items() {
 	while IFS= read -r name; do
 		[ -n "$name" ] || continue
 		target="$dest/$name"
+		marker="$(seed_marker_content "$meta" "$(seed_source_ref "$source_root" "$name")")"
 		# Truly absent only when no entry of any type exists (-e misses dangling
 		# symlinks, so test -L too). A regular file or symlink at a baked item's
 		# name is a user-owned collision, handled by the conflict branch below.
@@ -213,27 +241,32 @@ process_items() {
 }
 
 # --- Driver -------------------------------------------------------------------
-# agent | kind | baked source dir | on-volume destination dir | seed meta dir.
+# agent | kind | baked source dir | on-volume destination dir | seed meta dir |
+# upstream source root (`<owner>/<repo>#<dir>`, stamped into each marker's
+# `source=` line as "<root>/<item>"; the constants live in seed-skills.sh).
 # Codex seeds skills into $CONFIG/agents/skills (the ~/.agents symlink target)
 # and has no workflow runtime. The two claude rows point at baked source dirs
 # that NO LONGER EXIST in the image (powbox forfeited its Claude skills and
 # wf-* workflows to the dev-skills@roubtec plugin channel); they are kept
 # deliberately so the orphan sweep in process_items classifies the
 # previously-seeded marked copies on older claude-config volumes and --prune
-# retires them (skills and workflow .js files plus their sidecar markers).
+# retires them (skills and workflow .js files plus their sidecar markers). Their
+# source roots name where those items live TODAY (agent-skills' plugins/
+# dev-skills/{skills,workflows}) — the answer to "where do I fix this?" even
+# though nothing is baked from there, and inert while the baked set is empty.
 seed_targets() {
-	cat <<'EOF'
-claude skill    /home/node/.agent-container/claude/skills    /home/node/.claude/skills       /home/node/.agent-container/claude
-claude workflow /home/node/.agent-container/claude/workflows /home/node/.claude/workflows    /home/node/.agent-container/claude
-codex  skill    /home/node/.agent-container/codex/skills     /home/node/.codex/agents/skills /home/node/.agent-container/codex
+	cat <<EOF
+claude skill    /home/node/.agent-container/claude/skills    /home/node/.claude/skills       /home/node/.agent-container/claude $POWBOX_SEED_SOURCE_CLAUDE_SKILLS
+claude workflow /home/node/.agent-container/claude/workflows /home/node/.claude/workflows    /home/node/.agent-container/claude $POWBOX_SEED_SOURCE_CLAUDE_WORKFLOWS
+codex  skill    /home/node/.agent-container/codex/skills     /home/node/.codex/agents/skills /home/node/.agent-container/codex  $POWBOX_SEED_SOURCE_CODEX_SKILLS
 EOF
 }
 
 run_all() {
-	local rc=0 agent kind src dest meta
-	while read -r agent kind src dest meta; do
+	local rc=0 agent kind src dest meta source_root
+	while read -r agent kind src dest meta source_root; do
 		[ -n "$agent" ] || continue
-		process_items "$agent" "$kind" "$src" "$dest" "$meta" || rc=1
+		process_items "$agent" "$kind" "$src" "$dest" "$meta" "$source_root" || rc=1
 	done < <(seed_targets)
 	return "$rc"
 }

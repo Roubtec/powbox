@@ -757,9 +757,11 @@ fi
 
 # L3: a `!`-negated pipeline that is NOT the probe's last command (`! X; Y`).
 # The third `set -e` exemption a probe can plausibly reach (the
-# `if`/`while`/`until` condition is the fourth, but its own status is 0 when the
-# condition is false, so it cannot fail a probe from any position). A probe
-# written as `! command -v sometool; <more assertions>` silently passes its
+# `if`/`while`/`until` condition is the fourth, but an `if` whose condition is
+# false with no `else` is 0 by definition, as is a `while`/`until` whose body
+# never runs, so a condition never fails a probe from any position - a non-zero
+# status comes from the non-exempt body, which `set -e` handles normally). A
+# probe written as `! command -v sometool; <more assertions>` silently passes its
 # negated assertion even when `sometool` IS present - exactly the defect class
 # this driver exists to eliminate, which is why the comment blocks name it.
 run_driver 1 "$TMP/l3.out" \

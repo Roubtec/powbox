@@ -53,7 +53,7 @@ When you develop powbox from **inside** a powbox container, the validation surfa
 Runs in-container (do these before handing off):
 
 - Static lint gates: `shellcheck` (Tier 0 CI blocks at `--severity=error`; run the default severity locally), `shfmt -d`, and PSScriptAnalyzer — see [PowerShell Linting](#powershell-linting).
-- Pure-shell unit tests that need no image or Docker daemon, e.g. `scripts/test-sensitive-host-path.sh`, `scripts/test-detect-shadows.sh`, `scripts/test-pnpm-shadow-wrapper.sh`.
+- Pure-shell unit tests that need no image or Docker daemon, e.g. `scripts/test-sensitive-host-path.sh`, `scripts/test-detect-shadows.sh`, `scripts/test-shadow-mounts-chown.sh`, `scripts/test-pnpm-shadow-wrapper.sh`.
 
 Needs the host or CI (cannot run here):
 

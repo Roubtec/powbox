@@ -159,6 +159,47 @@ else {
   }
 }
 
+# Stage 0g - detect-shadows unit suite (task 053). The repo's largest pure-shell suite
+# and the only regression net for docker/shared/detect-shadows.sh's load-bearing
+# security properties: the under-workspace-root validation, the symlink skip, the
+# Git-tracked-content veto and its fail-closed paths, the newline rejection, and the
+# workspace-glob containment. It needs git, jq and a JQ-BACKED yq (python-yq -
+# detect-shadows.sh issues jq filters such as `.shadow[]? // empty`, which mikefarah's
+# Go yq rejects), none of which a Windows host has natively, so run it INSIDE the agent
+# image with the repo mounted read-only. Self-skips (recorded in $skipped) when the
+# image is absent; Tier 0 CI runs the same suite on every PR.
+if (-not $imagePresent) {
+  Write-Warning "Skipping detect-shadows unit suite (Stage 0g) - image '$Image' not found (no native bash/yq/jq on Windows to run it hermetically)."
+  $skipped.Add("Stage 0g: detect-shadows unit suite (image absent)")
+}
+else {
+  Write-Host "Running detect-shadows unit suite (in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-detect-shadows.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "detect-shadows unit suite failed. See container output above."
+  }
+}
+
+# Stage 0h - shadow-mounts mountpoint-ownership unit test (task 053). Fully hermetic:
+# it copies docker/shared/shadow-mounts.sh with its /workspace literal relocated into a
+# tmpdir and PATH-shims id/stat/chown/mount/mountpoint, so it needs neither root nor a
+# real mount to assert that every mountpoint component shadow-mounts.sh creates
+# inherits the DEEPEST EXISTING ancestor's uid:gid before the mount goes on top, with
+# exactly one warning per run when that fails. Without the chown, a created mountpoint
+# outlives the container as a root-owned directory on the host's own checkout. The Bash
+# smoke runs it on the host; Windows has no native bash, so run it in the image.
+if (-not $imagePresent) {
+  Write-Warning "Skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent)")
+}
+else {
+  Write-Host "Running shadow-mounts mountpoint-ownership unit test (in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-shadow-mounts-chown.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "shadow-mounts mountpoint-ownership unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe

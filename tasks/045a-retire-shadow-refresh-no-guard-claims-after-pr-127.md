@@ -9,8 +9,9 @@ PR #127 (`fix/shadow-refresh-self-hosted-guard`, open against `main`) adds exact
 Verified against `origin/fix/shadow-refresh-self-hosted-guard`: `shadow-refresh.sh` gains an early `POWBOX_SELF_HOSTED=1` skip (line 23) and a `POWBOX_IMAGE_STORE_ROLE=writer` skip (line 31), plus `scripts/test-shadow-refresh-guard.sh` covering both.
 The moment that merges, "the script itself has no self-hosted guard … so it would succeed and tmpfs-mask real workspace content" flips from an accurate warning into a false statement, and the reader is told to fear an outcome the code now prevents.
 
-PR #127 updates `docs/entrypoint-and-runtime.md` (it inserts a new bullet stating the hand-run carries the same two skips), but it does **not** touch `README.md` or `docker/shared/container-agent.md.tmpl`.
-Those two are the ones that go stale, and the template is the file every container's instruction copy is generated from — so a stale sentence there reaches every agent session, not just a reader of the repo.
+PR #127 updates `docs/entrypoint-and-runtime.md` — it appends a sentence to the shadow-mounts bullet stating that the hand-run carries the same two skips — and it also edits `README.md` and `docs/architecture.md`, but only in unrelated paragraphs (the worktree-contract paragraph around README line 171, and the pnpm-store gating paragraph in the architecture chapter's "Volumes and Stores").
+What it does **not** do is fix the stale `shadow-refresh.sh` sentence at `README.md` line 496, and it does not touch `docker/shared/container-agent.md.tmpl` at all — verified against `origin/fix/shadow-refresh-self-hosted-guard`, whose complete file list is `README.md`, `docker/shared/shadow-refresh.sh`, `docs/architecture.md`, `docs/entrypoint-and-runtime.md`, `scripts/test-shadow-refresh-guard.sh`, and two unrelated new task files.
+Those two sentences — README's and the template's — are the ones that go stale, and the template is the file every container's instruction copy is generated from, so a stale sentence there reaches every agent session, not just a reader of the repo.
 
 This is a docs-only follow-up: it changes no behavior and must not be started before PR #127 merges, because doing it earlier would make the docs describe a guard that does not exist yet.
 
@@ -59,5 +60,5 @@ Out of scope:
 ## Acceptance criteria
 
 - No file in the repo claims `shadow-refresh.sh` lacks a self-hosted guard, or that running it under `--isolated` would mask real content, once those guards are on `main`.
-- `grep -rn "no self-hosted guard\|would mask real content" README.md docker/shared docs` returns nothing.
+- `grep -rn "no self-hosted guard\|would mask real content\|neither of which carries one" README.md docker/shared docs` returns nothing — the first two alternatives catch the `README.md` and `container-agent.md.tmpl` sentences, the third catches the `docs/entrypoint-and-runtime.md` parenthetical named in scope item 3; all three match today, so the grep is a live canary rather than a vacuous one.
 - The statement that `shadow-mounts.sh` itself carries no guard (its skip living in `entrypoint-core.sh`) is preserved — it stays true, and it is what the pnpm wrapper's no-op mirrors.

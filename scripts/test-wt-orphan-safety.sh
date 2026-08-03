@@ -34,6 +34,9 @@
 #     worktree's verdict, and a notes merge CONCLUDED with either --commit or
 #     --abort still removes cleanly despite the NOTES_MERGE_WORKTREE dir git
 #     leaves behind (which is why the guard keys on the markers, not that dir).
+#     The one deliberate NON-guard that is neither a refusal nor a removal is
+#     pinned too: a `locked` worktree is left entirely to git, which declines a
+#     single --force exactly as vanilla does.
 #   * wt-enter's branch-conflict diagnosis (task 039): when <branch> is already
 #     checked out, the error must name the blocking worktree — and say plainly
 #     when that blocker is the SHARED primary checkout, the case agents keep
@@ -1600,6 +1603,50 @@ if [ -z "$(git -C "$RC3/.worktrees/$CONTAINER_NAME/art" status --porcelain)" ] &
 	ok "wt-remove --force still removes a clean worktree carrying ignored build artifacts (branch kept)"
 else
 	no "wt-remove --force did not remove a clean worktree with ignored artifacts: $(cat "$WORK_ROOT/rc3.err")"
+fi
+
+# `locked` is EXCLUDED from the guard set on purpose (see the audit block in
+# wt-remove): a `git worktree lock` holds no work in flight, so wt-remove neither
+# refuses on it nor overrides it — it is left ENTIRELY to git, which declines a
+# single `--force` exactly as vanilla `git worktree remove --force` does and
+# wants `-f -f` (which this script never passes). Pinned so the exclusion stays
+# checkable: the outcome must be GIT's refusal (exit 128, git's own wording), not
+# a `wt-remove:` refusal and not a removal.
+RCL="$(make_repo rc-locked)"
+git_quiet -C "$RCL" worktree add -q "$RCL/.worktrees/$CONTAINER_NAME/lk" -b lk-b >/dev/null 2>&1
+git_quiet -C "$RCL" worktree lock "$RCL/.worktrees/$CONTAINER_NAME/lk" >/dev/null 2>&1 || true
+LK_WT="$RCL/.worktrees/$CONTAINER_NAME/lk"
+miss=""
+[ -e "$RCL/.git/worktrees/lk/locked" ] || miss="$miss fixture-not-locked"
+[ -z "$(git -C "$LK_WT" status --porcelain 2>/dev/null)" ] || miss="$miss fixture-porcelain-not-clean"
+if [ -z "$miss" ]; then
+	for lk_mode in plain force; do
+		rc=0
+		if [ "$lk_mode" = plain ]; then
+			(cd "$RCL" && bash "$WT_REMOVE" lk 2>"$WORK_ROOT/rcl-$lk_mode.err") || rc=$?
+		else
+			(cd "$RCL" && bash "$WT_REMOVE" lk --force 2>"$WORK_ROOT/rcl-$lk_mode.err") || rc=$?
+		fi
+		[ "$rc" -eq 128 ] || miss="$miss $lk_mode-rc-$rc-not-128"
+		[ -d "$LK_WT" ] || miss="$miss $lk_mode-worktree-gone"
+		grep -qF 'cannot remove a locked working tree' "$WORK_ROOT/rcl-$lk_mode.err" ||
+			miss="$miss $lk_mode-not-gits-own-refusal"
+		! grep -q '^wt-remove: .* is in progress' "$WORK_ROOT/rcl-$lk_mode.err" ||
+			miss="$miss $lk_mode-wt-remove-guarded-it"
+	done
+	# And the same invocation against vanilla git, so "matches vanilla" is
+	# asserted rather than assumed: `--force` refuses identically, `-f -f` removes.
+	rc=0
+	git -C "$RCL" worktree remove --force "$LK_WT" >/dev/null 2>"$WORK_ROOT/rcl-vanilla.err" || rc=$?
+	[ "$rc" -eq 128 ] || miss="$miss vanilla-force-rc-$rc-not-128"
+	[ -d "$LK_WT" ] || miss="$miss vanilla-force-removed-it"
+	if [ -z "$miss" ]; then
+		ok "a locked but clean worktree is left to git: wt-remove (with and without --force) exits 128 with git's own 'cannot remove a locked working tree', same as vanilla --force"
+	else
+		no "wt-remove's handling of a locked worktree diverged from git's own:$miss"
+	fi
+else
+	no "precondition: could not fabricate a clean, locked worktree:$miss"
 fi
 
 # A CONCLUDED notes merge must still remove. This is the case that decides WHICH

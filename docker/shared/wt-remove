@@ -244,35 +244,73 @@ fi
 #                      finished or abandoned notes merge still removes cleanly
 #
 # NOT guarded, deliberately. Every name here really does appear in a worktree's
-# own admin dir, and every one was rejected for the same reason: it is not what
-# git keys "in progress" on, and it OUTLIVES the operation, so guarding it would
-# refuse worktrees that hold nothing in flight.
-#   MERGE_MSG, SQUASH_MSG, COMMIT_EDITMSG, AUTO_MERGE
-#                      message/scratch state. AUTO_MERGE was observed surviving a
-#                      completed multi-commit revert, and MERGE_MSG + SQUASH_MSG
-#                      + AUTO_MERGE were observed surviving the commit that
-#                      CONCLUDES a `merge --squash` (clean porcelain afterwards).
-#                      A conflicted squash merge itself leaves a DIRTY porcelain,
-#                      so the uncommitted-changes guard below is what holds it —
-#                      and the only resolution that makes it clean again is one
-#                      identical to HEAD, i.e. one that produced nothing
+# own admin dir, and every one was rejected because it is NOT what git keys "in
+# progress" on. Most of them carry a second, independent reason as well: they
+# OUTLIVE the operation, so guarding them would refuse worktrees that hold
+# nothing in flight. Where only the first reason applies, it is said so.
+#   AUTO_MERGE         scratch state that OUTLIVES the operation: it survives a
+#                      revert or a cherry-pick that runs to the end without ever
+#                      stopping (verified for a single clean revert, a clean
+#                      cherry-pick and a clean multi-commit revert) and a
+#                      completed rebase — each time with an EMPTY porcelain and
+#                      nothing whatsoever left in flight
+#   MERGE_MSG, SQUASH_MSG, COMMIT_EDITMSG
+#                      message scratch. COMMIT_EDITMSG is written by every
+#                      `git commit`, so it is present in essentially every
+#                      worktree. MERGE_MSG and SQUASH_MSG have NO observed
+#                      outliving case, and it is easy to assume otherwise: the
+#                      commit that CONCLUDES a `merge --squash` unlinks
+#                      MERGE_MSG, SQUASH_MSG and AUTO_MERGE alike (verified in a
+#                      plain repo AND in a linked worktree), and merge /
+#                      cherry-pick / revert `--abort`, `--quit` and `--continue`
+#                      all clear MERGE_MSG (verified). They are excluded on the
+#                      first reason alone: git does not key "in progress" on
+#                      them (a merge in flight is MERGE_HEAD, which IS guarded),
+#                      and an unconcluded squash merge leaves a DIRTY porcelain
+#                      that the uncommitted-changes guard below holds.
+#                      That leaves exactly ONE shape knowingly removed: an
+#                      unconcluded `merge --squash` whose conflict was resolved
+#                      back to HEAD's own content leaves MERGE_MSG + SQUASH_MSG
+#                      + AUTO_MERGE with an EMPTY porcelain, and `git status`
+#                      itself says "nothing to commit, working tree clean" —
+#                      wt-remove removes it (verified end to end). What is lost
+#                      is the pending message of a squash that produced no
+#                      change, and git reports nothing in flight, so refusing
+#                      there would be refusing on a message file alone
 #   NOTES_MERGE_WORKTREE
 #                      the conflict-editing directory, NOT a state marker: it
 #                      survives both `--commit` and `--abort` as an EMPTY dir, and
 #                      git itself treats an empty one as "no merge in progress"
 #                      (a fresh `git notes merge` starts fine next to it). `-e`
 #                      would therefore refuse forever after the first notes merge
-#   REBASE_HEAD, MERGE_MODE
-#                      subsumed: they only ever appear beside `rebase-apply`/
-#                      `rebase-merge` and `MERGE_HEAD` respectively, and are
-#                      cleared with them
+#   REBASE_HEAD        OUTLIVES the rebase, so guarding it would false-refuse.
+#                      A rebase whose LAST todo step is one that stops — a
+#                      `squash` or an `edit` on the final entry, or a conflict
+#                      on the final commit resolved and `--continue`d — leaves
+#                      REBASE_HEAD behind once the rebase has FINISHED: no
+#                      `rebase-apply`/`rebase-merge`, an EMPTY porcelain, and
+#                      `git status` reporting "nothing to commit, working tree
+#                      clean"; it then survives later commits too (verified).
+#                      Guarding it would refuse every worktree that ever ended a
+#                      rebase that way. (A stop in the MIDDLE of the todo, and a
+#                      `reword`, are cleaned up by the steps that follow — which
+#                      is why this is easy to miss and is pinned here.)
+#   MERGE_MODE         subsumed: it appears only beside MERGE_HEAD and is
+#                      cleared with it (verified), so the MERGE_HEAD guard
+#                      already covers every state it marks
 #   BISECT_TERMS, BISECT_NAMES, BISECT_EXPECTED_REV, BISECT_ANCESTORS_OK,
 #   BISECT_RUN         subsumed: `git bisect start` writes BISECT_LOG and
 #                      BISECT_START too, and `git bisect reset` clears them all
 #   locked, config.worktree
 #                      not operations. `locked` is `git worktree lock`, which
-#                      holds no work — a locked but clean worktree stays
-#                      removable with --force, matching vanilla semantics;
+#                      holds no work in flight, and it is left ENTIRELY to git:
+#                      wt-remove neither guards it nor overrides it, so a clean
+#                      locked worktree meets git's own `fatal: cannot remove a
+#                      locked working tree; use 'remove -f -f' to override or
+#                      unlock first` and exits 128 — from `wt-remove <slug>` and
+#                      `wt-remove <slug> --force` alike, byte-identical to
+#                      vanilla `git worktree remove --force` (verified; only
+#                      `-f -f` removes it, and this script never passes that).
 #                      `config.worktree` is per-worktree config (sparse-checkout)
 #
 # Probed with `-e`, not `-d`, matching git's bare stat(): a NON-directory

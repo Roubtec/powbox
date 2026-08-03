@@ -128,16 +128,22 @@ wt_reap_orphan_dir() {
 
 # wt_read_path <var> <resolver> [<args>...]
 #   Run <resolver> and store the single NUL-terminated path it emits in <var>,
-#   whole, whatever bytes it contains. Returns non-zero — leaving <var> untouched
-#   — when the resolver answers nothing, i.e. exactly when the resolver itself
-#   would have returned non-zero, so callers branch on this instead:
+#   whole, whatever bytes it contains. Returns 1 — leaving <var> untouched — when
+#   the resolver answers nothing, i.e. exactly when the resolver itself would
+#   have returned non-zero, so callers branch on this instead:
 #       wt_read_path blocker wt_worktree_for_branch "$root" "$branch" || ...
 #   `IFS=` is load-bearing: `read` strips leading and trailing IFS whitespace,
 #   and the default IFS contains the newline (and the space) that this whole
 #   exercise exists to preserve. Its own locals are `__wt_`-prefixed so that a
-#   caller's variable is never shadowed by one of them; <var> must therefore not
-#   itself carry that prefix.
+#   caller's variable is never shadowed by one of them, and a <var> carrying that
+#   prefix is REFUSED with status 2 rather than obeyed: `printf -v` would write
+#   the answer into the helper's OWN local, leave the caller's variable at
+#   whatever it held before, and still return 0 — a silently wrong answer no
+#   caller can branch on. The refusal is deliberately silent; the non-zero status
+#   is the whole signal, and it lands the caller on the same "unknown" branch a
+#   resolver that answers nothing does, instead of proceeding on a stale value.
 wt_read_path() {
+	case "$1" in __wt_*) return 2 ;; esac
 	local __wt_out_var="$1" __wt_path
 	shift
 	IFS= read -r -d '' __wt_path < <("$@") || return 1

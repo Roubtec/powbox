@@ -37,6 +37,11 @@
 #     naming the MAIN working tree (pinned directly: the integration case cannot
 #     tell a broken implementation apart, since in an ordinary repo the main tree
 #     is the repo root wt-enter already knows).
+#   * wt-common.sh wt_read_path REFUSING an out-variable name that collides with
+#     its own `__wt_`-prefixed locals — non-zero and silent — because obeying it
+#     writes the answer into the helper's own local and reports success over the
+#     caller's untouched (stale) variable, the one failure shape a caller cannot
+#     branch on. Ordinary names must keep working.
 #   * the non-destruction DETECTOR itself (destructive_advice below), because
 #     every case above delegates to it: a hostile dynamic value — a branch named
 #     `abort`, `force`, `remove`, `hard`, `rf` or `restore`, or a name/path
@@ -582,6 +587,38 @@ elif [ "$out" = "$UNSET_MARK" ] && [ "$(wt_worktree_for_branch "$RG" unheld-b | 
 	ok "wt_worktree_for_branch emits nothing and fails when no worktree holds the branch"
 else
 	no "unheld branch: expected no answer, got '$out'"
+fi
+
+# ---------------------------------------------------------------------------
+# Unit: wt_read_path REFUSES an out-variable name carrying its own `__wt_`
+# prefix, non-zero, instead of obeying it. Such a name collides with the
+# helper's locals, so `printf -v` writes the answer into the helper's OWN
+# variable: the caller's is left at whatever it held before while the call still
+# reports success — a stale value dressed as an answer, which is the one failure
+# shape a caller cannot branch on. The refusal is silent by design (no stderr):
+# the status is the whole signal, and it lands the caller on the same "unknown"
+# branch an unanswerable resolver does. Every prefixed name is refused, not just
+# the two locals that exist today, so adding a local cannot quietly re-open this.
+# ---------------------------------------------------------------------------
+for collide in __wt_out_var __wt_path __wt_future_local; do
+	printf -v "$collide" '%s' "$UNSET_MARK"
+	if wt_read_path "$collide" wt_primary_checkout "$RG"; then
+		no "wt_read_path reported SUCCESS for colliding out-variable '$collide' (left it '${!collide}')"
+	elif [ "${!collide}" = "$UNSET_MARK" ] &&
+		[ -z "$(wt_read_path "$collide" wt_primary_checkout "$RG" 2>&1)" ]; then
+		ok "wt_read_path refuses colliding out-variable '$collide' quietly, leaving it untouched"
+	else
+		no "wt_read_path refused '$collide' but did not stay quiet/untouched: '${!collide}'"
+	fi
+done
+
+# ...and the ordinary case is untouched by that guard: a plain name still gets
+# the answer, and still reports success.
+out="$UNSET_MARK"
+if wt_read_path out wt_primary_checkout "$RG" && [ "$out" = "$RG" ]; then
+	ok "wt_read_path still answers an ordinary out-variable name"
+else
+	no "wt_read_path with an ordinary out-variable name: got '$out', expected '$RG'"
 fi
 
 # ---------------------------------------------------------------------------

@@ -62,9 +62,10 @@
 # someone appends the parameter by hand. Loopback-only + trust auth inside the
 # container security boundary makes `disable` the honest description, not a
 # weakening, and it is the one spelling every common client accepts: pgx and
-# libpq/psql attempt TLS and fall back to plaintext, node-postgres attempts no
-# TLS at all, but all of them honor an explicit `disable`. The URL already
-# carries a query string, so append any extra parameter with `&`, not `?`.
+# libpq/psql attempt TLS and fall back to plaintext, node-postgres (`pg` 8.x)
+# attempts no TLS at all, but all of them honor an explicit `disable`. The URL
+# already carries a query string, so append any extra parameter with `&`, not
+# `?`.
 #
 # Export the connection string into your current shell with:
 #   eval "$(pg-dev-up url --export)"
@@ -620,10 +621,10 @@ print_url() {
 	# trust-auth cluster inside the container security boundary, not a weakening,
 	# and `disable` is the one spelling every common client accepts: pgx and
 	# libpq/psql attempt TLS and fall back to plaintext when the parameter is
-	# absent, node-postgres attempts no TLS at all (and treats `prefer`/`require`
-	# as verify-full aliases, so those spellings FAIL here), but all of them
-	# honor an explicit `disable`. Single construction site: `up`, `url`, and
-	# `url --export` all emit it.
+	# absent, node-postgres (`pg` 8.x) attempts no TLS at all (and treats
+	# `prefer`/`require` as verify-full aliases, so those spellings FAIL here),
+	# but all of them honor an explicit `disable`. Single construction site:
+	# `up`, `url`, and `url --export` all emit it.
 	url="postgresql://${user}:${pass}@${PG_HOST}:${PGPORT}/${db}?sslmode=disable"
 	if [ "${1:-}" = "--export" ]; then
 		# %q shell-escapes the value so `eval "$(pg-dev-up url --export)"` is safe

@@ -244,19 +244,25 @@ else {
 # quote, a trailing `#` comment, a `$(...)` or a backtick have nothing to reach;
 # and a probe fails the run exactly when its own shell exits non-zero, which
 # nothing discards any more. That second point is worth stating precisely,
-# because it is the rule you write probes against. POSIX `set -e` still EXEMPTS
-# a failing non-final member of an `&&`/`||` list, even when the probe is the
-# shell's whole input; what an `&&` chain gets is that the short-circuited list
-# is the probe's LAST command, so its non-zero status becomes the probe's exit
-# status and the runner's `||` guard sees it. Outside an `&&`/`||` list there is
-# no exemption at all - a failing member of a `;` sequence or of a `{ ...; }`
-# group aborts the probe outright. That is what makes these multi-clause
-# assertions real. Joined the original way - every probe a bare line of ONE
-# `set -e` script - the same exemption applied, but nothing caught the status it
-# left behind, so the non-final `&&`/`||` members of every probe, and the
-# overall status of every probe but the last (nothing followed it to discard
-# it), were masked; `;` sequences and `{ ...; }` groups were already enforced
-# then, so that shape is not something this change restored.
+# because it is the rule you write probes against, so learn the general rule
+# rather than a list of shapes. POSIX (XCU 2.14) EXEMPTS a failing command in
+# several positions - a non-final member of an `&&`/`||` list, a `!`-negated
+# pipeline, and the condition of an `if`/`elif`/`while`/`until` - and the probe
+# being the shell's whole input does not change that. What the exemption turns
+# on is POSITION: an exempt construct is BINDING as the probe's LAST command,
+# because its own status then becomes the probe's exit status and the runner's
+# `||` guard sees it, and UNENFORCED when anything follows it, which overwrites
+# that status. (`! X` inverts as POSIX says; an `if` whose condition is false
+# with no `else` is 0 by definition, so an `if` condition never fails a probe.)
+# Nothing outside that exempt set is suspended at all - a failing member of a
+# `;` sequence or of a `{ ...; }` group aborts the probe outright. That is what
+# makes these multi-clause assertions real. Joined the original way - every
+# probe a bare line of ONE `set -e` script - the same exemption applied, but
+# nothing caught the status it left behind, so the non-final `&&`/`||` members
+# of every probe, and the overall status of every probe but the last (nothing
+# followed it to discard it), were masked; `;` sequences and `{ ...; }` groups
+# were already enforced then, so that shape is not something this change
+# restored.
 # Consequences for probe authors:
 #   * do NOT hand-roll a per-probe `|| { ...; exit 1; }` tail - the runner
 #     supplies one, and a second is redundant;
@@ -268,12 +274,14 @@ else {
 #   * keep every probe single-line and free of a trailing line continuation -
 #     the driver rejects both, so the manifest stays one line per probe and this
 #     driver never hands `docker` a multi-line argument;
-#   * an `&&` chain is still the clearest shape, but a `;` sequence is binding
-#     too. Two shapes are NOT: a probe ending in `&`, whose async status POSIX
-#     fixes at 0, and a probe that MIXES the two - an `&&`/`||` list that is not
-#     the probe's last top-level command (`A && B; C`), whose short-circuited
-#     status `C` overwrites. Both are equally unenforceable in the original
-#     join; no shipped probe uses either.
+#   * an `&&` chain is still the clearest shape; a pipeline and a `;` sequence
+#     are binding too. What is NOT enforceable is any `set -e`-exempt construct
+#     that is not the probe's LAST command, because the command after it
+#     overwrites the status - `A && B; C` and `! X; Y` are the instances - plus
+#     a probe ending in `&`, whose async status POSIX fixes at 0. All are
+#     equally unenforceable in the original join; no shipped probe uses any of
+#     them, and section L of scripts/test-smoke-probe-wrapper.sh pins each with
+#     a characterization check.
 # Quote balance is no longer a hazard to anything but the probe itself: an
 # unbalanced quote makes that probe's own shell fail with a syntax error, named
 # by its index, and cannot reach any other probe.

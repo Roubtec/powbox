@@ -678,13 +678,20 @@ else
 	bad "the \`if\`-condition form aborts on \`false; true\` - K3's framing needs updating" "$(cat "$TMP/k3-if.out")"
 fi
 
-printf 'L. CHARACTERIZATION of an accepted limitation (the async-list one)\n'
+printf 'L. CHARACTERIZATION of the accepted limitations\n'
+# Three shapes the comment blocks in scripts/smoke-test-image.{sh,ps1},
+# commands/smoke-test.{sh,ps1} and docs/architecture.md declare unenforceable.
+# They are pinned here as characterization checks rather than left to an audit
+# of the probe list: an audit expires the moment someone adds a probe, a test
+# does not. Every assertion below states what the wrapper DOES, not what it
+# should do - closing any of these is an improvement, and the right response is
+# to flip the assertion and the prose, not to revert.
+#
+# L1: the async list.
 # A probe ending in `&` backgrounds its command; POSIX says an async list's
 # status is always 0, so `set -e` cannot see it and the probe can never fail.
 # Inherent, not a consequence of any join form, and only reachable via a
-# nonsense probe. This assertion pins what the wrapper DOES, not what it should
-# do: closing it is an improvement, and the right response is to flip the
-# assertion and the prose, not to revert.
+# nonsense probe.
 run_driver 1 "$TMP/l1.out" \
 	"true" \
 	'false &' \
@@ -708,6 +715,79 @@ if /bin/sh -ec 'false &' >"$TMP/l1-inner.out" 2>&1; then
 else
 	bad "\`sh -ec 'false &'\` now fails - the limitation may be closable" "$(cat "$TMP/l1-inner.out")"
 fi
+
+# L2: an `&&`/`||` list that is NOT the probe's last command (`A && B; C`).
+# `false` is a non-final member of the list, so POSIX `set -e` exempts it; the
+# `; true` that follows then overwrites the status the short-circuited list left
+# behind, and nothing is left for the runner's `||` guard to see. This is the
+# positional rule the comment blocks state, in its unenforced position.
+run_driver 1 "$TMP/l2.out" \
+	"true" \
+	'false && true; true' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "ACCEPTED LIMITATION: \`A && B; C\` discards the list's failure"
+else
+	bad "\`A && B; C\` became binding (rc=$rc) - a welcome change, but update the comment blocks in scripts/smoke-test-image.{sh,ps1}, commands/smoke-test.{sh,ps1} and docs/architecture.md, then flip this assertion" "$(cat "$TMP/l2.out")"
+fi
+# Control: inherent to `set -e`, not introduced by any join form - the pre-fix
+# bare-line join did not catch it either.
+if /bin/sh -c $'set -e\ntrue\nfalse && true; true\ntrue\n' >"$TMP/l2-bare.out" 2>&1; then
+	ok "control: the pre-fix bare-line join did not catch it either (inherent)"
+else
+	bad "a bare \`set -e\` line does abort on \`false && true; true\` - the \"inherent\" note is wrong" "$(cat "$TMP/l2-bare.out")"
+fi
+# Contrast, and the whole point of the positional rule: the SAME list as the
+# probe's LAST command IS binding. If this ever stops failing, the argv form has
+# regressed and property 2 is no longer true.
+run_driver 1 "$TMP/l2-last.out" \
+	"true" \
+	'false && true' \
+	"true"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	ok "contrast: the same list as the probe's LAST command IS binding"
+else
+	bad "\`false && true\` as a whole probe reported success - property 2 is broken" "$(cat "$TMP/l2-last.out")"
+fi
+
+# L3: a `!`-negated pipeline that is NOT the probe's last command (`! X; Y`).
+# The third `set -e` exemption a probe can plausibly reach (the `if`/`while`
+# condition is the fourth, but its own status is 0 when the condition is false,
+# so it cannot fail a probe from any position). A probe written as
+# `! command -v sometool; <more assertions>` silently passes its negated
+# assertion even when `sometool` IS present - exactly the defect class this
+# driver exists to eliminate, which is why the comment blocks name it.
+run_driver 1 "$TMP/l3.out" \
+	"true" \
+	'! true; true' \
+	"true"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "ACCEPTED LIMITATION: \`! X; Y\` discards the negated pipeline's failure"
+else
+	bad "\`! X; Y\` became binding (rc=$rc) - a welcome change, but update the comment blocks in scripts/smoke-test-image.{sh,ps1}, commands/smoke-test.{sh,ps1} and docs/architecture.md, then flip this assertion" "$(cat "$TMP/l3.out")"
+fi
+# Control: inherent, and shared with the pre-fix bare-line join.
+if /bin/sh -c $'set -e\ntrue\n! true; true\ntrue\n' >"$TMP/l3-bare.out" 2>&1; then
+	ok "control: the pre-fix bare-line join did not catch it either (inherent)"
+else
+	bad "a bare \`set -e\` line does abort on \`! true; true\` - the \"inherent\" note is wrong" "$(cat "$TMP/l3-bare.out")"
+fi
+# Contrast: `! X` as the probe's LAST command IS binding, same positional rule.
+run_driver 1 "$TMP/l3-last.out" \
+	"true" \
+	'! true' \
+	"true"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	ok "contrast: \`! X\` as the probe's LAST command IS binding"
+else
+	bad "\`! true\` as a whole probe reported success - property 2 is broken" "$(cat "$TMP/l3-last.out")"
+fi
+# ...and no shipped probe uses `!`, `if` or `while` as a shell construct today,
+# which is what makes all of the above documentation rather than a live hole.
 
 printf '\n%d check(s), %d failure(s)\n' "$checks" "$failures"
 [ "$failures" -eq 0 ] || exit 1

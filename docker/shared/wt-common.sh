@@ -75,12 +75,17 @@ wt_reap_orphan_dir() {
 	return 0
 }
 
-# The two resolvers below exist so callers can DIAGNOSE a "branch is already used
-# by worktree at ..." failure without parsing git's fatal message: that text is
+# The resolvers below exist so callers can DIAGNOSE a "branch is already used by
+# worktree at ..." failure without parsing git's fatal message: that text is
 # localizable and unstable, whereas `git worktree list --porcelain` is a
-# documented, machine-readable format. Both print a single absolute path on
+# documented, machine-readable format. They print a single absolute path on
 # stdout (nothing on failure) and return non-zero when they cannot answer, so a
 # caller can always fall back to git's own error.
+#
+# Every claim below about what git does was established by fabricating the state
+# and observing whether `git worktree add` then refuses. That rationale lives
+# HERE only; scripts/test-wt-orphan-safety.sh pins the outcomes without
+# restating it.
 
 # wt_primary_checkout <root>
 #   Print the absolute path of the repository's PRIMARY (main) working tree.
@@ -100,33 +105,72 @@ wt_primary_checkout() {
 	return 1
 }
 
+# wt_worktree_gitdir <worktree>
+#   Print the absolute git dir belonging to <worktree> ITSELF; return 1 when that
+#   cannot be established, so callers can tell "read it" from "did not read it".
+#   The toplevel cross-check is load-bearing: task worktrees live INSIDE the main
+#   working tree ($ROOT/.worktrees/...), so a worktree that has lost its own .git
+#   pointer still makes `rev-parse` succeed — against the ENCLOSING repo, whose
+#   operation state belongs to a different checkout (verified: git keeps refusing
+#   the second checkout there, so the blocker is real while its state is not ours
+#   to read). An unreachable git dir needs no separate probe: it already fails
+#   rev-parse (verified — such a worktree drops out of `git worktree list` too).
+wt_worktree_gitdir() {
+	local out gitdir top
+	out="$(git -C "$1" rev-parse --absolute-git-dir --show-toplevel 2>/dev/null)" || return 1
+	gitdir="${out%%$'\n'*}"
+	top="${out##*$'\n'}"
+	[ "$top" = "$1" ] || return 1
+	printf '%s\n' "$gitdir"
+}
+
+# wt_operation_in_flight <worktree>
+#   Is ANY unfinished rebase / am / bisect in progress in <worktree>? Three
+#   answers, because "none" and "could not tell" must never collapse into one —
+#   a caller turns "none" into a remedy that DELETES the worktree:
+#     0  an operation IS in flight
+#     1  none — verified
+#     2  UNKNOWN, nothing was observed
+#   For a worktree the porcelain already reports as holding the branch, this is
+#   the whole question: that `branch` record proves the block by itself, so no
+#   name comparison is needed and the answer cannot be skewed by whatever
+#   head-name/BISECT_START happen to contain — which matters, because a legal
+#   branch name may itself parse as an object id (see wt_state_branch).
+#   The three entries are exactly the ones git's own is_worktree_being_rebased()
+#   / is_worktree_being_bisected() stat(), probed with `-e` for the reasons given
+#   under wt_branch_held_by_operation.
+wt_operation_in_flight() {
+	local gitdir
+	gitdir="$(wt_worktree_gitdir "$1")" || return 2
+	[ ! -e "$gitdir/rebase-apply" ] || return 0
+	[ ! -e "$gitdir/rebase-merge" ] || return 0
+	[ ! -e "$gitdir/BISECT_LOG" ] || return 0
+	return 1
+}
+
 # wt_state_branch <file>
 #   Print the BARE branch name recorded in a per-worktree operation-state file,
-#   mirroring git's own reader (wt-status.c: get_branch()), which is deliberately
-#   tolerant of the several formats these files can hold:
-#     "refs/heads/<b>" -> "<b>"    (what rebase writes to head-name; git also
-#                                   accepts it in BISECT_START, where it writes
-#                                   the bare name — verified: git refuses a second
-#                                   checkout for either spelling)
-#     other "refs/..." -> verbatim (never equals a branch short-name, so no match)
-#     "detached HEAD"  -> nothing, return 1 (rebase started from a detached HEAD)
-#     an object id     -> nothing, return 1 (a bisect started from a detached
-#                                   HEAD records the commit; git abbreviates it
-#                                   before comparing, so the recorded id must
-#                                   NEVER be matched against a branch name)
+#   mirroring git's own reader (wt-status.c: get_branch()), which tolerates the
+#   several formats these files can hold:
+#     "refs/heads/<b>" -> "<b>"    (rebase's head-name spelling; git accepts it
+#                                   in BISECT_START too, where it writes "<b>")
+#     other "refs/..." -> verbatim (never equals a branch short-name)
+#     "detached HEAD"  -> nothing, return 1 (rebase from a detached HEAD)
+#     an object id     -> nothing, return 1 (a bisect from a detached HEAD records
+#                                   the commit; git abbreviates it before
+#                                   comparing, so it must NEVER be matched
+#                                   against a branch name)
 #     anything else    -> verbatim (bisect's bare "<b>")
 #
-#   The object-id test mirrors git's get_oid_hex() CONSERVATIVELY. git parses hex
-#   case-INsensitively and consumes exactly the repository's hash width without
-#   requiring end-of-string, so a value of 41+ hex digits, or one with trailing
-#   junk after the first 40, is an object id to git — verified: for both, git
-#   ALLOWS a second checkout of a same-named branch, while an `^[0-9a-f]{40}$`
-#   test would have called it held (a false "held"). We therefore treat any value
-#   BEGINNING with 40 hex digits of either case as an object id. That is wider
-#   than git in a SHA-256 repository (where 40 hex digits are just a branch name)
-#   and for the handful of oid-shaped refnames git itself rejects as ambiguous;
-#   both extras only degrade to UNKNOWN, which costs nothing but git's own error
-#   message, whereas the opposite error would be a false "held".
+#   The object-id test mirrors get_oid_hex() CONSERVATIVELY: git parses hex
+#   case-INsensitively and consumes exactly the hash width without requiring
+#   end-of-string, so 41+ hex digits, or 40 followed by junk, is an object id to
+#   git — for both, git ALLOWS a second checkout of a same-named branch, which an
+#   `^[0-9a-f]{40}$` test would have called held. Hence: any value BEGINNING with
+#   40 hex digits of either case. That over-reaches in a SHA-256 repository and
+#   for oid-shaped refnames git itself rejects as ambiguous, but only towards
+#   UNKNOWN, which costs no more than git's own error message; the opposite error
+#   would be a false "held".
 #   Returns 1 (printing nothing) when the file is missing, unreadable or empty,
 #   so a state we could not fully read degrades to UNKNOWN instead of being
 #   compared against truncated content.
@@ -154,38 +198,35 @@ wt_state_branch() {
 #   refuses to check it out again (worktree.c: find_shared_symref() consults
 #   is_worktree_being_rebased() / is_worktree_being_bisected() for detached
 #   worktrees), so without this the resolver would miss exactly the case where an
-#   interrupted operation, not a plain checkout, is the blocker.
+#   interrupted operation, not a plain checkout, is the blocker. ONLY detached
+#   records need this; a `branch` record already proves the block, and the
+#   question there is the simpler wt_operation_in_flight.
 #
-#   Reads the same per-worktree state files git itself reads, all under the
-#   worktree's own git dir (<common>/worktrees/<id>, or <root>/.git for the main
-#   working tree), and in git's own precedence (wt-status.c:
-#   wt_status_check_rebase / wt_status_check_bisect):
-#     rebase-apply/         apply backend, checked FIRST. When the sibling
-#                           `applying` marker marks it a `git am`, git stops
-#                           there and does NOT fall through to rebase-merge, and
-#                           an am does not hold the branch — verified: with both
-#                           dirs present and `applying` set, git allows the second
-#                           checkout, so probing rebase-merge first would be a
-#                           FALSE "held".
-#     rebase-merge/         merge/interactive backend, only when rebase-apply is
-#                           absent.
-#     BISECT_START          bisect, only when BISECT_LOG marks one in progress.
-#                           Checked independently of the rebase state, exactly as
-#                           git checks is_worktree_being_bisected() separately
-#                           from is_worktree_being_rebased().
-#   The two rebase entries are probed with `-e`, not `-d`, because git decides
-#   with a bare stat(): a NON-directory `rebase-apply` still makes git stop at the
-#   apply backend, where it then finds no branch — verified: with a regular file
-#   at rebase-apply and a rebase-merge/head-name naming the branch, git ALLOWS the
-#   second checkout, whereas a `-d` probe would skip to rebase-merge and report a
-#   false "held". `-e` follows symlinks just as stat() does, so a DANGLING symlink
-#   correctly falls through to rebase-merge (verified: git refuses there).
-#   Returns 1 when the state cannot be read (e.g. the worktree dir is gone), so
-#   the caller degrades to git's own error rather than guessing: a false "held"
-#   is worse than falling back to git's message.
+#   Reads the same per-worktree state files git reads, in git's own precedence
+#   (wt-status.c: wt_status_check_rebase / wt_status_check_bisect):
+#     rebase-apply/   apply backend, checked FIRST. A sibling `applying` marker
+#                     makes it a `git am`, which does not hold the branch and
+#                     stops git from consulting rebase-merge at all — with both
+#                     dirs present and `applying` set, git ALLOWS the second
+#                     checkout, so probing rebase-merge first would be a FALSE
+#                     "held".
+#     rebase-merge/   merge/interactive backend, only when rebase-apply is absent.
+#     BISECT_START    bisect, only when BISECT_LOG marks one in progress; checked
+#                     independently of the rebase state, as git checks
+#                     is_worktree_being_bisected() separately.
+#   Probed with `-e`, not `-d`, because git decides with a bare stat(): a
+#   NON-directory `rebase-apply` still makes git stop at the apply backend, where
+#   it finds no branch — git ALLOWS the second checkout, whereas a `-d` probe
+#   would skip to rebase-merge and report a false "held". `-e` follows symlinks
+#   just as stat() does, so a DANGLING symlink correctly falls through to
+#   rebase-merge (git refuses there).
+#   Returns 1 for "not held OR unreadable". Conflating them is safe HERE and only
+#   here: an unidentified detached blocker costs nothing but git's own error
+#   message, and git itself allows the second checkout when it cannot read the
+#   state either (verified with an unreadable head-name).
 wt_branch_held_by_operation() {
 	local wt="$1" branch="$2" gitdir head
-	gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+	gitdir="$(wt_worktree_gitdir "$wt")" || return 1
 	if [ -e "$gitdir/rebase-apply" ]; then
 		if [ ! -e "$gitdir/rebase-apply/applying" ] &&
 			head="$(wt_state_branch "$gitdir/rebase-apply/head-name")" &&
@@ -220,22 +261,21 @@ wt_branch_held_by_operation() {
 #   — the operation may have ended, or a read failed transiently — and then the
 #   advice would not match the blocker that was actually found, which here means
 #   offering "just remove that worktree" for one holding live bisect state:
-#     WT_BLOCKER_PATH                  the path just printed ("" when none)
-#     WT_BLOCKER_OPERATION_IN_FLIGHT   1 when that worktree holds an UNFINISHED
-#                                      rebase or bisect naming <branch>, else 0
-#   The flag is probed for a plain `branch` record too, not only for `detached`
-#   ones: `git bisect start` before the first good/bad leaves HEAD ON the branch,
-#   so the porcelain reports `branch` while a bisect really is in flight (verified
-#   — and that state is invisible to `git status --porcelain`, so a "remove the
-#   worktree" remedy would silently discard it).
+#     WT_BLOCKER_PATH        the path just printed ("" when none)
+#     WT_BLOCKER_OPERATION   none | in-flight | unknown, for that worktree
+#   "unknown" is deliberately NOT folded into "none": only a VERIFIED "none" may
+#   be answered with a remedy that deletes the worktree (see wt-enter, which
+#   applies that rule). The state is probed for a `branch` record too, not only
+#   for detached ones — `git bisect start` before the first good/bad leaves HEAD
+#   ON the branch, so a live bisect hides behind a plain `branch` record.
 #   A command substitution runs the function in a subshell and would throw both
 #   globals away, so a caller that needs them invokes it directly and redirects
 #   stdout instead.
 # shellcheck disable=SC2034 # WT_BLOCKER_* are outputs, read by the caller (wt-enter)
 wt_worktree_for_branch() {
-	local root="$1" branch="$2" out line path=""
+	local root="$1" branch="$2" out line path="" op
 	WT_BLOCKER_PATH=""
-	WT_BLOCKER_OPERATION_IN_FLIGHT=0
+	WT_BLOCKER_OPERATION="none"
 	out="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || return 1
 	while IFS= read -r line; do
 		case "$line" in
@@ -243,8 +283,12 @@ wt_worktree_for_branch() {
 		"branch "*)
 			if [ "${line#branch }" = "refs/heads/$branch" ] && [ -n "$path" ]; then
 				WT_BLOCKER_PATH="$path"
-				! wt_branch_held_by_operation "$path" "$branch" ||
-					WT_BLOCKER_OPERATION_IN_FLIGHT=1
+				op=0
+				wt_operation_in_flight "$path" || op=$?
+				case "$op" in
+				0) WT_BLOCKER_OPERATION="in-flight" ;;
+				2) WT_BLOCKER_OPERATION="unknown" ;;
+				esac
 				printf '%s\n' "$path"
 				return 0
 			fi
@@ -252,7 +296,7 @@ wt_worktree_for_branch() {
 		detached)
 			if [ -n "$path" ] && wt_branch_held_by_operation "$path" "$branch"; then
 				WT_BLOCKER_PATH="$path"
-				WT_BLOCKER_OPERATION_IN_FLIGHT=1
+				WT_BLOCKER_OPERATION="in-flight"
 				printf '%s\n' "$path"
 				return 0
 			fi

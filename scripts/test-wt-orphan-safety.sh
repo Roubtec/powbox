@@ -24,13 +24,17 @@
 #     destroy work: wt-remove only where it applies, "finish or abort it" where
 #     an operation is in flight. The diagnosis stays SILENT when the blocker git
 #     names is wt-enter's own destination, so git's prune/remove advice stands.
-#   * wt-common.sh wt_branch_held_by_operation against fabricated operation
-#     state, pinned to what real git does with the same state — including the
-#     values git parses as an OBJECT ID (case-insensitive, hash-width-prefixed)
-#     and the non-directory operation entries git's stat() still stops at.
-#   * wt-common.sh wt_worktree_for_branch reporting the blocker and whether an
-#     operation is in flight there from ONE scan, so wt-enter never re-probes to
-#     choose a remedy.
+#   * wt-common.sh wt_branch_held_by_operation and wt_operation_in_flight against
+#     fabricated operation state, pinned to what real git does with the same
+#     state.
+#   * wt-common.sh wt_worktree_for_branch reporting the blocker and its operation
+#     state (none / in-flight / unknown) from ONE scan, so wt-enter never
+#     re-probes to choose a remedy — and never answers an UNVERIFIED state with a
+#     remedy that deletes the worktree.
+#
+# WHY each expectation is what it is (git's own precedence, its object-id
+# parsing, its bare stat()) is documented once, in docker/shared/wt-common.sh.
+# This file pins the OUTCOMES and deliberately does not restate the rationale.
 #
 # Runs directly against the repo copies — no image build needed. Requires bash
 # and git on PATH (present in the agent image).
@@ -137,22 +141,18 @@ break_metadata() {
 }
 
 # ---------------------------------------------------------------------------
-# Unit: wt_branch_held_by_operation must read a detached worktree's operation
-# state the way GIT reads it, because git is what actually decides whether the
-# branch may be checked out again. Every expectation below was verified against
-# real git by fabricating the same state and observing whether `git worktree add`
-# refuses; a mismatch would make wt-enter either claim a blocker git does not
-# see (a false "held") or miss the one it does.
+# Unit: wt_branch_held_by_operation must read a DETACHED worktree's operation
+# state the way GIT reads it, because git is what decides whether the branch may
+# be checked out again. Each case states the fabricated state and what real git
+# does with it (ALLOWS / REFUSES a second checkout of the same branch); the
+# reasoning is in wt-common.sh.
 # ---------------------------------------------------------------------------
 RU="$(make_repo ru)"
 git_quiet -C "$RU" branch foo
 git_quiet -C "$RU" worktree add -q --detach "$RU/w" >/dev/null 2>&1
 GDU="$RU/.git/worktrees/w"
 
-# git checks rebase-apply BEFORE rebase-merge, and an `applying` marker makes it
-# a `git am` — which does not hold the branch, and stops git from consulting
-# rebase-merge at all. Verified: with both dirs present and `applying` set, git
-# ALLOWS the second checkout, so probing rebase-merge first is a false "held".
+# `git am` (rebase-apply + `applying`) beside a stale rebase-merge: git ALLOWS.
 mkdir -p "$GDU/rebase-merge" "$GDU/rebase-apply"
 printf 'refs/heads/foo\n' >"$GDU/rebase-merge/head-name"
 printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
@@ -164,7 +164,7 @@ else
 fi
 rm -rf "$GDU/rebase-merge" "$GDU/rebase-apply"
 
-# A real apply-backend rebase (no `applying` marker) DOES hold the branch.
+# A real apply-backend rebase (no `applying` marker): git REFUSES.
 mkdir -p "$GDU/rebase-apply"
 printf 'refs/heads/foo\n' >"$GDU/rebase-apply/head-name"
 if wt_branch_held_by_operation "$RU/w" foo; then
@@ -174,11 +174,8 @@ else
 fi
 rm -rf "$GDU/rebase-apply"
 
-# git decides which rebase backend to read with a bare stat(), not an is-a-dir
-# test: a NON-directory rebase-apply still makes it stop at the apply backend,
-# where it then finds no head-name and concludes the branch is free. Verified:
-# git ALLOWS the second checkout here, so falling through to rebase-merge (as a
-# `-d` probe does) would be a false "held".
+# NON-directory rebase-apply beside a rebase-merge naming the branch: git stops
+# at the apply backend, finds no head-name, and ALLOWS.
 mkdir -p "$GDU/rebase-merge"
 printf 'refs/heads/foo\n' >"$GDU/rebase-merge/head-name"
 printf 'junk\n' >"$GDU/rebase-apply"
@@ -189,9 +186,8 @@ else
 fi
 rm -f "$GDU/rebase-apply"
 
-# A DANGLING SYMLINK is the other side of that coin: stat() follows symlinks and
-# fails, so git really does fall through to rebase-merge — and REFUSES (verified).
-# `-e` follows symlinks too, so the helper must still report the branch as held.
+# DANGLING-SYMLINK rebase-apply: stat() follows and fails, so git falls through
+# to rebase-merge and REFUSES.
 ln -s /nonexistent-rebase-apply-target "$GDU/rebase-apply"
 if wt_branch_held_by_operation "$RU/w" foo; then
 	ok "a dangling-symlink rebase-apply falls through to rebase-merge, as stat() does"
@@ -200,8 +196,8 @@ else
 fi
 rm -rf "$GDU/rebase-apply" "$GDU/rebase-merge"
 
-# git writes the BARE branch name to BISECT_START, but its reader also strips a
-# refs/heads/ prefix — and treats such a bisect as holding the branch (verified).
+# BISECT_START in refs/heads/ form (git writes the bare name but strips the
+# prefix on read): git REFUSES.
 : >"$GDU/BISECT_LOG"
 printf 'refs/heads/foo\n' >"$GDU/BISECT_START"
 if wt_branch_held_by_operation "$RU/w" foo; then
@@ -210,11 +206,9 @@ else
 	no "BISECT_START in refs/heads/ form not recognised as holding the branch"
 fi
 
-# A bisect started from a detached HEAD records the object id. git abbreviates it
-# before comparing, so it can never match a branch named that hex string — and a
-# 40-hex refname is in fact unusable in git at all (verified: `git worktree add`
-# on one fails with "refname ... is ambiguous" / "invalid reference"). Either
-# way, comparing the raw value against a branch name would be wrong.
+# A bisect from a detached HEAD records the object id; git abbreviates it before
+# comparing, so it can never match a branch of that name (and a 40-hex refname is
+# unusable in git anyway). Comparing the raw value would be wrong either way.
 HEXB=0123456789abcdef0123456789abcdef01234567
 printf '%s\n' "$HEXB" >"$GDU/BISECT_START"
 if wt_branch_held_by_operation "$RU/w" "$HEXB"; then
@@ -223,9 +217,7 @@ else
 	ok "a full object id in BISECT_START is treated as a detached start, not a branch"
 fi
 
-# git's get_oid_hex() is CASE-INSENSITIVE, so an uppercase/mixed-case object id
-# is a detached start to git too — matching it against a branch name would be a
-# false "held".
+# get_oid_hex() is CASE-INSENSITIVE: a mixed-case object id is a detached start.
 printf '%s\n' "0123456789ABCDEF0123456789abcdef01234567" >"$GDU/BISECT_START"
 if wt_branch_held_by_operation "$RU/w" "0123456789ABCDEF0123456789abcdef01234567"; then
 	no "a mixed-case object id in BISECT_START must not match a same-named branch"
@@ -233,11 +225,8 @@ else
 	ok "object-id recognition in BISECT_START is case-insensitive, as git's is"
 fi
 
-# git consumes exactly the hash width and does NOT require end-of-string, so a
-# value of 41+ hex digits — or 40 hex digits with trailing junk — is an object id
-# to git while still being a legal branch name. Verified: for both, git ALLOWS a
-# second checkout of the same-named branch, so reporting "held" would be a false
-# positive (an `^[0-9a-f]{40}$` test used to do exactly that).
+# 41+ hex digits, or 40 with trailing junk: an object id to git yet a legal
+# branch name — git ALLOWS the second checkout of the same-named branch.
 for oidish in \
 	0123456789abcdef0123456789abcdef0123456789abc \
 	0123456789abcdef0123456789abcdef01234567zz; do
@@ -249,10 +238,8 @@ for oidish in \
 	fi
 done
 
-# The threshold must not over-reach: below the hash width a hex string really is
-# just a branch name, and git REFUSES the second checkout (verified for a 39-hex
-# name and for short ones like 'deadbeef'). Reporting "unknown" there would lose
-# a real diagnosis.
+# Below the hash width a hex string is just a branch name: git REFUSES. The
+# threshold must not over-reach and lose a real diagnosis.
 HEX39=0123456789abcdef0123456789abcdef0123456
 printf '%s\n' "$HEX39" >"$GDU/BISECT_START"
 if wt_branch_held_by_operation "$RU/w" "$HEX39"; then
@@ -261,10 +248,8 @@ else
 	no "a 39-hex branch name in BISECT_START must still count as holding the branch"
 fi
 
-# git probes bisect INDEPENDENTLY of the rebase state (is_worktree_being_bisected
-# is a separate call), so a broken rebase entry must not mask a live bisect.
-# Verified: with a regular file at rebase-apply and a real bisect on foo, git
-# REFUSES the second checkout.
+# git probes bisect INDEPENDENTLY of the rebase state, so a broken rebase entry
+# must not mask a live bisect: git REFUSES.
 printf 'refs/heads/foo\n' >"$GDU/BISECT_START"
 printf 'junk\n' >"$GDU/rebase-apply"
 if wt_branch_held_by_operation "$RU/w" foo; then
@@ -274,8 +259,8 @@ else
 fi
 rm -f "$GDU/rebase-apply"
 
-# State that cannot be read must degrade to "unknown" (never held), so the caller
-# falls back to git's own error instead of guessing from a partial read.
+# Unreadable state must degrade to "unknown" (never held) for a DETACHED record,
+# so the caller falls back to git's own error instead of guessing.
 rm -f "$GDU/BISECT_START"
 mkdir -p "$GDU/BISECT_START"
 if wt_branch_held_by_operation "$RU/w" foo; then
@@ -286,25 +271,80 @@ fi
 rm -rf "$GDU/BISECT_LOG" "$GDU/BISECT_START"
 
 # ---------------------------------------------------------------------------
-# Unit: wt_worktree_for_branch must report the blocker AND whether an operation
-# is in flight there from ONE scan, so the caller never re-probes to pick a
-# remedy (a second probe can disagree with the first and hand out advice that
-# does not match the blocker actually found). The flag has to be set for a plain
-# `branch` record too, not only for detached ones: `git bisect start` before the
-# first good/bad leaves HEAD ON the branch, so the porcelain says `branch` while
-# a real bisect is in flight — and `git status --porcelain` stays empty, so
-# nothing else would stop a caller from deleting that worktree.
+# Unit: wt_operation_in_flight answers the question a `branch` record poses —
+# "is ANY operation running here?" — with THREE outcomes, per THE REMEDY RULE.
+# ---------------------------------------------------------------------------
+RO="$(make_repo ro)"
+git_quiet -C "$RO" worktree add -q "$RO/op" -b op-b >/dev/null 2>&1
+GDO="$RO/.git/worktrees/op"
+
+op_rc() {
+	local rc=0
+	wt_operation_in_flight "$1" || rc=$?
+	echo "$rc"
+}
+
+if [ "$(op_rc "$RO/op")" = 1 ]; then
+	ok "wt_operation_in_flight verifies 'none' on a quiet worktree"
+else
+	no "quiet worktree should report 1 (none), got $(op_rc "$RO/op")"
+fi
+
+: >"$GDO/BISECT_LOG"
+if [ "$(op_rc "$RO/op")" = 0 ]; then
+	ok "wt_operation_in_flight sees a bisect with no reference to what BISECT_START names"
+else
+	no "BISECT_LOG present should report 0 (in flight), got $(op_rc "$RO/op")"
+fi
+rm -f "$GDO/BISECT_LOG"
+
+# A `git am` is an operation too, and needs the same "finish or abort" advice.
+mkdir -p "$GDO/rebase-apply"
+: >"$GDO/rebase-apply/applying"
+if [ "$(op_rc "$RO/op")" = 0 ]; then
+	ok "wt_operation_in_flight counts a git am as an operation in flight"
+else
+	no "git am should report 0 (in flight), got $(op_rc "$RO/op")"
+fi
+rm -rf "$GDO/rebase-apply"
+
+if [ "$(op_rc "$RO/does-not-exist")" = 2 ]; then
+	ok "wt_operation_in_flight reports UNKNOWN for a worktree that is not there"
+else
+	no "missing worktree should report 2 (unknown), got $(op_rc "$RO/does-not-exist")"
+fi
+
+# A worktree that lost its own .git pointer still satisfies `rev-parse`, because
+# task worktrees sit INSIDE the main working tree — the answer then describes the
+# ENCLOSING repo. That must read as UNKNOWN, not as the enclosing repo's state.
+git_quiet -C "$RO" worktree add -q "$RO/.worktrees/$CONTAINER_NAME/inside" -b inside-b >/dev/null 2>&1
+rm -f "$RO/.worktrees/$CONTAINER_NAME/inside/.git"
+if git -C "$RO/.worktrees/$CONTAINER_NAME/inside" rev-parse --absolute-git-dir >/dev/null 2>&1; then
+	if [ "$(op_rc "$RO/.worktrees/$CONTAINER_NAME/inside")" = 2 ]; then
+		ok "wt_operation_in_flight refuses to read the ENCLOSING repo's state as the worktree's"
+	else
+		no "worktree without its .git pointer should report 2 (unknown), got $(op_rc "$RO/.worktrees/$CONTAINER_NAME/inside")"
+	fi
+else
+	no "precondition: rev-parse should still resolve upwards from a worktree that lost its .git"
+fi
+
+# ---------------------------------------------------------------------------
+# Unit: wt_worktree_for_branch must report the blocker AND its operation state
+# from ONE scan, so the caller never re-probes to pick a remedy (a second probe
+# can disagree with the first and hand out advice that does not match the blocker
+# actually found). Cases below cover both record kinds and all three states.
 # ---------------------------------------------------------------------------
 RG="$(make_repo rg)"
 git_quiet -C "$RG" worktree add -q "$RG/plain" -b plain-b >/dev/null 2>&1
 WT_BLOCKER_PATH='(unset)'
-WT_BLOCKER_OPERATION_IN_FLIGHT='(unset)'
+WT_BLOCKER_OPERATION='(unset)'
 if wt_worktree_for_branch "$RG" plain-b >/dev/null &&
 	[ "$WT_BLOCKER_PATH" = "$RG/plain" ] &&
-	[ "$WT_BLOCKER_OPERATION_IN_FLIGHT" = 0 ]; then
-	ok "wt_worktree_for_branch records a plain blocker with no operation in flight"
+	[ "$WT_BLOCKER_OPERATION" = none ]; then
+	ok "wt_worktree_for_branch records a plain blocker with a VERIFIED 'none'"
 else
-	no "plain blocker globals wrong: path='$WT_BLOCKER_PATH' flag='$WT_BLOCKER_OPERATION_IN_FLIGHT'"
+	no "plain blocker globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
 fi
 
 git_quiet -C "$RG" branch bis-b
@@ -313,27 +353,83 @@ git_quiet -C "$RG/bis" bisect start >/dev/null 2>&1 || true
 if git -C "$RG" worktree list --porcelain | grep -qx "branch refs/heads/bis-b" &&
 	[ -z "$(git -C "$RG/bis" status --porcelain)" ]; then
 	WT_BLOCKER_PATH='(unset)'
-	WT_BLOCKER_OPERATION_IN_FLIGHT='(unset)'
+	WT_BLOCKER_OPERATION='(unset)'
 	if wt_worktree_for_branch "$RG" bis-b >/dev/null &&
 		[ "$WT_BLOCKER_PATH" = "$RG/bis" ] &&
-		[ "$WT_BLOCKER_OPERATION_IN_FLIGHT" = 1 ]; then
+		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
 		ok "a live bisect on an ON-BRANCH worktree is flagged from the same scan"
 	else
-		no "on-branch bisect globals wrong: path='$WT_BLOCKER_PATH' flag='$WT_BLOCKER_OPERATION_IN_FLIGHT'"
+		no "on-branch bisect globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
 	fi
 else
 	no "precondition: 'git bisect start' should leave $RG/bis on its branch with a clean status"
 fi
 
+# An ON-BRANCH bisect of a branch whose NAME BEGINS WITH 40 HEX DIGITS — a legal
+# refname that wt_state_branch must read as an object id. Deriving the state by
+# comparing BISECT_START to the branch name would therefore report "none" here.
+HEXBR=0123456789abcdef0123456789abcdef01234567-br
+git_quiet -C "$RG" branch "$HEXBR"
+git_quiet -C "$RG" worktree add -q "$RG/hexbis" "$HEXBR" >/dev/null 2>&1
+git_quiet -C "$RG/hexbis" bisect start >/dev/null 2>&1 || true
+if git -C "$RG" worktree list --porcelain | grep -qx "branch refs/heads/$HEXBR" &&
+	[ -z "$(git -C "$RG/hexbis" status --porcelain)" ] &&
+	! wt_state_branch "$RG/.git/worktrees/hexbis/BISECT_START" >/dev/null; then
+	WT_BLOCKER_PATH='(unset)'
+	WT_BLOCKER_OPERATION='(unset)'
+	if wt_worktree_for_branch "$RG" "$HEXBR" >/dev/null &&
+		[ "$WT_BLOCKER_PATH" = "$RG/hexbis" ] &&
+		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
+		ok "an on-branch bisect is flagged even when BISECT_START looks like an object id"
+	else
+		no "oid-shaped-branch bisect globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
+	fi
+else
+	no "precondition: '$HEXBR' should be a legal branch, on-branch bisecting, with an oid-shaped BISECT_START"
+fi
+
+# Same shape, different cause: BISECT_START unreadable. Reading it would yield
+# "no operation" again; not reading it keeps the bisect visible.
+git_quiet -C "$RG" branch unread-b
+git_quiet -C "$RG" worktree add -q "$RG/unread" unread-b >/dev/null 2>&1
+git_quiet -C "$RG/unread" bisect start >/dev/null 2>&1 || true
+chmod 000 "$RG/.git/worktrees/unread/BISECT_START"
+if ! cat "$RG/.git/worktrees/unread/BISECT_START" >/dev/null 2>&1; then
+	WT_BLOCKER_PATH='(unset)'
+	WT_BLOCKER_OPERATION='(unset)'
+	if wt_worktree_for_branch "$RG" unread-b >/dev/null &&
+		[ "$WT_BLOCKER_OPERATION" = in-flight ]; then
+		ok "an on-branch bisect with an UNREADABLE BISECT_START is still flagged"
+	else
+		no "unreadable-BISECT_START bisect op wrong: op='$WT_BLOCKER_OPERATION'"
+	fi
+else
+	no "precondition: BISECT_START should be unreadable after chmod 000 (are we root?)"
+fi
+chmod 600 "$RG/.git/worktrees/unread/BISECT_START"
+
+# A registered blocker whose directory is gone: nothing can be verified there.
+git_quiet -C "$RG" worktree add -q "$RG/vanished" -b vanished-b >/dev/null 2>&1
+rm -rf "$RG/vanished"
 WT_BLOCKER_PATH='(unset)'
-WT_BLOCKER_OPERATION_IN_FLIGHT='(unset)'
+WT_BLOCKER_OPERATION='(unset)'
+if wt_worktree_for_branch "$RG" vanished-b >/dev/null &&
+	[ "$WT_BLOCKER_PATH" = "$RG/vanished" ] &&
+	[ "$WT_BLOCKER_OPERATION" = unknown ]; then
+	ok "a blocker whose directory is gone reports UNKNOWN, not 'none'"
+else
+	no "vanished blocker globals wrong: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
+fi
+
+WT_BLOCKER_PATH='(unset)'
+WT_BLOCKER_OPERATION='(unset)'
 git_quiet -C "$RG" branch unheld-b
 if wt_worktree_for_branch "$RG" unheld-b >/dev/null; then
 	no "wt_worktree_for_branch must not claim a blocker for an unheld branch"
-elif [ -z "$WT_BLOCKER_PATH" ] && [ "$WT_BLOCKER_OPERATION_IN_FLIGHT" = 0 ]; then
+elif [ -z "$WT_BLOCKER_PATH" ] && [ "$WT_BLOCKER_OPERATION" = none ]; then
 	ok "wt_worktree_for_branch clears its globals when no worktree holds the branch"
 else
-	no "unheld-branch globals not cleared: path='$WT_BLOCKER_PATH' flag='$WT_BLOCKER_OPERATION_IN_FLIGHT'"
+	no "unheld-branch globals not cleared: path='$WT_BLOCKER_PATH' op='$WT_BLOCKER_OPERATION'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -469,11 +565,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: blocked by a worktree with an INTERRUPTED REBASE. git reports
-# such a worktree as `detached` in the porcelain, yet still refuses to check its
-# branch out elsewhere — so the diagnosis must consult the rebase state instead
-# of concluding "no worktree holds this branch" and falling back to git's bare
-# fatal. Same expectations as the sibling case above.
+# THE REMEDY RULE, which the next several cases each probe from a different
+# angle: wt-remove may be offered ONLY for a VERIFIED "no operation". It guards
+# unsaved work and rebase/merge state but has NO bisect guard, and a bisect
+# leaves `git status --porcelain` empty, so nothing else would stop the removal
+# from discarding it. "In flight" and "could not be verified" therefore both get
+# "do not remove", and only a plain idle worktree gets wt-remove.
+#
+# Integration: blocked by a worktree with an INTERRUPTED REBASE. git reports such
+# a worktree as `detached` in the porcelain yet still refuses to check its branch
+# out elsewhere, so the diagnosis must consult the operation state instead of
+# concluding "no worktree holds this branch". Same expectations as the sibling
+# case above.
 # ---------------------------------------------------------------------------
 R7="$(make_repo r7)"
 WB7="$R7/.worktrees/$CONTAINER_NAME"
@@ -510,11 +613,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: blocked by a BISECT. Same detached-worktree shape as the rebase
-# above, but the remedy differs: wt-remove has no bisect guard (and plain
-# `git worktree remove` happily deletes a bisecting worktree), so pointing the
-# caller at wt-remove here would destroy the in-progress bisect. The message must
-# say to finish or abort the operation instead.
+# Integration: blocked by a BISECT — same detached shape as the rebase above, but
+# the remedy must be "finish or abort", not wt-remove.
 # ---------------------------------------------------------------------------
 R8="$(make_repo r8)"
 WB8="$R8/.worktrees/$CONTAINER_NAME"
@@ -549,12 +649,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Integration: a bisect that has not yet been given a good/bad commit does NOT
-# detach — the worktree stays ON its branch and `git status --porcelain` is
-# empty, so wt-remove's guards (unsaved work, rebase/merge state) would all pass
-# and the removal would silently discard the bisect. The remedy must therefore
-# be "finish or abort" here too, which only holds if the operation state is read
-# for plain `branch` records and not just detached ones.
+# Integration: a bisect not yet given a good/bad commit does NOT detach — the
+# worktree stays ON its branch, so this only works if the operation state is read
+# for plain `branch` records too, not just detached ones.
 # ---------------------------------------------------------------------------
 RA="$(make_repo ra)"
 WBA="$RA/.worktrees/$CONTAINER_NAME"
@@ -582,6 +679,89 @@ if git -C "$RA" worktree list --porcelain | grep -qx "branch refs/heads/task-m" 
 	fi
 else
 	no "precondition: 'git bisect start' should leave $WBA/task-m on its branch with a clean status"
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the same on-branch bisect on an oid-shaped branch name (see the
+# unit case above). This is the shape that used to offer wt-remove, which then
+# deleted the worktree and the live bisect with it.
+# ---------------------------------------------------------------------------
+RH="$(make_repo rh)"
+WBH="$RH/.worktrees/$CONTAINER_NAME"
+EH="$WORK_ROOT/rh.err"
+HEXBR2=0123456789abcdef0123456789abcdef01234567-task
+git_quiet -C "$RH" branch "$HEXBR2"
+git_quiet -C "$RH" worktree add -q "$WBH/task-o" "$HEXBR2" >/dev/null 2>&1
+git_quiet -C "$WBH/task-o" bisect start >/dev/null 2>&1 || true
+if git -C "$RH" worktree list --porcelain | grep -qx "branch refs/heads/$HEXBR2" &&
+	[ -z "$(git -C "$WBH/task-o" status --porcelain)" ]; then
+	if out="$(cd "$RH" && bash "$WT_ENTER" task-p "$HEXBR2" 2>"$EH")"; then
+		no "wt-enter must fail when an oid-shaped branch name is held by an on-branch bisect (got '$out')"
+	else
+		miss=""
+		[ -z "$out" ] || miss="$miss stdout-not-empty"
+		grep -F "$WBH/task-o" "$EH" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		! grep -qF "wt-remove" "$EH" || miss="$miss points-at-wt-remove"
+		grep -qiF "bisect reset" "$EH" || miss="$miss no-bisect-remedy"
+		if [ -z "$miss" ]; then
+			ok "wt-enter warns off wt-remove for a bisect whose branch name looks like an object id"
+		else
+			no "wt-enter oid-shaped-branch bisect message inadequate:$miss"
+		fi
+	fi
+else
+	no "precondition: '$HEXBR2' should be on-branch bisecting with a clean status"
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the blocker is a SIBLING worktree registered in git's metadata but
+# MISSING on disk. wt-remove is a no-op on an absent dir, so offering it is a
+# closed loop; `git worktree prune` is what actually frees it.
+# ---------------------------------------------------------------------------
+RP="$(make_repo rp)"
+WBP="$RP/.worktrees/$CONTAINER_NAME"
+EP="$WORK_ROOT/rp.err"
+git_quiet -C "$RP" worktree add -q "$WBP/task-q" -b task-q >/dev/null 2>&1
+rm -rf "$WBP/task-q"
+if out="$(cd "$RP" && bash "$WT_ENTER" task-r task-q 2>"$EP")"; then
+	no "wt-enter must fail when a registered-but-missing sibling holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	grep -F "$WBP/task-q" "$EP" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	grep -qF "worktree prune" "$EP" || miss="$miss no-prune-remedy"
+	! grep -qF "wt-remove" "$EP" || miss="$miss dead-end-wt-remove-advice"
+	if [ -z "$miss" ]; then
+		ok "wt-enter advises 'worktree prune' for a registered-but-missing sibling blocker"
+	else
+		no "wt-enter prunable-sibling message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the blocker's operation state CANNOT be verified — here because
+# the worktree lost its own .git pointer. git still refuses the checkout, so the
+# blocker is real; the advice must degrade rather than fall back to wt-remove.
+# ---------------------------------------------------------------------------
+RV="$(make_repo rv)"
+WBV="$RV/.worktrees/$CONTAINER_NAME"
+EV="$WORK_ROOT/rv.err"
+git_quiet -C "$RV" worktree add -q "$WBV/task-s" -b task-s >/dev/null 2>&1
+git_quiet -C "$WBV/task-s" bisect start >/dev/null 2>&1 || true
+rm -f "$WBV/task-s/.git"
+if out="$(cd "$RV" && bash "$WT_ENTER" task-t task-s 2>"$EV")"; then
+	no "wt-enter must fail when an unverifiable sibling holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	grep -F "$WBV/task-s" "$EV" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	! grep -qF "wt-remove" "$EV" || miss="$miss points-at-wt-remove"
+	grep -qiF "could NOT be read" "$EV" || miss="$miss no-unverified-warning"
+	if [ -z "$miss" ]; then
+		ok "wt-enter refuses to recommend removal when the blocker's state cannot be verified"
+	else
+		no "wt-enter unverifiable-blocker message inadequate:$miss"
+	fi
 fi
 
 # ---------------------------------------------------------------------------

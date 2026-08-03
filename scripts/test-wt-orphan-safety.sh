@@ -23,10 +23,11 @@
 #     holding worktree reporting as `detached`. The diagnosis stays SILENT when
 #     the blocker git names is wt-enter's own destination, so git's prune/remove
 #     advice stands.
-#   * that the diagnosis NEVER advises discarding the blocking worktree, in ANY
-#     of the states it can be found in — an idle one, a rebase, a bisect, an
-#     interrupted revert, one whose state cannot even be read. wt-enter only
-#     names the blocker and hands over; the one remedy it offers is git's own
+#   * that the diagnosis NEVER advises discarding the blocking worktree OR the
+#     operation in flight inside it, in ANY of the states it can be found in — an
+#     idle one, a rebase, a bisect, an interrupted revert, one whose state cannot
+#     even be read. wt-enter names the blocker, points at inspection and at the
+#     worktree's owner, and stops; the one remedy it offers is git's own
 #     `worktree prune`, for a blocker whose directory is already gone.
 #   * wt-common.sh wt_branch_held_by_operation against fabricated operation
 #     state, pinned to what real git does with the same state — it decides
@@ -75,13 +76,31 @@ no() {
 }
 
 # destructive_advice <errfile> — echo a `miss` fragment when wt-enter's stderr
-# points the caller at anything that could DISCARD the blocking worktree. This is
-# the invariant every branch-conflict case below re-checks, because the class of
-# bug it guards (advice that deletes a worktree holding state `git status` does
-# not show) has recurred once per state git can leave behind. Only `git worktree
-# prune` is exempt: it drops a stale record for a directory that is already gone.
+# points the caller at anything that could DISCARD the blocking worktree or the
+# in-flight work inside it. This is the invariant every branch-conflict case below
+# re-checks, because the class of bug it guards (advice that throws away state
+# `git status` does not show) has recurred once per state git can leave behind.
+#
+# "Clear the operation yourself" counts, not just "delete the worktree": every
+# `rebase|am|cherry-pick|revert --abort` discards the conflict resolution done so
+# far, and `reset --hard`, `checkout -f`, `clean -fd` and `branch -D` each discard
+# work the blocking worktree may be the only copy of. So the patterns below are
+# command shapes, matched over wt-enter's own lines and git's diagnostics both.
+# Prose is deliberately NOT matched (a grep cannot tell "wt-enter will not discard
+# anything" from "discard it"); wt-enter states its refusals in prose and offers
+# remedies as commands, so command shapes are where advice actually lives. Short
+# flags are matched as CLUSTERS rather than whole tokens, so `-fd`, `-df`, `-rf`
+# and `-fx` are all caught by the one pattern.
+#
+# The single exemption is git's own `git worktree prune`, which drops a stale
+# record for a directory that is already gone and can destroy nothing. It is
+# applied by deleting just that two-word phrase before scanning — never by
+# skipping the line that carries it — so a message naming `prune` is still checked
+# for everything else it says.
 destructive_advice() {
-	grep -qiE 'wt-remove|worktree remove|rm -rf' "$1" && echo " destructive-advice"
+	LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' "$1" |
+		grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-z]*[rf]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-z]*f|clean[[:space:]]+-[a-z]*[fdx]|branch[[:space:]]+-[dD]\b|--force\b' &&
+		echo " destructive-advice"
 	return 0
 }
 
@@ -446,8 +465,8 @@ fi
 # Integration: blocked by a SIBLING task worktree keeps the ordinary semantics
 # (failure, empty stdout) but must surface the blocking worktree path rather
 # than swallowing it — and must NOT claim the primary checkout is involved.
-# The hand-over is non-destructive: the caller is pointed AT the worktree, never
-# at a way to get rid of it.
+# The hand-over is non-destructive: the caller is pointed AT the worktree and at
+# its owner, never at a way to get rid of it or of the work in flight inside it.
 # ---------------------------------------------------------------------------
 R6="$(make_repo r6)"
 WB6="$R6/.worktrees/$CONTAINER_NAME"

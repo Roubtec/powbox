@@ -116,14 +116,17 @@ fi
 #   live to a terminal on fd 2; only its exit status is taken, and preserved.
 #
 #   The diagnosis NAMES the blocker and stops there: it never suggests removing
-#   or otherwise discarding that worktree, not even conditionally. Deciding that
-#   a worktree is safe to delete would mean enumerating every state git can leave
-#   behind (rebase, am, cherry-pick, revert/sequencer, merge, bisect, ...) and
-#   keeping that list in lockstep with wt-remove's independently maintained
-#   guards; the gap between the two lists is a deleted worktree, and it has bitten
-#   more than once. The one remedy offered is git's own `worktree prune`, for a
-#   blocker whose directory is already gone — it drops a stale record and can
-#   destroy nothing. Everything else is "go look at it yourself", which is
+#   or otherwise discarding that worktree, not even conditionally, and it does not
+#   prescribe how to clear what is in flight there either — "finish or abort it"
+#   is the same loss by another route, since every `--abort` throws away whatever
+#   conflict resolution has been done. Deciding that a worktree is safe to delete
+#   would mean enumerating every state git can leave behind (rebase, am,
+#   cherry-pick, revert/sequencer, merge, bisect, ...) and keeping that list in
+#   lockstep with wt-remove's independently maintained guards; the gap between the
+#   two lists is a deleted worktree, and it has bitten more than once. The one
+#   remedy offered is git's own `worktree prune`, for a blocker whose directory is
+#   already gone — it drops a stale record and can destroy nothing. Everything
+#   else is "go look at it yourself, or ask whoever owns it", which is
 #   non-destructive by construction and needs no such list.
 #
 #   The diagnosis is deliberately SUPPRESSED when the resolved blocker is the
@@ -155,12 +158,13 @@ worktree_add() {
 			if [ ! -d "$blocker" ]; then
 				echo "wt-enter: nothing was changed. That worktree is registered in git's metadata but MISSING on disk. Run 'git -C $ROOT worktree prune' to drop the stale record, then rerun wt-enter." >&2
 			else
-				# No removal is suggested, whatever state that worktree is in:
+				# No remedy is suggested, whatever state that worktree is in:
 				# git may have left a rebase, am, cherry-pick, revert or bisect
 				# there that `git status` does not flag, and only its owner can
-				# see which. Naming it and handing over is what cannot go wrong.
-				echo "wt-enter: nothing was changed. That worktree may hold uncommitted work, or an unfinished rebase, am, cherry-pick, revert or bisect that 'git status' does not show — so wt-enter neither touches it nor tells you how to get rid of it." >&2
-				echo "wt-enter: look at it yourself: 'git -C $blocker status' (plus 'git -C $blocker bisect log' if a bisect may be running). Finish or abort whatever is in flight there and free '$BRANCH', or coordinate with whoever owns that worktree, then rerun wt-enter." >&2
+				# see which — or decide what it is worth. Naming it and handing
+				# over is what cannot go wrong.
+				echo "wt-enter: nothing was changed. That worktree may hold uncommitted work, or an unfinished rebase, am, cherry-pick, revert or bisect that 'git status' does not show — so wt-enter neither touches it nor tells you what to do with it." >&2
+				echo "wt-enter: look at it yourself: 'git -C $blocker status' (plus 'git -C $blocker bisect log' if a bisect may be running), or coordinate with whoever owns that worktree. Rerun wt-enter once '$BRANCH' is free." >&2
 				echo "wt-enter: running this task on a different branch avoids the conflict entirely." >&2
 			fi
 		fi

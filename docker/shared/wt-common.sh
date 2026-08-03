@@ -82,6 +82,9 @@ wt_reap_orphan_dir() {
 # NUL-terminated (nothing on failure) and return non-zero when they cannot
 # answer, so a caller can always fall back to git's own error. Read them with
 # wt_read_path, never with `$(…)` — see the delimiter note below.
+# (wt_worktree_locked is the one exception to the shape: it answers a QUESTION
+# about an already-resolved path, so it prints nothing and reports through its
+# exit status alone.)
 #
 # They IDENTIFY the blocking worktree and stop there, deliberately: they do not
 # classify it as safe to delete, and no caller may use them to pick a remedy that
@@ -315,6 +318,40 @@ wt_worktree_for_branch() {
 				printf '%s\0' "$path"
 				return 0
 			fi
+			;;
+		esac
+	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)
+	return 1
+}
+
+# wt_worktree_locked <root> <worktree>
+#   Return 0 when the record for <worktree> carries a `locked` attribute, 1
+#   otherwise — including when git cannot be asked, so the answer degrades
+#   towards "not locked", i.e. towards whatever a caller already said for an
+#   ordinary record. Prints nothing: the status is the whole answer.
+#
+#   It exists because "the directory is gone" does NOT imply "the record is
+#   stale". `git worktree prune` deliberately SKIPS a locked worktree (verified:
+#   with the directory deleted, `worktree prune -n -v` reports nothing, the
+#   record survives, and `git worktree add` keeps refusing the branch), and
+#   locking is exactly how one marks a worktree that lives on removable or
+#   temporarily-unmounted storage which still holds its work. Recommending
+#   `prune` there is advice that cannot work, aimed at a checkout that is not
+#   actually stale — so a caller must ask this before offering it.
+#
+#   Read from the same NUL-delimited porcelain as the resolvers above, for the
+#   same reason: the attribute is `locked` bare, or `locked <reason>` where the
+#   reason is a human-written string that git leaves UNQUOTED in `-z` mode and
+#   may contain newlines (verified) — one NUL-terminated field either way, but
+#   several "lines".
+wt_worktree_locked() {
+	local root="$1" want="$2" field path=""
+	while IFS= read -r -d '' field; do
+		case "$field" in
+		"worktree "*) path="${field#worktree }" ;;
+		locked | "locked "*)
+			[ "$path" = "$want" ] || continue
+			return 0
 			;;
 		esac
 	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)

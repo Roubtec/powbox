@@ -28,7 +28,9 @@
 #     idle one, a rebase, a bisect, an interrupted revert, one whose state cannot
 #     even be read. wt-enter names the blocker, points at inspection and at the
 #     worktree's owner, and stops; the one remedy it offers is git's own
-#     `worktree prune`, for a blocker whose directory is already gone.
+#     `worktree prune`, for a blocker whose directory is already gone — and it
+#     WITHHOLDS even that when the record is LOCKED, which git skips when pruning
+#     (the directory is then deliberately absent, not stale).
 #   * wt-common.sh wt_branch_held_by_operation against fabricated operation
 #     state, pinned to what real git does with the same state — it decides
 #     whether a DETACHED worktree is nevertheless identified as the blocker.
@@ -55,6 +57,10 @@
 #     recommended for it. A path ENDING in a newline is pinned the same way and
 #     covers the other half of that defect: the answer's own handoff, where a
 #     command substitution would strip the byte the `-z` read preserved.
+#   * wt-common.sh wt_worktree_locked, which is what lets that withholding
+#     happen: it reads the porcelain `locked` attribute, keeps a free-form
+#     multi-line lock reason inside its own record, and degrades to "not locked"
+#     when git cannot be asked.
 #   * that git's fatal status (128) is PROPAGATED rather than flattened, and that
 #     the paths inside the commands wt-enter suggests are shell-quoted, so advice
 #     about a worktree under a spaced path stays pasteable and safe to paste.
@@ -590,6 +596,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Unit: wt_worktree_locked. "The directory is gone" does NOT imply "the record is
+# stale": `git worktree prune` deliberately skips a LOCKED worktree, so a caller
+# that offers prune without asking this hands out a remedy that cannot work, for
+# a checkout whose owner locked it precisely to say "leave this alone" (typically
+# one parked on removable or currently-unmounted storage that still holds the
+# work). It answers through its exit status only — nothing on stdout — and a repo
+# it cannot query must answer "not locked", the direction that merely leaves the
+# caller where it already was.
+# ---------------------------------------------------------------------------
+git_quiet -C "$RG" worktree lock "$RG/plain" >/dev/null 2>&1
+if wt_worktree_locked "$RG" "$RG/plain" && [ -z "$(wt_worktree_locked "$RG" "$RG/plain")" ]; then
+	ok "wt_worktree_locked reports a locked worktree, silently"
+else
+	no "wt_worktree_locked missed a locked worktree (or printed something)"
+fi
+if wt_worktree_locked "$RG" "$RG/det"; then
+	no "wt_worktree_locked must not report an UNLOCKED worktree as locked"
+else
+	ok "wt_worktree_locked leaves an unlocked worktree alone"
+fi
+if wt_worktree_locked "$RG" "$RG/never-registered"; then
+	no "wt_worktree_locked must not claim a lock for a path git does not list"
+else
+	ok "wt_worktree_locked answers 'not locked' for an unregistered path"
+fi
+if wt_worktree_locked "$notrepo" "$notrepo"; then
+	no "wt_worktree_locked must answer 'not locked' when git cannot be queried"
+else
+	ok "wt_worktree_locked degrades to 'not locked' outside a repository"
+fi
+
+# The lock REASON is free-form human text, and git leaves it UNQUOTED in `-z`
+# mode — so the attribute genuinely spans several "lines". Pinned with a reason
+# that spells a FAKE porcelain record, the shape that would do the most damage
+# if a record boundary were ever taken from that text: the `locked` attribute
+# landing on a worktree that is not locked at all, which would have wt-enter
+# suppress the one correct remedy for a genuinely stale record. NUL-delimited it
+# is a single field and cannot.
+git_quiet -C "$RG" worktree unlock "$RG/plain" >/dev/null 2>&1
+FAKE_REASON=$'parked\nworktree '"$RG/det"$'\nlocked'
+git_quiet -C "$RG" worktree lock --reason "$FAKE_REASON" "$RG/plain" >/dev/null 2>&1
+if wt_worktree_locked "$RG" "$RG/det"; then
+	no "a lock reason spelling a fake porcelain record must not mark another worktree locked"
+elif wt_worktree_locked "$RG" "$RG/plain"; then
+	ok "a multi-line lock reason stays inside its own record"
+else
+	no "wt_worktree_locked lost the lock when the reason contained newlines"
+fi
+git_quiet -C "$RG" worktree unlock "$RG/plain" >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
 # Unit: wt_read_path REFUSES an out-variable name carrying its own `__wt_`
 # prefix, non-zero, instead of obeying it. Such a name collides with the
 # helper's locals, so `printf -v` writes the answer into the helper's OWN
@@ -646,6 +703,20 @@ if wt_read_path out wt_worktree_for_branch "$RZ" nl-b && [ "$out" = "$WTZ" ]; th
 else
 	no "wt_worktree_for_branch truncated a newline path: got '$out', expected '$WTZ'"
 fi
+
+# The same byte decides whether a LOCK is seen at all, and it is the PATH — not
+# the lock reason — that carries it unescaped in either porcelain format. Read
+# line-wise, the `worktree ` line answers the path's prefix, and the record's
+# `locked` attribute is then compared against a path nobody has: a locked
+# worktree reads as unlocked, and wt-enter goes on to offer `worktree prune` for
+# the one record git will not prune.
+git_quiet -C "$RZ" worktree lock "$WTZ" >/dev/null 2>&1
+if wt_worktree_locked "$RZ" "$WTZ"; then
+	ok "wt_worktree_locked sees the lock on a worktree whose path contains a newline"
+else
+	no "wt_worktree_locked missed the lock on a newline-path worktree"
+fi
+git_quiet -C "$RZ" worktree unlock "$WTZ" >/dev/null 2>&1
 
 # The truncation this guards is not hypothetical: the prefix is a path that is
 # not there, so a caller acting on it would diagnose the wrong failure entirely.
@@ -1091,6 +1162,47 @@ else
 		ok "wt-enter advises 'worktree prune' for a registered-but-missing sibling blocker"
 	else
 		no "wt-enter prunable-sibling message inadequate:$miss"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# Integration: the same registered-but-missing sibling, but LOCKED. git skips
+# locked worktrees when pruning, so the remedy the case above earns is exactly
+# wrong here: pasting it changes nothing and the caller comes straight back to a
+# branch that is still held — a loop that cannot terminate. The record is not
+# stale either; a lock is how one marks a checkout parked on removable or
+# unmounted storage whose work is intact where it lives. So the blocker must
+# still be named, the lock must be stated, and 'worktree prune' must NOT appear.
+#
+# git's refusal to prune it is the fact the whole message rests on, so it is
+# pinned as a precondition rather than assumed.
+# ---------------------------------------------------------------------------
+RL="$(make_repo rl)"
+WBL="$RL/.worktrees/$CONTAINER_NAME"
+EL="$WORK_ROOT/rl.err"
+git_quiet -C "$RL" worktree add -q "$WBL/task-lk" -b task-lk >/dev/null 2>&1
+git_quiet -C "$RL" worktree lock --reason "parked on an unmounted share" "$WBL/task-lk" >/dev/null 2>&1
+rm -rf "$WBL/task-lk"
+if [ -n "$(git -C "$RL" worktree prune -n -v 2>&1)" ]; then
+	no "precondition: git must not offer to prune a LOCKED worktree whose directory is gone"
+elif out="$(cd "$RL" && bash "$WT_ENTER" task-lm task-lk 2>"$EL")"; then
+	no "wt-enter must fail when a locked-but-missing sibling holds the branch (got '$out')"
+else
+	miss=""
+	[ -z "$out" ] || miss="$miss stdout-not-empty"
+	grep -F "$WBL/task-lk" "$EL" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	grep -qiF "locked" "$EL" || miss="$miss no-lock-wording"
+	# The stale-record remedy must not be offered for a record git will not touch.
+	! grep -qF "worktree prune" "$EL" || miss="$miss prune-advised-for-locked-blocker"
+	miss="$miss$(destructive_advice "$EL" "$WBL/task-lk" "$WBL/task-lm" "$RL" task-lk task-lm)"
+	[ ! -e "$WBL/task-lm" ] || miss="$miss worktree-created"
+	# Nothing was remediated: the locked record is still registered, still holding.
+	git -C "$RL" worktree list --porcelain | grep -qx "branch refs/heads/task-lk" ||
+		miss="$miss lock-record-gone"
+	if [ -z "$miss" ]; then
+		ok "wt-enter withholds the 'worktree prune' remedy for a LOCKED registered-but-missing blocker"
+	else
+		no "wt-enter locked-blocker message inadequate:$miss"
 	fi
 fi
 

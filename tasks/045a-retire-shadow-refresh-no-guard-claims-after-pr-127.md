@@ -48,7 +48,7 @@ Out of scope:
 
 - `README.md` (the "Mid-Session Packages" `shadow-refresh.sh` sentence)
 - `docker/shared/container-agent.md.tmpl` (the `--isolated` paragraph)
-- `docs/entrypoint-and-runtime.md` (the pnpm-wrapper bullet's parenthetical; confirm PR #127's own bullet)
+- `docs/entrypoint-and-runtime.md` (the pnpm-wrapper bullet's parenthetical; confirm the sentence PR #127 appended to the shadow-mounts bullet)
 
 ## Implementation notes
 

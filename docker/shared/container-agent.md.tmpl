@@ -84,7 +84,7 @@ Parallel, worktree-isolated work uses three baked helpers on `PATH`. Skills and 
 | `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-container pnpm store, dir-mounted JS/powbox gate only (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
 | `/home/node/.local/share/containers` | Per-container rootless Podman storage, keyed by agent + project (Claude and Codex get separate stores for the same repo) — images and named volumes persist here (Docker volume) |
 
-Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — running `shadow-refresh.sh` there is a harmless no-op, because the script skips itself under `POWBOX_SELF_HOSTED` and exits 0 without mounting.
+Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — running `shadow-refresh.sh` there is a harmless no-op, because the script skips itself under `POWBOX_SELF_HOSTED=1` and exits 0 without mounting.
 
 ## Network
 

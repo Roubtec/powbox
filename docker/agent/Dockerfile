@@ -59,8 +59,9 @@ ENV DISABLE_AUTOUPDATER=1
 # Intentionally runs the remote install script without pinning a checksum.
 # These images are built locally by each user as a personal harness and the
 # goal is always the latest agent tooling. Pinning a concrete
-# CLAUDE_CODE_VERSION (which agent-update does) is what lets Docker rebuild only
-# this layer when Claude — and only Claude — has a new release. Downloaded to a
+# CLAUDE_CODE_VERSION (which agent-update does) gives this install layer its own
+# cache key: it changes only for a Claude release, though the cheap asset,
+# metadata, and entrypoint layers above it rebuild too. Downloaded to a
 # file first (not `curl | bash`) so a failed download fails the build instead
 # of being masked by the pipeline's exit status. --retry ... --retry-all-errors
 # --http1.1 rides out the same transient HTTP/2 stream resets / CDN blips that

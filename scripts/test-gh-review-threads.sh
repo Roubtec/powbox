@@ -173,9 +173,8 @@ run() {
 
 jqr() { jq -r "$1" <<<"$2"; }
 
-# Bash-3.2-safe log inspection (no mapfile/readarray/arrays). This test runs
-# directly on the host in commands/smoke-test.sh Stage 0b, where macOS ships
-# Bash 3.2, so these must stay portable.
+# Bash-3.2-safe log inspection (no mapfile/readarray/arrays), so direct callers
+# on older Bash installations can still run the suite.
 count_matches() {
 	# count_matches <file> <fixed-string> — number of matching lines (0 if none).
 	# grep -c prints "0" and exits 1 on no match; `|| true` keeps set -e happy.

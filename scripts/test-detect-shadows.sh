@@ -62,10 +62,9 @@ deps_ok() {
 	return 0
 }
 
-# --check-deps: run ONLY the dependency probe and exit 0 (usable) or 1.  The
-# umbrella smoke's host fallback gates on this so an absent OR incompatible host
-# toolchain becomes a recorded skip there — without duplicating the probe —
-# instead of a spurious mid-suite failure here.
+# --check-deps: run ONLY the dependency probe and exit 0 (usable) or 1. This
+# standalone mode lets callers test whether PATH provides the full toolchain
+# needed by the suite without running its fixture assertions.
 if [ "${1:-}" = "--check-deps" ]; then
 	deps_ok || exit 1
 	exit 0

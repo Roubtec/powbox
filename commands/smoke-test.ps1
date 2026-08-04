@@ -42,7 +42,7 @@ if (-not $imagePresent) {
   Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2-5) runs, so you get no partial coverage. Build it (./build.ps1 agent), or pass -RequireImage to fail fast here with a clear message instead of a raw docker error at Stage 1."
 }
 
-# Stage 0 - sensitive-host-path predicate unit test against the BAKED library. Tier 0
+# Stage 0a - sensitive-host-path predicate unit test against the BAKED library. Tier 0
 # runs the /repo source; this runs the same Bash test INSIDE the agent image - which
 # ships bash and the base-image mawk the mountinfo
 # parser is verified against - with the repo mounted read-only. Like the Bash Stage 0a, it
@@ -56,8 +56,8 @@ if (-not $imagePresent) {
 # image is absent; the
 # live end-to-end guard is Stage 5.
 if (-not $imagePresent) {
-  Write-Warning "Skipping sensitive-host-path predicate unit test (Stage 0) - image '$Image' not found (no native bash on Windows to run it hermetically)."
-  $skipped.Add("Stage 0: sensitive-host-path predicate unit test (image absent)")
+  Write-Warning "Skipping sensitive-host-path predicate unit test (Stage 0a) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0a: sensitive-host-path predicate unit test (image absent)")
 }
 else {
   Write-Host "Running sensitive-host-path predicate unit test (in $Image) ..."
@@ -69,7 +69,7 @@ else {
   }
 }
 
-# Stage 0b - gh-review-threads helper unit test. Like Stage 0, the hermetic Bash test
+# Stage 0b - gh-review-threads helper unit test. Like Stage 0a, the hermetic Bash test
 # (it stubs `gh` with a PATH shim serving canned fixtures - no live GitHub) has no host
 # bash on Windows, so run the SAME test INSIDE the agent image (which ships bash, jq, and
 # the baked helper) with the repo mounted read-only; the stub and its fixtures are written
@@ -93,7 +93,7 @@ else {
   }
 }
 
-# Stage 0c - worktree orphan-safety unit test. The hermetic Bash test (a throwaway git
+# Stage 0d - worktree orphan-safety unit test. The hermetic Bash test (a throwaway git
 # repo in a tmpdir; no host bash on Windows) runs INSIDE the agent image with the repo
 # mounted read-only. It points POWBOX_WT_ENTER/POWBOX_WT_REMOVE/POWBOX_WT_COMMON at the
 # BAKED /usr/local/bin copies, so it exercises the installed wt-enter/wt-remove and the
@@ -102,8 +102,8 @@ else {
 # .worktrees/.orphaned/, so the sole copy of dirty work is never deleted when metadata is
 # lost). Self-skips (recorded in $skipped) when the image is absent.
 if (-not $imagePresent) {
-  Write-Warning "Skipping worktree orphan-safety unit test (Stage 0c) - image '$Image' not found (no native bash on Windows to run it hermetically)."
-  $skipped.Add("Stage 0c: worktree orphan-safety unit test (image absent)")
+  Write-Warning "Skipping worktree orphan-safety unit test (Stage 0d) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0d: worktree orphan-safety unit test (image absent)")
 }
 else {
   Write-Host "Running worktree orphan-safety unit test (baked helpers in $Image) ..."
@@ -145,7 +145,7 @@ else {
 # detect-shadows.sh issues jq filters such as `.shadow[]? // empty`, which mikefarah's
 # Go yq rejects), none of which a Windows host has natively, so run it INSIDE the agent
 # image with the repo mounted read-only, pointed at the BAKED /usr/local/bin copies
-# (POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR - the shape Stage 0c uses for the
+# (POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR - the shape Stage 0d uses for the
 # wt-* helpers) so a stale baked detect-shadows.sh is caught by a real suite rather than
 # by Stage 1's presence probe. Self-skips (recorded in $skipped) when the image is absent;
 # Tier 0 CI runs the same suite against the /repo source on every PR except one carrying
@@ -616,7 +616,7 @@ else {
 # bind (via the real shadow-mounts.sh) and leaves a linked worktree DIRTY (tracked
 # mod + untracked file); the second recreates on the same volume and asserts git
 # status still works, the branch/HEAD is intact, both dirty changes survived, and the
-# host checkout's real .git/worktrees gained no registrations. Tier 0 / Stage 0c only
+# host checkout's real .git/worktrees gained no registrations. Tier 0 / Stage 0d only
 # unit-tests the orphan-reaping SAFETY net, not this central bind/survive path, so
 # this stage is what guards it. Needs the image AND a runtime that can grant the
 # container CAP_SYS_ADMIN for the `mount --bind`; it self-skips when the image is

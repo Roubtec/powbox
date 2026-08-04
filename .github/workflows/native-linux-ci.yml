@@ -188,8 +188,8 @@ jobs:
           ln -sf "$RUNNER_TEMP/python-yq/bin/yq" "$RUNNER_TEMP/bin/yq"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
-      # The detect-shadows unit suite: the repo's largest pure-shell suite, and a
-      # real regression net for security properties that only this test covers —
+      # The detect-shadows unit suite: a real regression net for security
+      # properties that only this test covers —
       # the under-workspace-root validation, the symlink skip, the Git-tracked-
       # content veto and its fail-closed paths, the newline rejection, and the
       # workspace-glob containment. It is hermetic (throwaway repos in a tmpdir,

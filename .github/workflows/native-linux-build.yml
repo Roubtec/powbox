@@ -3,17 +3,23 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # Tier 1: the heavy native-Linux check — build the real agent image with real
 # Docker on a hosted ubuntu-latest runner (a native-Linux VM running a
 # first-class Docker daemon, not Docker Desktop on Windows/WSL), then run the
-# full smoke test. This reproduces the build / mount / identity / exec-bit defect
-# class that only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and
-# previously cost a human a VPS stand-up.
+# smoke test. Green here is a PARTIAL smoke, not a full one: the hosted runner
+# exposes no /dev/net/tun, so Stage 3's nested half self-skips (see the smoke
+# step's comment at the bottom of this file, and docs/smoke-tests.md). What it
+# does reproduce is the build / mount / identity / exec-bit defect class that
+# only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost
+# a human a VPS stand-up.
 #
 # Path-gated: across recent history most PRs are skill/docs/launcher edits, so
 # this runs ONLY when an image-affecting file changes. Tier 0
-# (.github/workflows/native-linux-ci.yml) still covers every PR. The
-# scripts/smoke-test* glob below also future-proofs task 005's
-# scripts/smoke-test-dirmount.* — its dir-mount stage will trigger Tier 1 and
-# join the smoke run automatically once it merges (the smoke entrypoint runs
-# whatever stages exist at run time).
+# (.github/workflows/native-linux-ci.yml) covers the rest — every PR EXCEPT one
+# carrying the repo's `non-code` label, whose job `if:` gates the static guards
+# off too (see that file's header). The scripts/smoke-test* glob below matches
+# every per-stage smoke script, so adding one is enough to TRIGGER Tier 1 — but
+# not to join the smoke run: commands/smoke-test.sh (and its PowerShell mirror)
+# invokes each stage script by name, with its own gate and skip wiring, so a new
+# stage runs here only once the umbrella is edited to call it. Task 005's
+# scripts/smoke-test-dirmount.* took both steps before it ran here as Stage 5.
 #
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
@@ -53,8 +59,9 @@ on:
     # to labeled/unlabeled activity types, so including them could let a bare
     # label change start this heavy build+smoke regardless of which files
     # changed — exactly the path-gating this workflow exists to enforce. Tier 0
-    # has no `paths:` filter and runs on every PR, so it DOES keep
-    # labeled/unlabeled — there the label gate must re-run/skip on toggle.
+    # has no `paths:` filter, so every PR triggers it and only its job-level
+    # `non-code` gate decides whether it does any work — which is why it DOES
+    # keep labeled/unlabeled: there the label gate must re-run/skip on toggle.
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
@@ -146,13 +153,17 @@ jobs:
           docker image inspect powbox-agent:latest >/dev/null
 
       # POWBOX_SMOKE_REQUIRE_IMAGE=1 turns a missing image into a hard error and
-      # makes the image-gated stages fail instead of self-skipping into a false
-      # "all green" — so CI never reports a partial smoke pass as success. The
-      # Podman stage's nested-run checks self-skip when /dev/net/tun is absent
-      # (the hosted runner has none); that validates the static engine wiring and
-      # is acceptable, not a failure. The pg-dev-up and self-hosted stages run
-      # in full. Task 005's dir-mount stage, once merged, runs here too.
-      - name: Smoke test (image required, no stage self-skip)
+      # makes the IMAGE-gated stages fail instead of self-skipping into a false
+      # "all green" — so a missing image can never be reported here as a pass. It
+      # does not suppress the self-skips that have other causes: the Podman stage's
+      # nested-run checks still self-skip when /dev/net/tun is absent (the hosted
+      # runner has none), leaving only its static engine wiring validated. That is
+      # acceptable, not a failure — but it does mean a green run here can still be
+      # a PARTIAL smoke, so read the run's skip banner rather than the job status
+      # alone. The pg-dev-up and self-hosted stages run in full; task 005's
+      # dir-mount stage has since merged as Stage 5 and runs here too, subject to
+      # its own host gates.
+      - name: Smoke test (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
         run: ./commands/smoke-test.sh

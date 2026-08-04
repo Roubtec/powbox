@@ -5,9 +5,9 @@
 #
 # Layer order is deliberate. Codex (updated less often, smaller) is installed
 # BELOW Claude (updated most often, larger). Bumping CLAUDE_CODE_VERSION then
-# busts only the Claude layer plus the cheap asset/metadata/entrypoint layers above it,
-# so the common case reuses the Codex and stable shared-linter layers below it
-# while pulling Claude plus the changed cheap upper layers. Bumping CODEX_VERSION
+# busts only the Claude layer plus the cheap asset/metadata/entrypoint layers
+# above it, so the common case reuses the Codex and stable shared-linter layers
+# below it while pulling Claude plus the changed cheap upper layers. Bumping CODEX_VERSION
 # rebuilds the stable shared-linter layers and Claude layer on top as a side
 # effect — an accepted, rarer cost. `agent-update` pins concrete versions per
 # agent binary so Docker rebuilds the minimum set of layers for those updates.
@@ -95,9 +95,9 @@ COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.ag
 # build-commit records the powbox commit that built these top (asset/claude)
 # layers; the .powbox-seeded skill marker copies it so a seeded skill can be
 # traced back to its source. Referencing POWBOX_COMMIT here busts only this
-# metadata layer (and the cheap entrypoint COPY below it) when the commit
-# changes — the expensive Codex/Claude install layers sit ABOVE and are never
-# affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
+# metadata layer (and the cheap entrypoint COPY above it) when the commit
+# changes — the expensive Codex/linter/Claude install layers sit BELOW and are
+# never affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
 # default keeps standalone `docker build` working.
 #
 # /home/node/.powbox/{claude,codex}.commit are the in-container provenance

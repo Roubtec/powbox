@@ -25,6 +25,7 @@ Tier 0 is the primary home for hermetic `/repo` source suites, so Stage 0 no lon
 
 Six entries point the suite at a **baked** artifact under `/usr/local/bin/`, so a stale or behaviorally broken installed copy is caught by a real suite instead of being waved through by Stage 1's `command -v` presence probe.
 Stage 0i is the exception: `test-pnpm-shadow-wrapper.sh` validates the `/repo` source and is explicitly routed out of Tier 0 because it requires the image's writable `/workspace` production root.
+The suite still self-skips when invoked directly on a generic host without that root, but both smoke umbrellas set `POWBOX_TEST_REQUIRE_WORKSPACE=1`, so an image-present Stage 0i fails if the promised production root cannot accept its fixture.
 
 The source-versus-baked detect-shadows split shipped by task 053 is therefore deliberate: Tier 0 validates the checkout immediately, while Stage 0g validates what the image installed.
 The same two-target shape now applies to sensitive-host-path, worktree orphan safety, peer-review-run and shadow-mounts; the source-only Podman Compose invariant suite stays solely in Tier 0, and the build-staged gh-review-threads helper stays solely in Tier 1.

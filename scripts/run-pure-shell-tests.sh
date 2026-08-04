@@ -3,7 +3,7 @@
 # Linux CI host. New suites join this runner automatically; the small routed
 # exception list below is deliberately checked so a rename/removal cannot leave
 # stale classification behind.
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

@@ -187,14 +187,16 @@ else {
 
 # Stage 0i - pnpm shadow-wrapper source unit test. The test shims every mount and
 # sudo interaction, but its production contract requires a writable /workspace
-# fixture. The image guarantees that root; an arbitrary host and Tier 0 do not.
+# fixture. The image guarantees that root; an arbitrary host and Tier 0 do not. The
+# explicit requirement promotes the suite's direct-run self-skip to a failure here,
+# because an image that lost its writable production root is broken.
 if (-not $imagePresent) {
   Write-Warning "Skipping pnpm shadow-wrapper unit test (Stage 0i) - image '$Image' not found (the suite needs the image's writable /workspace production root)."
   $skipped.Add("Stage 0i: pnpm shadow-wrapper unit test (image absent; needs a writable /workspace root)")
 }
 else {
   Write-Host "Running pnpm shadow-wrapper unit test (source in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-pnpm-shadow-wrapper.sh
+  docker run --rm -v "${rootDir}:/repo:ro" -e POWBOX_TEST_REQUIRE_WORKSPACE=1 --entrypoint /bin/bash $Image /repo/scripts/test-pnpm-shadow-wrapper.sh
   if ($LASTEXITCODE -ne 0) {
     throw "pnpm shadow-wrapper unit test failed. See container output above."
   }

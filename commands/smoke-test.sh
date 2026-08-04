@@ -174,11 +174,14 @@ fi
 # while the agent image does, so this is one of the pure-shell runner's explicit
 # Tier 1 routes. It validates the /repo source (the wrapper has no test override for
 # a baked path) and needs no daemon, network, or privileged operation once inside
-# the image. POWBOX_SMOKE_REQUIRE_IMAGE makes an absent image fatal in CI; a local
-# partial smoke records the honest skip.
+# the image. The explicit POWBOX_TEST_REQUIRE_WORKSPACE guard promotes the suite's
+# generic-host self-skip to a failure here: an image that cannot provide its promised
+# writable production root is broken, not partial coverage. POWBOX_SMOKE_REQUIRE_IMAGE
+# separately makes an absent image fatal in CI; a local partial smoke records that skip.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running pnpm shadow-wrapper unit test (source in $IMAGE) ..."
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e POWBOX_TEST_REQUIRE_WORKSPACE=1 \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-pnpm-shadow-wrapper.sh
 else
 	echo "WARNING: skipping pnpm shadow-wrapper unit test (Stage 0i) — image '$IMAGE' absent; the suite needs the image's writable /workspace production root."

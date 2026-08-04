@@ -17,8 +17,10 @@
 # `exec pnpm …` is harmless here (the warning is emitted BEFORE it, so the test
 # does not depend on pnpm being installed). The wrapper hard-requires its effective
 # dir to live under /workspace (its production contract), so the fixture workspace
-# is created there; the stage self-skips when /workspace is not writable (i.e. when
-# not run inside a powbox-style container).
+# is created there; a direct run self-skips when /workspace is not writable (i.e.
+# when not run inside a powbox-style container). The smoke umbrellas set
+# POWBOX_TEST_REQUIRE_WORKSPACE=1 because a built image that loses this production
+# root is a regression, not an optional-host limitation.
 #
 # Usage: scripts/test-pnpm-shadow-wrapper.sh
 set -euo pipefail
@@ -38,6 +40,10 @@ WARN_NEEDLE="root node_modules is NOT an isolated volume"
 # fixture must live there. Self-skip cleanly where that is impossible — a generic
 # dev box or CI runner without /workspace — like the other smoke stages do.
 if ! WS="$(mktemp -d /workspace/powbox-wrapper-smoke-XXXXXX 2>/dev/null)"; then
+	if [ -n "${POWBOX_TEST_REQUIRE_WORKSPACE:-}" ]; then
+		echo "FATAL: cannot create the required pnpm-shadow-wrapper fixture under /workspace." >&2
+		exit 1
+	fi
 	echo "pnpm-shadow-wrapper test skipped: cannot create a fixture under /workspace (run inside a powbox container)."
 	exit 0
 fi

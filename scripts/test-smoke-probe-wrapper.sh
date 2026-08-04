@@ -420,6 +420,15 @@ if [ ! -e "$CAPTURE" ]; then
 else
 	bad "docker ran despite a rejected probe"
 fi
+# The rejection message itself must stay ONE line per probe - the very property
+# it rejects the probe to protect. It echoes the offending probe back, so a raw
+# echo would split the diagnostic across the newline the probe carries; the
+# driver renders the newline as a visible `\n` instead.
+if grep -q 'probe: a\\nb$' "$TMP/g1.out"; then
+	ok "the rejected probe is echoed back with its newline escaped, on one line"
+else
+	bad "newline-bearing probe echoed back unescaped" "$(cat "$TMP/g1.out")"
+fi
 
 rm -f "$CAPTURE"
 SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "true" "   " >"$TMP/g2.out" 2>&1
@@ -438,6 +447,13 @@ if [ "$rc" -ne 0 ] && grep -q "carriage return" "$TMP/g3.out"; then
 else
 	bad "CR-bearing probe not rejected (rc=$rc)" "$(cat "$TMP/g3.out")"
 fi
+# A CR is worse than a newline in a diagnostic: echoed raw it rewinds a terminal
+# over the message that was just printed. It is escaped for the same reason.
+if grep -q 'probe: a\\rb$' "$TMP/g3.out"; then
+	ok "the rejected probe is echoed back with its carriage return escaped"
+else
+	bad "CR-bearing probe echoed back unescaped" "$(cat "$TMP/g3.out")"
+fi
 
 # A trailing ODD backslash run is a line continuation with nothing to continue:
 # `sh -ec` drops it and silently runs the TRUNCATED command, so an author who
@@ -454,6 +470,14 @@ if [ ! -e "$CAPTURE" ]; then
 	ok "docker was never invoked for the line-continuation list"
 else
 	bad "docker ran despite a rejected line-continuation probe"
+fi
+# ...and here the echoed probe must be BYTE-EXACT. This message is about the
+# trailing backslash COUNT, so a renderer that escaped backslashes too would
+# print an even run and contradict the sentence above it.
+if grep -q 'probe: printf x \\$' "$TMP/g4.out"; then
+	ok "the line-continuation probe is echoed back with its backslash run intact"
+else
+	bad "line-continuation probe echoed back with a mangled backslash run" "$(cat "$TMP/g4.out")"
 fi
 # ...and the rejection is not decorative: the probe shell really does swallow it
 # and pass, which is why the driver has to refuse it rather than let it through.

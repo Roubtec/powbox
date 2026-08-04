@@ -160,13 +160,21 @@ for ($i = 0; $i -lt $Commands.Count; $i++) {
   if ([string]::IsNullOrWhiteSpace($probe)) {
     throw "smoke-test-image.ps1: probe $n is empty; every probe must be a runnable command."
   }
+  # Rendering for the rejection messages below, mirroring probe_display() in the
+  # .sh driver. A newline becomes a visible `\n` and a carriage return a visible
+  # `\r`, so a rejection message stays ONE line however broken the probe is - and
+  # a CR cannot rewind the terminal over the diagnostic that was just printed.
+  # Nothing else is escaped, deliberately: the continuation rejection below is
+  # about the probe's exact trailing backslash COUNT, so a renderer that doubled
+  # backslashes would contradict its own message.
+  $display = ($probe -replace "`n", '\n') -replace "`r", '\r'
   if ($probe -match "[`r`n]") {
-    throw "smoke-test-image.ps1: probe $n contains a newline or carriage return; probes must be single-line so the failure manifest stays one line per probe and this driver never hands docker a multi-line argument. Probe: $probe"
+    throw "smoke-test-image.ps1: probe $n contains a newline or carriage return; probes must be single-line so the failure manifest stays one line per probe and this driver never hands docker a multi-line argument. Probe: $display"
   }
   # Trailing run of backslashes; an odd count is a line continuation.
   $trailingBs = [regex]::Match($probe, '\\+$')
   if ($trailingBs.Success -and ($trailingBs.Value.Length % 2 -eq 1)) {
-    throw "smoke-test-image.ps1: probe $n ends in a line continuation (odd trailing backslash) with nothing to continue; the probe shell would silently run the truncated command and pass. Probe: $probe"
+    throw "smoke-test-image.ps1: probe $n ends in a line continuation (odd trailing backslash) with nothing to continue; the probe shell would silently run the truncated command and pass. Probe: $display"
   }
 }
 

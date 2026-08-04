@@ -158,6 +158,17 @@ fi
 # shellcheck disable=SC2016
 RUNNER='i=0; for p in "$@"; do i=$((i + 1)); sh -ec "$p" || { printf "%s\n" "SMOKE PROBE $i FAILED" >&2; exit 1; }; done'
 
+# Render a probe for a rejection message. A newline becomes a visible `\n` and a
+# carriage return a visible `\r`, so the message stays ONE line however broken
+# the probe is - and a CR cannot rewind the terminal over the diagnostic that
+# was just printed. Nothing else is escaped, deliberately: the continuation
+# rejection below is about the probe's exact trailing backslash COUNT, so a
+# renderer that doubled backslashes would contradict its own message.
+probe_display() {
+	local rendered=${1//$'\n'/\\n}
+	printf '%s' "${rendered//$'\r'/\\r}"
+}
+
 NL=$'\n'
 idx=0
 for cmd in "$@"; do
@@ -169,7 +180,7 @@ for cmd in "$@"; do
 	case "$cmd" in
 	*"$NL"* | *$'\r'*)
 		printf 'smoke-test-image.sh: probe %d contains a newline or carriage return; probes must be single-line so the failure manifest stays one line per probe and the .ps1 mirror never hands docker a multi-line argument.\n' "$idx" >&2
-		printf '  probe: %s\n' "$cmd" >&2
+		printf '  probe: %s\n' "$(probe_display "$cmd")" >&2
 		exit 1
 		;;
 	esac
@@ -177,7 +188,7 @@ for cmd in "$@"; do
 	trailing_bs="${cmd##*[!\\]}"
 	if [ $((${#trailing_bs} % 2)) -eq 1 ]; then
 		printf 'smoke-test-image.sh: probe %d ends in a line continuation (odd trailing backslash) with nothing to continue; the probe shell would silently run the truncated command and pass.\n' "$idx" >&2
-		printf '  probe: %s\n' "$cmd" >&2
+		printf '  probe: %s\n' "$(probe_display "$cmd")" >&2
 		exit 1
 	fi
 done

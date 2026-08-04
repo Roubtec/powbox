@@ -76,6 +76,29 @@ return "ok";
 EOF
 run_ok "top-level return passes" "$WORK/top-return.js"
 
+cat >"$WORK/hook-shadowing.js" <<'EOF'
+export const meta = { name: "hook-shadowing", description: "runtime hooks are globals, not wrapper parameters" };
+const agent = 1;
+const parallel = 2;
+const pipeline = 3;
+const log = 4;
+const phase = 5;
+const args = 6;
+const budget = 7;
+const workflow = 8;
+return agent + parallel + pipeline + log + phase + args + budget + workflow;
+EOF
+run_ok "local bindings may shadow runtime hook globals" "$WORK/hook-shadowing.js"
+
+cat >"$WORK/escaped-property-identifiers.js" <<'EOF'
+export const meta = {
+  n\u0061me: "escaped-property-identifiers",
+  descr\u0069ption: "Acorn decodes valid escaped identifier keys",
+};
+return null;
+EOF
+run_ok "valid escaped metadata property identifiers pass" "$WORK/escaped-property-identifiers.js"
+
 cat >"$WORK/runtime-phase-filter.js" <<'EOF'
 export const meta = {
   name: "phase-filter",
@@ -89,14 +112,14 @@ run_ok "optional phases follow the installed runtime's filtering behavior" "$WOR
 cat >"$WORK/missing-meta.js" <<'EOF'
 return "missing";
 EOF
-run_fail "missing meta fails" "$WORK/missing-meta.js" "expected 'export'"
+run_fail "missing meta fails" "$WORK/missing-meta.js" "must be the FIRST statement"
 
 cat >"$WORK/meta-not-first.js" <<'EOF'
 const NAME = "computed";
 export const meta = { name: NAME, description: "not first" };
 return null;
 EOF
-run_fail "meta must be the first statement" "$WORK/meta-not-first.js" "expected 'export'"
+run_fail "meta must be the first statement" "$WORK/meta-not-first.js" "must be the FIRST statement"
 
 cat >"$WORK/computed-value.js" <<'EOF'
 export const meta = { name: NAME_CONST, description: "computed value" };
@@ -109,6 +132,18 @@ export const meta = { ["name"]: "computed-key", description: "computed key" };
 return null;
 EOF
 run_fail "computed meta key fails with the literal rule" "$WORK/computed-key.js" "computed keys not allowed in meta"
+
+cat >"$WORK/meta-binary-expression.js" <<'EOF'
+export const meta = { name: "binary", description: "initializer is not an object" } + 1;
+return null;
+EOF
+run_fail "non-object meta initializer follows the runtime AST check" "$WORK/meta-binary-expression.js" "must be the FIRST statement"
+
+cat >"$WORK/strict-octal-escape.js" <<'EOF'
+export const meta = { name: "octal", description: "\1" };
+return null;
+EOF
+run_fail "module-strict-invalid octal string escapes fail" "$WORK/strict-octal-escape.js" "Octal literal in strict mode"
 
 cat >"$WORK/missing-name.js" <<'EOF'
 export const meta = { description: "missing name" };
@@ -135,7 +170,14 @@ run_fail "body syntax error reports the original source line" "$WORK/body-syntax
 	head -c 524289 /dev/zero | tr '\0' x
 	printf '*/\n'
 } >"$WORK/oversize.js"
-run_fail "runtime source-size limit is enforced" "$WORK/oversize.js" "runtime limit of 524288 characters"
+run_fail "runtime ASCII source-size limit is enforced" "$WORK/oversize.js" "runtime limit of 524288 bytes"
+
+{
+	printf 'export const meta = { name: "oversize-multibyte", description: "byte limit" };\n/*'
+	node -e 'process.stdout.write("é".repeat(262145))'
+	printf '*/\n'
+} >"$WORK/oversize-multibyte.js"
+run_fail "runtime source-size limit counts UTF-8 bytes" "$WORK/oversize-multibyte.js" "runtime limit of 524288 bytes"
 
 if "$HELPER" --help | grep -Fq "Top-level await and return"; then
 	ok "help documents async-wrapper semantics"

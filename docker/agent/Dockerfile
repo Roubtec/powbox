@@ -47,10 +47,13 @@ RUN ACTIONLINT_VERSION=1.7.12 \
 
 # markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
 # default reproducible and omit optional dependencies; repository wrappers and
-# CI pins remain authoritative when they require another version. Bump this
-# literal pin, the tooling-table row, and the exact Bash and PowerShell Stage 1
-# smoke assertions together.
-RUN npm install -g --omit=optional markdownlint-cli2@0.23.2
+# CI pins remain authoritative when they require another version. wf-check uses
+# a private Acorn 8.15.0 install, matching the parser bundled in Claude Code
+# 2.1.221; the native Claude executable does not expose its copy to Node. Bump
+# these literal pins, the tooling-table row, and the exact Bash and PowerShell
+# Stage 1 smoke assertions together.
+RUN npm install -g --omit=optional markdownlint-cli2@0.23.2 \
+    && npm install --prefix /usr/local/lib/wf-check --omit=dev --omit=optional --ignore-scripts acorn@8.15.0
 USER node
 
 # --- Claude (upper layer: updated most often) --------------------------------

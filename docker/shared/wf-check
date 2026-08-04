@@ -6,7 +6,14 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const MAX_SOURCE_LENGTH = 524288;
+const MAX_SOURCE_BYTES = 524288;
+const ACORN_VERSION = "8.15.0";
+const ACORN_PATHS = [
+  process.env.WF_CHECK_ACORN,
+  "/usr/local/lib/wf-check/node_modules/acorn",
+  "/usr/local/lib/node_modules/acorn",
+  "acorn",
+].filter(Boolean);
 const USAGE = `Usage: wf-check <script.js>
 
 Validate a Claude Workflow script without running it.
@@ -20,296 +27,89 @@ workflow hooks. Top-level await and return are therefore valid.
 
 const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-class MetaSyntaxError extends Error {
-  constructor(message, source, offset) {
-    super(message);
-    this.name = "MetaSyntaxError";
-    this.offset = offset;
-    const before = source.slice(0, offset);
-    this.line = before.split("\n").length;
-    const lastNewline = before.lastIndexOf("\n");
-    this.column = offset - lastNewline;
+function loadAcorn() {
+  const failures = [];
+  for (const candidate of ACORN_PATHS) {
+    try {
+      const acorn = require(candidate);
+      if (typeof acorn.parse !== "function") failures.push(`${candidate}: module has no parse function`);
+      else if (acorn.version !== ACORN_VERSION) failures.push(`${candidate}: expected ${ACORN_VERSION}, found ${acorn.version || "unknown"}`);
+      else return acorn;
+    } catch (error) {
+      failures.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`Acorn is unavailable; rebuild the agent image (${failures.join("; ")})`);
+}
+
+function parsePureValue(node) {
+  switch (node.type) {
+    case "Literal":
+      return node.value;
+    case "ArrayExpression":
+      return node.elements.map((element) => {
+        if (element === null) throw new Error("sparse arrays not allowed");
+        if (element.type === "SpreadElement") throw new Error("spread not allowed in meta");
+        return parsePureValue(element);
+      });
+    case "ObjectExpression":
+      return parseObject(node);
+    case "TemplateLiteral":
+      if (node.expressions.length > 0) throw new Error("template interpolation not allowed in meta");
+      return node.quasis.map((quasi) => quasi.value.cooked ?? "").join("");
+    case "UnaryExpression":
+      if (node.operator === "-" && node.argument.type === "Literal" && typeof node.argument.value === "number") {
+        return -node.argument.value;
+      }
+      throw new Error("only negative-number unary allowed in meta");
+    default:
+      throw new Error(`non-literal node type in meta: ${node.type}`);
   }
 }
 
-class Scanner {
-  constructor(source) {
-    this.source = source;
-    this.index = 0;
-  }
-
-  fail(message, offset = this.index) {
-    throw new MetaSyntaxError(message, this.source, offset);
-  }
-
-  skipTrivia() {
-    if (this.index === 0 && this.source.startsWith("#!")) {
-      const newline = this.source.indexOf("\n", this.index);
-      this.index = newline === -1 ? this.source.length : newline;
-    }
-    while (this.index < this.source.length) {
-      const rest = this.source.slice(this.index);
-      const whitespace = rest.match(/^\s+/u);
-      if (whitespace) {
-        this.index += whitespace[0].length;
-        continue;
-      }
-      if (rest.startsWith("//")) {
-        const newline = this.source.indexOf("\n", this.index + 2);
-        this.index = newline === -1 ? this.source.length : newline;
-        continue;
-      }
-      if (rest.startsWith("/*")) {
-        const end = this.source.indexOf("*/", this.index + 2);
-        if (end === -1) this.fail("unterminated block comment");
-        this.index = end + 2;
-        continue;
-      }
-      break;
-    }
-  }
-
-  punctuation(value) {
-    this.skipTrivia();
-    if (!this.source.startsWith(value, this.index)) return false;
-    this.index += value.length;
-    return true;
-  }
-
-  expectPunctuation(value, message = `expected '${value}'`) {
-    if (!this.punctuation(value)) this.fail(message);
-  }
-
-  identifier() {
-    this.skipTrivia();
-    const rest = this.source.slice(this.index);
-    const match = rest.match(/^[$_\p{ID_Start}][$_\u200c\u200d\p{ID_Continue}]*/u);
-    if (!match) return null;
-    const token = { raw: match[0], value: match[0], start: this.index };
-    this.index += match[0].length;
-    return token;
-  }
-
-  expectIdentifier(value) {
-    const token = this.identifier();
-    if (!token || token.value !== value) this.fail(`expected '${value}'`);
-    return token;
-  }
-
-  stringLiteral() {
-    this.skipTrivia();
-    const quote = this.source[this.index];
-    if (quote !== "'" && quote !== '"') return null;
-    const start = this.index++;
-    let closed = false;
-    while (this.index < this.source.length) {
-      const char = this.source[this.index++];
-      if (char === quote) {
-        closed = true;
-        break;
-      }
-      if (char === "\\") {
-        if (this.index >= this.source.length) break;
-        if (this.source[this.index] === "\r" && this.source[this.index + 1] === "\n") this.index += 2;
-        else this.index += 1;
-        continue;
-      }
-      if (char === "\n" || char === "\r") this.fail("unterminated string literal", start);
-    }
-    if (!closed) this.fail("unterminated string literal", start);
-    const raw = this.source.slice(start, this.index);
-    let value;
-    try {
-      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
-    } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error), start);
-    }
-    return { raw, value, start };
-  }
-
-  templateLiteral() {
-    this.skipTrivia();
-    if (this.source[this.index] !== "`") return null;
-    const start = this.index++;
-    let closed = false;
-    while (this.index < this.source.length) {
-      const char = this.source[this.index++];
-      if (char === "`") {
-        closed = true;
-        break;
-      }
-      if (char === "\\") {
-        if (this.index < this.source.length) this.index += 1;
-        continue;
-      }
-      if (char === "$" && this.source[this.index] === "{") {
-        this.fail("template interpolation not allowed in meta", this.index - 1);
-      }
-    }
-    if (!closed) this.fail("unterminated template literal", start);
-    const raw = this.source.slice(start, this.index);
-    let value;
-    try {
-      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
-    } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error), start);
-    }
-    return { raw, value, start };
-  }
-
-  numberLiteral() {
-    this.skipTrivia();
-    const rest = this.source.slice(this.index);
-    const patterns = [
-      /^0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*n?/,
-      /^0[bB][01](?:_?[01])*n?/,
-      /^0[oO][0-7](?:_?[0-7])*n?/,
-      /^(?:\d(?:_?\d)*)n/,
-      /^(?:(?:\d(?:_?\d)*)?\.(?:\d(?:_?\d)*)|\d(?:_?\d)*\.)(?:[eE][+-]?\d(?:_?\d)*)?/,
-      /^\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?/,
-    ];
-    let raw = null;
-    for (const pattern of patterns) {
-      const match = rest.match(pattern);
-      if (match && (raw === null || match[0].length > raw.length)) raw = match[0];
-    }
-    if (raw === null) return null;
-    const next = rest[raw.length];
-    if (next && /[$_\p{ID_Continue}.]/u.test(next)) this.fail("invalid numeric literal");
-    const start = this.index;
-    this.index += raw.length;
-    let value;
-    try {
-      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
-    } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error), start);
-    }
-    return { raw, value, start };
-  }
-
-  regexpLiteral() {
-    this.skipTrivia();
-    if (this.source[this.index] !== "/" || this.source.startsWith("//", this.index) || this.source.startsWith("/*", this.index)) return null;
-    const start = this.index++;
-    let inClass = false;
-    let closed = false;
-    while (this.index < this.source.length) {
-      const char = this.source[this.index++];
-      if (char === "\\") {
-        if (this.index < this.source.length) this.index += 1;
-        continue;
-      }
-      if (char === "\n" || char === "\r") this.fail("unterminated regular expression literal", start);
-      if (char === "[") inClass = true;
-      else if (char === "]") inClass = false;
-      else if (char === "/" && !inClass) {
-        closed = true;
-        break;
-      }
-    }
-    if (!closed) this.fail("unterminated regular expression literal", start);
-    while (/[$_\u200c\u200d\p{ID_Continue}]/u.test(this.source[this.index] || "")) this.index += 1;
-    const raw = this.source.slice(start, this.index);
-    try {
-      vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
-    } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error), start);
-    }
-    return { raw, value: { regexpLiteral: true }, start };
-  }
-}
-
-function parsePureValue(scanner) {
-  scanner.skipTrivia();
-  const start = scanner.index;
-  if (scanner.punctuation("{")) return parseObject(scanner, start);
-  if (scanner.punctuation("[")) {
-    const values = [];
-    scanner.skipTrivia();
-    if (scanner.punctuation("]")) return values;
-    while (true) {
-      scanner.skipTrivia();
-      if (scanner.source.startsWith("...", scanner.index)) scanner.fail("spread not allowed in meta");
-      if (scanner.source[scanner.index] === ",") scanner.fail("sparse arrays not allowed");
-      values.push(parsePureValue(scanner));
-      scanner.skipTrivia();
-      if (scanner.punctuation("]")) return values;
-      scanner.expectPunctuation(",", "expected ',' or ']' in meta array");
-      scanner.skipTrivia();
-      if (scanner.punctuation("]")) return values;
-    }
-  }
-  if (scanner.punctuation("-")) {
-    const number = scanner.numberLiteral();
-    if (!number || typeof number.value !== "number") scanner.fail("only negative-number unary allowed in meta", start);
-    return -number.value;
-  }
-  const string = scanner.stringLiteral();
-  if (string) return string.value;
-  const template = scanner.templateLiteral();
-  if (template) return template.value;
-  const number = scanner.numberLiteral();
-  if (number) return number.value;
-  const regexp = scanner.regexpLiteral();
-  if (regexp) return regexp.value;
-  const identifier = scanner.identifier();
-  if (identifier) {
-    if (identifier.value === "true") return true;
-    if (identifier.value === "false") return false;
-    if (identifier.value === "null") return null;
-    scanner.fail(`non-literal node type in meta: Identifier (${identifier.value})`, identifier.start);
-  }
-  scanner.fail("expected a literal value in meta");
-}
-
-function parsePropertyKey(scanner) {
-  scanner.skipTrivia();
-  if (scanner.source[scanner.index] === "[") scanner.fail("computed keys not allowed in meta");
-  const string = scanner.stringLiteral();
-  let token = string;
-  if (!token) token = scanner.numberLiteral();
-  if (!token) token = scanner.identifier();
-  if (!token) scanner.fail("unsupported key type in meta");
-  const key = String(token.value);
-  if (RESERVED_KEYS.has(key)) scanner.fail(`reserved key name not allowed in meta: ${key}`, token.start);
+function propertyKey(property) {
+  let key;
+  if (property.key.type === "Identifier") key = property.key.name;
+  else if (property.key.type === "Literal") key = String(property.key.value);
+  else throw new Error(`unsupported key type in meta: ${property.key.type}`);
+  if (RESERVED_KEYS.has(key)) throw new Error(`reserved key name not allowed in meta: ${key}`);
   return key;
 }
 
-function parseObject(scanner, start) {
+function parseObject(node) {
   const value = Object.create(null);
-  scanner.skipTrivia();
-  if (scanner.punctuation("}")) return value;
-  while (true) {
-    scanner.skipTrivia();
-    if (scanner.source.startsWith("...", scanner.index)) scanner.fail("only plain properties allowed in meta");
-    const key = parsePropertyKey(scanner);
-    scanner.skipTrivia();
-    if (!scanner.punctuation(":")) scanner.fail("methods/accessors and shorthand properties not allowed in meta");
-    value[key] = parsePureValue(scanner);
-    scanner.skipTrivia();
-    if (scanner.punctuation("}")) return value;
-    scanner.expectPunctuation(",", "expected ',' or '}' in meta object");
-    scanner.skipTrivia();
-    if (scanner.punctuation("}")) return value;
-    if (scanner.index <= start) scanner.fail("internal parser error");
+  for (const property of node.properties) {
+    if (property.type !== "Property") throw new Error("only plain properties allowed in meta");
+    if (property.computed) throw new Error("computed keys not allowed in meta");
+    if (property.method || property.kind !== "init") throw new Error("methods/accessors not allowed in meta");
+    value[propertyKey(property)] = parsePureValue(property.value);
   }
+  return value;
 }
 
 function parseMeta(source) {
-  const scanner = new Scanner(source);
-  scanner.skipTrivia();
-  const statementStart = scanner.index;
-  scanner.expectIdentifier("export");
-  scanner.expectIdentifier("const");
-  scanner.expectIdentifier("meta");
-  scanner.expectPunctuation("=", "expected '=' after 'export const meta'");
-  scanner.skipTrivia();
-  if (!scanner.punctuation("{")) scanner.fail("meta must be an object literal");
-  const meta = parseObject(scanner, scanner.index - 1);
-  const objectEnd = scanner.index;
-  scanner.skipTrivia();
-  if (scanner.source[scanner.index] === ";") scanner.index += 1;
-  return { meta, statementStart, statementEnd: scanner.index, objectEnd };
+  const { parse } = loadAcorn();
+  const program = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+    allowAwaitOutsideFunction: true,
+    allowReturnOutsideFunction: true,
+  });
+  const statement = program.body[0];
+  const declaration = statement?.declaration;
+  const declarator = declaration?.declarations?.[0];
+  if (
+    statement?.type !== "ExportNamedDeclaration" ||
+    declaration?.type !== "VariableDeclaration" ||
+    declaration.kind !== "const" ||
+    declaration.declarations.length !== 1 ||
+    declarator?.id?.type !== "Identifier" ||
+    declarator.id.name !== "meta" ||
+    declarator.init?.type !== "ObjectExpression"
+  ) {
+    throw new Error("`export const meta = { name, description, phases }` must be the FIRST statement in the script");
+  }
+  return { meta: parseObject(declarator.init), statementEnd: statement.end };
 }
 
 function normalizeMeta(meta) {
@@ -334,8 +134,7 @@ function blankPrefix(source, end) {
 }
 
 function compileBody(source, metaEnd, filename) {
-  const hooks = "agent, parallel, pipeline, log, phase, args, budget, workflow";
-  const transformed = `async function __body(${hooks}) {'use strict';${blankPrefix(source, metaEnd)}\n}`;
+  const transformed = `async function __body() {'use strict';${blankPrefix(source, metaEnd)}\n}`;
   return new vm.Script(transformed, { filename, displayErrors: true });
 }
 
@@ -357,8 +156,8 @@ function main(argv) {
     process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
-  if (source.length > MAX_SOURCE_LENGTH) {
-    process.stderr.write(`wf-check: ${filename}: script exceeds the Workflow runtime limit of ${MAX_SOURCE_LENGTH} characters\n`);
+  if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_BYTES) {
+    process.stderr.write(`wf-check: ${filename}: script exceeds the Workflow runtime limit of ${MAX_SOURCE_BYTES} bytes\n`);
     return 1;
   }
 
@@ -366,11 +165,9 @@ function main(argv) {
   try {
     parsed = parseMeta(source);
   } catch (error) {
-    if (error instanceof MetaSyntaxError) {
-      process.stderr.write(`wf-check: ${filename}:${error.line}:${error.column}: ${error.message}\n`);
-    } else {
-      process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
-    }
+    const location = error && typeof error === "object" && "loc" in error ? error.loc : undefined;
+    const suffix = location ? `:${location.line}:${location.column + 1}` : "";
+    process.stderr.write(`wf-check: ${filename}${suffix}: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
 

@@ -1561,6 +1561,77 @@ case "$RF5" in
 *) no "precondition: the control-byte repo path should carry an ESC byte" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Integration: the inspection commands wt-remove offers must be PASTEABLE, the
+# same property wt-enter's spaced-path case pins for its own advice further down.
+# The two helpers share one message shape — `look at it yourself: '<command>'`,
+# with the command DELIMITED by single quotes in the prose and the path inside it
+# rendered by `shq` — so a reader lifts what is between the delimiters and the
+# quoting inside it is what survives a path containing spaces or a quote of its
+# own. That split is the whole contract: the outer quotes mark where the command
+# ends in a sentence that keeps going (`(and '…'), or coordinate with …`), and
+# `shq` makes the command reach the intended worktree and nothing else.
+#
+# It is worth pinning HERE, on the refusal side, rather than leaning on the
+# wt-enter case: wt-remove is the helper that emits TWO commands on one line (the
+# bisect refusals carry the extra `bisect log` hint), which is exactly where a
+# missing delimiter would leave the boundary between them unreadable. Both are
+# extracted from between their delimiters and RUN, as `rev-parse` rather than
+# `status`/`log` so the answer is comparable, and both must land on the bisecting
+# worktree — under a path carrying a space AND a single quote, the two characters
+# that break an unquoted paste and an unescaped one respectively.
+# ---------------------------------------------------------------------------
+RQ="$(make_repo "rq s'p")"
+WBQ="$RQ/.worktrees/$CONTAINER_NAME"
+EQ="$WORK_ROOT/rq.err"
+git_quiet -C "$RQ" branch bq-b
+git_quiet -C "$RQ" worktree add -q "$WBQ/task-q" bq-b >/dev/null 2>&1
+git_quiet -C "$WBQ/task-q" bisect start >/dev/null 2>&1 || true
+if [ ! -e "$RQ/.git/worktrees/task-q/BISECT_START" ]; then
+	no "precondition: bisect did not start in the spaced-path worktree of $RQ"
+elif (cd "$RQ" && bash "$WT_REMOVE" task-q 2>"$EQ"); then
+	no "wt-remove must refuse a bisecting worktree under a spaced path"
+else
+	miss=""
+	# The quoted spelling is what is offered; the raw one — which would paste as
+	# `git -C <first-word>` and hand the rest of the path to git as arguments —
+	# must not appear anywhere on stderr.
+	printf -v want_status 'git -C %q status' "$WBQ/task-q"
+	printf -v want_bisect 'git -C %q bisect log' "$WBQ/task-q"
+	grep -qF "$want_status" "$EQ" || miss="$miss no-quoted-status-hint"
+	grep -qF "$want_bisect" "$EQ" || miss="$miss no-quoted-bisect-hint"
+	! grep -qF "git -C $WBQ/task-q status" "$EQ" || miss="$miss unquoted-path"
+	# End-to-end, per command: lift it from between its delimiters and run it.
+	q_status="$(LC_ALL=C sed -n "s/^wt-remove: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$EQ" | head -1)"
+	q_bisect="$(LC_ALL=C sed -n "s/.*(and '\(git -C .* bisect log\)').*/\1/p" "$EQ" | head -1)"
+	for hint in "$q_status" "$q_bisect"; do
+		if [ -z "$hint" ]; then
+			miss="$miss no-inspection-command"
+			continue
+		fi
+		# Strip the trailing subcommand (`status`, or `bisect log`) and ask the
+		# `git -C <path>` prefix that remains which tree it actually reaches. The
+		# path token is left exactly as printed — it is the thing under test, and
+		# it carries the escapes that must survive the shell.
+		case "$hint" in
+		*" status") prefix="${hint% status}" ;;
+		*" bisect log") prefix="${hint% bisect log}" ;;
+		*)
+			miss="$miss unrecognized-hint-shape"
+			continue
+			;;
+		esac
+		got="$(eval "$prefix rev-parse --show-toplevel" 2>/dev/null || true)"
+		[ "$got" = "$WBQ/task-q" ] || miss="$miss inspection-command-not-pasteable"
+	done
+	miss="$miss$(destructive_advice "$EQ" "$WBQ/task-q" "$RQ" task-q)"
+	if [ -z "$miss" ]; then
+		ok "wt-remove's inspection hints paste verbatim from between their delimiters"
+	else
+		no "wt-remove spaced-path refusal advice inadequate:$miss"
+	fi
+fi
+
 # --- and NO false refusals: a clean worktree is still removed with no friction
 # wt-remove is called by the batch skills after every PR is opened, so a guard
 # that refused a clean tree would be its own kind of breakage.

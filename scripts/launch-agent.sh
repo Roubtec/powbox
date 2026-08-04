@@ -976,6 +976,7 @@ MOUNT_WORKSPACE_VOLUMES=false
 # use for an isolated node_modules mount, which would only litter the host.
 MOUNT_WORKTREES_VOLUME=false
 WORKTREES_ONLY_REPO_DESCRIPTION="worktrees-only repo"
+WORKTREES_ONLY_CACHE_DESCRIPTION="language caches"
 REPO_SPEC=""
 
 if [ "$ISOLATED" = true ]; then
@@ -1163,9 +1164,11 @@ else
 	elif [ -f "$PROJECT_PATH/go.mod" ]; then
 		MOUNT_WORKTREES_VOLUME=true
 		WORKTREES_ONLY_REPO_DESCRIPTION="go.mod-only repo"
+		WORKTREES_ONLY_CACHE_DESCRIPTION="Go caches"
 	elif dotnet_repo_present "$PROJECT_PATH"; then
 		MOUNT_WORKTREES_VOLUME=true
 		WORKTREES_ONLY_REPO_DESCRIPTION=".NET-only repo"
+		WORKTREES_ONLY_CACHE_DESCRIPTION="NuGet packages"
 	fi
 fi
 
@@ -1349,6 +1352,9 @@ if [ "$RESUME" = true ]; then
 	fi
 	if [ -n "$CLONE_REF" ]; then
 		echo "Note: --ref is ignored on resume; the existing checkout is left untouched." >&2
+	fi
+	if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
+		echo "Note: --resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES wiring, are skipped. Omit --resume to apply them." >&2
 	fi
 	# A running container (e.g. launched --detach, or its terminal was lost)
 	# can't be `docker start`ed — that errors — so reattach instead. Mirrors the
@@ -1534,9 +1540,9 @@ if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" =
 			fi
 		elif [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 			if [ "$CONTAINER_RUNNING" = true ]; then
-				echo "Note: container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts (only .worktrees = agent-wt-${CONTAINER_NAME}, no node_modules volume); Go/NuGet caches and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use --volatile) to fix the mounts." >&2
+				echo "Note: container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts (only .worktrees = agent-wt-${CONTAINER_NAME}, no node_modules volume); ${WORKTREES_ONLY_CACHE_DESCRIPTION} and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use --volatile) to fix the mounts." >&2
 			else
-				echo "Container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-${CONTAINER_NAME} — persistent Go/NuGet caches + worktrees) and no node_modules mount."
+				echo "Container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-${CONTAINER_NAME} — persistent ${WORKTREES_ONLY_CACHE_DESCRIPTION} + worktrees) and no node_modules mount."
 				RECREATE_STALE_MOUNTS=1
 			fi
 		else
@@ -1571,16 +1577,24 @@ if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 	[ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CONTAINER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	EXISTING_NUGET_PACKAGES=""
+	EXISTING_NUGET_PACKAGES_SET=false
 	while IFS= read -r env_entry; do
 		case "$env_entry" in
 		NUGET_PACKAGES=*)
 			EXISTING_NUGET_PACKAGES="${env_entry#NUGET_PACKAGES=}"
+			EXISTING_NUGET_PACKAGES_SET=true
 			break
 			;;
 		esac
 	done <<<"$EXISTING_CONTAINER_ENV"
 	if [ "$EXISTING_NUGET_PACKAGES" != "$WT_NUGET_PACKAGES_DIR" ]; then
-		EXISTING_NUGET_DISPLAY="${EXISTING_NUGET_PACKAGES:-<unset>}"
+		if [ "$EXISTING_NUGET_PACKAGES_SET" != true ]; then
+			EXISTING_NUGET_DISPLAY="<unset>"
+		elif [ -z "$EXISTING_NUGET_PACKAGES" ]; then
+			EXISTING_NUGET_DISPLAY="<empty>"
+		else
+			EXISTING_NUGET_DISPLAY="$EXISTING_NUGET_PACKAGES"
+		fi
 		if [ "$CONTAINER_RUNNING" = true ]; then
 			echo "Note: container ${CONTAINER_NAME} was created with NUGET_PACKAGES='${EXISTING_NUGET_DISPLAY}', but this launch expects '${WT_NUGET_PACKAGES_DIR}'. Container environment is fixed at creation; stop it and relaunch (or use --volatile) to enable persistent NuGet packages." >&2
 		else
@@ -1594,7 +1608,7 @@ if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 			CONTAINER_EXISTS=false
 		fi
 	fi
-	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_DISPLAY env_entry
+	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_PACKAGES_SET EXISTING_NUGET_DISPLAY env_entry
 fi
 
 # Detect whether the existing container predates the per-container Podman storage

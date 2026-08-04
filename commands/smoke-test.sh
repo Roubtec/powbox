@@ -302,8 +302,7 @@ fi
 # .worktrees/.golangci-cache/<container>/<slug>, the main checkout scopes to
 # .root only in self-hosted mode when .worktrees is not a mountpoint (no host
 # litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
-# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports;
-# the NUGET_PACKAGES probe does the same offline through `dotnet nuget locals`.
+# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
 # The ccache probes prove the binary is baked, that it honors a CCACHE_DIR env
 # (so the launcher's .worktrees/.ccache wiring lands) and — the functional check —
 # that two identical `ccache gcc` compiles into a fresh cache produce a hit —
@@ -380,8 +379,10 @@ fi
 # producer emits and so could flip a probe green→141 with no code change.
 # scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
-# The dotnet probes pin the two pieces of the SDK layer that can regress
-# silently.
+# The dotnet probes pin the SDK layer pieces that can regress silently, including
+# an offline `dotnet nuget locals` check that the NUGET_PACKAGES override resolves
+# to the exact requested path after tolerating the command's label and trailing
+# separator formatting.
 # The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up
 # RUN does and asserts both marker files exist under $HOME/.dotnet, are owned by
 # the runtime user, and that $HOME/.dotnet is writable by it — which pins that
@@ -458,7 +459,6 @@ fi
 	"[ -x /usr/local/libexec/golangci-lint ]" \
 	'GOMODCACHE=/tmp/powbox-gomod-probe go env GOMODCACHE | grep -qx /tmp/powbox-gomod-probe' \
 	'GOCACHE=/tmp/powbox-gocache-probe go env GOCACHE | grep -qx /tmp/powbox-gocache-probe' \
-	'NUGET_PACKAGES=/tmp/powbox-nuget-packages-probe dotnet nuget locals global-packages --list | grep -Fqx "global-packages: /tmp/powbox-nuget-packages-probe"' \
 	'GOLANGCI_LINT_CACHE=/tmp/powbox-golangci-custom golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-custom"' \
 	'mkdir -p /tmp/powbox-golangci-probe/repo && cd /tmp/powbox-golangci-probe/repo && git init -q && git -c user.email=smoke@powbox.local -c user.name=smoke commit -q --allow-empty -m init && git worktree add -q .worktrees/probe-cont/task-a -b probe-a' \
 	'cd /tmp/powbox-golangci-probe/repo/.worktrees/probe-cont/task-a && golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/probe-cont/task-a"' \
@@ -468,6 +468,7 @@ fi
 	"opa version >/dev/null" \
 	'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"' \
 	"dotnet --version >/dev/null" \
+	'NUGET_PACKAGES=/tmp/powbox-nuget-packages-probe dotnet nuget locals global-packages --list | sed "s/^[^:]*:[[:space:]]*//; s:/*$::" | grep -Fqx /tmp/powbox-nuget-packages-probe' \
 	'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ]' \
 	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]' \
 	"file --version >/dev/null" \

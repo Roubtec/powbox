@@ -104,7 +104,7 @@ Ok "dir-mounted hash matches SHA256(path)[:12], has nm/wt and no ws volume"
 # must not opt a non-dev folder into project volumes.
 $matrixRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-gate-$PID"
 $inaccessibleFixture = Join-Path $matrixRoot "dotnet-inaccessible/blocked"
-$inaccessibleExpected = "true"
+$inaccessibleExpected = $null
 $linkedDirectoryCreated = $false
 $linkedFileCreated = $false
 try {
@@ -118,6 +118,7 @@ try {
     New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot $marker[0]) $marker[1]) | Out-Null
   }
   if ([System.IO.Path]::DirectorySeparatorChar -eq '/') {
+    $inaccessibleExpected = "true"
     & chmod 000 $inaccessibleFixture
     if ($LASTEXITCODE -ne 0) { Fail "could not make the inaccessible .NET detector fixture unreadable" }
     try { [System.IO.Directory]::GetFiles($inaccessibleFixture) | Out-Null }
@@ -147,7 +148,6 @@ try {
       @("dotnet-shallow-sln", "false", "true"),
       @("dotnet-root-case", "false", "true"),
       @("dotnet-hidden", "false", "true"),
-      @("dotnet-inaccessible", "false", $inaccessibleExpected),
       @("dotnet-deep", "false", "false"),
       @("both", "true", "true"),
       @("powbox-yml", "true", "true"),
@@ -155,6 +155,7 @@ try {
       @("local-shadow-empty", "true", "true"),
       @("local-ctx-only", "false", "false"),
       @("neither", "false", "false"))
+  if ($null -ne $inaccessibleExpected) { $gateCases += ,@("dotnet-inaccessible", "false", $inaccessibleExpected) }
   if ($linkedDirectoryCreated) { $gateCases += ,@("dotnet-linked-dir", "false", "false") }
   if ($linkedFileCreated) { $gateCases += ,@("dotnet-linked-file", "false", "false") }
   foreach ($case in $gateCases) {
@@ -166,7 +167,7 @@ try {
     $wantNuget = if ($case[2] -eq "true") { "$($gid["WORKSPACE_MOUNT"])/.worktrees/.nuget" } else { "" }
     if ($gid["NUGET_PACKAGES"] -ne $wantNuget) { Fail "gate matrix $($case[0]): NUGET_PACKAGES is '$($gid["NUGET_PACKAGES"])', want '$wantNuget'" }
   }
-  if ($inaccessibleExpected -eq "true") {
+  if ($null -ne $inaccessibleExpected -and $inaccessibleExpected -eq "true") {
     Write-Host "  note: permissions are not enforced for this user; inaccessible-child skip case could not be exercised"
   }
 }
@@ -201,7 +202,10 @@ if ($dockerArgs[0] -eq "container" -and $dockerArgs[1] -eq "inspect") {
 if ($dockerArgs[0] -eq "inspect" -and $dockerArgs.Count -gt 2 -and $dockerArgs[1] -eq "--format") {
   $format = $dockerArgs[2]
   if ($format.Contains("powbox.continue")) { Write-Output "false" }
-  elseif ($format.Contains("Config.Env")) { Write-Output "PATH=/usr/local/bin:/usr/bin" }
+  elseif ($format.Contains("Config.Env")) {
+    Write-Output "PATH=/usr/local/bin:/usr/bin"
+    if ($env:POWBOX_FAKE_NUGET_SET -eq "true") { Write-Output "NUGET_PACKAGES=$env:POWBOX_FAKE_NUGET" }
+  }
   elseif ($format.Contains("/node_modules")) { Write-Output $env:POWBOX_FAKE_NM }
   elseif ($format.Contains("/.worktrees")) { Write-Output $env:POWBOX_FAKE_WT }
   elseif ($format.Contains("/home/node/.local/share/containers")) { Write-Output "yes" }
@@ -222,6 +226,7 @@ try {
   $env:POWBOX_FAKE_DOCKER_LOG = Join-Path $migrationRoot "docker.log"
   $env:POWBOX_FAKE_NM = $migrationId["NM_VOLUME"]
   $env:POWBOX_FAKE_WT = $migrationId["WT_VOLUME"]
+  $env:POWBOX_FAKE_NUGET_SET = "false"
   $env:GIT_CONFIG_PATH = Join-Path $migrationRoot "missing-gitconfig"
 
   Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
@@ -236,10 +241,21 @@ try {
     Fail "stopped stale-NuGet migration did not explain the expected path"
   }
 
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_NUGET_SET = "true"
+  $env:POWBOX_FAKE_NUGET = $migrationNuget -replace '^/workspace/', '/Workspace/'
+  $migrationMixedCaseOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationMixedCaseExit = $LASTEXITCODE
+  if ($migrationMixedCaseExit -ne 0) { Fail "mixed-case stale-NuGet migration fixture failed: $($migrationMixedCaseOutput -join ' ')" }
+  if (-not ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer")) {
+    Fail "stopped container with a case-only NUGET_PACKAGES mismatch was not recreated"
+  }
+
   $migrationIsolatedId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "nuget-migration")
   $migrationIsolatedContainer = $migrationIsolatedId["CONTAINER_NAME"]
   Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
   $env:POWBOX_FAKE_RUNNING = "false"
+  $env:POWBOX_FAKE_NUGET_SET = "false"
   $migrationIsolatedOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo owner/app -Name nuget-migration -Detach 2>&1)
   $migrationIsolatedExit = $LASTEXITCODE
   if ($migrationIsolatedExit -ne 0) { Fail "self-hosted stale-NuGet migration fixture failed: $($migrationIsolatedOutput -join ' ')" }
@@ -258,17 +274,26 @@ try {
   if (($migrationRunningOutput -join "`n") -notlike "*stop it and relaunch*") {
     Fail "running stale-NuGet migration did not emit the lifecycle warning"
   }
+
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_RUNNING = "false"
+  $migrationResumeOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Resume -Detach 2>&1)
+  $migrationResumeExit = $LASTEXITCODE
+  if ($migrationResumeExit -ne 0) { Fail "resume frozen-environment warning fixture failed: $($migrationResumeOutput -join ' ')" }
+  if (($migrationResumeOutput -join "`n") -notlike "*persistent NUGET_PACKAGES wiring, are skipped*") {
+    Fail "resume did not explain that frozen NUGET_PACKAGES migration is skipped"
+  }
 }
 finally {
   $env:PATH = $oldPath
-  foreach ($name in @("POWBOX_FAKE_DOCKER_LOG", "POWBOX_FAKE_RUNNING", "POWBOX_FAKE_NM", "POWBOX_FAKE_WT")) {
+  foreach ($name in @("POWBOX_FAKE_DOCKER_LOG", "POWBOX_FAKE_RUNNING", "POWBOX_FAKE_NM", "POWBOX_FAKE_WT", "POWBOX_FAKE_NUGET_SET", "POWBOX_FAKE_NUGET")) {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
   }
   if ($null -eq $oldGitConfigPath) { Remove-Item Env:GIT_CONFIG_PATH -ErrorAction SilentlyContinue }
   else { $env:GIT_CONFIG_PATH = $oldGitConfigPath }
   Remove-Item -Recurse -Force $migrationRoot -ErrorAction SilentlyContinue
 }
-Ok "frozen NuGet env migration: stopped dir-mounted/self-hosted containers recreate; running ones warn"
+Ok "frozen NuGet env migration: missing/mixed-case paths recreate; running ones warn; resume explains its skip"
 
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")

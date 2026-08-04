@@ -456,7 +456,7 @@ Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) i
 Omitting `--ctx` and having no effective `ctx:` key is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
 To explicitly clear a previously mounted context on a stopped container, use `ctx: []`; use `--volatile` when you want a fresh container regardless of labels.
 
-Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value or configured `ctx:` is ignored (a warning is printed).
+Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value or configured `ctx:` is ignored, and launcher migrations for frozen mounts or environment (including persistent `NUGET_PACKAGES` wiring) are skipped (warnings are printed).
 To apply a ctx change, omit `--resume` and let the script auto-detect and recreate as needed.
 
 ## Workspace Shadow Mounts

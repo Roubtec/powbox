@@ -111,8 +111,9 @@ fi
 
 # --- Prune ONLY this container's orphans --------------------------------------
 # A peer container's live worktrees live under its own $CONTAINER_NAME subdir
-# and are never scanned; the shared .pnpm-store and .gomodcache/.gocache sit at
-# the volume root. Each reaped orphan's scoped golangci-lint analysis cache
+# and are never scanned; the shared .pnpm-store, .gomodcache/.gocache, .ccache,
+# and .nuget caches sit at the volume root. Each reaped orphan's scoped
+# golangci-lint analysis cache
 # (.golangci-cache/$CONTAINER_NAME/<slug>, written by the golangci-lint
 # wrapper) is dropped with it — best-effort, exactly the slug being reaped —
 # so caches from crashed sessions do not accumulate.

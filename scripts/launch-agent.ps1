@@ -627,6 +627,7 @@ $mountWorkspaceVolumes = $false
 # use for an isolated node_modules mount, which would only litter the host.
 $mountWorktreesVolume = $false
 $worktreesOnlyRepoDescription = "worktrees-only repo"
+$worktreesOnlyCacheDescription = "language caches"
 $repoSpec = ""
 
 if ($Isolated) {
@@ -796,11 +797,13 @@ else {
   elseif ($goModPresent) {
     $mountWorktreesVolume = $true
     $worktreesOnlyRepoDescription = "go.mod-only repo"
+    $worktreesOnlyCacheDescription = "Go caches"
   }
   else {
     if (Test-Powbox-DotNetRepoPresent $resolvedProject) {
       $mountWorktreesVolume = $true
       $worktreesOnlyRepoDescription = ".NET-only repo"
+      $worktreesOnlyCacheDescription = "NuGet packages"
     }
   }
 }
@@ -989,6 +992,9 @@ if ($Resume) {
   }
   if ($Ref -ne "") {
     Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
+  }
+  if ($Isolated -or $mountWorktreesVolume) {
+    Write-Host "Note: -Resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES wiring, are skipped. Omit -Resume to apply them." -ForegroundColor Yellow
   }
 
   # A running container (e.g. launched -Detach, or its terminal was lost) can't be
@@ -1200,10 +1206,10 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
     }
     elseif ($mountWorktreesVolume) {
       if ($containerRunning) {
-        Write-Host "Note: container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); Go/NuGet caches and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
+        Write-Host "Note: container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); $worktreesOnlyCacheDescription and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
       }
       else {
-        Write-Host "Container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent Go/NuGet caches + worktrees) and no node_modules mount."
+        Write-Host "Container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent $worktreesOnlyCacheDescription + worktrees) and no node_modules mount."
         $recreateStaleMounts = $true
       }
     }
@@ -1242,14 +1248,16 @@ if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExi
   $existingContainerEnv = @(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $existingContainerEnv = @() }
   $existingNugetPackages = $null
+  $existingNugetPackagesFound = $false
   foreach ($envEntry in $existingContainerEnv) {
     if ($envEntry.StartsWith("NUGET_PACKAGES=", [System.StringComparison]::Ordinal)) {
       $existingNugetPackages = $envEntry.Substring("NUGET_PACKAGES=".Length)
+      $existingNugetPackagesFound = $true
       break
     }
   }
-  if ($existingNugetPackages -ne $worktreesNugetPackagesDir) {
-    $existingNugetDisplay = if ($null -eq $existingNugetPackages -or $existingNugetPackages -eq "") { "<unset>" } else { $existingNugetPackages }
+  if ($existingNugetPackages -cne $worktreesNugetPackagesDir) {
+    $existingNugetDisplay = if (-not $existingNugetPackagesFound) { "<unset>" } elseif ($existingNugetPackages -ceq "") { "<empty>" } else { $existingNugetPackages }
     if ($containerRunning) {
       Write-Host "Note: container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay', but this launch expects '$worktreesNugetPackagesDir'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent NuGet packages." -ForegroundColor Yellow
     }

@@ -246,7 +246,12 @@ fi
 if [ "$1" = inspect ] && [ "${2:-}" = --format ]; then
 	case "$3" in
 	*powbox.continue*) printf 'false\n' ;;
-	*Config.Env*) printf 'PATH=/usr/local/bin:/usr/bin\n' ;;
+	*Config.Env*)
+		printf 'PATH=/usr/local/bin:/usr/bin\n'
+		if [ "${POWBOX_FAKE_NUGET_SET:-false}" = true ]; then
+			printf 'NUGET_PACKAGES=%s\n' "$POWBOX_FAKE_NUGET"
+		fi
+		;;
 	*'/node_modules'*) printf '%s\n' "$POWBOX_FAKE_NM" ;;
 	*'/.worktrees'*) printf '%s\n' "$POWBOX_FAKE_WT" ;;
 	*'/home/node/.local/share/containers'*) printf 'yes\n' ;;
@@ -270,12 +275,29 @@ MIGRATION_STOPPED_OUTPUT="$({
 		POWBOX_FAKE_RUNNING=false \
 		POWBOX_FAKE_NM="$MIGRATION_NM" \
 		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
 		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
 } 2>&1)" || fail "stopped stale-NuGet migration fixture failed: $MIGRATION_STOPPED_OUTPUT"
 grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
 	fail "stopped container with correct mounts and missing NUGET_PACKAGES was not recreated"
 printf '%s\n' "$MIGRATION_STOPPED_OUTPUT" | grep -Fq "recreating it with '$MIGRATION_NUGET'" ||
 	fail "stopped stale-NuGet migration did not explain the expected path"
+
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_MIXED_CASE_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=true \
+		POWBOX_FAKE_NUGET="${MIGRATION_NUGET/#\/workspace\//\/Workspace\/}" \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "mixed-case stale-NuGet migration fixture failed: $MIGRATION_MIXED_CASE_OUTPUT"
+grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
+	fail "stopped container with a case-only NUGET_PACKAGES mismatch was not recreated"
 
 MIGRATION_ISOLATED_ID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration 2>/dev/null)"
 MIGRATION_ISOLATED_CONTAINER="$(id_field "$MIGRATION_ISOLATED_ID" CONTAINER_NAME)"
@@ -286,6 +308,8 @@ MIGRATION_ISOLATED_OUTPUT="$({
 		POWBOX_FAKE_RUNNING=false \
 		POWBOX_FAKE_NM="" \
 		POWBOX_FAKE_WT="" \
+		POWBOX_FAKE_NUGET_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
 		"$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration --detach
 } 2>&1)" || fail "self-hosted stale-NuGet migration fixture failed: $MIGRATION_ISOLATED_OUTPUT"
 grep -Fqx "rm $MIGRATION_ISOLATED_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
@@ -298,6 +322,8 @@ MIGRATION_RUNNING_OUTPUT="$({
 		POWBOX_FAKE_RUNNING=true \
 		POWBOX_FAKE_NM="$MIGRATION_NM" \
 		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
 		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
 } 2>&1)" || fail "running stale-NuGet migration fixture failed: $MIGRATION_RUNNING_OUTPUT"
 if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
@@ -305,9 +331,23 @@ if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
 fi
 printf '%s\n' "$MIGRATION_RUNNING_OUTPUT" | grep -Fq "stop it and relaunch" ||
 	fail "running stale-NuGet migration did not emit the lifecycle warning"
+
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_RESUME_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --resume --detach
+} 2>&1)" || fail "resume frozen-environment warning fixture failed: $MIGRATION_RESUME_OUTPUT"
+printf '%s\n' "$MIGRATION_RESUME_OUTPUT" | grep -Fq "persistent NUGET_PACKAGES wiring, are skipped" ||
+	fail "resume did not explain that frozen NUGET_PACKAGES migration is skipped"
 rm -rf "$MIGRATION_ROOT"
 trap - EXIT
-ok "frozen NuGet env migration: stopped dir-mounted/self-hosted containers recreate; running ones warn"
+ok "frozen NuGet env migration: missing/mixed-case paths recreate; running ones warn; resume explains its skip"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"

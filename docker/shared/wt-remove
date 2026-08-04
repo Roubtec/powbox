@@ -446,22 +446,33 @@ fi
 #   `show-ref --verify --quiet`: 0 the name resolves to an object; 1 it does not
 #     RESOLVE, which covers genuine absence, an unresolvable symref (probe 3)
 #     and — measured — a ref backend that could not be read at all (a mode-000
-#     `reftable/` dir answers 1, not an error); anything else (128) means git
-#     could not open the repository.
+#     `reftable/` dir answers 1, not an error); anything else (128) means the
+#     lookup failed OUTRIGHT, which is NOT the same as "git could not open the
+#     repository": the ref storage may be unopenable, or the name may be there
+#     while the object it names is not. Both were measured with git 2.47.3 —
+#     a pseudo-ref left pointing at an object a `git gc --prune=now` then
+#     removed answers 128 (`fatal: git show-ref: bad ref <NAME> (<oid>)`) under
+#     BOTH backends while that repository opens perfectly and `git status`/`git
+#     log` both succeed. Either way the state is UNKNOWN, so it is refused.
 #   `symbolic-ref --quiet`: 0 the name EXISTS as a symbolic ref, whether or not
-#     its target resolves; 1 it is not a symbolic ref (absent, or a direct ref);
-#     anything else (128) means the ref storage could not be READ — measured on
-#     that same mode-000 `reftable/` dir, where this is the probe that says so.
+#     its target resolves; 1 it is not a symbolic ref (absent, or a direct ref —
+#     including the dangling-object direct ref just described, which this probe
+#     answers 1 for rather than 128); anything else (128) means the lookup
+#     failed outright here too — measured on that same mode-000 `reftable/` dir,
+#     where this is the probe that says so.
 # The two are ORed and their failure modes are complementary, which is the point:
 # probe 2's mute 1 is exactly where probe 3 is loud. Only 0 and 1 are answers;
 # anything else is refused, the same "unknown means unsafe to delete" direction
 # as every other check in this script, rather than left to the status read below
-# to catch by accident. The shape the test forces is a git that cannot open the
-# repository's ref storage — an older binary meeting a ref-storage extension it
-# does not understand, say — which is a property of the BINARY, not of the
-# repository, and is why that test substitutes a `git` on PATH rather than
-# building a fixture; the mode-000 `reftable/` dir above reaches the same refusal
-# from the repository side, and is pinned too. (Metadata broken badly enough that
+# to catch by accident. The shape the test forces is ONE of the two above — a git
+# that cannot open the repository's ref storage at all, an older binary meeting a
+# ref-storage extension it does not understand, say — which is a property of the
+# BINARY, not of the repository, and is why that test substitutes a `git` on PATH
+# rather than building a fixture; the mode-000 `reftable/` dir above reaches the
+# same refusal from the repository side, and is pinned too. The other shape, the
+# pruned-away target, needs neither: it refuses through this same branch, with
+# and without `--force` (measured end to end under `reftable`, where there is no
+# marker file for probe 1 to catch it by). (Metadata broken badly enough that
 # git cannot see the worktree at all never gets here: it is caught further up, by
 # the orphan-reap path, which QUARANTINES rather than deletes.)
 #
@@ -476,7 +487,7 @@ ref_probe() {
 	case "$rc" in
 	0) return 0 ;;
 	1) return 1 ;;
-	*) die "cannot read the ref storage of the worktree at $(shq "$WT") (git exited $rc looking up $name), so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)" ;;
+	*) die "cannot establish the state of the worktree at $(shq "$WT"): the ref lookup failed outright (git exited $rc looking up $name) — its ref storage could not be read, or that name points at an object that is not there — so its in-progress operations cannot be checked; refusing to remove it (nothing was changed)" ;;
 	esac
 }
 

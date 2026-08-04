@@ -1777,10 +1777,14 @@ esac
 # (f) The REF lookup itself FAILS. Probing the ref backend for the pseudo-ref
 # markers added a second way for the operation state to be unknowable, and it has
 # to fail in the same direction as everything else here: a `git show-ref` that
-# DIES (exit 128) must not be read as "nothing in flight". The realistic shape is
+# DIES (exit 128) must not be read as "nothing in flight". One realistic shape is
 # a git that cannot open the repository's ref storage at all — an older binary
 # meeting `extensions.refStorage = reftable`, say — which is precisely why no
-# fixture built with the one git on PATH can produce it. It is forced instead
+# fixture built with the one git on PATH can produce it. (It is not the only one:
+# a marker pointing at an object a `git gc --prune=now` removed also exits 128,
+# out of a repository that opens perfectly — measured under both backends, which
+# is why the refusal message names the broader condition rather than blaming the
+# ref storage.) It is forced instead
 # with a `git` SHIM on PATH that fails exactly the `show-ref` call and delegates
 # every other invocation to the real binary, since the failure is a property of
 # the BINARY rather than of the repository. The worktree is otherwise pristine,
@@ -1814,8 +1818,15 @@ for mode in plain force; do
 	fi
 	[ "$rc" -ne 0 ] || miss="$miss $mode-REMOVED-ANYWAY"
 	[ -d "$RF6_WT" ] || miss="$miss $mode-worktree-gone"
-	grep -qF "cannot read the ref storage" "$WORK_ROOT/rf6-$mode.err" ||
-		miss="$miss $mode-ref-storage-failure-not-named"
+	# The refusal must name the ref lookup as the thing that failed, and say WHICH
+	# name it died on — the two halves a reader needs. It must NOT diagnose it
+	# narrowly as unreadable ref storage: exit 128 also comes out of a perfectly
+	# readable storage holding a marker whose target object was pruned away
+	# (measured under both backends), so the message states the broader condition.
+	grep -qF "the ref lookup failed outright" "$WORK_ROOT/rf6-$mode.err" ||
+		miss="$miss $mode-ref-lookup-failure-not-named"
+	grep -qF "looking up MERGE_HEAD" "$WORK_ROOT/rf6-$mode.err" ||
+		miss="$miss $mode-failing-marker-not-named"
 	grep -qF "refusing to remove it" "$WORK_ROOT/rf6-$mode.err" ||
 		miss="$miss $mode-no-refusal-wording"
 	miss="$miss$(destructive_advice "$WORK_ROOT/rf6-$mode.err" "$RF6_WT" "$RF6" rstore)"
@@ -1836,8 +1847,8 @@ fi
 # changes" about a repository whose refs simply cannot be READ (measured — the
 # worktree does survive, by accident and under the wrong name). `symbolic-ref
 # --quiet` exits 128, which is why it carries the same 0/1/refuse contract as
-# probe 2 rather than being read as a plain yes/no, and why the ref-storage
-# failure is named as itself.
+# probe 2 rather than being read as a plain yes/no, and why the lookup failure is
+# named as itself rather than as dirt.
 if [ -z "$REFTABLE_OK" ]; then
 	skip "an unreadable reftable ref storage (this git cannot create a --ref-format=reftable repo)"
 else

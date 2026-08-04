@@ -1084,9 +1084,33 @@ fi
 # such a fixture's marker missing; `symbolic-ref` is what answers about
 # existence. The `:symref:` arm is matched FIRST so the `:ref:` glob, which the
 # longer spelling would otherwise be tested against, cannot claim it.
+#
+# `<gitdir>:badref:<NAME>` is the fourth, for the marker that is THERE while the
+# object it names is not — a pseudo-ref left pointing at a commit a `git gc
+# --prune=now` removed. `show-ref --verify` neither confirms nor denies such a
+# name: it DIES (exit 128, `fatal: git show-ref: bad ref <NAME> (<oid>)`), so the
+# `:ref:` spelling would call the marker missing and the `:symref:` one likewise
+# (a direct ref is not symbolic — measured: exit 1). Presence here is therefore
+# exactly that failure, `> 1`, which is also the contract wt-remove's `ref_probe`
+# refuses on; an exit of 0 or 1 would mean the fixture no longer holds the shape.
+# Its glob cannot be claimed by the `:ref:` arm either — `:badref:` does not
+# contain `:ref:` — but it is listed alongside `:symref:`, before it, so the
+# ordering rule above holds by inspection rather than by that coincidence.
+#
+# The admin dir is checked FIRST for this spelling, because a dying lookup is not
+# by itself evidence of anything: point `--git-dir` at a directory that is no
+# longer there and the same 128 comes back. Without that check the "state lost"
+# assertion could never fire — a worktree DELETED by a regression takes its admin
+# dir with it, and the marker would then read as present out of the rubble.
 marker_present() {
+	local rc=0
 	case "$1" in
 	*:symref:*) [ -n "$(git --git-dir="${1%%:symref:*}" symbolic-ref --quiet "${1##*:symref:}" 2>/dev/null)" ] ;;
+	*:badref:*)
+		[ -d "${1%%:badref:*}" ] || return 1
+		git --git-dir="${1%%:badref:*}" show-ref --verify --quiet "${1##*:badref:}" >/dev/null 2>&1 || rc=$?
+		[ "$rc" -gt 1 ]
+		;;
 	*:ref:*) git --git-dir="${1%%:ref:*}" show-ref --verify --quiet "${1##*:ref:}" ;;
 	*) [ -e "$1" ] ;;
 	esac
@@ -1784,12 +1808,12 @@ esac
 # a marker pointing at an object a `git gc --prune=now` removed also exits 128,
 # out of a repository that opens perfectly — measured under both backends, which
 # is why the refusal message names the broader condition rather than blaming the
-# ref storage.) It is forced instead
-# with a `git` SHIM on PATH that fails exactly the `show-ref` call and delegates
-# every other invocation to the real binary, since the failure is a property of
-# the BINARY rather than of the repository. The worktree is otherwise pristine,
-# so without this branch it is simply removed — which is what makes the case
-# load-bearing rather than decorative.
+# ref storage. That shape needs no shim and is pinned as case (h) below.) It is
+# forced instead with a `git` SHIM on PATH that fails exactly the `show-ref` call
+# and delegates every other invocation to the real binary, since the failure is a
+# property of the BINARY rather than of the repository. The worktree is otherwise
+# pristine, so without this branch it is simply removed — which is what makes the
+# case load-bearing rather than decorative.
 RF6="$(make_repo rf-refstore)"
 git_quiet -C "$RF6" worktree add -q "$RF6/.worktrees/$CONTAINER_NAME/rstore" -b rstore-b >/dev/null 2>&1
 GIT_SHIM="$WORK_ROOT/git-shim"
@@ -1864,6 +1888,77 @@ else
 		"$RF7" rtstore \
 		"chmod 000 '$RF7/.git/worktrees/rtstore/reftable'" \
 		"chmod 755 '$RF7/.git/worktrees/rtstore/reftable'"
+fi
+
+# (h) The OTHER shape behind the same exit 128, and the one the refusal message's
+# broader wording exists for: the ref storage opens perfectly and the marker is
+# right where git left it, but the OBJECT it names is gone — a pseudo-ref left
+# pointing at a commit a `git gc --prune=now` removed. `show-ref --verify` cannot
+# answer about such a name and dies on it (`fatal: git show-ref: bad ref
+# CHERRY_PICK_HEAD (<oid>)`), while the repository itself is entirely healthy:
+# `git status` and `git log` both succeed, which is asserted below because it is
+# the whole difference from (f) and (g). Where those two force the failure with a
+# `git` SHIM and with an unreadable `reftable/` dir respectively, this one is
+# built with the ONE git on PATH out of an ordinary repository — the shape a real
+# worktree can arrive at on its own, and the reason the die contract cannot be
+# narrowed to "the ref storage could not be read".
+#
+# It is reftable-only, and not by convenience: under `files` a stopped
+# cherry-pick leaves a CHERRY_PICK_HEAD FILE, so probe 1 answers "present" before
+# any ref lookup happens and the refusal names the cherry-pick (measured — the
+# worktree is still refused, just never through this branch). Only under
+# `reftable`, where there is no file at all, does the lookup get to fail.
+#
+# The fixture is left with a CLEAN porcelain (the conflict is resolved back to
+# HEAD's content and staged), so nothing downstream can refuse by accident: with
+# the die contract regressed to "128 means absent" the operation guard finds
+# nothing, the uncommitted-changes check finds nothing, and the worktree is
+# REMOVED. The expected phrase names the diagnostic AND the marker it died on, in
+# both invocation modes.
+if [ -z "$REFTABLE_OK" ]; then
+	skip "a state marker whose target object was pruned away (this git cannot create a --ref-format=reftable repo)"
+else
+	RF8="$(make_repo rf-prunedtarget --ref-format=reftable)"
+	printf 'a\n' >"$RF8/f.txt"
+	git_quiet -C "$RF8" add -A
+	git_quiet -C "$RF8" commit -qm f1
+	git_quiet -C "$RF8" checkout -q -b rfp-side
+	printf 'side\n' >"$RF8/f.txt"
+	git_quiet -C "$RF8" commit -qam s1
+	git_quiet -C "$RF8" checkout -q main
+	printf 'main\n' >"$RF8/f.txt"
+	git_quiet -C "$RF8" commit -qam m1
+	git_quiet -C "$RF8" branch rfp-b
+	git_quiet -C "$RF8" worktree add -q "$RF8/.worktrees/$CONTAINER_NAME/rfp" rfp-b >/dev/null 2>&1
+	RF8_WT="$RF8/.worktrees/$CONTAINER_NAME/rfp"
+	RF8_GD="$RF8/.git/worktrees/rfp"
+	git_quiet -C "$RF8_WT" cherry-pick rfp-side >/dev/null 2>&1 || true
+	# Resolve back to HEAD's content so the porcelain is clean, then ORPHAN the
+	# picked commit: drop the only branch that reaches it, expire the reflogs that
+	# still do, and prune. CHERRY_PICK_HEAD is not a gc root, so the marker is left
+	# naming an object that no longer exists.
+	printf 'main\n' >"$RF8_WT/f.txt"
+	git_quiet -C "$RF8_WT" add f.txt
+	git_quiet -C "$RF8" branch -D rfp-side >/dev/null 2>&1
+	git_quiet -C "$RF8" reflog expire --expire=now --all >/dev/null 2>&1
+	git_quiet -C "$RF8" gc --prune=now >/dev/null 2>&1
+	rf8_show=0
+	git --git-dir="$RF8_GD" show-ref --verify --quiet CHERRY_PICK_HEAD >/dev/null 2>&1 || rf8_show=$?
+	rf8_sym=0
+	git --git-dir="$RF8_GD" symbolic-ref --quiet CHERRY_PICK_HEAD >/dev/null 2>&1 || rf8_sym=$?
+	if [ ! -e "$RF8_GD/CHERRY_PICK_HEAD" ] && [ "$rf8_show" -eq 128 ] && [ "$rf8_sym" -eq 1 ] &&
+		git -C "$RF8_WT" status >/dev/null 2>&1 && git -C "$RF8_WT" log -1 >/dev/null 2>&1; then
+		miss="$(wt_remove_must_refuse \
+			"the ref lookup failed outright (git exited 128 looking up CHERRY_PICK_HEAD)" \
+			"$RF8" rfp "$RF8_GD:badref:CHERRY_PICK_HEAD")"
+		if [ -z "$miss" ]; then
+			ok "wt-remove refuses when a state marker's target object was PRUNED away (show-ref dies out of a repository that opens fine)"
+		else
+			no "wt-remove pruned-target ref-lookup fail-safe inadequate:$miss"
+		fi
+	else
+		no "precondition: the pruned-target fixture should leave CHERRY_PICK_HEAD with no file, show-ref at 128 (got $rf8_show), symbolic-ref at 1 (got $rf8_sym), and a repository whose status and log still succeed"
+	fi
 fi
 
 # ---------------------------------------------------------------------------

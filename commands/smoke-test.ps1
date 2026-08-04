@@ -234,6 +234,8 @@ else {
 # The opa probe goes past a bare version check: it writes a tiny Rego policy +
 # test and runs `opa test`, exercising the exact `opa test policy/...` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
+# The actionlint and markdownlint-cli2 probes assert their exact baked default
+# versions, so a pin bump must update this inventory and its Bash mirror.
 # Every probe below is handed to the driver (scripts/smoke-test-image.ps1) as a
 # separate ARGUMENT, and the driver passes it to the container the same way: as
 # one element of `"$@"` for a fixed one-line runner that executes each probe in
@@ -354,6 +356,8 @@ else {
     'command -v gh-review-threads >/dev/null'
     'command -v peer-review-run >/dev/null'
     'shellcheck --version >/dev/null'
+    'actionlint --version | grep -qx 1.7.12'
+    "markdownlint-cli2 --version | grep -q '^markdownlint-cli2 v0.23.2 '"
     'ping -V >/dev/null'
     'nc -h >/dev/null 2>&1'
     'bc --version >/dev/null'

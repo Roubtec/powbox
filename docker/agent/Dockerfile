@@ -13,6 +13,32 @@
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 
+# --- Shared linters (stable layer below the frequently updated agents) -------
+# actionlint is the current stable v1.7.12 release. Fetch its static Linux
+# tarball directly from GitHub and verify the per-architecture SHA256 published
+# in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
+# the version, both checksums, and the exact smoke assertions together.
+USER root
+RUN ACTIONLINT_VERSION=1.7.12 \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) actionlint_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 ;; \
+        arm64) actionlint_sha256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 ;; \
+        *) echo "no pinned actionlint checksum for architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/actionlint.tar.gz \
+        "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz" \
+    && echo "${actionlint_sha256}  /tmp/actionlint.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local/bin --no-same-owner -xzf /tmp/actionlint.tar.gz actionlint \
+    && chmod 0755 /usr/local/bin/actionlint \
+    && rm /tmp/actionlint.tar.gz
+
+# markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
+# default reproducible and omit optional dependencies; repository wrappers and
+# CI pins remain authoritative when they require another version.
+RUN npm install -g --omit=optional markdownlint-cli2@0.23.2
+USER node
+
 # --- Codex (lower layer: updated less often) ---------------------------------
 ARG CODEX_VERSION=latest
 ENV CODEX_CONFIG_DIR=/home/node/.codex

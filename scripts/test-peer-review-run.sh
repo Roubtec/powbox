@@ -42,9 +42,6 @@ set -uo pipefail
 #       attempt (10j-fallback), with neither working the peer stays unavailable
 #       (10j-nofallback), and a MISSING binary does not trigger a spurious
 #       key-fallback attempt (10j-missingbin)
-#  (14) strength knobs — per-invocation model/effort pins, their provider-specific
-#       spellings, honest degradation when the CLI lacks --effort, and the usage
-#       rejections that keep a reviewer from being asked for a weak level
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
 #       descendant escalated to KILL and actually dies, sibling isolation proven
 #       BEHAVIORALLY AND HONESTLY (a fake provider probes a sibling's planted
@@ -82,6 +79,9 @@ set -uo pipefail
 #       `--help` that inherits stdout must not hold the capture open past the
 #       probe timeout (file-based capture, no pipe), and the helper itself
 #       reaps a probe-spawned in-group stray (supervised probe, group sweep)
+#  (14) strength knobs — per-invocation model/effort pins, their provider-specific
+#       spellings, honest degradation when the CLI lacks --effort, and the usage
+#       rejections that keep a reviewer from being asked for a weak level
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the

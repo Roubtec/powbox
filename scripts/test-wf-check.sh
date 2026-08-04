@@ -90,6 +90,28 @@ return agent + parallel + pipeline + log + phase + args + budget + workflow;
 EOF
 run_ok "local bindings may shadow runtime hook globals" "$WORK/hook-shadowing.js"
 
+cat >"$WORK/reserved-identifier.js" <<'EOF'
+export const meta = { name: "reserved-identifier", description: "compiler scratch identifiers are reserved" };
+const __wRg$collision = 1;
+return __wRg$collision;
+EOF
+run_fail "compiler-reserved identifier prefix fails" "$WORK/reserved-identifier.js" "Identifier '__wRg\$collision' is reserved."
+
+cat >"$WORK/await-using.js" <<'EOF'
+export const meta = { name: "await-using", description: "compiler cannot transform await using" };
+await using value = resource;
+return value;
+EOF
+run_fail "await using declarations fail the compiler pass" "$WORK/await-using.js" "'await using' declarations are not supported"
+
+cat >"$WORK/reserved-text.js" <<'EOF'
+export const meta = { name: "reserved-text", description: "reserved-prefix text is not an identifier" };
+// __wRg$insideAComment is harmless.
+const marker = "__wRg$insideAString";
+return marker;
+EOF
+run_ok "reserved prefix in strings and comments is not rejected" "$WORK/reserved-text.js"
+
 cat >"$WORK/escaped-property-identifiers.js" <<'EOF'
 export const meta = {
   n\u0061me: "escaped-property-identifiers",

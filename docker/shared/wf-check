@@ -14,6 +14,13 @@ const ACORN_PATHS = [
   "/usr/local/lib/node_modules/acorn",
   "acorn",
 ].filter(Boolean);
+const ACORN_WALK_PATHS = [
+  process.env.WF_CHECK_ACORN_WALK,
+  "/usr/local/lib/wf-check/node_modules/acorn-walk",
+  "/usr/local/lib/node_modules/acorn-walk",
+  "acorn-walk",
+].filter(Boolean);
+const RESERVED_IDENTIFIER_PREFIX = "__wRg$";
 const USAGE = `Usage: wf-check <script.js>
 
 Validate a Claude Workflow script without running it.
@@ -22,7 +29,9 @@ The checker mirrors the installed Workflow loader: the first statement must be
 \`export const meta = { ... }\`, metadata must be recursively literal, name and
 description must be non-empty strings, and the remaining source is parsed as a
 strict async body with agent, parallel, pipeline, log, phase, args, budget, and
-workflow hooks. Top-level await and return are therefore valid.
+workflow hooks. Top-level await and return are therefore valid. The compiler's
+reserved __wRg$ identifier prefix and unsupported await-using declarations are
+also rejected.
 `;
 
 const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -40,6 +49,23 @@ function loadAcorn() {
     }
   }
   throw new Error(`Acorn is unavailable; rebuild the agent image (${failures.join("; ")})`);
+}
+
+function loadAcornWalk() {
+  const failures = [];
+  for (const candidate of ACORN_WALK_PATHS) {
+    try {
+      const walk = require(candidate);
+      if (typeof walk.full !== "function" || typeof walk.ancestor !== "function") {
+        failures.push(`${candidate}: module has no full/ancestor walkers`);
+      } else {
+        return walk;
+      }
+    } catch (error) {
+      failures.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`Acorn-walk is unavailable; rebuild the agent image (${failures.join("; ")})`);
 }
 
 function parsePureValue(node) {
@@ -138,6 +164,40 @@ function compileBody(source, metaEnd, filename) {
   return new vm.Script(transformed, { filename, displayErrors: true });
 }
 
+function workflowBody(source, metaEnd) {
+  return source.slice(metaEnd).replace(/^[;\s]*\n/, "").trimStart();
+}
+
+function validateCompilerPass(source, metaEnd) {
+  const { parse } = loadAcorn();
+  const walk = loadAcornWalk();
+  const body = workflowBody(source, metaEnd);
+  const program = parse(`(async () => {'use strict';\n${body}\n})()`, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowHashBang: true,
+  });
+
+  // Claude's compiler reserves this prefix for the await/return wrappers that
+  // it injects after this validation pass. Use the same AST walk rather than a
+  // text scan: strings and comments containing the prefix remain valid.
+  walk.full(program, (node) => {
+    if (typeof node.name === "string" && node.name.startsWith(RESERVED_IDENTIFIER_PREFIX)) {
+      throw new SyntaxError(`Identifier '${node.name}' is reserved.`);
+    }
+    if (node.type === "WithStatement") {
+      throw new SyntaxError("'with' statements are not supported in workflow scripts.");
+    }
+  });
+  walk.ancestor(program, {
+    VariableDeclaration(node) {
+      if (node.kind === "await using") {
+        throw new SyntaxError("'await using' declarations are not supported in workflow scripts.");
+      }
+    },
+  });
+}
+
 function readSourceBytes(filename) {
   const bytes = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
   let descriptor;
@@ -195,6 +255,7 @@ function main(argv) {
   try {
     meta = normalizeMeta(parsed.meta);
     compileBody(source, parsed.statementEnd, filename);
+    validateCompilerPass(source, parsed.statementEnd);
   } catch (error) {
     const message = error instanceof Error && error.stack ? error.stack : String(error);
     process.stderr.write(`wf-check: ${message}\n`);

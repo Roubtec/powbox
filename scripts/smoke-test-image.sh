@@ -125,9 +125,16 @@ fi
 # property 1 guarantees. But property 1 says nothing about a probe's own
 # VERDICT, and the third shape below gets that wrong, so it is a correctness
 # reason, not a cosmetic one. Rejection is kept identical in the .ps1 mirror so
-# a probe one driver refuses is never run by the other:
+# a probe one driver refuses is never run by the other — including for the first
+# shape below, where "identical" costs an explicit list rather than coming free:
 #   * an empty or whitespace-only probe — AUTHORING MISTAKE, always, and nothing
-#     more subtle than that;
+#     more subtle than that. "Whitespace" means the full Unicode White_Space
+#     property, not the ASCII bytes `[[:space:]]` matches in the C locale: the
+#     mirror tests [string]::IsNullOrWhiteSpace(), which is Unicode-aware, so a
+#     probe of nothing but U+00A0 was once rejected there and RUN here — the
+#     dangerous direction, since it reaches `docker` as a no-op probe that
+#     trivially "passes". $UNICODE_BLANKS below restores the parity, and
+#     sections G/H of scripts/test-smoke-probe-wrapper.sh pin it;
 #   * a newline or carriage return — DIAGNOSABILITY and the Windows argument
 #     path: the failure manifest prints one line per probe, and the .ps1 mirror
 #     would have to hand `docker` a multi-line native-command argument, which is
@@ -169,11 +176,53 @@ probe_display() {
 	printf '%s' "${rendered//$'\r'/\\r}"
 }
 
+# The non-ASCII code points carrying the Unicode White_Space property, as their
+# UTF-8 byte sequences. The .ps1 mirror gets this set for free from
+# [string]::IsNullOrWhiteSpace(); `[[:space:]]` here matches only the ASCII
+# whitespace bytes under the C/POSIX locale these scripts routinely run in, so
+# without this list a probe of nothing but U+00A0 was rejected there and RUN
+# here. Spelled with `\x` rather than `\u` deliberately: bash only encodes `\u`
+# when LC_CTYPE names a UTF-8 locale and otherwise leaves the escape literal,
+# which would make the check silently locale-dependent — the very defect being
+# closed. Removed by literal string replacement, never as a bracket-expression
+# byte class, so no single byte of a multi-byte probe can be stripped on its own.
+UNICODE_BLANKS=(
+	$'\xc2\x85'     # U+0085 NEXT LINE
+	$'\xc2\xa0'     # U+00A0 NO-BREAK SPACE
+	$'\xe1\x9a\x80' # U+1680 OGHAM SPACE MARK
+	$'\xe2\x80\x80' # U+2000 EN QUAD
+	$'\xe2\x80\x81' # U+2001 EM QUAD
+	$'\xe2\x80\x82' # U+2002 EN SPACE
+	$'\xe2\x80\x83' # U+2003 EM SPACE
+	$'\xe2\x80\x84' # U+2004 THREE-PER-EM SPACE
+	$'\xe2\x80\x85' # U+2005 FOUR-PER-EM SPACE
+	$'\xe2\x80\x86' # U+2006 SIX-PER-EM SPACE
+	$'\xe2\x80\x87' # U+2007 FIGURE SPACE
+	$'\xe2\x80\x88' # U+2008 PUNCTUATION SPACE
+	$'\xe2\x80\x89' # U+2009 THIN SPACE
+	$'\xe2\x80\x8a' # U+200A HAIR SPACE
+	$'\xe2\x80\xa8' # U+2028 LINE SEPARATOR
+	$'\xe2\x80\xa9' # U+2029 PARAGRAPH SEPARATOR
+	$'\xe2\x80\xaf' # U+202F NARROW NO-BREAK SPACE
+	$'\xe2\x81\x9f' # U+205F MEDIUM MATHEMATICAL SPACE
+	$'\xe3\x80\x80' # U+3000 IDEOGRAPHIC SPACE
+)
+
+# True when a probe is empty or nothing but whitespace, for the same set of
+# characters the .ps1 mirror's [string]::IsNullOrWhiteSpace() covers.
+probe_is_blank() {
+	local rest=${1//[[:space:]]/} blank
+	for blank in "${UNICODE_BLANKS[@]}"; do
+		rest=${rest//"$blank"/}
+	done
+	[ -z "$rest" ]
+}
+
 NL=$'\n'
 idx=0
 for cmd in "$@"; do
 	idx=$((idx + 1))
-	if [ -z "${cmd//[[:space:]]/}" ]; then
+	if probe_is_blank "$cmd"; then
 		printf 'smoke-test-image.sh: probe %d is empty; every probe must be a runnable command.\n' "$idx" >&2
 		exit 1
 	fi

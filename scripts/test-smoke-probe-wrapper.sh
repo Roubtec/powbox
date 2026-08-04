@@ -30,6 +30,9 @@
 #     on ONE line (newline/CR escaped) while leaving its trailing backslash run
 #     byte-exact - in BOTH drivers, since the rendering is what a regression
 #     would silently drop;
+#   * "empty" means the same thing in both drivers, down to the non-ASCII
+#     Unicode White_Space code points the .sh driver's `[[:space:]]` does not
+#     cover on its own;
 #   * the .sh and .ps1 drivers hand docker a byte-identical argument vector.
 #
 # Section K re-tests holes the earlier `if`-condition form left open, each with
@@ -442,6 +445,35 @@ else
 	bad "empty probe not rejected (rc=$rc)" "$(cat "$TMP/g2.out")"
 fi
 
+# ...and "empty" has to mean the SAME THING in both drivers. `[[:space:]]` in the
+# .sh driver matches only the ASCII whitespace bytes under the C/POSIX locale,
+# while the mirror's [string]::IsNullOrWhiteSpace() is Unicode-aware: a probe of
+# nothing but U+00A0 was rejected by the .ps1 and ACCEPTED by the .sh, which is
+# the dangerous direction - it reaches `docker` as a no-op probe that trivially
+# "passes". Two representatives, one 2-byte and one 3-byte UTF-8 sequence, so a
+# half-finished $UNICODE_BLANKS list cannot pass this. Spelled with `\x` rather
+# than `\u` because bash only encodes `\u` under a UTF-8 LC_CTYPE, and this test
+# must not depend on the locale it happens to run in. The .ps1 half of the pair
+# is in section H.
+exotic_blank_names=("U+00A0 NO-BREAK SPACE" "U+3000 IDEOGRAPHIC SPACE")
+exotic_blank_probes=($'\xc2\xa0' $'\xe3\x80\x80')
+exotic_blank_ps=('[string][char]0x00A0' '[string][char]0x3000')
+for eb in "${!exotic_blank_probes[@]}"; do
+	rm -f "$CAPTURE"
+	SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "true" "${exotic_blank_probes[$eb]}" >"$TMP/g6.$eb.out" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ] && grep -q "is empty" "$TMP/g6.$eb.out"; then
+		ok ".sh rejects a probe of only ${exotic_blank_names[$eb]} as empty"
+	else
+		bad ".sh accepted a probe of only ${exotic_blank_names[$eb]} (rc=$rc)" "$(cat "$TMP/g6.$eb.out")"
+	fi
+	if [ ! -e "$CAPTURE" ]; then
+		ok "docker was never invoked for the ${exotic_blank_names[$eb]} list"
+	else
+		bad "docker ran despite a probe of only ${exotic_blank_names[$eb]}"
+	fi
+done
+
 rm -f "$CAPTURE"
 SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "true" $'a\rb' >"$TMP/g3.out" 2>&1
 rc=$?
@@ -613,6 +645,19 @@ PS
 	else
 		bad ".ps1 echoed the line-continuation probe with a mangled backslash run" "$(cat "$TMP/h6.out")"
 	fi
+
+	# Exotic-whitespace rejection parity - the .sh half is in section G. Both
+	# drivers must call the same probe empty, so neither runs what the other
+	# refuses.
+	for eb in "${!exotic_blank_ps[@]}"; do
+		if ps1_reject_message "$TMP/h7.$eb.out" "\$p = ${exotic_blank_ps[$eb]}"; then
+			bad ".ps1 accepted a probe of only ${exotic_blank_names[$eb]}" "$(cat "$TMP/h7.$eb.out")"
+		elif grep -q "is empty" "$TMP/h7.$eb.out"; then
+			ok ".ps1 rejects a probe of only ${exotic_blank_names[$eb]} as empty (parity with .sh)"
+		else
+			bad ".ps1 rejected the ${exotic_blank_names[$eb]} probe for the wrong reason" "$(cat "$TMP/h7.$eb.out")"
+		fi
+	done
 else
 	printf '  skip  pwsh unavailable - .sh/.ps1 argv, rejection and message-rendering parity not checked here\n'
 fi

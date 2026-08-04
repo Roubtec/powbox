@@ -42,9 +42,9 @@ if (-not $imagePresent) {
   Write-Warning "image '$Image' not found - the image-gated stages need it. Stage 1 will fail and abort the run before any later stage (Stages 2-5) runs, so you get no partial coverage. Build it (./build.ps1 agent), or pass -RequireImage to fail fast here with a clear message instead of a raw docker error at Stage 1."
 }
 
-# Stage 0 - sensitive-host-path predicate unit test. The Bash smoke (commands/smoke-test.sh)
-# runs this hermetically on the host; on Windows there is no native bash, so run the SAME
-# Bash test INSIDE the agent image - which ships bash and the base-image mawk the mountinfo
+# Stage 0 - sensitive-host-path predicate unit test against the BAKED library. Tier 0
+# runs the /repo source; this runs the same Bash test INSIDE the agent image - which
+# ships bash and the base-image mawk the mountinfo
 # parser is verified against - with the repo mounted read-only. Like the Bash Stage 0a, it
 # points the test at the BAKED /usr/local/bin/sensitive-host-path.sh (via SENSITIVE_HOST_PATH_LIB,
 # below) - the library entrypoint-core.sh / fix-workspace-perms.sh / heal-workspace-perms.sh
@@ -52,8 +52,8 @@ if (-not $imagePresent) {
 # This covers the predicate and the /proc/self/mountinfo source lookup that stop the
 # workspace-perms heal from recursively chowning a mount whose host source is a system/home
 # dir (the VPS-lockout incident - an accidental cc/cx from ~ re-owning the home tree and
-# breaking sshd StrictModes on ~/.ssh). Unlike the Bash version there is no host run (no host
-# bash on Windows), so it self-skips - recorded in $skipped - when the image is absent; the
+# breaking sshd StrictModes on ~/.ssh). It self-skips - recorded in $skipped - when the
+# image is absent; the
 # live end-to-end guard is Stage 5.
 if (-not $imagePresent) {
   Write-Warning "Skipping sensitive-host-path predicate unit test (Stage 0) - image '$Image' not found (no native bash on Windows to run it hermetically)."
@@ -113,28 +113,6 @@ else {
   }
 }
 
-# Stage 0e - Podman Compose exec-form health-check probe invariants (task 025). The
-# hermetic Bash test parses scripts/smoke-test-podman.sh's embedded Compose fixture with
-# yq and asserts the health check stays an EXEC-form CMD array (not CMD-SHELL), that the
-# probe inspects+classifies the wired translation (CMD->CMD-SHELL is a detected
-# KNOWN-XFAIL, not a silent pass), that it drives the check and requires "healthy" while
-# a never-succeeding negative control must be driven to exactly terminal "unhealthy" (not
-# merely "not healthy"), that cleanup tears down the
-# project + only the temp dir, and that the Bash/PowerShell probes stay in parity. It runs INSIDE
-# the agent image (which ships yq and bash) with the repo mounted read-only. Self-skips
-# (recorded in $skipped) when the image is absent.
-if (-not $imagePresent) {
-  Write-Warning "Skipping Podman Compose health-check probe unit test (Stage 0e) - image '$Image' not found (needs bash + yq to parse the embedded fixture)."
-  $skipped.Add("Stage 0e: Podman Compose health-check probe unit test (image absent)")
-}
-else {
-  Write-Host "Running Podman Compose health-check probe unit test (in $Image) ..."
-  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-podman-compose-healthcheck.sh
-  if ($LASTEXITCODE -ne 0) {
-    throw "Podman Compose health-check probe unit test failed. See container output above."
-  }
-}
-
 # Stage 0f - peer-review-run unit test. The hermetic Bash test (fake `claude`/`codex`
 # binaries on a per-case PATH - no real providers, image, or network) has no host bash
 # on Windows, so run it INSIDE the agent image against the BAKED
@@ -190,14 +168,11 @@ else {
 # real mount to assert that every mountpoint component shadow-mounts.sh creates
 # inherits the DEEPEST EXISTING ancestor's uid:gid before the mount goes on top, with
 # exactly one warning per run when that fails. Without the chown, a created mountpoint
-# outlives the container as a root-owned directory on the host's own checkout. The Bash
-# smoke prefers the same in-image run (the code under test calls GNU-only `realpath -m/-e`,
-# so its host fallback is Linux-only); Windows has no native bash at all, so run it in the
-# image or record a skip. Like Stage 0g the in-image run is pointed at the BAKED copy
+# outlives the container as a root-owned directory on the host's own checkout. Like
+# Stage 0g the in-image run is pointed at the BAKED copy
 # (SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh) - that is the file sudo actually runs in a
 # live container, so a stale baked copy is caught here rather than by Stage 1's presence probe.
-# The /repo source is covered by the Bash smoke's Linux host fallback and by running the suite
-# directly; unlike Stage 0g it has no Tier 0 CI step yet (that is task 059).
+# The /repo source is covered by Tier 0's auto-discovered source runner.
 if (-not $imagePresent) {
   Write-Warning "Skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) - image '$Image' not found (no native bash on Windows to run it hermetically)."
   $skipped.Add("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent)")
@@ -207,6 +182,21 @@ else {
   docker run --rm -v "${rootDir}:/repo:ro" -e SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh --entrypoint /bin/bash $Image /repo/scripts/test-shadow-mounts-chown.sh
   if ($LASTEXITCODE -ne 0) {
     throw "shadow-mounts mountpoint-ownership unit test failed. See container output above."
+  }
+}
+
+# Stage 0i - pnpm shadow-wrapper source unit test. The test shims every mount and
+# sudo interaction, but its production contract requires a writable /workspace
+# fixture. The image guarantees that root; an arbitrary host and Tier 0 do not.
+if (-not $imagePresent) {
+  Write-Warning "Skipping pnpm shadow-wrapper unit test (Stage 0i) - image '$Image' not found (the suite needs the image's writable /workspace production root)."
+  $skipped.Add("Stage 0i: pnpm shadow-wrapper unit test (image absent; needs a writable /workspace root)")
+}
+else {
+  Write-Host "Running pnpm shadow-wrapper unit test (source in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-pnpm-shadow-wrapper.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "pnpm shadow-wrapper unit test failed. See container output above."
   }
 }
 
@@ -483,6 +473,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
   Write-Host "pg-dev-up functional test passed."
+
+  # The scoped suite starts real PostgreSQL daemons on loopback and needs the
+  # server binaries baked into the image, so Tier 1's database stage owns it.
+  Write-Host "Running pg-dev-up scoped unit/integration suite in $Image ..."
+  docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-pg-dev-up-scoped.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "pg-dev-up scoped unit/integration suite failed. See container output above."
+  }
 }
 
 # Stage 3 - rootless Podman engine: the agent image bakes podman + a docker shim
@@ -616,7 +614,7 @@ else {
 # bind (via the real shadow-mounts.sh) and leaves a linked worktree DIRTY (tracked
 # mod + untracked file); the second recreates on the same volume and asserts git
 # status still works, the branch/HEAD is intact, both dirty changes survived, and the
-# host checkout's real .git/worktrees gained no registrations. Stage 0c only
+# host checkout's real .git/worktrees gained no registrations. Tier 0 / Stage 0c only
 # unit-tests the orphan-reaping SAFETY net, not this central bind/survive path, so
 # this stage is what guards it. Needs the image AND a runtime that can grant the
 # container CAP_SYS_ADMIN for the `mount --bind`; it self-skips when the image is

@@ -861,7 +861,7 @@ Smoke test the built image with:
 ./commands/smoke-test.sh
 ```
 
-The run is layered: a hermetic tier of nine unit-suite entries (Stages 0 through 0h, over seven distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network — hermetic, but not container-free, since with the image present only Stages 0 and 0c run purely on the host and the other seven run the suite inside a throwaway container, mostly against the **baked** artifact — then six image/host stages — tool presence and key image config, a `pg-dev-up` functional test, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
+The run is layered: a hermetic tier of seven unit-suite entries (Stages 0a, 0b, 0d and 0f–0i, over seven distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — six entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
 Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with a narrow exception the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the orientation the scripts do not give you: what each stage is for, which entries run the `/repo` source and which the baked artifact, which stages reach the network and what a failed pull or clone costs, and which self-skips the banner cannot see. For what an individual stage asserts, read that stage's script.
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-container `agent-nm-<agent>-<project>` and `agent-wt-<agent>-<project>` volumes (for a dir-mounted JS/powbox project; a Go- or boundedly detected .NET-only repo gets only the latter, a non-dev folder neither, and `--isolated` an `agent-ws-<container>` volume instead), a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
@@ -943,20 +943,33 @@ ignores filemode, the bind mount reports `0755`, uid semantics differ) is caught
 automatically on PRs instead of during a manual VPS stand-up. Two layered
 workflows keep cost proportional to the change:
 
-- **Tier 0 — every PR except a `non-code`-labelled one** (`.github/workflows/native-linux-ci.yml`, seconds, no
+- **Tier 0 — every PR except a `non-code`-labelled one** (`.github/workflows/native-linux-ci.yml`, about a minute, no
   Docker): static guards — an exec-bit check (`scripts/check-exec-bits.sh`, the
   PR #51 class), `shellcheck` (error severity) over all `*.sh`, an advisory
   `shfmt` on the scripts a PR changes, and `Invoke-ScriptAnalyzer`
   (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1` —
-  plus the hermetic `scripts/test-detect-shadows.sh` unit suite, which needs no
-  image and is the only regression net for `detect-shadows.sh`'s security
-  properties (under-workspace-root validation, symlink skip, Git-tracked-content
-  veto, newline rejection, workspace-glob containment). That suite needs the
+  plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
+  every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
+  routed to Tier 1. The current 12-suite set is `test-claude-hook-skew.sh`,
+  `test-context-mount-config.sh`, `test-detect-shadows.sh`,
+  `test-peer-review-run.sh`, `test-podman-compose-healthcheck.sh`,
+  `test-seed-marker-source.sh`, `test-sensitive-host-path.sh`,
+  `test-shadow-mounts-chown.sh`, `test-shadow-refresh-guard.sh`,
+  `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`, and
+  `test-wt-orphan-safety.sh`. A new suite is selected automatically; a
+  suite-named log heading makes any non-zero exit obvious. The detect-shadows
+  and Podman-health-check suites need the
   **jq-backed python-yq**, so the job installs it into a throwaway venv from
   `.github/requirements/python-yq.txt` — the whole dependency closure pinned and
   SHA256-verified via `pip --require-hashes`, the same pinned-and-hashed contract
   as the `shfmt` step — and puts it ahead of the runner image's preinstalled
-  mikefarah Go `yq`, which cannot parse the jq filters `detect-shadows.sh` issues.
+  mikefarah Go `yq`, which cannot parse the jq filters they issue.
+  Three suites are explicitly routed to Tier 1 instead: `test-gh-review-threads.sh`
+  needs the separately fetched/baked helper, `test-pnpm-shadow-wrapper.sh` needs
+  the image's writable `/workspace` production root, and
+  `test-pg-dev-up-scoped.sh` starts real PostgreSQL daemons using the baked
+  server binaries. Deliberate Stage 0 repeats target baked artifacts; Tier 0
+  targets `/repo` source, so those are two-target checks rather than duplicate runs.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
   builds the agent image and runs `./commands/smoke-test.sh` under
   `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error instead of a
@@ -966,7 +979,8 @@ workflows keep cost proportional to the change:
   a partial smoke (see "What CI covers vs. what stays VPS-only" below). It
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
-  `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints; skill/docs PRs run
+  `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints and the three
+  `scripts/test-*.sh` suites routed to Tier 1 above; skill/docs PRs run
   Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
   only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
   re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next

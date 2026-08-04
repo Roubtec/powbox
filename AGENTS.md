@@ -55,7 +55,9 @@ Shell formatting convention: among the extensionless `docker/shared/` helpers (`
 Runs in-container (do these before handing off):
 
 - Static lint gates: `shellcheck` (Tier 0 CI blocks at `--severity=error`; run the default severity locally), `shfmt -d`, and PSScriptAnalyzer — see [PowerShell Linting](#powershell-linting).
-- Pure-shell unit tests that need no image or Docker daemon, e.g. `scripts/test-sensitive-host-path.sh`, `scripts/test-detect-shadows.sh`, `scripts/test-shadow-mounts-chown.sh`, `scripts/test-pnpm-shadow-wrapper.sh`.
+- Pure-shell source suites: `./scripts/run-pure-shell-tests.sh` auto-discovers and runs the native-Linux-hermetic `scripts/test-*.sh` set in parallel, with isolated logs and suite-named failures; Tier 0 runs the same entry point on every eligible PR, so a new suite joins automatically.
+- Three environment-dependent suites stay out of that source runner but remain automatic in Tier 1 smoke: `test-gh-review-threads.sh` needs the separately fetched/baked helper, `test-pnpm-shadow-wrapper.sh` needs the image's writable `/workspace` production root, and `test-pg-dev-up-scoped.sh` starts real PostgreSQL daemons using the baked server binaries.
+- Individual suites may honestly skip an optional platform/dependency case (for example `flock` or a newer Git ref backend); their own summary is the source of truth, while any non-zero suite exit still fails the runner loudly.
 
 Needs the host or CI (cannot run here):
 

@@ -74,6 +74,11 @@ on:
       - 'scripts/launch-agent.*'
       - 'scripts/build-image.*'
       - 'scripts/smoke-test*'
+      # Source suites routed out of Tier 0 because they need a built/staged
+      # helper, the image's /workspace contract, or PostgreSQL server binaries.
+      - 'scripts/test-gh-review-threads.sh'
+      - 'scripts/test-pg-dev-up-scoped.sh'
+      - 'scripts/test-pnpm-shadow-wrapper.sh'
       - 'commands/smoke-test.*'
       - '.github/workflows/native-linux-build.yml'
 

@@ -125,9 +125,10 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
 # --- Entrypoint, setup hooks, and worktree helpers ---------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
 # Each agent's hook is baked here so editing a hook rebuilds only this layer.
-# The wt-* worktree helpers (plus the gitcat cross-branch reader and the
-# peer-review-run bidirectional peer-review runner) are baked here too — not in
-# the base image — because they evolve in lockstep with the
+# The wt-* worktree helpers (plus the gitcat cross-branch reader,
+# peer-review-run bidirectional peer-review runner, and wf-check/wf-status
+# workflow debugging helpers) are baked here too — not in the base image —
+# because they evolve in lockstep with the
 # agent-layer assets that reference them (the worktree-running skills and the
 # dev-skills wf-* workflows, both sourced from Roubtec/agent-skills). Keeping
 # them in this layer
@@ -145,6 +146,8 @@ COPY --chmod=755 \
     docker/shared/powbox-provenance \
     docker/shared/gitcat \
     docker/shared/peer-review-run \
+    docker/shared/wf-check \
+    docker/shared/wf-status \
     docker/shared/wt-common.sh \
     docker/shared/wt-bootstrap \
     docker/shared/wt-enter \

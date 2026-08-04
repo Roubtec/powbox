@@ -439,6 +439,8 @@ fi
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \
 	"command -v peer-review-run >/dev/null" \
+	"wf-check --help >/dev/null" \
+	"wf-status --help >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	'actionlint_output="$(actionlint --version)" && test "$(printf "%s\n" "$actionlint_output" | sed -n "1p")" = 1.7.12' \
 	'markdownlint_file="$(mktemp --suffix=.md)" && printf "# Smoke test\n" > "$markdownlint_file" && markdownlint_output="$(markdownlint-cli2 "$markdownlint_file")" && test "$(printf "%s\n" "$markdownlint_output" | grep -Fxc "Linting: 1 file")" -eq 1 && rm -- "$markdownlint_file" && test "$(npm list --global --depth=0 --json | jq -r ".dependencies[\"markdownlint-cli2\"].version")" = 0.23.2' \

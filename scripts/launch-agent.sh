@@ -418,22 +418,27 @@ powbox_local_shadow_config_present() {
 # A deliberately bounded .NET repo detector for the worktrees-volume-only gate.
 # Solutions are recognized at the repo root; project files are recognized there
 # or exactly one directory below it (for layouts such as src/App.csproj).
-# Fixed globs avoid an unbounded recursive scan and do not enumerate unrelated
-# subtrees such as node_modules. Keep this predicate in sync with the PowerShell
-# launcher and the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
+# Fixed-depth finds avoid an unbounded recursive scan. They are deliberately
+# case-insensitive and include dot-prefixed direct children, matching the
+# PowerShell launcher on every host. Inaccessible or concurrently removed child
+# dirs are skipped. Keep this predicate in sync with the PowerShell launcher and
+# the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
 dotnet_repo_present() {
-	local project_root="$1" marker
-	for marker in \
-		"$project_root"/*.sln \
-		"$project_root"/*.slnx \
-		"$project_root"/*.csproj \
-		"$project_root"/*.fsproj \
-		"$project_root"/*.vbproj \
-		"$project_root"/*/*.csproj \
-		"$project_root"/*/*.fsproj \
-		"$project_root"/*/*.vbproj; do
-		[ -f "$marker" ] && return 0
-	done
+	local project_root="$1"
+	while IFS= read -r -d ''; do
+		return 0
+	done < <(
+		find "$project_root" -mindepth 1 -maxdepth 1 -type f \
+			\( -iname '*.sln' -o -iname '*.slnx' -o -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \
+			-print0 2>/dev/null
+	)
+	while IFS= read -r -d ''; do
+		return 0
+	done < <(
+		find "$project_root" -mindepth 2 -maxdepth 2 -type f \
+			\( -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \
+			-print0 2>/dev/null
+	)
 	return 1
 }
 
@@ -1556,6 +1561,44 @@ if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" =
 			CONTAINER_EXISTS=false
 		fi
 	fi
+fi
+
+# NUGET_PACKAGES is frozen in Config.Env when a container is created. A container
+# from before persistent NuGet caching can already have the correct .worktrees
+# mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
+# to compare at all; either shape would otherwise exit through reuse above the new
+# EXTRA_ENV assembly and keep restoring into ephemeral ~/.nuget/packages forever.
+# Compare the exact expected path for every worktrees-backed launch. Follow the
+# mount-mismatch lifecycle: warn without disrupting a running process, and
+# recreate a stopped mismatch so the new environment takes effect.
+if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
+	[ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	EXISTING_CONTAINER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+	EXISTING_NUGET_PACKAGES=""
+	while IFS= read -r env_entry; do
+		case "$env_entry" in
+		NUGET_PACKAGES=*)
+			EXISTING_NUGET_PACKAGES="${env_entry#NUGET_PACKAGES=}"
+			break
+			;;
+		esac
+	done <<<"$EXISTING_CONTAINER_ENV"
+	if [ "$EXISTING_NUGET_PACKAGES" != "$WT_NUGET_PACKAGES_DIR" ]; then
+		EXISTING_NUGET_DISPLAY="${EXISTING_NUGET_PACKAGES:-<unset>}"
+		if [ "$CONTAINER_RUNNING" = true ]; then
+			echo "Note: container ${CONTAINER_NAME} was created with NUGET_PACKAGES='${EXISTING_NUGET_DISPLAY}', but this launch expects '${WT_NUGET_PACKAGES_DIR}'. Container environment is fixed at creation; stop it and relaunch (or use --volatile) to enable persistent NuGet packages." >&2
+		else
+			echo "Container ${CONTAINER_NAME} was created with NUGET_PACKAGES='${EXISTING_NUGET_DISPLAY}'; recreating it with '${WT_NUGET_PACKAGES_DIR}' so NuGet packages persist."
+			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+					exit 1
+				fi
+			fi
+			CONTAINER_EXISTS=false
+		fi
+	fi
+	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_DISPLAY env_entry
 fi
 
 # Detect whether the existing container predates the per-container Podman storage

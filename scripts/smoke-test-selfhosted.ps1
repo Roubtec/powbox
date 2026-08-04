@@ -102,15 +102,20 @@ Ok "dir-mounted hash matches SHA256(path)[:12], has nm/wt and no ws volume"
 # node_modules/ mountpoint littering the host folder. The local ctx:-only case
 # must not opt a non-dev folder into project volumes.
 $matrixRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-gate-$PID"
+$inaccessibleFixture = Join-Path $matrixRoot "dotnet-inaccessible/blocked"
 try {
-  foreach ($dir in @("pkg-only", "gomod-only", "dotnet-sln", "dotnet-slnx", "dotnet-root-project", "dotnet-shallow/src", "dotnet-deep/src/App", "both", "powbox-yml", "local-shadow", "local-shadow-empty", "local-ctx-only", "neither")) {
+  foreach ($dir in @("pkg-only", "gomod-only", "dotnet-sln", "dotnet-slnx", "dotnet-root-project", "dotnet-shallow/src", "dotnet-root-case", "dotnet-hidden/.src", "dotnet-inaccessible/blocked", "dotnet-deep/src/App", "both", "powbox-yml", "local-shadow", "local-shadow-empty", "local-ctx-only", "neither")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $matrixRoot $dir) | Out-Null
   }
   foreach ($marker in @(@("pkg-only", "package.json"), @("gomod-only", "go.mod"), @("both", "package.json"), @("both", "go.mod"))) {
     New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot $marker[0]) $marker[1]) | Out-Null
   }
-  foreach ($marker in @(@("dotnet-sln", "App.sln"), @("dotnet-slnx", "App.slnx"), @("dotnet-root-project", "App.fsproj"), @("dotnet-shallow/src", "App.csproj"), @("dotnet-deep/src/App", "App.vbproj"))) {
+  foreach ($marker in @(@("dotnet-sln", "App.sln"), @("dotnet-slnx", "App.slnx"), @("dotnet-root-project", "App.fsproj"), @("dotnet-shallow/src", "App.csproj"), @("dotnet-root-case", "Legacy.SLN"), @("dotnet-hidden/.src", "App.CSPROJ"), @("dotnet-inaccessible/blocked", "unrelated.txt"), @("dotnet-deep/src/App", "App.vbproj"))) {
     New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot $marker[0]) $marker[1]) | Out-Null
+  }
+  if ([System.IO.Path]::DirectorySeparatorChar -eq '/') {
+    & chmod 000 $inaccessibleFixture
+    if ($LASTEXITCODE -ne 0) { Fail "could not make the inaccessible .NET detector fixture unreadable" }
   }
   New-Item -ItemType File -Force -Path (Join-Path (Join-Path $matrixRoot "powbox-yml") ".powbox.yml") | Out-Null
   Set-Content -LiteralPath (Join-Path (Join-Path $matrixRoot "local-shadow") ".powbox.local.yml") -Value @("shadow:", "  - .worktrees")
@@ -123,6 +128,9 @@ try {
       @("dotnet-slnx", "false", "true"),
       @("dotnet-root-project", "false", "true"),
       @("dotnet-shallow", "false", "true"),
+      @("dotnet-root-case", "false", "true"),
+      @("dotnet-hidden", "false", "true"),
+      @("dotnet-inaccessible", "false", "false"),
       @("dotnet-deep", "false", "false"),
       @("both", "true", "true"),
       @("powbox-yml", "true", "true"),
@@ -140,9 +148,104 @@ try {
   }
 }
 finally {
+  if ([System.IO.Path]::DirectorySeparatorChar -eq '/') { & chmod 700 $inaccessibleFixture 2>$null }
   Remove-Item -Recurse -Force $matrixRoot -ErrorAction SilentlyContinue
 }
-Ok "volume-gate matrix: nm stays on JS/powbox; wt and NuGet also cover bounded .NET/Go; deep .NET and local ctx-only stay non-dev"
+Ok "volume-gate matrix: bounded .NET is case/dot-dir consistent and skips inaccessible children; nm stays narrow"
+
+# --- frozen NUGET_PACKAGES migration (no Docker daemon needed) ---------------
+# A pre-task container can already have exactly the expected nm/wt mounts, so the
+# mount migration alone cannot detect that Config.Env lacks NUGET_PACKAGES. Drive
+# the real reuse path through a tiny Docker shim: stopped containers must recreate;
+# running containers must be left alone with an actionable warning.
+$migrationRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-nuget-migration-$PID"
+$migrationBin = Join-Path $migrationRoot "bin"
+$migrationProject = Join-Path $migrationRoot "project"
+New-Item -ItemType Directory -Force -Path $migrationBin, $migrationProject | Out-Null
+New-Item -ItemType File -Force -Path (Join-Path $migrationProject "package.json") | Out-Null
+$migrationId = Get-Identity @("-Agent", "claude", "-ProjectPath", $migrationProject)
+$migrationContainer = $migrationId["CONTAINER_NAME"]
+$migrationNuget = $migrationId["NUGET_PACKAGES"]
+$fakeDocker = @'
+$dockerArgs = @($args)
+Add-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ($dockerArgs -join " ")
+if ($dockerArgs[0] -eq "container" -and $dockerArgs[1] -eq "inspect") {
+  if ($dockerArgs.Count -gt 3 -and $dockerArgs[2] -eq "--format" -and $dockerArgs[3].Contains("State.Running")) {
+    Write-Output $env:POWBOX_FAKE_RUNNING
+  }
+  exit 0
+}
+if ($dockerArgs[0] -eq "inspect" -and $dockerArgs.Count -gt 2 -and $dockerArgs[1] -eq "--format") {
+  $format = $dockerArgs[2]
+  if ($format.Contains("powbox.continue")) { Write-Output "false" }
+  elseif ($format.Contains("Config.Env")) { Write-Output "PATH=/usr/local/bin:/usr/bin" }
+  elseif ($format.Contains("/node_modules")) { Write-Output $env:POWBOX_FAKE_NM }
+  elseif ($format.Contains("/.worktrees")) { Write-Output $env:POWBOX_FAKE_WT }
+  elseif ($format.Contains("/home/node/.local/share/containers")) { Write-Output "yes" }
+  exit 0
+}
+if ($dockerArgs[0] -eq "image" -and $dockerArgs[1] -eq "inspect") {
+  if ($dockerArgs -contains "--format") { Write-Output "1" }
+  exit 0
+}
+exit 0
+'@
+Set-Content -LiteralPath (Join-Path $migrationBin "docker.ps1") -Value $fakeDocker
+$oldPath = $env:PATH
+$oldGitConfigPath = $env:GIT_CONFIG_PATH
+$pathSeparator = [System.IO.Path]::PathSeparator
+try {
+  $env:PATH = "$migrationBin$pathSeparator$oldPath"
+  $env:POWBOX_FAKE_DOCKER_LOG = Join-Path $migrationRoot "docker.log"
+  $env:POWBOX_FAKE_NM = $migrationId["NM_VOLUME"]
+  $env:POWBOX_FAKE_WT = $migrationId["WT_VOLUME"]
+  $env:GIT_CONFIG_PATH = Join-Path $migrationRoot "missing-gitconfig"
+
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_RUNNING = "false"
+  $migrationStoppedOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationStoppedExit = $LASTEXITCODE
+  if ($migrationStoppedExit -ne 0) { Fail "stopped stale-NuGet migration fixture failed: $($migrationStoppedOutput -join ' ')" }
+  if (-not ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer")) {
+    Fail "stopped container with correct mounts and missing NUGET_PACKAGES was not recreated"
+  }
+  if (($migrationStoppedOutput -join "`n") -notlike "*recreating it with '$migrationNuget'*") {
+    Fail "stopped stale-NuGet migration did not explain the expected path"
+  }
+
+  $migrationIsolatedId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "nuget-migration")
+  $migrationIsolatedContainer = $migrationIsolatedId["CONTAINER_NAME"]
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_RUNNING = "false"
+  $migrationIsolatedOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -Isolated -Repo owner/app -Name nuget-migration -Detach 2>&1)
+  $migrationIsolatedExit = $LASTEXITCODE
+  if ($migrationIsolatedExit -ne 0) { Fail "self-hosted stale-NuGet migration fixture failed: $($migrationIsolatedOutput -join ' ')" }
+  if (-not ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationIsolatedContainer")) {
+    Fail "self-hosted container missing NUGET_PACKAGES was not recreated"
+  }
+
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_RUNNING = "true"
+  $migrationRunningOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationRunningExit = $LASTEXITCODE
+  if ($migrationRunningExit -ne 0) { Fail "running stale-NuGet migration fixture failed: $($migrationRunningOutput -join ' ')" }
+  if ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer") {
+    Fail "running container with stale NUGET_PACKAGES was disrupted"
+  }
+  if (($migrationRunningOutput -join "`n") -notlike "*stop it and relaunch*") {
+    Fail "running stale-NuGet migration did not emit the lifecycle warning"
+  }
+}
+finally {
+  $env:PATH = $oldPath
+  foreach ($name in @("POWBOX_FAKE_DOCKER_LOG", "POWBOX_FAKE_RUNNING", "POWBOX_FAKE_NM", "POWBOX_FAKE_WT")) {
+    Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+  }
+  if ($null -eq $oldGitConfigPath) { Remove-Item Env:GIT_CONFIG_PATH -ErrorAction SilentlyContinue }
+  else { $env:GIT_CONFIG_PATH = $oldGitConfigPath }
+  Remove-Item -Recurse -Force $migrationRoot -ErrorAction SilentlyContinue
+}
+Ok "frozen NuGet env migration: stopped dir-mounted/self-hosted containers recreate; running ones warn"
 
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")

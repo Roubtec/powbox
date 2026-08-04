@@ -139,6 +139,9 @@ mkdir -p \
 	"$MATRIX_ROOT/dotnet-slnx" \
 	"$MATRIX_ROOT/dotnet-root-project" \
 	"$MATRIX_ROOT/dotnet-shallow/src" \
+	"$MATRIX_ROOT/dotnet-root-case" \
+	"$MATRIX_ROOT/dotnet-hidden/.src" \
+	"$MATRIX_ROOT/dotnet-inaccessible/blocked" \
 	"$MATRIX_ROOT/dotnet-deep/src/App" \
 	"$MATRIX_ROOT/both" \
 	"$MATRIX_ROOT/powbox-yml" \
@@ -152,6 +155,10 @@ mkdir -p \
 : >"$MATRIX_ROOT/dotnet-slnx/App.slnx"
 : >"$MATRIX_ROOT/dotnet-root-project/App.fsproj"
 : >"$MATRIX_ROOT/dotnet-shallow/src/App.csproj"
+: >"$MATRIX_ROOT/dotnet-root-case/Legacy.SLN"
+: >"$MATRIX_ROOT/dotnet-hidden/.src/App.CSPROJ"
+: >"$MATRIX_ROOT/dotnet-inaccessible/blocked/unrelated.txt"
+chmod 000 "$MATRIX_ROOT/dotnet-inaccessible/blocked"
 : >"$MATRIX_ROOT/dotnet-deep/src/App/App.vbproj"
 : >"$MATRIX_ROOT/both/package.json"
 : >"$MATRIX_ROOT/both/go.mod"
@@ -170,6 +177,9 @@ gate_case dotnet-sln false true
 gate_case dotnet-slnx false true
 gate_case dotnet-root-project false true
 gate_case dotnet-shallow false true
+gate_case dotnet-root-case false true
+gate_case dotnet-hidden false true
+gate_case dotnet-inaccessible false false
 gate_case dotnet-deep false false
 gate_case both true true
 gate_case powbox-yml true true
@@ -177,9 +187,99 @@ gate_case local-shadow true true
 gate_case local-shadow-empty true true
 gate_case local-ctx-only false false
 gate_case neither false false
+chmod 700 "$MATRIX_ROOT/dotnet-inaccessible/blocked"
 rm -rf "$MATRIX_ROOT"
 trap - EXIT
-ok "volume-gate matrix: nm stays on JS/powbox; wt and NuGet also cover bounded .NET/Go; deep .NET and local ctx-only stay non-dev"
+ok "volume-gate matrix: bounded .NET is case/dot-dir consistent and skips inaccessible children; nm stays narrow"
+
+# --- frozen NUGET_PACKAGES migration (no Docker daemon needed) ----------------
+# A pre-task container can already have exactly the expected nm/wt mounts, so the
+# mount migration alone cannot detect that Config.Env lacks NUGET_PACKAGES. Drive
+# the real reuse path through a tiny Docker shim: stopped containers must recreate;
+# running containers must be left alone with an actionable warning.
+MIGRATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-nuget-migration-XXXXXX")"
+trap 'rm -rf "$MIGRATION_ROOT"' EXIT
+mkdir -p "$MIGRATION_ROOT/bin" "$MIGRATION_ROOT/project"
+: >"$MIGRATION_ROOT/project/package.json"
+MIGRATION_ID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude "$MIGRATION_ROOT/project" 2>/dev/null)"
+MIGRATION_CONTAINER="$(id_field "$MIGRATION_ID" CONTAINER_NAME)"
+MIGRATION_NM="$(id_field "$MIGRATION_ID" NM_VOLUME)"
+MIGRATION_WT="$(id_field "$MIGRATION_ID" WT_VOLUME)"
+MIGRATION_NUGET="$(id_field "$MIGRATION_ID" NUGET_PACKAGES)"
+cat >"$MIGRATION_ROOT/bin/docker" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$POWBOX_FAKE_DOCKER_LOG"
+if [ "$1" = container ] && [ "$2" = inspect ]; then
+	if [ "${3:-}" = --format ] && printf '%s' "${4:-}" | grep -q 'State.Running'; then
+		printf '%s\n' "$POWBOX_FAKE_RUNNING"
+	fi
+	exit 0
+fi
+if [ "$1" = inspect ] && [ "${2:-}" = --format ]; then
+	case "$3" in
+	*powbox.continue*) printf 'false\n' ;;
+	*Config.Env*) printf 'PATH=/usr/local/bin:/usr/bin\n' ;;
+	*'/node_modules'*) printf '%s\n' "$POWBOX_FAKE_NM" ;;
+	*'/.worktrees'*) printf '%s\n' "$POWBOX_FAKE_WT" ;;
+	*'/home/node/.local/share/containers'*) printf 'yes\n' ;;
+	*powbox.podman-devices*) : ;;
+	*) : ;;
+	esac
+	exit 0
+fi
+if [ "$1" = image ] && [ "${2:-}" = inspect ]; then
+	case "$*" in *--format*) printf '1\n' ;; esac
+	exit 0
+fi
+exit 0
+SH
+chmod +x "$MIGRATION_ROOT/bin/docker"
+
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_STOPPED_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "stopped stale-NuGet migration fixture failed: $MIGRATION_STOPPED_OUTPUT"
+grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
+	fail "stopped container with correct mounts and missing NUGET_PACKAGES was not recreated"
+printf '%s\n' "$MIGRATION_STOPPED_OUTPUT" | grep -Fq "recreating it with '$MIGRATION_NUGET'" ||
+	fail "stopped stale-NuGet migration did not explain the expected path"
+
+MIGRATION_ISOLATED_ID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration 2>/dev/null)"
+MIGRATION_ISOLATED_CONTAINER="$(id_field "$MIGRATION_ISOLATED_ID" CONTAINER_NAME)"
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_ISOLATED_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="" \
+		POWBOX_FAKE_WT="" \
+		"$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration --detach
+} 2>&1)" || fail "self-hosted stale-NuGet migration fixture failed: $MIGRATION_ISOLATED_OUTPUT"
+grep -Fqx "rm $MIGRATION_ISOLATED_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
+	fail "self-hosted container missing NUGET_PACKAGES was not recreated"
+
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_RUNNING_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=true \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "running stale-NuGet migration fixture failed: $MIGRATION_RUNNING_OUTPUT"
+if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
+	fail "running container with stale NUGET_PACKAGES was disrupted"
+fi
+printf '%s\n' "$MIGRATION_RUNNING_OUTPUT" | grep -Fq "stop it and relaunch" ||
+	fail "running stale-NuGet migration did not emit the lifecycle warning"
+rm -rf "$MIGRATION_ROOT"
+trap - EXIT
+ok "frozen NuGet env migration: stopped dir-mounted/self-hosted containers recreate; running ones warn"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"

@@ -202,15 +202,23 @@ function Test-Powbox-LocalShadowConfigPresent ([string]$Workspace) {
 # Solutions are recognized at the repo root; project files are recognized there
 # or exactly one directory below it (for layouts such as src/App.csproj).
 # GetFiles is non-recursive at each explicitly visited level, so unrelated deep
-# trees are never scanned. Keep this predicate in sync with launch-agent.sh and
-# the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
+# trees are never scanned. Extension matching is explicitly case-insensitive on
+# every host, and dot-prefixed direct children count. Inaccessible or concurrently
+# removed children are skipped. Keep this predicate in sync with launch-agent.sh
+# and the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
 function Test-Powbox-DotNetRepoPresent ([string]$Workspace) {
-  foreach ($pattern in @("*.sln", "*.slnx", "*.csproj", "*.fsproj", "*.vbproj")) {
-    if ([System.IO.Directory]::GetFiles($Workspace, $pattern).Count -gt 0) { return $true }
+  try { $rootFiles = [System.IO.Directory]::GetFiles($Workspace) }
+  catch { $rootFiles = @() }
+  foreach ($file in $rootFiles) {
+    if (@(".sln", ".slnx", ".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
   }
-  foreach ($directory in [System.IO.Directory]::GetDirectories($Workspace)) {
-    foreach ($pattern in @("*.csproj", "*.fsproj", "*.vbproj")) {
-      if ([System.IO.Directory]::GetFiles($directory, $pattern).Count -gt 0) { return $true }
+  try { $directories = [System.IO.Directory]::GetDirectories($Workspace) }
+  catch { $directories = @() }
+  foreach ($directory in $directories) {
+    try { $childFiles = [System.IO.Directory]::GetFiles($directory) }
+    catch { continue }
+    foreach ($file in $childFiles) {
+      if (@(".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
     }
   }
   return $false
@@ -1196,6 +1204,44 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
         docker container inspect $containerName *> $null
         if ($LASTEXITCODE -eq 0) {
           Write-Error "Failed to remove container $containerName after detecting outdated workspace volume mounts."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+}
+
+# NUGET_PACKAGES is frozen in Config.Env when a container is created. A container
+# from before persistent NuGet caching can already have the correct .worktrees
+# mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
+# to compare at all; either shape would otherwise exit through reuse above the new
+# run-argument assembly and keep restoring into ephemeral ~/.nuget/packages forever.
+# Compare the exact expected path for every worktrees-backed launch. Follow the
+# mount-mismatch lifecycle: warn without disrupting a running process, and
+# recreate a stopped mismatch so the new environment takes effect.
+if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExists) {
+  $existingContainerEnv = @(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $existingContainerEnv = @() }
+  $existingNugetPackages = $null
+  foreach ($envEntry in $existingContainerEnv) {
+    if ($envEntry.StartsWith("NUGET_PACKAGES=", [System.StringComparison]::Ordinal)) {
+      $existingNugetPackages = $envEntry.Substring("NUGET_PACKAGES=".Length)
+      break
+    }
+  }
+  if ($existingNugetPackages -ne $worktreesNugetPackagesDir) {
+    $existingNugetDisplay = if ($null -eq $existingNugetPackages -or $existingNugetPackages -eq "") { "<unset>" } else { $existingNugetPackages }
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay', but this launch expects '$worktreesNugetPackagesDir'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent NuGet packages." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "Container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay'; recreating it with '$worktreesNugetPackagesDir' so NuGet packages persist."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting an outdated NUGET_PACKAGES environment."
           exit 1
         }
       }

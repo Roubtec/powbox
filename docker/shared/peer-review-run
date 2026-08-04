@@ -1316,8 +1316,8 @@ run_attempt() {
 		return 0
 	fi
 
-	# Start the attempt clock BEFORE build_cmd. For Codex, build_cmd_codex runs the
-	# bounded provider help capability probe (once per run, on the first
+	# Start the attempt clock BEFORE build_cmd. Both adapters run the bounded
+	# provider help capability probe (once per run, on the first
 	# attempt) — real wall time the caller waited. elapsedSeconds is the contract's
 	# TOTAL wall time across all attempts, so the probe must be COUNTED; timing from
 	# after build_cmd would silently drop it (a slow-but-successful probe made the

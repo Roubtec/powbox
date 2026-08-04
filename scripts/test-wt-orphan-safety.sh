@@ -1076,8 +1076,17 @@ fi
 # they are spelled `<gitdir>:ref:<NAME>` and looked up in the ref storage
 # instead. (`:ref:` cannot occur by accident in these fixtures: every path here
 # is rooted at a mktemp dir.)
+#
+# `<gitdir>:symref:<NAME>` is the third spelling, for a marker that exists as a
+# SYMBOLIC ref whose target does not resolve — NOTES_MERGE_REF after the notes
+# ref it points at is deleted. `show-ref --verify` answers 1 there (it reports
+# what a name RESOLVES to, not what exists), so the `:ref:` spelling would call
+# such a fixture's marker missing; `symbolic-ref` is what answers about
+# existence. The `:symref:` arm is matched FIRST so the `:ref:` glob, which the
+# longer spelling would otherwise be tested against, cannot claim it.
 marker_present() {
 	case "$1" in
+	*:symref:*) [ -n "$(git --git-dir="${1%%:symref:*}" symbolic-ref --quiet "${1##*:symref:}" 2>/dev/null)" ] ;;
 	*:ref:*) git --git-dir="${1%%:ref:*}" show-ref --verify --quiet "${1##*:ref:}" ;;
 	*) [ -e "$1" ] ;;
 	esac
@@ -1255,9 +1264,14 @@ fi
 # The markers are strictly PER-WORKTREE (verified: the same merge run in the main
 # checkout writes them into `.git/`, not into `.git/worktrees/<slug>/`), so
 # guarding them cannot make a sibling's notes merge block this removal.
-notes_merge_repo() { # <name> -> echoes ROOT, with worktree <slug> mid-notes-merge
-	local root slug="$2"
-	root="$(make_repo "$1")"
+# notes_merge_repo <name> <slug> [<git init flag>...] -> echoes ROOT, with
+# worktree <slug> mid-notes-merge. The trailing flags are for
+# `--ref-format=reftable`, which turns the two markers into pseudo-refs with no
+# file on disk; the reftable cases further down build the SAME shape with them.
+notes_merge_repo() {
+	local root name="$1" slug="$2"
+	shift 2
+	root="$(make_repo "$name" "$@")"
 	git_quiet -C "$root" branch "$slug-b" >/dev/null 2>&1
 	git_quiet -C "$root" worktree add -q "$root/.worktrees/$CONTAINER_NAME/$slug" "$slug-b" >/dev/null 2>&1
 	git_quiet -C "$root" notes --ref=A add -m "note from A" HEAD >/dev/null 2>&1
@@ -1323,12 +1337,7 @@ if [ -z "$REFTABLE_OK" ]; then
 	skip "reftable ref-backend cases (this git cannot create a --ref-format=reftable repo)"
 else
 	# (a) a conflicted `git notes merge` — the shape that was actually removed.
-	RT1="$(make_repo rt-notes --ref-format=reftable)"
-	git_quiet -C "$RT1" branch rtnm-b >/dev/null 2>&1
-	git_quiet -C "$RT1" worktree add -q "$RT1/.worktrees/$CONTAINER_NAME/rtnm" rtnm-b >/dev/null 2>&1
-	git_quiet -C "$RT1" notes --ref=A add -m "note from A" HEAD >/dev/null 2>&1
-	git_quiet -C "$RT1" notes --ref=B add -m "note from B" HEAD >/dev/null 2>&1
-	git_quiet -C "$RT1/.worktrees/$CONTAINER_NAME/rtnm" notes --ref=A merge B >/dev/null 2>&1 || true
+	RT1="$(notes_merge_repo rt-notes rtnm --ref-format=reftable)"
 	GDT1="$RT1/.git/worktrees/rtnm"
 	if [ ! -e "$GDT1/NOTES_MERGE_PARTIAL" ] && [ ! -e "$GDT1/NOTES_MERGE_REF" ] &&
 		git --git-dir="$GDT1" show-ref --verify --quiet NOTES_MERGE_PARTIAL &&
@@ -1403,6 +1412,62 @@ else
 		fi
 	else
 		no "precondition: under reftable a stopped single-commit revert should leave REVERT_HEAD as a REF, no file and no sequencer/"
+	fi
+
+	# (d) NOTES_MERGE_REF alone, under reftable — the same half-torn-down shape
+	# the files-backend case above builds by deleting NOTES_MERGE_PARTIAL, and the
+	# only fixture that can prove the NOTES_MERGE_REF half of the guard
+	# load-bearing HERE: case (a) carries both markers, so dropping REF from
+	# wt-remove's state list would leave (a) passing. `update-ref -d` is the
+	# reftable equivalent of that case's `rm -f` — there is no file to remove.
+	RT4="$(notes_merge_repo rt-notesref rtnmr --ref-format=reftable)"
+	WT4="$RT4/.worktrees/$CONTAINER_NAME/rtnmr"
+	GDT4="$RT4/.git/worktrees/rtnmr"
+	git_quiet -C "$WT4" update-ref -d NOTES_MERGE_PARTIAL >/dev/null 2>&1
+	if [ ! -e "$GDT4/NOTES_MERGE_PARTIAL" ] && [ ! -e "$GDT4/NOTES_MERGE_REF" ] &&
+		! git --git-dir="$GDT4" show-ref --verify --quiet NOTES_MERGE_PARTIAL &&
+		git --git-dir="$GDT4" show-ref --verify --quiet NOTES_MERGE_REF; then
+		miss="$(wt_remove_must_refuse "a 'git notes' merge (NOTES_MERGE_REF)" "$RT4" rtnmr "$GDT4:ref:NOTES_MERGE_REF")"
+		if [ -z "$miss" ]; then
+			ok "wt-remove refuses a half-torn-down notes merge under reftable: NOTES_MERGE_REF as a ref, no NOTES_MERGE_PARTIAL"
+		else
+			no "wt-remove NOTES_MERGE_REF-only guard fails open under reftable:$miss"
+		fi
+	else
+		no "precondition: under reftable the half-torn-down notes fixture should hold NOTES_MERGE_REF as a REF, no NOTES_MERGE_PARTIAL and no marker files"
+	fi
+
+	# (e) NOTES_MERGE_REF as a symbolic ref whose TARGET is gone. `git notes merge`
+	# writes NOTES_MERGE_REF as a symref to `refs/notes/<ref>` (measured under both
+	# backends), and `show-ref --verify` reports what a name RESOLVES to, not
+	# whether it exists: delete the notes ref while the merge is unconcluded and
+	# that probe answers 1, "absent". Under `files` the marker FILE still catches
+	# it — which is why this fixture is reftable-only, where there is no file and
+	# the guard fell through to "nothing in flight" and REMOVED the worktree
+	# (measured before the symbolic-ref probe was added). NOTES_MERGE_PARTIAL is
+	# torn down as in (d) so nothing but this probe can refuse.
+	RT5="$(notes_merge_repo rt-notesdangling rtnmd --ref-format=reftable)"
+	WT5="$RT5/.worktrees/$CONTAINER_NAME/rtnmd"
+	GDT5="$RT5/.git/worktrees/rtnmd"
+	git_quiet -C "$WT5" update-ref -d NOTES_MERGE_PARTIAL >/dev/null 2>&1
+	git_quiet -C "$RT5" update-ref -d refs/notes/A >/dev/null 2>&1
+	if [ ! -e "$GDT5/NOTES_MERGE_PARTIAL" ] && [ ! -e "$GDT5/NOTES_MERGE_REF" ] &&
+		! git --git-dir="$GDT5" show-ref --verify --quiet NOTES_MERGE_PARTIAL &&
+		! git --git-dir="$GDT5" show-ref --verify --quiet NOTES_MERGE_REF &&
+		[ "$(git --git-dir="$GDT5" symbolic-ref --quiet NOTES_MERGE_REF 2>/dev/null)" = refs/notes/A ] &&
+		[ -n "$(ls -A "$GDT5/NOTES_MERGE_WORKTREE" 2>/dev/null)" ]; then
+		miss="$(wt_remove_must_refuse "a 'git notes' merge (NOTES_MERGE_REF)" "$RT5" rtnmd "$GDT5:symref:NOTES_MERGE_REF")"
+		# The conflict directory is the whole reason to refuse: with both the
+		# notes ref and NOTES_MERGE_PARTIAL gone it is the only copy left.
+		[ -n "$(ls -A "$GDT5/NOTES_MERGE_WORKTREE" 2>/dev/null)" ] ||
+			miss="$miss unresolved-notes-lost"
+		if [ -z "$miss" ]; then
+			ok "wt-remove refuses NOTES_MERGE_REF under reftable when it is a symref whose target was deleted (show-ref alone calls it absent)"
+		else
+			no "wt-remove NOTES_MERGE_REF guard fails open for an unresolvable symref under reftable:$miss"
+		fi
+	else
+		no "precondition: under reftable the deleted-notes-ref fixture should hold NOTES_MERGE_REF as an UNRESOLVABLE symref to refs/notes/A, no NOTES_MERGE_PARTIAL and a non-empty NOTES_MERGE_WORKTREE"
 	fi
 fi
 
@@ -1761,6 +1826,35 @@ else
 	no "wt-remove ref-lookup fail-safe inadequate:$miss"
 fi
 
+# (g) The same refusal reached from the REPOSITORY side instead of the binary's.
+# Under `reftable` the ref storage is a directory, and a mode-000 `reftable/` is
+# one this git cannot read — no shim needed. The point of the case is WHICH probe
+# notices, and WHICH diagnosis comes out: `show-ref --verify --quiet` answers 1
+# there, "absent" (measured), so on that probe alone the operation guard walks the
+# whole state list finding nothing and the refusal falls through to the
+# uncommitted-changes check below it, which reports "worktree has uncommitted
+# changes" about a repository whose refs simply cannot be READ (measured — the
+# worktree does survive, by accident and under the wrong name). `symbolic-ref
+# --quiet` exits 128, which is why it carries the same 0/1/refuse contract as
+# probe 2 rather than being read as a plain yes/no, and why the ref-storage
+# failure is named as itself.
+if [ -z "$REFTABLE_OK" ]; then
+	skip "an unreadable reftable ref storage (this git cannot create a --ref-format=reftable repo)"
+else
+	RF7="$(make_repo rf-reftable --ref-format=reftable)"
+	git_quiet -C "$RF7" worktree add -q "$RF7/.worktrees/$CONTAINER_NAME/rtstore" -b rtstore-b >/dev/null 2>&1
+	rf7_rc=0
+	chmod 000 "$RF7/.git/worktrees/rtstore/reftable"
+	git --git-dir="$RF7/.git/worktrees/rtstore" show-ref --verify --quiet CHERRY_PICK_HEAD 2>/dev/null || rf7_rc=$?
+	chmod 755 "$RF7/.git/worktrees/rtstore/reftable"
+	[ "$rf7_rc" -eq 1 ] ||
+		no "precondition: an unreadable reftable/ should make show-ref answer 1 (absent), which is what makes this case load-bearing (got $rf7_rc)"
+	fs_case "wt-remove refuses when a reftable ref storage cannot be READ (show-ref calls it absent, symbolic-ref does not)" \
+		"$RF7" rtstore \
+		"chmod 000 '$RF7/.git/worktrees/rtstore/reftable'" \
+		"chmod 755 '$RF7/.git/worktrees/rtstore/reftable'"
+fi
+
 # ---------------------------------------------------------------------------
 # Integration: the inspection commands wt-remove offers must be PASTEABLE, the
 # same property wt-enter's spaced-path case pins for its own advice further down.
@@ -1851,21 +1945,38 @@ fi
 # (measured — it answers for a branch called `MERGE_HEAD`, `sequencer` or
 # `rebase-apply` alike), which would refuse EVERY worktree in such a repository,
 # forever, whether or not anything is in flight. `show-ref --verify` takes an
-# exact ref path and cannot make that mistake. Branch names are chosen by task
-# files and by people, so this is data, exactly like the hostile branch names the
+# exact ref path and cannot make that mistake, and neither does `symbolic-ref`,
+# which reads the name as given. Branch names are chosen by task files and by
+# people, so this is data, exactly like the hostile branch names the
 # destructive_advice detector has to survive.
-RC1B="$(make_repo rc-markerbranch)"
-for b in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD NOTES_MERGE_PARTIAL NOTES_MERGE_REF sequencer rebase-apply rebase-merge BISECT_LOG BISECT_START; do
-	git_quiet -C "$RC1B" branch "$b" >/dev/null 2>&1 ||
-		no "precondition: git refused to create a branch named '$b'"
-done
-git_quiet -C "$RC1B" worktree add -q "$RC1B/.worktrees/$CONTAINER_NAME/mb" -b mb-b >/dev/null 2>&1
-if (cd "$RC1B" && bash "$WT_REMOVE" mb 2>"$WORK_ROOT/rc1b.err") &&
-	[ ! -e "$RC1B/.worktrees/$CONTAINER_NAME/mb" ] &&
-	git -C "$RC1B" show-ref --verify --quiet refs/heads/mb-b; then
-	ok "wt-remove is not fooled by BRANCHES named after the state markers (the ref probe is exact, not DWIM)"
+#
+# It is run under BOTH ref backends, because where a DWIMing lookup would FIND
+# the branch differs: under `files` a branch is a loose file beneath
+# `refs/heads/`, under `reftable` it is a record in the very table the guarded
+# pseudo-refs live in — the storage in which an inexact lookup has the least
+# distance to travel to reach the wrong answer.
+marker_branch_case() { # <backend label> <repo name> <slug> [<git init flag>...]
+	local root backend="$1" name="$2" slug="$3" b
+	shift 3
+	root="$(make_repo "$name" "$@")"
+	for b in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD NOTES_MERGE_PARTIAL NOTES_MERGE_REF sequencer rebase-apply rebase-merge BISECT_LOG BISECT_START; do
+		git_quiet -C "$root" branch "$b" >/dev/null 2>&1 ||
+			no "precondition: git refused to create a branch named '$b'"
+	done
+	git_quiet -C "$root" worktree add -q "$root/.worktrees/$CONTAINER_NAME/$slug" -b "$slug-b" >/dev/null 2>&1
+	if (cd "$root" && bash "$WT_REMOVE" "$slug" 2>"$WORK_ROOT/$slug.err") &&
+		[ ! -e "$root/.worktrees/$CONTAINER_NAME/$slug" ] &&
+		git -C "$root" show-ref --verify --quiet "refs/heads/$slug-b"; then
+		ok "wt-remove is not fooled by BRANCHES named after the state markers, $backend backend (the ref probes are exact, not DWIM)"
+	else
+		no "wt-remove FALSE-REFUSED a clean worktree in a repo holding branches named after state markers, $backend backend: $(cat "$WORK_ROOT/$slug.err")"
+	fi
+}
+marker_branch_case files rc-markerbranch mb
+if [ -z "$REFTABLE_OK" ]; then
+	skip "branches named after the state markers under the reftable backend (this git cannot create a --ref-format=reftable repo)"
 else
-	no "wt-remove FALSE-REFUSED a clean worktree in a repo holding branches named after state markers: $(cat "$WORK_ROOT/rc1b.err")"
+	marker_branch_case reftable rc-markerbranch-rt mbrt --ref-format=reftable
 fi
 
 # The main checkout being mid-operation must not leak into a task worktree's

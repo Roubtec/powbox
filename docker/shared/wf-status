@@ -1,0 +1,382 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const USAGE = `Usage: wf-status <runId-or-transcript-dir>
+
+Print a best-effort summary of a Claude Workflow run.
+
+The helper reads journal.jsonl, agent transcript metadata, and (when available)
+the sibling workflows/<runId>.json snapshot. Labels, phases, error states, and
+the final return are harness-owned and may be unavailable in a killed or older
+run; missing files and a truncated final JSONL record are reported as warnings,
+not fatal errors.
+`;
+
+function readJson(filename, warnings, label) {
+  let text;
+  try {
+    text = fs.readFileSync(filename, "utf8");
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      warnings.push(`${label} is missing`);
+      return null;
+    }
+    warnings.push(`${label} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    warnings.push(`${label} is truncated or invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+function listDirectories(directory) {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function candidateMtime(candidate) {
+  for (const filename of [candidate.snapshotPath, path.join(candidate.runDir, "journal.jsonl"), candidate.runDir]) {
+    try {
+      return fs.statSync(filename).mtimeMs;
+    } catch {
+      // Keep trying less-specific artifacts.
+    }
+  }
+  return 0;
+}
+
+function findRun(runId) {
+  const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  const projectsDir = path.join(configDir, "projects");
+  const candidates = [];
+  for (const project of listDirectories(projectsDir)) {
+    const projectDir = path.join(projectsDir, project);
+    for (const session of listDirectories(projectDir)) {
+      const sessionDir = path.join(projectDir, session);
+      const runDir = path.join(sessionDir, "subagents", "workflows", runId);
+      const snapshotPath = path.join(sessionDir, "workflows", `${runId}.json`);
+      if (fs.existsSync(runDir) || fs.existsSync(snapshotPath)) candidates.push({ runDir, snapshotPath });
+    }
+  }
+  candidates.sort((left, right) => candidateMtime(right) - candidateMtime(left));
+  return candidates;
+}
+
+function resolveInput(input) {
+  if (/^wf_[a-z0-9-]{6,}$/i.test(input) && !fs.existsSync(input)) {
+    const candidates = findRun(input);
+    if (candidates.length === 0) throw new Error(`run ${input} was not found under the Claude projects directory`);
+    return { ...candidates[0], runId: input, duplicateCount: candidates.length };
+  }
+
+  const resolved = path.resolve(input);
+  let runDir = resolved;
+  try {
+    if (fs.statSync(resolved).isFile()) {
+      if (path.basename(resolved) === "journal.jsonl") runDir = path.dirname(resolved);
+      else throw new Error("the path is a file, not a transcript directory or journal.jsonl");
+    }
+  } catch (error) {
+    if (error && error.code === "ENOENT") throw new Error(`transcript path does not exist: ${resolved}`);
+    throw error;
+  }
+  const runId = path.basename(runDir);
+  const sessionDir = path.resolve(runDir, "../../..");
+  return { runDir, runId, snapshotPath: path.join(sessionDir, "workflows", `${runId}.json`), duplicateCount: 1 };
+}
+
+function readJournal(filename, warnings) {
+  let text;
+  try {
+    text = fs.readFileSync(filename, "utf8");
+  } catch (error) {
+    if (error && error.code === "ENOENT") warnings.push("journal.jsonl is missing");
+    else warnings.push(`journal.jsonl could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+  const records = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() === "") continue;
+    try {
+      const record = JSON.parse(line);
+      if (record && typeof record === "object") records.push(record);
+    } catch (error) {
+      const qualifier = index === lines.length - 1 && !text.endsWith("\n") ? "truncated final" : "invalid";
+      warnings.push(`journal.jsonl line ${index + 1} is a ${qualifier} record and was ignored`);
+    }
+  }
+  return records;
+}
+
+function readEdgeLines(filename) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filename, "r");
+    const size = fs.fstatSync(descriptor).size;
+    const chunkSize = Math.min(size, 65536);
+    const first = Buffer.alloc(chunkSize);
+    fs.readSync(descriptor, first, 0, chunkSize, 0);
+    const last = Buffer.alloc(chunkSize);
+    fs.readSync(descriptor, last, 0, chunkSize, Math.max(0, size - chunkSize));
+    const firstLines = first.toString("utf8").split("\n").slice(0, -1);
+    const lastLines = last.toString("utf8").split("\n");
+    if (size > chunkSize) lastLines.shift();
+    return { firstLines, lastLines };
+  } catch {
+    return { firstLines: [], lastLines: [] };
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function parseLine(line) {
+  try {
+    const value = JSON.parse(line);
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function transcriptHints(filename) {
+  const { firstLines, lastLines } = readEdgeLines(filename);
+  let prompt = null;
+  for (const line of firstLines) {
+    const record = parseLine(line);
+    const content = record && record.type === "user" ? record.message?.content : null;
+    if (typeof content === "string" && content.trim() !== "") {
+      prompt = content.trim().split(/\r?\n/, 1)[0];
+      break;
+    }
+  }
+  let completed = false;
+  let failed = false;
+  for (const line of lastLines) {
+    const record = parseLine(line);
+    if (!record) continue;
+    if (record.type === "assistant" && record.isApiErrorMessage === true) failed = true;
+    if (record.type === "assistant" && record.message?.stop_reason === "end_turn") completed = true;
+  }
+  return { prompt, completed, failed };
+}
+
+function normalizeState(state) {
+  if (state === "done" || state === "completed" || state === "complete" || state === "success") return "completed";
+  if (state === "error" || state === "failed" || state === "failure") return "failed";
+  return "pending";
+}
+
+function compactLabel(value) {
+  if (typeof value !== "string") return "?";
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (oneLine === "") return "?";
+  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+}
+
+function readAgents(runDir, warnings) {
+  const agents = new Map();
+  let entries;
+  try {
+    entries = fs.readdirSync(runDir, { withFileTypes: true });
+  } catch (error) {
+    warnings.push(`transcript directory could not be listed: ${error instanceof Error ? error.message : String(error)}`);
+    return agents;
+  }
+  for (const entry of entries) {
+    const match = entry.name.match(/^agent-(.+)\.meta\.json$/);
+    if (!entry.isFile() || !match) continue;
+    const agentId = match[1];
+    const metadata = readJson(path.join(runDir, entry.name), warnings, entry.name) || {};
+    const transcriptPath = path.join(runDir, `agent-${agentId}.jsonl`);
+    const hints = transcriptHints(transcriptPath);
+    agents.set(agentId, {
+      agentId,
+      label: compactLabel(metadata.label || metadata.name || metadata.description || hints.prompt),
+      state: normalizeState(metadata.state || metadata.status || (hints.failed ? "failed" : hints.completed ? "completed" : "pending")),
+      agentType: typeof metadata.agentType === "string" ? metadata.agentType : undefined,
+    });
+  }
+  for (const entry of entries) {
+    const match = entry.name.match(/^agent-(.+)\.jsonl$/);
+    if (!entry.isFile() || !match || agents.has(match[1])) continue;
+    const agentId = match[1];
+    const hints = transcriptHints(path.join(runDir, entry.name));
+    agents.set(agentId, {
+      agentId,
+      label: compactLabel(hints.prompt),
+      state: normalizeState(hints.failed ? "failed" : hints.completed ? "completed" : "pending"),
+    });
+  }
+  return agents;
+}
+
+function buildCalls(snapshot, journal, agentFiles) {
+  const calls = [];
+  const byAgentId = new Map();
+  const progress = Array.isArray(snapshot?.workflowProgress) ? snapshot.workflowProgress : [];
+  const progressByIndex = new Map();
+  for (const entry of progress) {
+    if (!entry || entry.type !== "workflow_agent") continue;
+    const index = Number.isFinite(entry.index) ? entry.index : progressByIndex.size + 1;
+    progressByIndex.set(index, entry);
+  }
+  for (const [index, entry] of [...progressByIndex.entries()].sort((left, right) => left[0] - right[0])) {
+    const agentId = typeof entry.agentId === "string" ? entry.agentId : undefined;
+    const fallback = agentId ? agentFiles.get(agentId) : undefined;
+    const call = {
+      index,
+      agentId,
+      label: compactLabel(entry.label || fallback?.label),
+      phase: compactLabel(entry.phaseTitle),
+      state: normalizeState(entry.state),
+      error: typeof entry.error === "string" ? entry.error : undefined,
+      journalKey: undefined,
+    };
+    calls.push(call);
+    if (agentId) byAgentId.set(agentId, call);
+  }
+
+  const journalCalls = new Map();
+  for (const record of journal) {
+    if (record.type !== "started" && record.type !== "result") continue;
+    const key = typeof record.key === "string" ? record.key : `unkeyed:${journalCalls.size + 1}`;
+    const current = journalCalls.get(key) || { key, starts: [], result: null };
+    if (record.type === "started") current.starts.push(record);
+    else current.result = record;
+    journalCalls.set(key, current);
+  }
+  for (const journalCall of journalCalls.values()) {
+    const lastStart = journalCall.starts[journalCall.starts.length - 1];
+    const agentId = typeof journalCall.result?.agentId === "string" && journalCall.result.agentId !== ""
+      ? journalCall.result.agentId
+      : typeof lastStart?.agentId === "string" ? lastStart.agentId : undefined;
+    let call = agentId ? byAgentId.get(agentId) : undefined;
+    if (!call) {
+      const fallback = agentId ? agentFiles.get(agentId) : undefined;
+      call = {
+        index: calls.length + 1,
+        agentId,
+        label: compactLabel(fallback?.label),
+        phase: "?",
+        state: journalCall.result ? "completed" : fallback?.state || "pending",
+        error: undefined,
+        journalKey: journalCall.key,
+      };
+      calls.push(call);
+      if (agentId) byAgentId.set(agentId, call);
+    } else {
+      call.journalKey = journalCall.key;
+      if (journalCall.result) call.state = "completed";
+    }
+  }
+
+  for (const [agentId, fileAgent] of agentFiles) {
+    if (byAgentId.has(agentId)) continue;
+    const call = {
+      index: calls.length + 1,
+      agentId,
+      label: compactLabel(fileAgent.label),
+      phase: "?",
+      state: fileAgent.state,
+      error: undefined,
+      journalKey: undefined,
+    };
+    calls.push(call);
+    byAgentId.set(agentId, call);
+  }
+  return calls;
+}
+
+function phasesSeen(snapshot) {
+  const progress = Array.isArray(snapshot?.workflowProgress) ? snapshot.workflowProgress : [];
+  const phases = new Map();
+  for (const entry of progress) {
+    if (!entry || entry.type !== "workflow_phase" || typeof entry.title !== "string") continue;
+    const index = Number.isFinite(entry.index) ? entry.index : phases.size + 1;
+    phases.set(index, entry.title);
+  }
+  return [...phases.entries()].sort((left, right) => left[0] - right[0]);
+}
+
+function displayValue(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? String(value) : encoded;
+  } catch {
+    return "<unserializable>";
+  }
+}
+
+function main(argv) {
+  if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (argv.length !== 1) {
+    process.stderr.write(USAGE);
+    return 2;
+  }
+
+  let resolved;
+  try {
+    resolved = resolveInput(argv[0]);
+  } catch (error) {
+    process.stderr.write(`wf-status: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+
+  const warnings = [];
+  if (resolved.duplicateCount > 1) warnings.push(`run ID matched ${resolved.duplicateCount} sessions; using the newest artifact`);
+  const snapshot = readJson(resolved.snapshotPath, warnings, "workflow snapshot");
+  const journal = readJournal(path.join(resolved.runDir, "journal.jsonl"), warnings);
+  const agentFiles = readAgents(resolved.runDir, warnings);
+  const calls = buildCalls(snapshot, journal, agentFiles);
+  const phases = phasesSeen(snapshot);
+  const counts = { completed: 0, failed: 0, pending: 0 };
+  for (const call of calls) counts[call.state] += 1;
+  let status = typeof snapshot?.status === "string" ? snapshot.status : "unknown";
+  if (!snapshot && (journal.length > 0 || calls.length > 0)) status = "partial";
+
+  const lines = [
+    `Workflow: ${resolved.runId}`,
+    `Directory: ${resolved.runDir}`,
+    `Status: ${status}`,
+    "Phases seen:",
+  ];
+  if (phases.length === 0) lines.push("  (none recorded)");
+  else for (const [index, title] of phases) lines.push(`  ${index}. ${title}`);
+  lines.push(`Agents: ${calls.length} total (${counts.completed} completed, ${counts.failed} failed, ${counts.pending} pending)`);
+  if (calls.length === 0) lines.push("  (none recorded)");
+  for (const call of calls) {
+    const id = call.agentId || "?";
+    const phase = call.phase !== "?" ? ` · ${call.phase}` : "";
+    const error = call.error ? ` · ${compactLabel(call.error)}` : "";
+    lines.push(`  ${call.state.padEnd(9)} ${call.label} [${id}]${phase}${error}`);
+  }
+  lines.push("Final return:");
+  if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, "result")) lines.push(`  ${displayValue(snapshot.result)}`);
+  else lines.push("  (not available)");
+  if (snapshot?.error) lines.push(`Workflow error: ${compactLabel(String(snapshot.error))}`);
+  if (warnings.length > 0) {
+    lines.push("Warnings:");
+    for (const warning of warnings) lines.push(`  - ${warning}`);
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return 0;
+}
+
+process.exitCode = main(process.argv.slice(2));

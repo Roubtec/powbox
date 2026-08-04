@@ -1,0 +1,386 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const USAGE = `Usage: wf-check <script.js>
+
+Validate a Claude Workflow script without running it.
+
+The checker mirrors the installed Workflow loader: the first statement must be
+\`export const meta = { ... }\`, metadata must be recursively literal, name and
+description must be non-empty strings, and the remaining source is parsed as a
+strict async body with agent, parallel, pipeline, log, phase, args, budget, and
+workflow hooks. Top-level await and return are therefore valid.
+`;
+
+const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+class MetaSyntaxError extends Error {
+  constructor(message, source, offset) {
+    super(message);
+    this.name = "MetaSyntaxError";
+    this.offset = offset;
+    const before = source.slice(0, offset);
+    this.line = before.split("\n").length;
+    const lastNewline = before.lastIndexOf("\n");
+    this.column = offset - lastNewline;
+  }
+}
+
+class Scanner {
+  constructor(source) {
+    this.source = source;
+    this.index = 0;
+  }
+
+  fail(message, offset = this.index) {
+    throw new MetaSyntaxError(message, this.source, offset);
+  }
+
+  skipTrivia() {
+    if (this.index === 0 && this.source.startsWith("#!")) {
+      const newline = this.source.indexOf("\n", this.index);
+      this.index = newline === -1 ? this.source.length : newline;
+    }
+    while (this.index < this.source.length) {
+      const rest = this.source.slice(this.index);
+      const whitespace = rest.match(/^\s+/u);
+      if (whitespace) {
+        this.index += whitespace[0].length;
+        continue;
+      }
+      if (rest.startsWith("//")) {
+        const newline = this.source.indexOf("\n", this.index + 2);
+        this.index = newline === -1 ? this.source.length : newline;
+        continue;
+      }
+      if (rest.startsWith("/*")) {
+        const end = this.source.indexOf("*/", this.index + 2);
+        if (end === -1) this.fail("unterminated block comment");
+        this.index = end + 2;
+        continue;
+      }
+      break;
+    }
+  }
+
+  punctuation(value) {
+    this.skipTrivia();
+    if (!this.source.startsWith(value, this.index)) return false;
+    this.index += value.length;
+    return true;
+  }
+
+  expectPunctuation(value, message = `expected '${value}'`) {
+    if (!this.punctuation(value)) this.fail(message);
+  }
+
+  identifier() {
+    this.skipTrivia();
+    const rest = this.source.slice(this.index);
+    const match = rest.match(/^[$_\p{ID_Start}][$_\u200c\u200d\p{ID_Continue}]*/u);
+    if (!match) return null;
+    const token = { raw: match[0], value: match[0], start: this.index };
+    this.index += match[0].length;
+    return token;
+  }
+
+  expectIdentifier(value) {
+    const token = this.identifier();
+    if (!token || token.value !== value) this.fail(`expected '${value}'`);
+    return token;
+  }
+
+  stringLiteral() {
+    this.skipTrivia();
+    const quote = this.source[this.index];
+    if (quote !== "'" && quote !== '"') return null;
+    const start = this.index++;
+    let closed = false;
+    while (this.index < this.source.length) {
+      const char = this.source[this.index++];
+      if (char === quote) {
+        closed = true;
+        break;
+      }
+      if (char === "\\") {
+        if (this.index >= this.source.length) break;
+        if (this.source[this.index] === "\r" && this.source[this.index + 1] === "\n") this.index += 2;
+        else this.index += 1;
+        continue;
+      }
+      if (char === "\n" || char === "\r") this.fail("unterminated string literal", start);
+    }
+    if (!closed) this.fail("unterminated string literal", start);
+    const raw = this.source.slice(start, this.index);
+    let value;
+    try {
+      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error), start);
+    }
+    return { raw, value, start };
+  }
+
+  templateLiteral() {
+    this.skipTrivia();
+    if (this.source[this.index] !== "`") return null;
+    const start = this.index++;
+    let closed = false;
+    while (this.index < this.source.length) {
+      const char = this.source[this.index++];
+      if (char === "`") {
+        closed = true;
+        break;
+      }
+      if (char === "\\") {
+        if (this.index < this.source.length) this.index += 1;
+        continue;
+      }
+      if (char === "$" && this.source[this.index] === "{") {
+        this.fail("template interpolation not allowed in meta", this.index - 1);
+      }
+    }
+    if (!closed) this.fail("unterminated template literal", start);
+    const raw = this.source.slice(start, this.index);
+    let value;
+    try {
+      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error), start);
+    }
+    return { raw, value, start };
+  }
+
+  numberLiteral() {
+    this.skipTrivia();
+    const rest = this.source.slice(this.index);
+    const patterns = [
+      /^0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*n?/,
+      /^0[bB][01](?:_?[01])*n?/,
+      /^0[oO][0-7](?:_?[0-7])*n?/,
+      /^(?:\d(?:_?\d)*)n/,
+      /^(?:(?:\d(?:_?\d)*)?\.(?:\d(?:_?\d)*)|\d(?:_?\d)*\.)(?:[eE][+-]?\d(?:_?\d)*)?/,
+      /^\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?/,
+    ];
+    let raw = null;
+    for (const pattern of patterns) {
+      const match = rest.match(pattern);
+      if (match && (raw === null || match[0].length > raw.length)) raw = match[0];
+    }
+    if (raw === null) return null;
+    const next = rest[raw.length];
+    if (next && /[$_\p{ID_Continue}.]/u.test(next)) this.fail("invalid numeric literal");
+    const start = this.index;
+    this.index += raw.length;
+    let value;
+    try {
+      value = vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error), start);
+    }
+    return { raw, value, start };
+  }
+
+  regexpLiteral() {
+    this.skipTrivia();
+    if (this.source[this.index] !== "/" || this.source.startsWith("//", this.index) || this.source.startsWith("/*", this.index)) return null;
+    const start = this.index++;
+    let inClass = false;
+    let closed = false;
+    while (this.index < this.source.length) {
+      const char = this.source[this.index++];
+      if (char === "\\") {
+        if (this.index < this.source.length) this.index += 1;
+        continue;
+      }
+      if (char === "\n" || char === "\r") this.fail("unterminated regular expression literal", start);
+      if (char === "[") inClass = true;
+      else if (char === "]") inClass = false;
+      else if (char === "/" && !inClass) {
+        closed = true;
+        break;
+      }
+    }
+    if (!closed) this.fail("unterminated regular expression literal", start);
+    while (/[$_\u200c\u200d\p{ID_Continue}]/u.test(this.source[this.index] || "")) this.index += 1;
+    const raw = this.source.slice(start, this.index);
+    try {
+      vm.runInNewContext(raw, Object.create(null), { timeout: 50 });
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error), start);
+    }
+    return { raw, value: { regexpLiteral: true }, start };
+  }
+}
+
+function parsePureValue(scanner) {
+  scanner.skipTrivia();
+  const start = scanner.index;
+  if (scanner.punctuation("{")) return parseObject(scanner, start);
+  if (scanner.punctuation("[")) {
+    const values = [];
+    scanner.skipTrivia();
+    if (scanner.punctuation("]")) return values;
+    while (true) {
+      scanner.skipTrivia();
+      if (scanner.source.startsWith("...", scanner.index)) scanner.fail("spread not allowed in meta");
+      if (scanner.source[scanner.index] === ",") scanner.fail("sparse arrays not allowed");
+      values.push(parsePureValue(scanner));
+      scanner.skipTrivia();
+      if (scanner.punctuation("]")) return values;
+      scanner.expectPunctuation(",", "expected ',' or ']' in meta array");
+      scanner.skipTrivia();
+      if (scanner.punctuation("]")) return values;
+    }
+  }
+  if (scanner.punctuation("-")) {
+    const number = scanner.numberLiteral();
+    if (!number || typeof number.value !== "number") scanner.fail("only negative-number unary allowed in meta", start);
+    return -number.value;
+  }
+  const string = scanner.stringLiteral();
+  if (string) return string.value;
+  const template = scanner.templateLiteral();
+  if (template) return template.value;
+  const number = scanner.numberLiteral();
+  if (number) return number.value;
+  const regexp = scanner.regexpLiteral();
+  if (regexp) return regexp.value;
+  const identifier = scanner.identifier();
+  if (identifier) {
+    if (identifier.value === "true") return true;
+    if (identifier.value === "false") return false;
+    if (identifier.value === "null") return null;
+    scanner.fail(`non-literal node type in meta: Identifier (${identifier.value})`, identifier.start);
+  }
+  scanner.fail("expected a literal value in meta");
+}
+
+function parsePropertyKey(scanner) {
+  scanner.skipTrivia();
+  if (scanner.source[scanner.index] === "[") scanner.fail("computed keys not allowed in meta");
+  const string = scanner.stringLiteral();
+  let token = string;
+  if (!token) token = scanner.numberLiteral();
+  if (!token) token = scanner.identifier();
+  if (!token) scanner.fail("unsupported key type in meta");
+  const key = String(token.value);
+  if (RESERVED_KEYS.has(key)) scanner.fail(`reserved key name not allowed in meta: ${key}`, token.start);
+  return key;
+}
+
+function parseObject(scanner, start) {
+  const value = Object.create(null);
+  scanner.skipTrivia();
+  if (scanner.punctuation("}")) return value;
+  while (true) {
+    scanner.skipTrivia();
+    if (scanner.source.startsWith("...", scanner.index)) scanner.fail("only plain properties allowed in meta");
+    const key = parsePropertyKey(scanner);
+    scanner.skipTrivia();
+    if (!scanner.punctuation(":")) scanner.fail("methods/accessors and shorthand properties not allowed in meta");
+    value[key] = parsePureValue(scanner);
+    scanner.skipTrivia();
+    if (scanner.punctuation("}")) return value;
+    scanner.expectPunctuation(",", "expected ',' or '}' in meta object");
+    scanner.skipTrivia();
+    if (scanner.punctuation("}")) return value;
+    if (scanner.index <= start) scanner.fail("internal parser error");
+  }
+}
+
+function parseMeta(source) {
+  const scanner = new Scanner(source);
+  scanner.skipTrivia();
+  const statementStart = scanner.index;
+  scanner.expectIdentifier("export");
+  scanner.expectIdentifier("const");
+  scanner.expectIdentifier("meta");
+  scanner.expectPunctuation("=", "expected '=' after 'export const meta'");
+  scanner.skipTrivia();
+  if (!scanner.punctuation("{")) scanner.fail("meta must be an object literal");
+  const meta = parseObject(scanner, scanner.index - 1);
+  const objectEnd = scanner.index;
+  scanner.skipTrivia();
+  if (scanner.source[scanner.index] === ";") scanner.index += 1;
+  return { meta, statementStart, statementEnd: scanner.index, objectEnd };
+}
+
+function normalizeMeta(meta) {
+  if (typeof meta.name !== "string" || meta.name.length === 0) throw new Error("meta.name must be a non-empty string");
+  if (typeof meta.description !== "string" || meta.description.length === 0) throw new Error("meta.description must be a non-empty string");
+  const phases = [];
+  if (Array.isArray(meta.phases)) {
+    for (const entry of meta.phases) {
+      if (!entry || typeof entry !== "object" || typeof entry.title !== "string") continue;
+      phases.push({
+        title: entry.title,
+        ...(typeof entry.detail === "string" ? { detail: entry.detail } : {}),
+        ...(typeof entry.model === "string" ? { model: entry.model } : {}),
+      });
+    }
+  }
+  return { name: meta.name, description: meta.description, phases: phases.length > 0 ? phases : undefined };
+}
+
+function blankPrefix(source, end) {
+  return source.slice(0, end).replace(/[^\r\n]/g, " ") + source.slice(end);
+}
+
+function compileBody(source, metaEnd, filename) {
+  const hooks = "agent, parallel, pipeline, log, phase, args, budget, workflow";
+  const transformed = `async function __body(${hooks}) {'use strict';${blankPrefix(source, metaEnd)}\n}`;
+  return new vm.Script(transformed, { filename, displayErrors: true });
+}
+
+function main(argv) {
+  if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (argv.length !== 1) {
+    process.stderr.write(USAGE);
+    return 2;
+  }
+
+  const filename = path.resolve(argv[0]);
+  let source;
+  try {
+    source = fs.readFileSync(filename, "utf8");
+  } catch (error) {
+    process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+
+  let parsed;
+  try {
+    parsed = parseMeta(source);
+  } catch (error) {
+    if (error instanceof MetaSyntaxError) {
+      process.stderr.write(`wf-check: ${filename}:${error.line}:${error.column}: ${error.message}\n`);
+    } else {
+      process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+    return 1;
+  }
+
+  let meta;
+  try {
+    meta = normalizeMeta(parsed.meta);
+    compileBody(source, parsed.statementEnd, filename);
+  } catch (error) {
+    const message = error instanceof Error && error.stack ? error.stack : String(error);
+    process.stderr.write(`wf-check: ${message}\n`);
+    return 1;
+  }
+
+  process.stdout.write(`OK ${filename}: workflow ${JSON.stringify(meta.name)} is valid\n`);
+  return 0;
+}
+
+process.exitCode = main(process.argv.slice(2));

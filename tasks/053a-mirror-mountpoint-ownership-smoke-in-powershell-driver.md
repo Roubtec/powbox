@@ -34,7 +34,7 @@ When neither form works, record a `Note-Skip` and skip the ownership assertions 
 
 Considered and declined:
 
-- **`stat -c` only.** Diverges from the `.sh`'s documented BSD tolerance, so a macOS host would hard-fail where the Bash driver records an honest skip.
+- **`stat -c` only.** Diverges from the `.sh`'s documented BSD tolerance: `owner_of()`'s `stat -f '%u:%g'` fallback means a macOS host reads the ownership and runs the assertions, so a `stat -c`-only port would hard-fail where the Bash driver passes — the `.sh`'s skip guard fires only when *neither* form works.
 - **A pure PowerShell/.NET route.** .NET exposes `UnixFileMode` but not the owner uid/gid, so this would mean P/Invoke into libc — far more code and a new portability surface for a smoke test.
 
 ### (b) Non-Linux hosts — gate the ownership assertions on `$IsLinux`, and record a counted, reported `Note-Skip` otherwise

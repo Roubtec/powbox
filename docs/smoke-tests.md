@@ -1,7 +1,7 @@
 # Smoke tests
 
 Orientation for `commands/smoke-test.sh`: how the run is layered, where each part actually executes, what it costs when the network or the host cannot cooperate, and what a partial run does and does not prove.
-It deliberately does **not** mirror the assertions. Each stage's script is the source of truth for what it checks, and is cited below so you can open it directly; the umbrella's per-stage comment blocks explain the wiring around it.
+It deliberately does **not** mirror the assertions. Where a stage has a script of its own, that script is the source of truth for what it checks and is cited below so you can open it directly (Stage 2 is inline in the umbrella and so cites none); the umbrella's per-stage comment blocks explain the wiring around it.
 Routed from [AGENTS.md](../AGENTS.md) and from the README's [Host Validation](../README.md#host-validation) section, which keeps the invocation and points here for the rest.
 
 The smoke tier needs a real built image and, in places, a relaunchable container, so it runs on the host or in CI — never from inside an agent container (see [AGENTS.md](../AGENTS.md) → "Validating Changes").
@@ -36,7 +36,7 @@ Which suite each entry runs, which env override selects the baked path, and exac
 
 ## What each stage is for
 
-- **Stage 1 — tool presence and key image config** (`scripts/smoke-test-image.sh`). The sweep every later stage assumes: expected CLIs resolve (most are genuinely invoked, a handful are presence-only probes), plus the image configuration that would otherwise regress silently. One structural note that reading the probe list will not tell you: each probe is handed to the driver as a **separate argument** and executed in its own `sh -ec`, so probe text is data rather than script and a failure is reported by index against a printed manifest — but all probes share one container, so filesystem effects deliberately carry forward between them while `cd`, `export` and shell variables do not.
+- **Stage 1 — tool presence and key image config** (`scripts/smoke-test-image.sh`). The sweep every later stage assumes: expected CLIs resolve (most are genuinely invoked, a handful are presence-only probes), plus the image configuration that would otherwise regress silently. Watch `wt-bootstrap`, `powbox-provenance` and `gitcat` in particular: no suite anywhere in the smoke exercises them, so their presence probe here is the whole of their coverage. One structural note that reading the probe list will not tell you: each probe is handed to the driver as a **separate argument** and executed in its own `sh -ec`, so probe text is data rather than script and a failure is reported by index against a printed manifest — but all probes share one container, so filesystem effects deliberately carry forward between them while `cd`, `export` and shell variables do not.
 - **Stage 2 — `pg-dev-up` functional test.** Stands up real throwaway PostgreSQL clusters and connects through the emitted `DATABASE_URL`, reaching the role/db creation, URL encoding, DSN and worktree-scoping behavior that `pg-dev-up check` (binary presence only) cannot.
 - **Stage 3 — rootless Podman engine** (`scripts/smoke-test-podman.sh`). Runs the image with the launch-time device and security wiring the launcher normally supplies via the compose overlays, so a base/Podman bump that regresses the engine is caught. Static engine wiring first, then a nested half: a nested run, a bridge network with a published port, and a Compose exec-form health check driven through the `docker compose` shim spelling. See [rootless-podman.md](rootless-podman.md) → "Compose health-check behavior".
 - **Stage 4 — self-hosted (`--isolated`) launch mode** (`scripts/smoke-test-selfhosted.sh`). Stage A validates the launcher's identity contract through the `POWBOX_PRINT_IDENTITY` hook, which exits before any Docker call and so needs no image, daemon, or network. Stage B validates the baked `seed-workspace.sh` clone/reuse/`--reclone`/failure behavior and the single-mount hardlink layout against the image, self-skipping when the image is absent. `POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE=1` runs Stage A only.
@@ -54,7 +54,7 @@ Everything else runs against the already-present local image and the host — th
 What an unreachable registry or remote costs is not uniform:
 
 - Stage 3's Alpine pull **aborts** the stage, while its distroless `pause` pull **degrades** to a recorded skip of just the XFAIL reproduction.
-- Stage 4 fails if the fixture repo cannot be cloned. Do not read that as "any clone failure aborts": several of Stage B's cases *expect* a failure — a nonexistent repo, an `ssh://` URL to one, a bogus `--ref` — and the failure is the assertion, captured and validated rather than propagated.
+- Stage 4 fails if the fixture repo cannot be cloned. Do not read that as "any clone failure aborts": several of Stage B's cases *expect* a failure — a nonexistent repo, an `ssh://` URL to one — and the failure is the assertion, captured and validated rather than propagated. A bogus `--ref` is the deliberate counter-case: it does **not** abort the clone at all, because the default branch is cloned first and only the post-clone checkout of the ref fails, benignly — a warning, and a valid checkout left on the default branch.
 
 ## Partial runs, host gates, and skipping
 
@@ -71,7 +71,7 @@ A genuinely broken image — missing engine, dropped drop-in — fails the stage
 ### The banner is not complete
 
 Every **requested** skip reaches the banner, because the umbrella records those itself.
-A **runtime** self-skip decided inside a child script reaches it only through the `POWBOX_SMOKE_SKIP_MARKER` mechanism, and marker wiring exists for exactly three children: Stages 3, 5 and 6.
+A **runtime** self-skip decided inside a child script has no channel of its own other than the `POWBOX_SMOKE_SKIP_MARKER` mechanism, and marker wiring exists for exactly three children: Stages 3, 5 and 6 — though a skip can still reach the banner without the child's help when the umbrella re-evaluates the same host condition itself, which is how Stage 3's tun-driven nested-half skip is recorded.
 
 Stage 4's child is handed no marker — on either umbrella — so its runtime self-skips are invisible, and a run in which they fired still ends `Smoke test complete (all stages ran)`.
 In practice this bites when `POWBOX_SMOKE_PUBLIC_REPO` points at something other than the default: two of Stage B's ref cases assert against Hello-World-specific contents and silently self-skip unless `POWBOX_SMOKE_REF_PATH` and `POWBOX_SMOKE_REF_BRANCH` are supplied too.

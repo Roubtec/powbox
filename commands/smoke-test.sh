@@ -189,6 +189,103 @@ else
 	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent; host run also skipped — no coverage)")
 fi
 
+# Stage 0g — detect-shadows unit suite (task 053). Hermetic (throwaway repos in a
+# tmpdir; no image-internal state, root, or Docker daemon needed by the test
+# itself). It is the repo's largest pure-shell suite and the only regression net
+# for docker/shared/detect-shadows.sh's load-bearing security properties: the
+# under-workspace-root validation, the symlink skip, the Git-tracked-content veto
+# and its fail-closed paths, the newline rejection, and the workspace-glob
+# containment — every one of which was verified to fail against the pre-fix script.
+#
+# The suite needs git, jq, and a JQ-BACKED yq — python-yq, since detect-shadows.sh
+# issues jq filters like `.shadow[]? // empty`, which mikefarah's Go yq rejects
+# outright. The agent image guarantees that toolchain and an arbitrary host does
+# not, so prefer the in-image run; fall back to the host only when the suite's own
+# `--check-deps` capability probe passes — not a bare `command -v yq`, because the
+# WRONG yq implementation would then turn 22 assertions red instead of recording an
+# honest skip — else skip.
+#
+# That toolchain probe is necessary but NOT sufficient: like Stage 0f/0h, the host
+# fallback is additionally gated on a LINUX host, because the CODE UNDER TEST needs a
+# GNU userland that `--check-deps` cannot speak for. detect-shadows.sh calls GNU-only
+# `realpath -m --` and drives its .NET artifact scan through `find -H … -printf '%h\0'
+# | sort -zu` — neither `realpath -m` nor `find -printf`/`sort -z` exists on BSD/macOS.
+# Without the gate, a macOS host that happens to have git, jq and python-yq installed
+# passes `--check-deps` and then fails the whole smoke on a toolchain difference,
+# instead of recording the honest skip this stage intends. The two skips are kept
+# distinct so the banner says which one actually applies.
+#
+# The in-image run points the suite at the BAKED /usr/local/bin copies (via
+# POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR, the shape Stage 0c/0d uses for
+# the wt-* helpers), so a STALE baked detect-shadows.sh is caught by a real suite
+# instead of being waved through by Stage 1's `command -v` presence probe. The /repo
+# SOURCE is covered by the host fallback below and, on every PR, by Tier 0 CI
+# (.github/workflows/native-linux-ci.yml), which runs the suite unset.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running detect-shadows unit suite (baked scripts in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e POWBOX_DETECT_SHADOWS=/usr/local/bin/detect-shadows.sh \
+		-e POWBOX_PNPM_SHADOW_DOCTOR=/usr/local/bin/pnpm-shadow-doctor \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-detect-shadows.sh
+elif [ "$(uname -s)" != Linux ]; then
+	echo "WARNING: skipping detect-shadows unit suite (Stage 0g) — image '$IMAGE' absent and this is a non-Linux host (detect-shadows.sh itself calls GNU-only 'realpath -m' and 'find -printf'/'sort -z', which BSD/macOS reject)."
+	skipped+=("Stage 0g: detect-shadows unit suite (image absent; host fallback needs a GNU/Linux userland)")
+elif "${ROOT_DIR}/scripts/test-detect-shadows.sh" --check-deps >/dev/null 2>&1; then
+	echo "Running detect-shadows unit suite (host source — image '$IMAGE' absent) ..."
+	"${ROOT_DIR}/scripts/test-detect-shadows.sh"
+else
+	echo "WARNING: skipping detect-shadows unit suite (Stage 0g) — image '$IMAGE' absent and the host toolchain is unusable (it needs git, jq, and the jq-backed python-yq; mikefarah's Go yq cannot parse the filters detect-shadows.sh issues)."
+	skipped+=("Stage 0g: detect-shadows unit suite (image absent; host fallback needs git, jq and a jq-backed yq)")
+fi
+
+# Stage 0h — shadow-mounts mountpoint-ownership unit test (task 053). Fully
+# hermetic: it copies docker/shared/shadow-mounts.sh with its /workspace literal
+# relocated into a tmpdir and PATH-shims id/stat/chown/mount/mountpoint, so it
+# needs neither root nor a real mount to assert the chown/mount decision logic —
+# every created mountpoint component inherits the DEEPEST EXISTING ancestor's
+# uid:gid, before the mount goes on top, with exactly one warning per run when
+# that fails. Without the chown, a mountpoint shadow-mounts.sh creates outlives
+# the container as a root-owned directory on the host's own checkout.
+#
+# The test itself needs only bash + coreutils, but the CODE UNDER TEST does not:
+# the suite deliberately leaves `realpath` unshimmed so the directory walk is the
+# real one, and shadow-mounts.sh calls `realpath -m --` / `realpath -e --`, which
+# are GNU-only (BSD/macOS realpath has neither flag). So mirror Stage 0e/0g/0f:
+# prefer the in-image run — Linux userland guaranteed — and fall back to a host
+# run only on a LINUX host, recording an honest skip otherwise rather than
+# failing a macOS host smoke on a toolchain difference. It stays unconditional on
+# every Linux host and in CI, so it cannot decay into a permanent skip.
+#
+# Like Stage 0g, the in-image run points the suite at the BAKED copy (via
+# SHADOW_MOUNTS_SH), not at /repo/docker/shared/shadow-mounts.sh: /usr/local/bin/
+# shadow-mounts.sh is what actually runs under sudo in a live container, so a
+# STALE baked copy is caught by a real suite instead of being waved through by
+# Stage 1's `command -v` presence probe. The baked file is COPY --chmod=755, so
+# the unprivileged container user can read it — the suite only ever COPIES it and
+# rewrites the /workspace literal, never executes the baked path itself.
+#
+# The /repo SOURCE is covered by the host-fallback branch below (a Linux host that
+# has not built the image yet) and by running the suite directly, which AGENTS.md →
+# "Validating Changes" lists as an in-container gate. Unlike Stage 0g there is no
+# Tier 0 CI step for it yet; wiring every hermetic scripts/test-*.sh into Tier 0 is
+# tasks/059-wire-pure-shell-suites-into-ci.md, and this stage is deliberately not
+# front-running it.
+#
+# The privileged end-to-end counterpart (real root, real bind mount, real
+# ownership on disk) is Stage 6's scripts/smoke-test-worktree-metadata.sh.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running shadow-mounts mountpoint-ownership unit test (baked script in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-shadow-mounts-chown.sh
+elif [ "$(uname -s)" = Linux ]; then
+	echo "Running shadow-mounts mountpoint-ownership unit test (host source — image '$IMAGE' absent) ..."
+	"${ROOT_DIR}/scripts/test-shadow-mounts-chown.sh"
+else
+	echo "WARNING: skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) — image '$IMAGE' absent and this is a non-Linux host (shadow-mounts.sh itself calls GNU-only 'realpath -m/-e', which BSD/macOS realpath rejects)."
+	skipped+=("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent; host fallback needs a GNU/Linux userland)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe

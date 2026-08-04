@@ -8,15 +8,85 @@
 # (including symlink escape) and confirms the pnpm/npm workspace logic is
 # unchanged.
 #
-# Runs directly against the repo copy of detect-shadows.sh — no image build
-# needed.  Requires bash, yq, and jq on PATH (all present in the agent image).
+# Runs directly against the repo copy of detect-shadows.sh by default — no image
+# build needed.  Requires bash, git, jq, and yq on PATH (all present in the agent
+# image).  The yq must be the JQ-BACKED python-yq, not mikefarah's Go yq — see
+# deps_ok below; the interface is probed up front so an incompatible one fails
+# with one clear FATAL instead of a scatter of confusing assertion failures.
 #
-# Usage: scripts/test-detect-shadows.sh
+# Scripts under test are overridable so the same suite can be pointed at the
+# BAKED /usr/local/bin copies inside the image instead of the repo source, the
+# way scripts/test-wt-orphan-safety.sh takes POWBOX_WT_*.  commands/smoke-test.sh
+# uses that for its in-image run, so a stale baked detect-shadows.sh is caught by
+# a real suite rather than only by Stage 1's `command -v` presence probe; Tier 0
+# CI runs the same suite unset, i.e. against the repo source.
+#
+# Usage: scripts/test-detect-shadows.sh [--check-deps]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DETECT="$SCRIPT_DIR/../docker/shared/detect-shadows.sh"
-DOCTOR="$SCRIPT_DIR/../docker/shared/pnpm-shadow-doctor"
+DETECT="${POWBOX_DETECT_SHADOWS:-$SCRIPT_DIR/../docker/shared/detect-shadows.sh}"
+DOCTOR="${POWBOX_PNPM_SHADOW_DOCTOR:-$SCRIPT_DIR/../docker/shared/pnpm-shadow-doctor}"
+
+# yq_capable — behavioral capability probe for the jq-backed `yq -r <jq filter>`
+# interface (python-yq) that detect-shadows.sh relies on.  It exercises the two
+# filter shapes the script actually issues — `.<key>[]? // empty` and
+# `has("<key>")` with raw (-r) output — so any yq that answers correctly can run
+# the suite while an incompatible implementation is rejected up front.  This is
+# not hypothetical: mikefarah's Go yq v4 is what `ubuntu-latest` preinstalls, and
+# it rejects the alternative operator's `empty` (`invalid input text "empty"`),
+# which silently turns 22 of this suite's assertions red with no hint at the
+# cause.  Mirrors scripts/test-podman-compose-healthcheck.sh's yq_capable.
+# Silent: callers print their own message.
+yq_capable() {
+	command -v yq >/dev/null 2>&1 || return 1
+	local out
+	out="$(printf 'shadow:\n  - "a/b"\n' | yq -r '.shadow[]? // empty' 2>/dev/null)" || return 1
+	[ "$out" = "a/b" ] || return 1
+	out="$(printf 'shadow:\n  - "a/b"\n' | yq -r 'has("shadow")' 2>/dev/null)" || return 1
+	[ "$out" = "true" ] || return 1
+	# A file with no such key must yield nothing rather than an error, which is
+	# what makes the `// empty` guard load-bearing in detect-shadows.sh.
+	out="$(printf 'other: 1\n' | yq -r '.shadow[]? // empty' 2>/dev/null)" || return 1
+	[ -z "$out" ] || return 1
+	return 0
+}
+
+# deps_ok — the full toolchain probe: git and jq must be present (the suite
+# builds throwaway repos and detect-shadows.sh parses package.json with jq) and
+# yq must provide the interface above.  Silent.
+deps_ok() {
+	command -v git >/dev/null 2>&1 || return 1
+	command -v jq >/dev/null 2>&1 || return 1
+	yq_capable || return 1
+	return 0
+}
+
+# --check-deps: run ONLY the dependency probe and exit 0 (usable) or 1.  The
+# umbrella smoke's host fallback gates on this so an absent OR incompatible host
+# toolchain becomes a recorded skip there — without duplicating the probe —
+# instead of a spurious mid-suite failure here.
+if [ "${1:-}" = "--check-deps" ]; then
+	deps_ok || exit 1
+	exit 0
+fi
+
+command -v git >/dev/null 2>&1 || {
+	echo "FATAL: git not found on PATH (the suite builds throwaway repositories)" >&2
+	exit 1
+}
+command -v jq >/dev/null 2>&1 || {
+	echo "FATAL: jq not found on PATH (detect-shadows.sh parses package.json with it)" >&2
+	exit 1
+}
+command -v yq >/dev/null 2>&1 || {
+	echo "FATAL: yq not found on PATH (detect-shadows.sh parses .powbox.yml with it)" >&2
+	exit 1
+}
+yq_capable || {
+	echo "FATAL: the 'yq' on PATH does not provide the jq-backed 'yq -r <filter>' interface (python-yq) that detect-shadows.sh needs — mikefarah's Go yq is incompatible (it rejects '.shadow[]? // empty' with 'invalid input text \"empty\"'). Install python-yq (pip install yq / pipx install yq) and put it ahead on PATH." >&2
+	exit 1
+}
 
 if [ ! -f "$DETECT" ]; then
 	echo "FATAL: detect-shadows.sh not found at $DETECT" >&2

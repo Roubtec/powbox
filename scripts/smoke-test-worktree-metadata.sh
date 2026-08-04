@@ -27,6 +27,22 @@ set -euo pipefail
 #   4. Host-side: the dir-mounted checkout's real .git/worktrees gained NO container
 #      registrations — the bind kept every registration inside the volume, so the
 #      host's own git metadata is never polluted by the container's worktrees.
+#   5. Host-side (task 053): every mountpoint directory shadow-mounts.sh had to
+#      CREATE inherited the ownership of the deepest ancestor that already existed,
+#      instead of being left root-owned. This script already runs the real
+#      /usr/local/bin/shadow-mounts.sh as root against a real dir-mounted checkout,
+#      which is the only place that chown can be exercised for real — the hermetic
+#      scripts/test-shadow-mounts-chown.sh covers the decision logic, but not
+#      whether a real root-created directory really lands host-owned on a real bind
+#      mount. Covered: a SINGLE created component on the ordinary tmpfs path
+#      (proj/bin — the .NET artifact shape the chown was written for, whose proj
+#      parent already existed), a MULTI-component creation (.claude/worktrees, where
+#      two levels are created and the walk has to reach the workspace root), and the
+#      SINGLE-component case on the special durable-bind path (.git/worktrees), which
+#      takes a different branch through shadow-mounts.sh and so is not redundant.
+#      These assertions are deliberately tolerant and are therefore VACUOUS on a
+#      squashing filesystem, under a rootless engine, and when the smoke itself runs
+#      as root; the latter two are detected and announced. See the block itself.
 #
 # Privileges: the durable bind is a `mount --bind`, so the container needs
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile — exactly the launch-time
@@ -188,6 +204,56 @@ fi
 echo "durable-change-A" >>"$WTDIR/tracked.txt"
 echo "untracked-content-A" >"$WTDIR/UNTRACKED_NEW.txt"
 echo "  ok: linked worktree created and left dirty (tracked mod + untracked file)"
+
+# Mountpoint-ownership coverage (task 053), MULTI-component case. $WS/.git/worktrees
+# above created ONE component (its .git parent already existed); this target has to
+# create TWO ($WS/.claude and $WS/.claude/worktrees), so shadow-mounts.sh must walk
+# up past both to $WS and hand that owner to each. It is also a real powbox shadow:
+# .claude/worktrees is the harness worktree root the entrypoint tmpfs-shadows.
+# Mount capability is already proven above, so a failure here is a hard failure.
+if ! /usr/local/bin/shadow-mounts.sh "$WS/.claude/worktrees" 2>"$smerr"; then
+	echo "FAIL: shadow-mounts.sh failed on the multi-component target $WS/.claude/worktrees despite mount capability being present" >&2
+	sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true
+	exit 1
+fi
+if ! mountpoint -q "$WS/.claude/worktrees"; then
+	echo "FAIL: $WS/.claude/worktrees is not a mountpoint after shadow-mounts.sh - the multi-component shadow did not materialize" >&2
+	exit 1
+fi
+# The INTERMEDIATE $WS/.claude was created but is not itself a mountpoint, so its
+# ownership is readable right here with no unmount needed. The two mountpoints
+# themselves are asserted on the host once this container exits (see below).
+# Sentinels rather than a bare fallback: the image always has GNU stat, so a
+# failure here is itself a fault and must not read as "both unknown, so equal".
+own="$(stat -c %u:%g "$WS/.claude" 2>/dev/null || echo "UNREADABLE")"
+parent="$(stat -c %u:%g "$WS" 2>/dev/null || echo "UNREADABLE")"
+if [ "$own" = UNREADABLE ] || [ "$parent" = UNREADABLE ]; then
+	echo "FAIL: cannot read the ownership of $WS/.claude and/or $WS inside the container (stat -c failed) - the mountpoint-ownership check cannot be evaluated" >&2
+	exit 1
+fi
+if [ "$own" != "$parent" ]; then
+	echo "FAIL: the created intermediate directory $WS/.claude is owned by $own but its pre-existing parent $WS is owned by $parent - the shadow-mounts.sh mountpoint chown REGRESSED" >&2
+	exit 1
+fi
+echo "  ok: multi-component shadow created; the intermediate .claude inherited the tree owner ($own)"
+
+# Mountpoint-ownership coverage (task 053), SINGLE-component case on the ORDINARY
+# tmpfs path. $WS/proj is created on the host by the driver, so only $WS/proj/bin is
+# new and its deepest existing ancestor is $WS/proj. This is the exact shape the
+# chown was written for - a .NET project bin/obj artifact dir that detect-shadows.sh
+# emits automatically - and it takes the plain tmpfs branch, not the special
+# /.git/worktrees durable-bind branch, so it is not a duplicate of the assertion at
+# the top of this script. Mount capability is proven, so a failure here is hard.
+if ! /usr/local/bin/shadow-mounts.sh "$WS/proj/bin" 2>"$smerr"; then
+	echo "FAIL: shadow-mounts.sh failed on the single-component target $WS/proj/bin despite mount capability being present" >&2
+	sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true
+	exit 1
+fi
+if ! mountpoint -q "$WS/proj/bin"; then
+	echo "FAIL: $WS/proj/bin is not a mountpoint after shadow-mounts.sh - the artifact shadow did not materialize" >&2
+	exit 1
+fi
+echo "  ok: single-component artifact shadow created at proj/bin (ownership asserted on the host after this container exits)"
 exit 0
 '
 
@@ -309,9 +375,19 @@ fi
 FIXTURE=""
 WTVOL="powbox-smoke-wtmeta-$$"
 cleanup() {
-	# The container (root) may have left an empty, root-owned .git/worktrees /
-	# .worktrees mountpoint dir inside the fixture; a plain rm removes them (their
-	# invoker-owned parent grants the unlink). Best-effort either way.
+	# The container may have left empty mountpoint dirs inside the fixture:
+	# proj/bin, .claude/worktrees and .git/worktrees (created by shadow-mounts.sh,
+	# and — per the ownership assertions below — expected to be invoker-owned) plus
+	# .worktrees (created root-owned by the container ENGINE for the named volume).
+	# A plain rm clears them when their PARENT is invoker-owned, which is what grants
+	# the unlink — true for .git/worktrees and proj/bin (their parents pre-existed on
+	# the host) and for .worktrees. It is NOT guaranteed for .claude/worktrees: the
+	# .claude parent is itself container-created, so in exactly the regression case
+	# these assertions exist to catch (the chown gone, both levels left root-owned)
+	# the rm cannot unlink it and the fixture tmpdir leaks. Cosmetic only — a rootful
+	# rmdir is not worth invoking here, the run has already FAILED loudly by then, and
+	# the leak is a bounded empty dir under TMPDIR. Best-effort regardless: errors are
+	# swallowed so cleanup never masks the real failure.
 	[ -n "$FIXTURE" ] && rm -rf "$FIXTURE" 2>/dev/null
 	docker volume rm -f "$WTVOL" >/dev/null 2>&1 || true
 }
@@ -320,6 +396,12 @@ trap cleanup EXIT
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/powbox-wtmeta-XXXXXX")"
 git -C "$FIXTURE" init -q
 printf 'base tracked content\n' >"$FIXTURE/tracked.txt"
+# A stand-in project directory for the mountpoint-ownership coverage (task 053):
+# it is created HERE, by the invoking host user, so when Container A shadows
+# proj/bin the only NEW component is bin and its deepest existing ancestor is this
+# invoker-owned proj. That is the .NET artifact shape the chown exists for.
+mkdir -p "$FIXTURE/proj"
+printf 'stand-in for a project whose bin/ is shadowed\n' >"$FIXTURE/proj/project.marker"
 git -C "$FIXTURE" -c user.email=smoke@powbox.local -c user.name="powbox smoke" add -A
 git -C "$FIXTURE" -c user.email=smoke@powbox.local -c user.name="powbox smoke" commit -qm "init"
 
@@ -343,6 +425,88 @@ case "$rc" in
 	;;
 *) fail "Container A could not set up the durable worktree (see the FAIL line above)" ;;
 esac
+
+# --- Host-side: created mountpoints inherited the tree's ownership (task 053) ---
+# shadow-mounts.sh only ever runs via sudo, so a mountpoint it has to CREATE is
+# created by ROOT. On a native-Linux bind mount that directory OUTLIVES the
+# container once the tmpfs/bind goes away, and if it is left root-owned mode-755
+# the host user can afterwards neither populate nor remove it (e.g. a later host
+# `dotnet build` writing into bin/obj). Every created component must therefore
+# inherit the uid:gid of the deepest ancestor that already existed.
+#
+# The assertion runs HERE — on the host, after Container A exited — rather than
+# inside the container: the container's mount namespace died with it, so the
+# tmpfs/bind is no longer stacked on top and a plain stat sees the UNDERLYING
+# directory. That keeps the inner script's flow untouched (no unmount-and-restat
+# dance) and it measures exactly the real-world consequence the chown exists to
+# prevent. The intermediate `.claude` — created but never a mountpoint — is
+# asserted inside Container A instead, where no unmount is needed either.
+#
+# Covered: proj/bin (ONE created component on the ORDINARY tmpfs path — the .NET
+# artifact shape the chown was written for, its proj parent created by the host
+# invoker above), .claude/worktrees (TWO created components), and .git/worktrees
+# (ONE created component, but on the special durable-BIND branch, which reaches the
+# mount through bind_git_worktrees instead of the tmpfs line — a different path
+# through the script, so not a duplicate of the proj/bin case). NOT .worktrees —
+# that mountpoint is created by the container ENGINE for the named volume, never by
+# shadow-mounts.sh, so it is legitimately root-owned and is not evidence of anything.
+#
+# Tolerance: each assertion is EQUALITY with the deepest pre-existing ancestor,
+# never "== $(id -u)". On a filesystem where chown is a no-op (a Windows/FUSE bind
+# mount) every path reports the same squashed owner, so this passes instead of
+# failing spuriously; on a native-Linux mount a missing chown leaves the directory
+# root-owned while its ancestor is not, and the assertion fires. Equality also
+# subsumes the weaker "must not be root" form whenever the tree's owner is not
+# root.
+#
+# That tolerance has a price, so state the vacuity conditions out loud — all three
+# are cases where these checks CANNOT fail and a green run proves nothing:
+#   * a squashing filesystem (Windows/FUSE) — every path reports one owner;
+#   * a ROOTLESS engine — the container's root maps to the invoker, so even an
+#     unchowned directory lands invoker-owned;
+#   * the smoke itself run as ROOT on the host — the whole fixture is then
+#     root-owned, so ancestor and mountpoint are both root with or without the chown.
+# The last two are detected below and announced; the first cannot be probed
+# portably. Real teeth come from an unprivileged host user on a rootful Linux
+# engine — the native-Linux CI runner, and a stock Linux desktop install.
+
+# GNU (`-c`) vs BSD/macOS (`-f`) stat: a host smoke run may be on either.
+owner_of() {
+	stat -c '%u:%g' "$1" 2>/dev/null || stat -f '%u:%g' "$1" 2>/dev/null
+}
+
+assert_created_mountpoint_owner() {
+	local dir="$1" ancestor="$2" label="$3" got want
+	[ -e "$dir" ] || fail "mountpoint ownership ($label): shadow-mounts.sh should have created '$dir', but it is absent on the host after the container exited"
+	got="$(owner_of "$dir")" || fail "mountpoint ownership ($label): cannot stat '$dir'"
+	want="$(owner_of "$ancestor")" || fail "mountpoint ownership ($label): cannot stat '$ancestor'"
+	[ "$got" = "$want" ] || fail "mountpoint ownership ($label): '$dir' is owned by $got but its deepest pre-existing ancestor '$ancestor' is owned by $want — the created mountpoint did NOT inherit the tree's ownership. The shadow-mounts.sh mountpoint chown has regressed; on a native-Linux bind mount the host user is left unable to populate or remove that directory."
+	echo "  ok: mountpoint ownership ($label) — <fixture>${dir#"$FIXTURE"} inherited $got from its pre-existing ancestor <fixture>${ancestor#"$FIXTURE"}"
+}
+
+if ! owner_of "$FIXTURE" >/dev/null 2>&1; then
+	# note_skip, not a bare echo: this is a genuine no-coverage case, so it belongs in
+	# the umbrella banner rather than scrolling past in the log — the same idiom the
+	# runtime self-skips above use. It is a PARTIAL skip (the rest of the stage still
+	# runs), and a later whole-stage note_skip legitimately overwrites it, that being
+	# the more severe outcome. Practically unreachable — every supported host has GNU
+	# or BSD stat — but silence here would be indistinguishable from a real pass.
+	note_skip "mountpoint-ownership assertions skipped: this host's stat supports neither 'stat -c' nor 'stat -f'"
+	echo "  note: skipping the mountpoint-ownership assertions — this host's stat supports neither 'stat -c' nor 'stat -f'."
+else
+	# Say out loud when the assertions below cannot fail (see the vacuity conditions
+	# above). Both notes are purely informational: never a skip, never a failure — the
+	# engine may not answer, and a vacuous pass is still a pass.
+	if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+		echo "  note: this container engine is ROOTLESS — the mountpoint-ownership assertions below are satisfied vacuously (the container's root maps to you, so an unchowned directory would still look invoker-owned). Real coverage comes from a rootful engine, e.g. the native-Linux CI runner."
+	fi
+	if [ "$(id -u)" = 0 ]; then
+		echo "  note: this smoke is running as ROOT on the host — the whole fixture is root-owned, so the mountpoint-ownership assertions below are satisfied vacuously (ancestor and mountpoint are both root with or without the chown). Real coverage comes from an unprivileged host user."
+	fi
+	assert_created_mountpoint_owner "$FIXTURE/proj/bin" "$FIXTURE/proj" "single created component, tmpfs path"
+	assert_created_mountpoint_owner "$FIXTURE/.claude/worktrees" "$FIXTURE" "multi-component creation"
+	assert_created_mountpoint_owner "$FIXTURE/.git/worktrees" "$FIXTURE/.git" "single created component, durable-bind path"
+fi
 
 # --- Container B (the recreate) ------------------------------------------------
 echo "Container B — recreate on the SAME .worktrees volume + repo, assert survival"

@@ -88,9 +88,8 @@ yq_capable() {
 }
 
 # --check-yq: run ONLY the yq presence/capability probe and exit 0 (capable) or 1.
-# The umbrella smoke's Stage 0e host fallback gates on this so an absent OR
-# incompatible host yq becomes a recorded skip there — without duplicating the
-# probe logic — instead of a spurious mid-test failure here.
+# This standalone mode lets callers test whether PATH provides the jq-backed yq
+# interface needed by the full suite without running its fixture assertions.
 if [ "${1:-}" = "--check-yq" ]; then
 	yq_capable || exit 1
 	exit 0

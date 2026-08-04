@@ -196,8 +196,8 @@ jobs:
       # workspace-glob containment. It is hermetic (throwaway repos in a tmpdir,
       # no image, no Docker, no root), so it belongs in Tier 0 where an edit to
       # detect-shadows.sh gets the feedback in seconds instead of waiting for the
-      # path-gated Tier 1 build. commands/smoke-test.sh runs it too (Stage 0g,
-      # in-image, against the same source); this step is the fast path.
+      # path-gated Tier 1 build. This Tier 0 run validates the checkout source;
+      # commands/smoke-test.sh Stage 0g validates the baked /usr/local/bin copy.
       #
       # The suite probes its own toolchain and exits with one clear FATAL when the
       # yq on PATH is the wrong implementation, so a runner-image change that

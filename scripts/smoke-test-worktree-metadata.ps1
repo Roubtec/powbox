@@ -3,7 +3,8 @@ param(
 )
 
 # Smoke-test the DURABLE worktree-metadata lifecycle (task 017), behaviourally
-# identical to scripts/smoke-test-worktree-metadata.sh. In dir-mounted mode a linked
+# identical to scripts/smoke-test-worktree-metadata.sh EXCEPT for the mountpoint-
+# ownership assertions - see KNOWN DIVERGENCE below. In dir-mounted mode a linked
 # git worktree - and its per-worktree admin metadata - must SURVIVE a container
 # stop/recreate, because the metadata is bound from the persistent .worktrees volume
 # over .git/worktrees instead of living in the tmpfs shadow that vanishes on recycle.
@@ -29,6 +30,18 @@ param(
 #   4. Host-side: the dir-mounted checkout's real .git/worktrees gained NO container
 #      registrations - the bind kept every registration inside the volume.
 #
+# KNOWN DIVERGENCE from the Bash script (task 053 / PR #131): that script also asserts
+# a fifth property - that every mountpoint directory shadow-mounts.sh had to CREATE
+# inherited the ownership of the deepest ancestor that already existed, instead of being
+# left root-owned - using a proj/bin and a .claude/worktrees fixture. That coverage is
+# NOT mirrored here yet, so a full smoke driven through commands/smoke-test.ps1 - which
+# invokes THIS script at Stage 6, including on a native-Linux host running pwsh - does
+# not exercise the privileged mountpoint-chown integration check. Mirroring it is not a
+# mechanical port: the assertions compare uid:gid, which PowerShell has no native
+# accessor for and which is meaningless on the Windows/macOS hosts this driver exists to
+# serve, and the port cannot be validated from inside an agent container. Tracked as
+# tasks/053a-mirror-mountpoint-ownership-smoke-in-powershell-driver.md; until it lands,
+# run commands/smoke-test.sh on Linux for the ownership coverage.
 # Privileges: the durable bind is a `mount --bind`, so the container needs
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile - the launch-time wiring the
 # launcher supplies via compose.shared.yml and that smoke-test-podman.ps1 replicates.

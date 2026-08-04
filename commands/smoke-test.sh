@@ -205,6 +205,16 @@ fi
 # WRONG yq implementation would then turn 22 assertions red instead of recording an
 # honest skip — else skip.
 #
+# That toolchain probe is necessary but NOT sufficient: like Stage 0f/0h, the host
+# fallback is additionally gated on a LINUX host, because the CODE UNDER TEST needs a
+# GNU userland that `--check-deps` cannot speak for. detect-shadows.sh calls GNU-only
+# `realpath -m --` and drives its .NET artifact scan through `find -H … -printf '%h\0'
+# | sort -zu` — neither `realpath -m` nor `find -printf`/`sort -z` exists on BSD/macOS.
+# Without the gate, a macOS host that happens to have git, jq and python-yq installed
+# passes `--check-deps` and then fails the whole smoke on a toolchain difference,
+# instead of recording the honest skip this stage intends. The two skips are kept
+# distinct so the banner says which one actually applies.
+#
 # The in-image run points the suite at the BAKED /usr/local/bin copies (via
 # POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR, the shape Stage 0c/0d uses for
 # the wt-* helpers), so a STALE baked detect-shadows.sh is caught by a real suite
@@ -217,6 +227,9 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		-e POWBOX_DETECT_SHADOWS=/usr/local/bin/detect-shadows.sh \
 		-e POWBOX_PNPM_SHADOW_DOCTOR=/usr/local/bin/pnpm-shadow-doctor \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-detect-shadows.sh
+elif [ "$(uname -s)" != Linux ]; then
+	echo "WARNING: skipping detect-shadows unit suite (Stage 0g) — image '$IMAGE' absent and this is a non-Linux host (detect-shadows.sh itself calls GNU-only 'realpath -m' and 'find -printf'/'sort -z', which BSD/macOS reject)."
+	skipped+=("Stage 0g: detect-shadows unit suite (image absent; host fallback needs a GNU/Linux userland)")
 elif "${ROOT_DIR}/scripts/test-detect-shadows.sh" --check-deps >/dev/null 2>&1; then
 	echo "Running detect-shadows unit suite (host source — image '$IMAGE' absent) ..."
 	"${ROOT_DIR}/scripts/test-detect-shadows.sh"

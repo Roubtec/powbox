@@ -433,8 +433,8 @@ fi
 	"command -v gh-review-threads >/dev/null" \
 	"command -v peer-review-run >/dev/null" \
 	"shellcheck --version >/dev/null" \
-	"actionlint --version | grep -qx 1.7.12" \
-	"markdownlint-cli2 --version | grep -q '^markdownlint-cli2 v0.23.2 '" \
+	'test "$(actionlint --version)" = 1.7.12' \
+	'markdownlint-cli2 --version >/dev/null && test "$(npm list --global --depth=0 --json | jq -r ".dependencies[\"markdownlint-cli2\"].version")" = 0.23.2' \
 	"ping -V >/dev/null" \
 	"nc -h >/dev/null 2>&1" \
 	"bc --version >/dev/null" \

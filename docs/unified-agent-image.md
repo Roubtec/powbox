@@ -41,13 +41,14 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 
 1. base (`powbox-agent-base`)
 2. Codex install layer (infrequent updates)
-3. Claude install layer (frequent, larger updates)
-4. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
+3. stable shared-linter layers (`actionlint`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the base image used by the provenance resolver
+4. Claude install layer (frequent, larger updates)
+5. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
 
 Consequence:
 
 - **Claude updates** (the common case) change only the top layer → clients pull only the Claude layer. Codex layer underneath is reused. This is the bandwidth win, achieved with one image and one tag.
-- **Codex updates** (rare) change the lower layer → the Claude layer above rebuilds and both are pulled. Unavoidable with any single-image stacking, and accepted.
+- **Codex updates** (rare) change the lower layer → the stable shared-linter layers and Claude layer above rebuild. Unavoidable with any single-image stacking, and accepted.
 
 Each binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`) so that edits to hooks/skills do not trigger binary reinstalls.
 
@@ -130,7 +131,7 @@ Because the peer list is the same for every agent now, it can be rendered from t
 
 ## Implementation order
 
-1. Add `docker/agent/Dockerfile` (base → Codex layer → Claude layer → shared assets) and the unified `entrypoint-agent.sh`; keep both hooks.
+1. Add `docker/agent/Dockerfile` (base → Codex layer → stable shared-tool layers → Claude layer → shared assets) and the unified `entrypoint-agent.sh`; keep both hooks.
 2. Update `docker-bake.hcl` and `scripts/build-image.sh` for the single `agent` target.
 3. Merge compose files; mount both config volumes; thread `PRIMARY_AGENT`.
 4. Update `launch-agent.sh` (image, env, both-volume ensure) and verify `cc`/`cx` unchanged in behavior.

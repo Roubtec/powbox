@@ -7,13 +7,22 @@
 # BELOW Claude (updated most often, larger). Bumping CLAUDE_CODE_VERSION then
 # busts only the Claude layer plus the cheap asset/entrypoint layers above it,
 # so the common case re-pulls just the Claude layer. Bumping CODEX_VERSION
-# rebuilds the Claude layer on top as a side effect — an accepted, rarer cost.
-# `agent-update` pins concrete versions per binary so Docker rebuilds the
-# minimum set of layers for any single update.
+# rebuilds the stable shared-linter layers and Claude layer on top as a side
+# effect — an accepted, rarer cost. `agent-update` pins concrete versions per
+# binary so Docker rebuilds the minimum set of layers for any single update.
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 
-# --- Shared linters (stable layer below the frequently updated agents) -------
+# --- Codex (lower layer: updated less often) ---------------------------------
+ARG CODEX_VERSION=latest
+ENV CODEX_CONFIG_DIR=/home/node/.codex
+USER root
+RUN npm install -g @openai/codex@${CODEX_VERSION}
+USER node
+
+# --- Shared linters (stable layers between the agent installs) ---------------
+# Keep these above Codex so its cache parent remains the base image; the
+# provenance resolver deliberately models that exact parent plus CODEX_VERSION.
 # actionlint is the current stable v1.7.12 release. Fetch its static Linux
 # tarball directly from GitHub and verify the per-architecture SHA256 published
 # in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
@@ -37,13 +46,6 @@ RUN ACTIONLINT_VERSION=1.7.12 \
 # default reproducible and omit optional dependencies; repository wrappers and
 # CI pins remain authoritative when they require another version.
 RUN npm install -g --omit=optional markdownlint-cli2@0.23.2
-USER node
-
-# --- Codex (lower layer: updated less often) ---------------------------------
-ARG CODEX_VERSION=latest
-ENV CODEX_CONFIG_DIR=/home/node/.codex
-USER root
-RUN npm install -g @openai/codex@${CODEX_VERSION}
 USER node
 
 # --- Claude (upper layer: updated most often) --------------------------------

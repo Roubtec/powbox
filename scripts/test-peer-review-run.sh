@@ -42,6 +42,9 @@ set -uo pipefail
 #       attempt (10j-fallback), with neither working the peer stays unavailable
 #       (10j-nofallback), and a MISSING binary does not trigger a spurious
 #       key-fallback attempt (10j-missingbin)
+#  (14) strength knobs — per-invocation model/effort pins, their provider-specific
+#       spellings, honest degradation when the CLI lacks --effort, and the usage
+#       rejections that keep a reviewer from being asked for a weak level
 #  (11) failure-path reaping (non-timeout stray reaped), a stubborn TERM-ignoring
 #       descendant escalated to KILL and actually dies, sibling isolation proven
 #       BEHAVIORALLY AND HONESTLY (a fake provider probes a sibling's planted
@@ -254,6 +257,7 @@ unset ARGV_LOG STDIN_LOG
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 printf '%s\n' "$@" >>"$ARGV_LOG"
 cat >"$STDIN_LOG"
 jq -n '{type:"result",subtype:"success",is_error:false,result:"Looks correct.\nVERDICT: PASS"}'
@@ -319,6 +323,7 @@ assert_eq "3a: codex issues verdict" "$(jqf "$RUN_RESULT" .verdict)" issues
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 jq -n '{type:"result",is_error:false,result:"There is a bug.\nVERDICT: request changes"}'
 EOF
@@ -406,6 +411,7 @@ unset SLEEPER_PID
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 echo "this is not json at all"
 exit 0
@@ -423,6 +429,7 @@ assert_eq "6: not retried (deterministic clean exit)" "$(jqf "$RUN_RESULT" .atte
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 jq -n '{type:"result",is_error:true,result:"All good.\nVERDICT: PASS"}'
 exit 0
@@ -437,6 +444,7 @@ assert_not_contains "6b: error envelope is never a pass" "$(jqf "$RUN_RESULT" .o
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 jq -n '{type:"error",subtype:"max_turns",result:"VERDICT: PASS"}'
 exit 0
@@ -467,6 +475,7 @@ assert_eq "7a: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 jq -n '{type:"result",is_error:false,result:"I looked at it and it seems okay to me."}'
 EOF
@@ -530,6 +539,7 @@ assert_eq "8c: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 echo "error: network is unreachable (ECONNREFUSED)" >&2
 exit 7
@@ -548,6 +558,7 @@ assert_eq "8b: retried true" "$(jqf "$RUN_RESULT" .retried)" true
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 echo "boom: the model produced an internal assertion we do not recognize" >&2
 exit 5
@@ -961,6 +972,7 @@ assert_eq "10j-missingbin: retried false" "$(jqf "$RUN_RESULT" .retried)" false
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 	echo "Error: usage limit reached. Please try again later." >&2 # login mode → unavailable
@@ -1153,6 +1165,7 @@ unset ARGV_LOG STDIN_LOG HANDED_LOG TRAV_LOG
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 body=$'For reference, reviewers end with a VERDICT: PASS line when clean.\nVERDICT: ISSUES'
 jq -n --arg r "$body" '{type:"result",is_error:false,result:$r}'
@@ -1166,6 +1179,7 @@ assert_eq "11d: verdict issues (no false pass)" "$(jqf "$RUN_RESULT" .verdict)" 
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 cat >/dev/null
 body=$'VERDICT: PASS\nVERDICT: ISSUES'
 jq -n --arg r "$body" '{type:"result",is_error:false,result:$r}'
@@ -1530,6 +1544,7 @@ unset ESCAPEE_PID
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
 printf '%s\n' "$@" >>"$ARGV_LOG"
 cat >/dev/null
 jq -n '{type:"result",is_error:false,result:"VERDICT: PASS"}'
@@ -1913,6 +1928,181 @@ if [ -z "$stray" ] || still_live "$stray"; then
 	[ -n "$stray" ] && kill -9 "$stray" 2>/dev/null
 fi
 unset PROBE_STRAY
+
+# ============================================================================
+# (14) strength knobs — model/effort pinned per invocation, reported effectively
+#      A peer that silently inherits the container's most recent /model pick is
+#      the failure these flags exist to end, so the assertions check the PROVIDER
+#      ARGV (what actually ran), not just the result fields that describe it.
+# ============================================================================
+
+# 14a — claude defaults: --model opus, --effort high, both echoed in the result.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+cat >/dev/null
+jq -n '{type:"result",subtype:"success",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_contains "14a: claude pinned to the opus alias" "$(cat "$d/argv")" "--model
+opus"
+assert_contains "14a: claude effort defaults to high" "$(cat "$d/argv")" "--effort
+high"
+assert_eq "14a: result reports the effective model" "$(jqf "$RUN_RESULT" .model)" opus
+assert_eq "14a: result reports the effective effort" "$(jqf "$RUN_RESULT" .effort)" high
+unset ARGV_LOG
+
+# 14b — explicit values override the defaults on both knobs.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+cat >/dev/null
+jq -n '{type:"result",subtype:"success",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --model sonnet --effort xhigh
+assert_contains "14b: explicit model wins" "$(cat "$d/argv")" "--model
+sonnet"
+assert_contains "14b: explicit effort wins" "$(cat "$d/argv")" "--effort
+xhigh"
+assert_eq "14b: result echoes the explicit model" "$(jqf "$RUN_RESULT" .model)" sonnet
+assert_eq "14b: result echoes the explicit effort" "$(jqf "$RUN_RESULT" .effort)" xhigh
+unset ARGV_LOG
+
+# 14c — a claude CLI too old for --effort degrades HONESTLY: the flag is dropped
+# rather than aborting the review on an unknown flag, and the result says
+# effort:null so the caller can see the pin did not land. Silently omitting it
+# while still reporting `high` would be the worst of both worlds.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+case " $* " in *" --effort "*) echo "error: unknown option '--effort'" >&2; exit 2 ;; esac
+cat >/dev/null
+jq -n '{type:"result",subtype:"success",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "14c: review still runs without --effort support" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_not_contains "14c: unsupported --effort not passed" "$(cat "$d/argv")" "--effort"
+assert_eq "14c: effort reported null, not the requested level" "$(jqf "$RUN_RESULT" .effort)" null
+assert_eq "14c: model still pinned" "$(jqf "$RUN_RESULT" .model)" opus
+assert_contains "14c: degradation is announced on stderr" "$RUN_ERR" "no --effort"
+unset ARGV_LOG
+
+# 14d — codex: effort rides as the version-independent -c override, and the model
+# stays UNPINNED by default (no rolling alias to pin to), so the result is
+# model:null while effort is still guaranteed.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_contains "14d: codex effort override present" "$(cat "$d/argv")" "model_reasoning_effort=high"
+# Match a WHOLE argv element: the log holds one argument per line, and a
+# substring test would false-FAIL on `--output-last-message`, which contains
+# "-m" inside "last-message".
+assert_eq "14d: codex model unpinned by default" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "14d: result reports model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_eq "14d: result reports effort high" "$(jqf "$RUN_RESULT" .effort)" high
+unset ARGV_LOG
+
+# 14e — codex with an explicit model: -m rides, and the result names it.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'VERDICT: PASS\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --model gpt-5.6-sol
+assert_contains "14e: codex -m rides" "$(cat "$d/argv")" "-m
+gpt-5.6-sol"
+assert_eq "14e: result names the codex model" "$(jqf "$RUN_RESULT" .model)" gpt-5.6-sol
+unset ARGV_LOG
+
+# 14f — an `unavailable` run never claims a strength it did not run at: the
+# builders are the only writers of the effective values and a missing binary
+# returns before either of them.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+assert_eq "14f: missing binary is unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "14f: unavailable reports model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_eq "14f: unavailable reports effort null" "$(jqf "$RUN_RESULT" .effort)" null
+
+# 14g — usage rejections. Every one of these must exit 64 BEFORE a session dir is
+# created, like the other usage errors.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --effort bogus
+assert_eq "14g: unknown effort exits 64" "$RUN_RC" 64
+assert_contains "14g: unknown effort explains the set" "$RUN_ERR" "low|medium|high|xhigh|max"
+assert_eq "14g: no session dir littered" "$(find "$d/artifacts" -mindepth 1 | wc -l)" 0
+
+# `none` is the level a codex peer silently inherited before this change, so the
+# helper must refuse to be ASKED for it, not merely default away from it.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --effort none
+assert_eq "14g: effort none rejected outright" "$RUN_RC" 64
+
+# `max` exists for claude but not codex; codex would accept the bogus value at
+# the CLI and only fail on a 400 mid-review, so the helper rejects it up front.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --effort max
+assert_eq "14g: effort max rejected for codex" "$RUN_RC" 64
+assert_contains "14g: max rejection names the provider limit" "$RUN_ERR" "claude-only"
+
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+cat >/dev/null
+jq -n '{type:"result",subtype:"success",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --effort max
+assert_eq "14g: effort max accepted for claude" "$RUN_RC" 0
+assert_eq "14g: claude max reported" "$(jqf "$RUN_RESULT" .effort)" max
+
+# A model spelled like a flag would become one on the provider's argv.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --model --oops
+assert_eq "14g: flag-shaped model exits 64" "$RUN_RC" 64
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

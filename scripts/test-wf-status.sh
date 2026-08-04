@@ -93,6 +93,26 @@ assert_has() {
 	fi
 }
 
+write_boundary_aligned_transcript() {
+	local filename="$1" prompt="$2" status_record="$3"
+	local padding_prefix='{"type":"progress","padding":"'
+	local padding_suffix='"}'
+	local prefix_size padding_width final_size
+	printf '{"type":"user","message":{"role":"user","content":"%s"}}\n' "$prompt" >"$filename"
+	prefix_size="$(wc -c <"$filename")"
+	padding_width=$((65536 - ${#status_record} - 1 - ${#padding_prefix} - ${#padding_suffix} - 1))
+	{
+		printf '%s\n%s' "$status_record" "$padding_prefix"
+		printf '%*s' "$padding_width" ''
+		printf '%s\n' "$padding_suffix"
+	} >>"$filename"
+	final_size="$(wc -c <"$filename")"
+	if [[ "$final_size" -ne $((prefix_size + 65536)) ]]; then
+		echo "test-wf-status: failed to align tail fixture $filename" >&2
+		exit 1
+	fi
+}
+
 output="$($HELPER "$RUN_DIR")"
 assert_has "transcript directory resolves its run ID" "$output" "Workflow: $RUN_ID"
 assert_has "snapshot status is shown" "$output" "Status: failed"
@@ -135,6 +155,22 @@ assert_has "complete non-newline-terminated transcript line is retained" "$parti
 assert_has "transcript failure survives a matching journal result" "$partial_output" "failed    failed result transcript [p3]"
 assert_has "partial run has no invented final return" "$partial_output" "(not available)"
 assert_has "missing snapshot is a warning" "$partial_output" "workflow snapshot is missing"
+
+BOUNDARY_ID="wf_boundary-047"
+BOUNDARY_DIR="$SESSION/subagents/workflows/$BOUNDARY_ID"
+mkdir -p "$BOUNDARY_DIR"
+write_boundary_aligned_transcript \
+	"$BOUNDARY_DIR/agent-b1.jsonl" \
+	"boundary failure prompt" \
+	'{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[]}}'
+write_boundary_aligned_transcript \
+	"$BOUNDARY_DIR/agent-b2.jsonl" \
+	"boundary completion prompt" \
+	'{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}'
+boundary_output="$($HELPER "$BOUNDARY_DIR")"
+assert_has "newline-aligned tail retains its first failure record" "$boundary_output" "failed    boundary failure prompt [b1]"
+assert_has "newline-aligned tail retains its first completion record" "$boundary_output" "completed boundary completion prompt [b2]"
+assert_has "boundary-aligned transcript states are counted" "$boundary_output" "Agents: 2 total (1 completed, 1 failed, 0 pending)"
 
 EMPTY_ID="wf_empty-047"
 EMPTY_DIR="$SESSION/subagents/workflows/$EMPTY_ID"

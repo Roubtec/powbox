@@ -121,20 +121,33 @@ function readJournal(filename, warnings) {
   return records;
 }
 
+function readBytesAt(descriptor, length, position) {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const bytesRead = fs.readSync(descriptor, bytes, offset, length - offset, position + offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return bytes.subarray(0, offset);
+}
+
 function readEdgeLines(filename) {
   let descriptor;
   try {
     descriptor = fs.openSync(filename, "r");
     const size = fs.fstatSync(descriptor).size;
     const chunkSize = Math.min(size, 65536);
-    const first = Buffer.alloc(chunkSize);
-    fs.readSync(descriptor, first, 0, chunkSize, 0);
-    const last = Buffer.alloc(chunkSize);
-    fs.readSync(descriptor, last, 0, chunkSize, Math.max(0, size - chunkSize));
+    const first = readBytesAt(descriptor, chunkSize, 0);
+    const tailOffset = Math.max(0, size - chunkSize);
+    const last = readBytesAt(descriptor, chunkSize, tailOffset);
     const firstLines = first.toString("utf8").split("\n");
-    if (size > chunkSize || firstLines[firstLines.length - 1] === "") firstLines.pop();
+    if (first.length < size || firstLines[firstLines.length - 1] === "") firstLines.pop();
     const lastLines = last.toString("utf8").split("\n");
-    if (size > chunkSize) lastLines.shift();
+    if (tailOffset > 0) {
+      const boundary = readBytesAt(descriptor, 1, tailOffset - 1);
+      if (boundary.length !== 1 || boundary[0] !== 0x0a) lastLines.shift();
+    }
     return { firstLines, lastLines };
   } catch {
     return { firstLines: [], lastLines: [] };

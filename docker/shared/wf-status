@@ -131,7 +131,8 @@ function readEdgeLines(filename) {
     fs.readSync(descriptor, first, 0, chunkSize, 0);
     const last = Buffer.alloc(chunkSize);
     fs.readSync(descriptor, last, 0, chunkSize, Math.max(0, size - chunkSize));
-    const firstLines = first.toString("utf8").split("\n").slice(0, -1);
+    const firstLines = first.toString("utf8").split("\n");
+    if (size > chunkSize || firstLines[firstLines.length - 1] === "") firstLines.pop();
     const lastLines = last.toString("utf8").split("\n");
     if (size > chunkSize) lastLines.shift();
     return { firstLines, lastLines };
@@ -271,7 +272,7 @@ function buildCalls(snapshot, journal, agentFiles) {
         agentId,
         label: compactLabel(fallback?.label),
         phase: "?",
-        state: journalCall.result ? "completed" : fallback?.state || "pending",
+        state: fallback?.state === "failed" ? "failed" : journalCall.result ? "completed" : fallback?.state || "pending",
         error: undefined,
         journalKey: journalCall.key,
       };
@@ -279,7 +280,7 @@ function buildCalls(snapshot, journal, agentFiles) {
       if (agentId) byAgentId.set(agentId, call);
     } else {
       call.journalKey = journalCall.key;
-      if (journalCall.result) call.state = "completed";
+      if (journalCall.result && call.state !== "failed") call.state = "completed";
     }
   }
 

@@ -27,6 +27,7 @@ cat >"$RUN_DIR/journal.jsonl" <<'EOF'
 {"type":"started","key":"v2:one","agentId":"a1"}
 {"type":"result","key":"v2:one","agentId":"a1","result":{"ok":true}}
 {"type":"started","key":"v2:two","agentId":"a2"}
+{"type":"result","key":"v2:two","agentId":"a2","result":{"ok":false}}
 {"type":"started","key":"v2:three","agentId":"a3"}
 EOF
 printf '{"type":"result"' >>"$RUN_DIR/journal.jsonl"
@@ -97,7 +98,8 @@ assert_has "transcript directory resolves its run ID" "$output" "Workflow: $RUN_
 assert_has "snapshot status is shown" "$output" "Status: failed"
 assert_has "phases seen are rendered" "$output" "1. Bootstrap"
 assert_has "completed/failed/pending calls are counted" "$output" "Agents: 3 total (1 completed, 1 failed, 1 pending)"
-assert_has "snapshot labels are correlated by agent ID" "$output" "failed    worker-failed [a2]"
+assert_has "snapshot failure survives a matching journal result" "$output" "failed    worker-failed [a2]"
+assert_has "snapshot labels are correlated by agent ID" "$output" "worker-failed [a2] · Work · fixture failure"
 assert_has "agent error is rendered" "$output" "fixture failure"
 assert_has "final return is rendered" "$output" '{"delivered":1,"note":"fixture return"}'
 assert_has "truncated final journal record is non-fatal" "$output" "truncated final record and was ignored"
@@ -110,23 +112,27 @@ PARTIAL_DIR="$SESSION/subagents/workflows/$PARTIAL_ID"
 mkdir -p "$PARTIAL_DIR"
 cat >"$PARTIAL_DIR/journal.jsonl" <<'EOF'
 {"type":"started","key":"v2:pending","agentId":"p1"}
+{"type":"started","key":"v2:failed","agentId":"p3"}
+{"type":"result","key":"v2:failed","agentId":"p3","result":{"ok":false}}
 EOF
 printf '{"type":"started","key":"v2:cut"' >>"$PARTIAL_DIR/journal.jsonl"
 cat >"$PARTIAL_DIR/agent-p1.meta.json" <<'EOF'
 {"agentType":"workflow-subagent","spawnDepth":1}
 EOF
-cat >"$PARTIAL_DIR/agent-p1.jsonl" <<'EOF'
-{"type":"user","message":{"role":"user","content":"pending label from prompt"}}
-{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[]}}
-EOF
+printf '%s' '{"type":"user","message":{"role":"user","content":"pending label from prompt"}}' >"$PARTIAL_DIR/agent-p1.jsonl"
 cat >"$PARTIAL_DIR/agent-p2.jsonl" <<'EOF'
 {"type":"user","message":{"role":"user","content":"completed orphan transcript"}}
 {"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}
 EOF
+cat >"$PARTIAL_DIR/agent-p3.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"failed result transcript"}}
+{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API error"}]}}
+EOF
 partial_output="$($HELPER "$PARTIAL_DIR")"
 assert_has "missing snapshot degrades to partial" "$partial_output" "Status: partial"
-assert_has "partial journal plus transcript still produce useful counts" "$partial_output" "Agents: 2 total (1 completed, 0 failed, 1 pending)"
-assert_has "prompt-derived label is clearly best effort" "$partial_output" "pending label from prompt [p1]"
+assert_has "partial journal plus transcript still produce useful counts" "$partial_output" "Agents: 3 total (1 completed, 1 failed, 1 pending)"
+assert_has "complete non-newline-terminated transcript line is retained" "$partial_output" "pending label from prompt [p1]"
+assert_has "transcript failure survives a matching journal result" "$partial_output" "failed    failed result transcript [p3]"
 assert_has "partial run has no invented final return" "$partial_output" "(not available)"
 assert_has "missing snapshot is a warning" "$partial_output" "workflow snapshot is missing"
 

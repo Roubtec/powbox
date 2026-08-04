@@ -50,10 +50,11 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 
 When you develop powbox from **inside** a powbox container, the validation surface is split: static checks and pure-shell tests run here, but anything that needs a built image runs on the host or in CI.
 
+Shell formatting convention: among the extensionless `docker/shared/` helpers (`pg-dev-up`, `wt-bootstrap`, `wt-enter`, `wt-remove`, `gitcat`, `peer-review-run`, `pnpm-shadow-doctor`, `cid`, and `powbox-provenance`), only `pg-dev-up` currently differs from default `shfmt`; its indented `case` bodies are accepted house style, and additions should match that existing style. CI's advisory `shfmt` check selects only changed `*.sh` files, so reviewers should not raise pre-existing default-`shfmt` diffs in extensionless helpers.
+
 Runs in-container (do these before handing off):
 
 - Static lint gates: `shellcheck` (Tier 0 CI blocks at `--severity=error`; run the default severity locally), `shfmt -d`, and PSScriptAnalyzer — see [PowerShell Linting](#powershell-linting).
-- Extensionless shell helpers under `docker/shared/` accept indented `case` bodies as house style (`pg-dev-up` is currently the only one with a default `shfmt -d` diff); CI's advisory `shfmt` check is scoped to changed `*.sh`, so reviewers should not raise pre-existing diffs in those extensionless helpers.
 - Pure-shell unit tests that need no image or Docker daemon, e.g. `scripts/test-sensitive-host-path.sh`, `scripts/test-detect-shadows.sh`, `scripts/test-shadow-mounts-chown.sh`, `scripts/test-pnpm-shadow-wrapper.sh`.
 
 Needs the host or CI (cannot run here):

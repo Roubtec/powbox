@@ -40,11 +40,12 @@ Out of scope:
 
 - Pin exact versions (release tag for actionlint, npm version for markdownlint-cli2) so image builds are reproducible; note the versions in the Dockerfile comment.
 - Keep image-size impact minimal: actionlint is a single small binary; markdownlint-cli2 adds a node_modules subtree under the global prefix — acceptable, but avoid pulling optional deps.
+- `markdownlint-cli2 --version` is not a dedicated version option: the CLI treats `--version` as an input glob while its startup banner happens to include the version. The smoke should therefore exercise the PATH binary by linting a real file and verify the exact pin separately through npm's machine-readable global package metadata, rather than parsing presentation output that lints no files.
 - This is an image change: full validation needs a host rebuild + smoke run (Tier 1 CI covers image-affecting PRs to main). In-container validation is limited to Dockerfile lint/review.
 
 ## Acceptance criteria
 
-- A rebuilt agent image has `actionlint --version` and `markdownlint-cli2 --version` working on `PATH` for the `node` user.
+- A rebuilt agent image has `actionlint --version` working and `markdownlint-cli2` linting a real Markdown file on `PATH` for the `node` user; npm's global package metadata reports the pinned markdownlint-cli2 version.
 - The tooling table documents both, including the repo-pin caveat for markdownlint-cli2.
 - Image smoke asserts both binaries.
 

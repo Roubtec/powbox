@@ -235,9 +235,13 @@ else {
 # test and runs `opa test`, exercising the exact `opa test policy/...` contract a
 # policy-repo's CI runs (and that motivated baking opa in).
 # The actionlint probe captures the whole multi-line version output successfully
-# before comparing its first line exactly. The markdownlint-cli2 probe lints a
-# real temporary Markdown file and asserts the exact global npm package version.
-# A pin bump must update this inventory and its Bash mirror.
+# before comparing its first line exactly. markdownlint-cli2 has no dedicated
+# `--version` option: it treats that token as an input glob while its human-facing
+# startup banner happens to show a version. Rather than parse that presentation
+# output without exercising linting, its probe invokes the PATH binary on a real
+# temporary Markdown file and separately reads the exact installed pin from npm's
+# machine-readable global package metadata. A pin bump must update this inventory
+# and its Bash mirror.
 # Every probe below is handed to the driver (scripts/smoke-test-image.ps1) as a
 # separate ARGUMENT, and the driver passes it to the container the same way: as
 # one element of `"$@"` for a fixed one-line runner that executes each probe in

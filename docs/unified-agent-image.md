@@ -91,7 +91,7 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 - `check-updates.sh` reads both baked versions in **one** container start (`docker run … sh -c 'claude --version; codex --version'`) — the win the single image unlocks — and resolves both npm latests. Its `--porcelain` mode emits a machine-readable table: `name<TAB>status<TAB>baked<TAB>latest`.
 - `agent-update` reads that table once and rebuilds `agent` pinning each agent binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
-- Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
+- Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the stable shared-linter layers and Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
 
 ### Launcher and macros
 

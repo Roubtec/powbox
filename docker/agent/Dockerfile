@@ -5,8 +5,9 @@
 #
 # Layer order is deliberate. Codex (updated less often, smaller) is installed
 # BELOW Claude (updated most often, larger). Bumping CLAUDE_CODE_VERSION then
-# busts only the Claude layer plus the cheap asset/entrypoint layers above it,
-# so the common case re-pulls just the Claude layer. Bumping CODEX_VERSION
+# busts only the Claude layer plus the cheap asset/metadata/entrypoint layers above it,
+# so the common case reuses the Codex and stable shared-linter layers below it
+# while pulling Claude plus the changed cheap upper layers. Bumping CODEX_VERSION
 # rebuilds the stable shared-linter layers and Claude layer on top as a side
 # effect — an accepted, rarer cost. `agent-update` pins concrete versions per
 # agent binary so Docker rebuilds the minimum set of layers for those updates.

@@ -436,11 +436,11 @@ fi
 # dir-mounted JS/powbox/Go/.NET projects and in self-hosted mode, omitted for
 # non-dev folders so nothing is mkdir-ed onto a host bind mount). Plain env is
 # all these tools need — no `go env -w`, ccache, or NuGet config — so this mkdir
-# only surfaces a bad value LOUDLY
-# at startup instead of as a confusing mid-session build failure. Guarded so a
-# bad value never aborts the container start: on failure the var is unset (the
-# exec'd agent inherits the cleared env), so the tool falls back to its
-# image-default, container-ephemeral cache path and keeps working.
+# only surfaces a bad value LOUDLY at startup instead of as a confusing
+# mid-session build failure. Guarded so a bad value never aborts the container
+# start: on failure the var is unset (the exec'd agent inherits the cleared env),
+# so the tool falls back to its image-default, container-ephemeral cache path and
+# keeps working.
 for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR NUGET_PACKAGES; do
 	_cache_dir="${!_cache_var:-}"
 	[ -n "$_cache_dir" ] || continue

@@ -199,26 +199,39 @@ function Test-Powbox-LocalShadowConfigPresent ([string]$Workspace) {
 }
 
 # A deliberately bounded .NET repo detector for the worktrees-volume-only gate.
-# Solutions are recognized at the repo root; project files are recognized there
-# or exactly one directory below it (for layouts such as src/App.csproj).
+# Solutions and project files are recognized at the repo root or exactly one
+# directory below it (for layouts such as src/App.sln or src/App.csproj).
 # GetFiles is non-recursive at each explicitly visited level, so unrelated deep
 # trees are never scanned. Extension matching is explicitly case-insensitive on
-# every host, and dot-prefixed direct children count. Inaccessible or concurrently
-# removed children are skipped. Keep this predicate in sync with launch-agent.sh
-# and the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
+# every host, and dot-prefixed direct children count. Reparse-point files and
+# child directories are not followed; inaccessible or concurrently removed
+# children are skipped. Keep this predicate in sync with launch-agent.sh and the
+# identity fixtures in smoke-test-selfhosted.{sh,ps1}.
 function Test-Powbox-DotNetRepoPresent ([string]$Workspace) {
   try { $rootFiles = [System.IO.Directory]::GetFiles($Workspace) }
   catch { $rootFiles = @() }
   foreach ($file in $rootFiles) {
+    try {
+      if (([System.IO.File]::GetAttributes($file) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    }
+    catch { continue }
     if (@(".sln", ".slnx", ".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
   }
   try { $directories = [System.IO.Directory]::GetDirectories($Workspace) }
   catch { $directories = @() }
   foreach ($directory in $directories) {
+    try {
+      if (([System.IO.File]::GetAttributes($directory) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    }
+    catch { continue }
     try { $childFiles = [System.IO.Directory]::GetFiles($directory) }
     catch { continue }
     foreach ($file in $childFiles) {
-      if (@(".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
+      try {
+        if (([System.IO.File]::GetAttributes($file) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+      }
+      catch { continue }
+      if (@(".sln", ".slnx", ".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
     }
   }
   return $false
@@ -613,7 +626,6 @@ $mountWorkspaceVolumes = $false
 # projects want the persistent worktrees volume and language caches but have no
 # use for an isolated node_modules mount, which would only litter the host.
 $mountWorktreesVolume = $false
-$dotNetRepoPresent = $false
 $worktreesOnlyRepoDescription = "worktrees-only repo"
 $repoSpec = ""
 
@@ -771,20 +783,26 @@ else {
     $mountWorkspaceVolumes = $true
   }
   # The worktrees volume has WIDER, non-Node triggers: go.mod and a bounded .NET
-  # predicate (root *.sln/*.slnx/*.csproj/*.fsproj/*.vbproj, or project files
-  # exactly one directory below the root). A pure Go or .NET repo gets agent-wt-*
+  # predicate (solution/project files at the root or exactly one directory below
+  # it). A pure Go or .NET repo gets agent-wt-*
   # (persistent caches + worktrees) but NOT agent-nm-* — no empty node_modules/
   # litter on the host. PNPM_STORE_DIR stays keyed to the JS/powbox gate above,
   # so the pnpm wrapper's host-litter warning still fires for a stray root
   # `pnpm install` in a Go/.NET-only repo.
-  $dotNetRepoPresent = Test-Powbox-DotNetRepoPresent $resolvedProject
   $goModPresent = Test-Path (Join-Path $resolvedProject 'go.mod') -PathType Leaf
-  if ($mountWorkspaceVolumes -or $goModPresent -or $dotNetRepoPresent) {
+  if ($mountWorkspaceVolumes) {
     $mountWorktreesVolume = $true
   }
-  if ($goModPresent -and $dotNetRepoPresent) { $worktreesOnlyRepoDescription = "Go/.NET repo" }
-  elseif ($goModPresent) { $worktreesOnlyRepoDescription = "go.mod-only repo" }
-  elseif ($dotNetRepoPresent) { $worktreesOnlyRepoDescription = ".NET-only repo" }
+  elseif ($goModPresent) {
+    $mountWorktreesVolume = $true
+    $worktreesOnlyRepoDescription = "go.mod-only repo"
+  }
+  else {
+    if (Test-Powbox-DotNetRepoPresent $resolvedProject) {
+      $mountWorktreesVolume = $true
+      $worktreesOnlyRepoDescription = ".NET-only repo"
+    }
+  }
 }
 
 $containerName = "$Agent-$projectSlug"

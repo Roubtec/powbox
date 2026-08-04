@@ -3,10 +3,11 @@ set -euo pipefail
 
 # Smoke-test the self-hosted ("--isolated") launch mode. Two stages:
 #
-#   Stage A — launcher identity. Drives scripts/launch-agent.sh with the
-#   POWBOX_PRINT_IDENTITY hook (which resolves names and exits before any Docker
-#   call), so it runs ANYWHERE — no image, no daemon, no network. It asserts the
-#   naming contract: dir-mounted is byte-for-byte unchanged; a --name is
+#   Stage A — launcher identity and frozen environment migration. The identity
+#   fixtures drive POWBOX_PRINT_IDENTITY, which exits before Docker; the migration
+#   fixtures drive the normal reuse path through a PATH-shimmed fake Docker command.
+#   The stage needs no image, daemon, or network. It asserts the naming contract:
+#   dir-mounted is byte-for-byte unchanged; a --name is
 #   deterministic (so a relaunch re-attaches the same workspace path → same Claude
 #   session slug); an unnamed launch is fresh each time; the repo-slug strips .git
 #   and lowercases; and the per-mode volume set is correct.
@@ -76,7 +77,7 @@ project_hash() {
 }
 
 echo "Self-hosted smoke test (launcher: $LAUNCHER)"
-echo "Stage A — launcher identity (no image/daemon needed)"
+echo "Stage A — launcher identity + frozen environment migration (no image/daemon needed)"
 
 # --- dir-mounted is unchanged: hash == SHA256(canonical path)[:12] -------------
 DM="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude "$ROOT_DIR" 2>/dev/null)"
@@ -103,13 +104,21 @@ ok "dir-mounted has nm/wt volumes and no ws volume"
 # agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
 # committed .powbox.yml / local shadow: → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
-# go.mod or bounded .NET markers (root solutions/projects and one-level project
-# files). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES, so a
+# go.mod or bounded .NET markers (solution/project files at the root or one level
+# below). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES, so a
 # pure Go or .NET repo gets persistent caches + worktrees WITHOUT an empty
 # node_modules/ mountpoint littering the host folder. The local ctx:-only case
 # must not opt a non-dev folder into project volumes.
 MATRIX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-gate-XXXXXX")"
-trap 'rm -rf "$MATRIX_ROOT"' EXIT
+MATRIX_INACCESSIBLE="$MATRIX_ROOT/dotnet-inaccessible/blocked"
+MATRIX_INACCESSIBLE_LOCKED=false
+cleanup_matrix() {
+	if [ "$MATRIX_INACCESSIBLE_LOCKED" = true ]; then
+		chmod 700 "$MATRIX_INACCESSIBLE" 2>/dev/null || :
+	fi
+	rm -rf "$MATRIX_ROOT"
+}
+trap cleanup_matrix EXIT
 gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / MOUNT_WORKTREES_VOLUME
 	local out
 	out="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude "$MATRIX_ROOT/$1" 2>/dev/null)"
@@ -139,9 +148,13 @@ mkdir -p \
 	"$MATRIX_ROOT/dotnet-slnx" \
 	"$MATRIX_ROOT/dotnet-root-project" \
 	"$MATRIX_ROOT/dotnet-shallow/src" \
+	"$MATRIX_ROOT/dotnet-shallow-sln/src" \
 	"$MATRIX_ROOT/dotnet-root-case" \
 	"$MATRIX_ROOT/dotnet-hidden/.src" \
 	"$MATRIX_ROOT/dotnet-inaccessible/blocked" \
+	"$MATRIX_ROOT/dotnet-linked-dir" \
+	"$MATRIX_ROOT/dotnet-link-target" \
+	"$MATRIX_ROOT/dotnet-linked-file" \
 	"$MATRIX_ROOT/dotnet-deep/src/App" \
 	"$MATRIX_ROOT/both" \
 	"$MATRIX_ROOT/powbox-yml" \
@@ -155,10 +168,20 @@ mkdir -p \
 : >"$MATRIX_ROOT/dotnet-slnx/App.slnx"
 : >"$MATRIX_ROOT/dotnet-root-project/App.fsproj"
 : >"$MATRIX_ROOT/dotnet-shallow/src/App.csproj"
+: >"$MATRIX_ROOT/dotnet-shallow-sln/src/App.sln"
 : >"$MATRIX_ROOT/dotnet-root-case/Legacy.SLN"
 : >"$MATRIX_ROOT/dotnet-hidden/.src/App.CSPROJ"
-: >"$MATRIX_ROOT/dotnet-inaccessible/blocked/unrelated.txt"
-chmod 000 "$MATRIX_ROOT/dotnet-inaccessible/blocked"
+: >"$MATRIX_INACCESSIBLE/App.csproj"
+chmod 000 "$MATRIX_INACCESSIBLE"
+MATRIX_INACCESSIBLE_LOCKED=true
+if [ -r "$MATRIX_INACCESSIBLE/App.csproj" ]; then
+	INACCESSIBLE_EXPECTED=true
+else
+	INACCESSIBLE_EXPECTED=false
+fi
+: >"$MATRIX_ROOT/dotnet-link-target/App.csproj"
+ln -s ../dotnet-link-target "$MATRIX_ROOT/dotnet-linked-dir/external"
+ln -s ../dotnet-link-target/App.csproj "$MATRIX_ROOT/dotnet-linked-file/App.csproj"
 : >"$MATRIX_ROOT/dotnet-deep/src/App/App.vbproj"
 : >"$MATRIX_ROOT/both/package.json"
 : >"$MATRIX_ROOT/both/go.mod"
@@ -177,9 +200,12 @@ gate_case dotnet-sln false true
 gate_case dotnet-slnx false true
 gate_case dotnet-root-project false true
 gate_case dotnet-shallow false true
+gate_case dotnet-shallow-sln false true
 gate_case dotnet-root-case false true
 gate_case dotnet-hidden false true
-gate_case dotnet-inaccessible false false
+gate_case dotnet-inaccessible false "$INACCESSIBLE_EXPECTED"
+gate_case dotnet-linked-dir false false
+gate_case dotnet-linked-file false false
 gate_case dotnet-deep false false
 gate_case both true true
 gate_case powbox-yml true true
@@ -187,10 +213,12 @@ gate_case local-shadow true true
 gate_case local-shadow-empty true true
 gate_case local-ctx-only false false
 gate_case neither false false
-chmod 700 "$MATRIX_ROOT/dotnet-inaccessible/blocked"
-rm -rf "$MATRIX_ROOT"
+if [ "$INACCESSIBLE_EXPECTED" = true ]; then
+	echo "  note: permissions are not enforced for this user; inaccessible-child skip case could not be exercised"
+fi
+cleanup_matrix
 trap - EXIT
-ok "volume-gate matrix: bounded .NET is case/dot-dir consistent and skips inaccessible children; nm stays narrow"
+ok "volume-gate matrix: bounded .NET handles one-level solutions without following links; nm stays narrow"
 
 # --- frozen NUGET_PACKAGES migration (no Docker daemon needed) ----------------
 # A pre-task container can already have exactly the expected nm/wt mounts, so the

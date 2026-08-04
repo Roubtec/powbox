@@ -416,11 +416,12 @@ powbox_local_shadow_config_present() {
 }
 
 # A deliberately bounded .NET repo detector for the worktrees-volume-only gate.
-# Solutions are recognized at the repo root; project files are recognized there
-# or exactly one directory below it (for layouts such as src/App.csproj).
+# Solutions and project files are recognized at the repo root or exactly one
+# directory below it (for layouts such as src/App.sln or src/App.csproj).
 # Fixed-depth finds avoid an unbounded recursive scan. They are deliberately
 # case-insensitive and include dot-prefixed direct children, matching the
-# PowerShell launcher on every host. Inaccessible or concurrently removed child
+# PowerShell launcher on every host. find's default non-following mode keeps
+# symlink files and child dirs out; inaccessible or concurrently removed child
 # dirs are skipped. Keep this predicate in sync with the PowerShell launcher and
 # the identity fixtures in smoke-test-selfhosted.{sh,ps1}.
 dotnet_repo_present() {
@@ -436,7 +437,7 @@ dotnet_repo_present() {
 		return 0
 	done < <(
 		find "$project_root" -mindepth 2 -maxdepth 2 -type f \
-			\( -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \
+			\( -iname '*.sln' -o -iname '*.slnx' -o -iname '*.csproj' -o -iname '*.fsproj' -o -iname '*.vbproj' \) \
 			-print0 2>/dev/null
 	)
 	return 1
@@ -974,7 +975,6 @@ MOUNT_WORKSPACE_VOLUMES=false
 # projects want the persistent worktrees volume and language caches but have no
 # use for an isolated node_modules mount, which would only litter the host.
 MOUNT_WORKTREES_VOLUME=false
-DOTNET_REPO_PRESENT=false
 WORKTREES_ONLY_REPO_DESCRIPTION="worktrees-only repo"
 REPO_SPEC=""
 
@@ -1152,23 +1152,19 @@ else
 		MOUNT_WORKSPACE_VOLUMES=true
 	fi
 	# The worktrees volume has WIDER, non-Node triggers: go.mod and a bounded .NET
-	# predicate (root *.sln/*.slnx/*.csproj/*.fsproj/*.vbproj, or project files
-	# exactly one directory below the root). A pure Go or .NET repo gets agent-wt-*
+	# predicate (solution/project files at the root or exactly one directory below
+	# it). A pure Go or .NET repo gets agent-wt-*
 	# (persistent caches + worktrees) but NOT agent-nm-* — no empty node_modules/
 	# litter on the host. PNPM_STORE_DIR stays keyed to the JS/powbox gate above,
 	# so the pnpm wrapper's host-litter warning still fires for a stray root
 	# `pnpm install` in a Go/.NET-only repo.
-	if dotnet_repo_present "$PROJECT_PATH"; then
-		DOTNET_REPO_PRESENT=true
-	fi
-	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ] || [ -f "$PROJECT_PATH/go.mod" ] || [ "$DOTNET_REPO_PRESENT" = true ]; then
+	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 		MOUNT_WORKTREES_VOLUME=true
-	fi
-	if [ -f "$PROJECT_PATH/go.mod" ] && [ "$DOTNET_REPO_PRESENT" = true ]; then
-		WORKTREES_ONLY_REPO_DESCRIPTION="Go/.NET repo"
 	elif [ -f "$PROJECT_PATH/go.mod" ]; then
+		MOUNT_WORKTREES_VOLUME=true
 		WORKTREES_ONLY_REPO_DESCRIPTION="go.mod-only repo"
-	elif [ "$DOTNET_REPO_PRESENT" = true ]; then
+	elif dotnet_repo_present "$PROJECT_PATH"; then
+		MOUNT_WORKTREES_VOLUME=true
 		WORKTREES_ONLY_REPO_DESCRIPTION=".NET-only repo"
 	fi
 fi

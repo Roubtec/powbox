@@ -12,9 +12,10 @@
 # self-hosted mode (mirrors the compose.fuse.yml / compose.netdev.yml overlay pattern).
 #
 # The single workspace volume also holds node_modules, .worktrees, and the pnpm
-# store, Go caches, and ccache as ordinary subdirs, so the dir-mounted agent-nm-* /
-# agent-wt-* shadow mounts are omitted in this mode (the launcher simply does not
-# add them). Because everything shares one mount, pnpm hardlinks package files
+# store, Go caches, NuGet packages, and ccache as ordinary subdirs, so the
+# dir-mounted agent-nm-* / agent-wt-* shadow mounts are omitted in this mode (the
+# launcher simply does not add them). Because everything shares one mount, pnpm
+# hardlinks package files
 # everywhere — including the root node_modules, which falls back to copying in
 # dir-mounted mode (separate mount → link(2) EXDEV).
 #

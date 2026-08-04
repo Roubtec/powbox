@@ -224,7 +224,8 @@ else {
 # .worktrees/.golangci-cache/<container>/<slug>, the main checkout scopes to
 # .root only in self-hosted mode when .worktrees is not a mountpoint (no host
 # litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
-# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
+# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports;
+# the NUGET_PACKAGES probe does the same offline through `dotnet nuget locals`.
 # The ccache probes prove the binary is baked, that it honors a CCACHE_DIR env
 # (so the launcher's .worktrees/.ccache wiring lands) and - the functional check -
 # that two identical `ccache gcc` compiles into a fresh cache produce a hit -
@@ -380,6 +381,7 @@ else {
     '[ -x /usr/local/libexec/golangci-lint ]'
     'GOMODCACHE=/tmp/powbox-gomod-probe go env GOMODCACHE | grep -qx /tmp/powbox-gomod-probe'
     'GOCACHE=/tmp/powbox-gocache-probe go env GOCACHE | grep -qx /tmp/powbox-gocache-probe'
+    'NUGET_PACKAGES=/tmp/powbox-nuget-packages-probe dotnet nuget locals global-packages --list | grep -Fqx "global-packages: /tmp/powbox-nuget-packages-probe"'
     'GOLANGCI_LINT_CACHE=/tmp/powbox-golangci-custom golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-custom"'
     'mkdir -p /tmp/powbox-golangci-probe/repo && cd /tmp/powbox-golangci-probe/repo && git init -q && git -c user.email=smoke@powbox.local -c user.name=smoke commit -q --allow-empty -m init && git worktree add -q .worktrees/probe-cont/task-a -b probe-a'
     'cd /tmp/powbox-golangci-probe/repo/.worktrees/probe-cont/task-a && golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/probe-cont/task-a"'

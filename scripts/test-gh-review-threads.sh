@@ -17,8 +17,9 @@ set -euo pipefail
 # nested comment fetch-up. Runnable on its own and wired into
 # commands/smoke-test.{sh,ps1}.
 #
-# Covers cases (a)–(i) — (a)–(e) from the task Implementation notes, (f)–(g) added
-# in review, (h)–(i) added for the fail-closed parser/identity guards (task 033):
+# Covers cases (a)–(j) — (a)–(e) from the task Implementation notes, (f)–(g) added
+# in review, (h)–(i) added for the fail-closed parser/identity guards (task 033),
+# (j) for the same guard on the nested comments fetch-up (task 033a):
 #   (a) unresolved-only filtering, and --all
 #   (b) a two-page thread list followed via endCursor (two separate gh calls,
 #       right `after` values, no --paginate)
@@ -33,6 +34,9 @@ set -euo pipefail
 #   (i) response-identity mismatch (wrong nameWithOwner / wrong PR number) —
 #       fail closed after the single whole-fetch retry, both on the first page
 #       and on a later page reached via endCursor
+#   (j) malformed NESTED comments pages (missing data.node / node {} /
+#       comments null / nodes null) — the fetch-up parser fails, and the helper
+#       must fail closed rather than silently truncate the thread's comments
 #
 # Every threads-page fixture echoes the positive response identity the helper
 # asserts since agent-skills task 013: repository.nameWithOwner plus
@@ -597,6 +601,74 @@ assert_contains "i4: identity diagnosis on stderr" "$RUN_ERR" "response identity
 assert_eq "i4: whole fetch retried (four thread-list calls)" "$(count_matches "$d/log" '[owner=')" 4
 assert_contains "i4: second call follows the cursor" "$(nth_match 2 "$d/log" '[owner=')" "[after=CURSOR_I]"
 assert_not_contains "i4: retry restarts at page one" "$(nth_match 3 "$d/log" '[owner=')" "[after="
+
+# ============================================================================
+# (j) malformed NESTED comments pages — the fetch-up parser fails, fail closed
+# ============================================================================
+# The (h) principle applied to the one response the threads-page guards never
+# see: the nested comments page fetched when a thread's
+# comments.pageInfo.hasNextPage is true. Pre-033a that path failed OPEN — the
+# merge read `.data.node.comments.nodes` as null, `jq -cs '.[0] + .[1]'` treats
+# null as the identity for `+` so the merge silently succeeded, hasNextPage read
+# null and ended the loop, and the thread was emitted with only its FIRST page of
+# comments at exit 0 with nothing on stderr. Silently dropping comments can make
+# a thread look addressed when it is not, which is exactly what a caller like the
+# address-review skill decides from this output.
+#
+# The threads page below is well-formed, in scope and identity-correct — (j0)
+# proves it merges cleanly at exit 0 when the nested page is well-formed — so in
+# (j1)–(j4) the malformed nested page is the ONLY thing that can reject the
+# fetch. Each asserts exit 3, empty stdout, the extraction diagnosis (distinct
+# from the identity and offender-listing scope diagnoses), and the whole-fetch
+# retry: two thread-list calls AND two nested-comments calls.
+NODES_J='[
+  {"id":"T_j_clean","isResolved":false,"isOutdated":false,"path":"j1.js","line":1,
+   "comments":{"nodes":[{"databaseId":851,"author":{"login":"codex","__typename":"Bot"},"body":"single page","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r851"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}},
+  {"id":"T_j_paged","isResolved":false,"isOutdated":false,"path":"j2.js","line":2,
+   "comments":{"nodes":[{"databaseId":852,"author":{"login":"codex","__typename":"Bot"},"body":"first page","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r852"}],"pageInfo":{"hasNextPage":true,"endCursor":"JCUR"}}}
+]'
+
+# j0: control — the same threads page with a WELL-FORMED nested page merges both
+# comment pages at exit 0. Without it, (j1)–(j4) could pass for the wrong reason
+# (a fixture the helper rejects before it ever issues the nested query).
+JCOMMENTS_OK='{"data":{"node":{"comments":{"nodes":[{"databaseId":853,"author":{"login":"alice","__typename":"User"},"body":"second page","diffHunk":"@@","url":"https://github.com/acme/widgets/pull/12#discussion_r853"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
+d="$(new_case)"
+threads_one_page "$NODES_J" >"$d/threads-1"
+printf '%s\n' "$JCOMMENTS_OK" >"$d/comments-1"
+run "$d" --repo acme/widgets 12
+assert_eq "j0: control exit 0" "$RUN_RC" 0
+assert_eq "j0: both threads emitted" "$(jqr '[.[].id]|sort|join(",")' "$RUN_OUT")" T_j_clean,T_j_paged
+assert_eq "j0: paged thread merged both comment pages" "$(jqr '.[]|select(.id=="T_j_paged")|[.comments[].databaseId]|join(",")' "$RUN_OUT")" "852,853"
+assert_eq "j0: one nested-comments call" "$(count_matches "$d/log" '[threadId=')" 1
+
+# nested_malformed_case <label> <nested-comments-response> — serve the
+# well-formed (j) threads page and the given malformed nested comments page on
+# BOTH the first attempt and the whole-fetch retry, then assert fail-closed.
+nested_malformed_case() {
+	local label="$1" payload="$2" dir
+	dir="$(new_case)"
+	threads_one_page "$NODES_J" >"$dir/threads-1"
+	threads_one_page "$NODES_J" >"$dir/threads-2"
+	printf '%s\n' "$payload" >"$dir/comments-1"
+	printf '%s\n' "$payload" >"$dir/comments-2"
+	run "$dir" --repo acme/widgets 12
+	assert_eq "$label: fails closed (exit 3)" "$RUN_RC" 3
+	assert_eq "$label: no stdout emitted (clean threads page never leaks)" "$RUN_OUT" ""
+	assert_contains "$label: extraction diagnosis on stderr" "$RUN_ERR" "malformed response — could not extract comment urls"
+	assert_eq "$label: fetched twice (retry once)" "$(count_matches "$dir/log" '[owner=')" 2
+	assert_eq "$label: nested page re-fetched on the retry" "$(count_matches "$dir/log" '[threadId=')" 2
+}
+
+# j1: the nested response is missing `data.node` entirely.
+nested_malformed_case "j1: missing data.node" '{"data":{}}'
+# j2: `data.node` present but empty — the shape reproduced against agent-skills 21af561.
+nested_malformed_case "j2: empty data.node" '{"data":{"node":{}}}'
+# j3: `comments` explicitly null.
+nested_malformed_case "j3: comments null" '{"data":{"node":{"comments":null}}}'
+# j4: `comments` present with well-formed pageInfo but `nodes` null — the shape a
+# `nodes`-only check must catch even though pagination metadata looks healthy.
+nested_malformed_case "j4: comments.nodes null" \
+	'{"data":{"node":{"comments":{"nodes":null,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}'
 
 # ============================================================================
 # usage / arg handling

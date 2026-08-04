@@ -159,18 +159,19 @@ else {
   }
 }
 
-# Stage 0g - detect-shadows unit suite (task 053). The repo's largest pure-shell suite
-# and the only regression net for docker/shared/detect-shadows.sh's load-bearing
-# security properties: the under-workspace-root validation, the symlink skip, the
-# Git-tracked-content veto and its fail-closed paths, the newline rejection, and the
-# workspace-glob containment. It needs git, jq and a JQ-BACKED yq (python-yq -
+# Stage 0g - detect-shadows unit suite (task 053). The only regression net anywhere in
+# the repo for docker/shared/detect-shadows.sh's load-bearing security properties: the
+# under-workspace-root validation, the symlink skip, the Git-tracked-content veto and
+# its fail-closed paths, the newline rejection, and the workspace-glob containment.
+# It needs git, jq and a JQ-BACKED yq (python-yq -
 # detect-shadows.sh issues jq filters such as `.shadow[]? // empty`, which mikefarah's
 # Go yq rejects), none of which a Windows host has natively, so run it INSIDE the agent
 # image with the repo mounted read-only, pointed at the BAKED /usr/local/bin copies
 # (POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR - the shape Stage 0c uses for the
 # wt-* helpers) so a stale baked detect-shadows.sh is caught by a real suite rather than
 # by Stage 1's presence probe. Self-skips (recorded in $skipped) when the image is absent;
-# Tier 0 CI runs the same suite against the /repo source on every PR.
+# Tier 0 CI runs the same suite against the /repo source on every PR except one carrying
+# the repo's `non-code` label, which gates the whole static-guards job off.
 if (-not $imagePresent) {
   Write-Warning "Skipping detect-shadows unit suite (Stage 0g) - image '$Image' not found (no native bash/yq/jq on Windows to run it hermetically)."
   $skipped.Add("Stage 0g: detect-shadows unit suite (image absent)")

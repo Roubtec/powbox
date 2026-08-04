@@ -191,8 +191,8 @@ fi
 
 # Stage 0g — detect-shadows unit suite (task 053). Hermetic (throwaway repos in a
 # tmpdir; no image-internal state, root, or Docker daemon needed by the test
-# itself). It is the repo's largest pure-shell suite and the only regression net
-# for docker/shared/detect-shadows.sh's load-bearing security properties: the
+# itself). It is the only regression net anywhere in the repo for
+# docker/shared/detect-shadows.sh's load-bearing security properties: the
 # under-workspace-root validation, the symlink skip, the Git-tracked-content veto
 # and its fail-closed paths, the newline rejection, and the workspace-glob
 # containment — every one of which was verified to fail against the pre-fix script.
@@ -219,8 +219,10 @@ fi
 # POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR, the shape Stage 0c/0d uses for
 # the wt-* helpers), so a STALE baked detect-shadows.sh is caught by a real suite
 # instead of being waved through by Stage 1's `command -v` presence probe. The /repo
-# SOURCE is covered by the host fallback below and, on every PR, by Tier 0 CI
-# (.github/workflows/native-linux-ci.yml), which runs the suite unset.
+# SOURCE is covered by the host fallback below and by Tier 0 CI
+# (.github/workflows/native-linux-ci.yml), which runs the suite unset on every PR
+# EXCEPT one carrying the repo's `non-code` label — that label gates the whole
+# static-guards job, so a `non-code` PR gets no Tier 0 detect-shadows run at all.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running detect-shadows unit suite (baked scripts in $IMAGE) ..."
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" \

@@ -67,7 +67,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `docker/shared/entrypoint-{claude,codex}-hook.sh`: per-agent config-seeding hooks, run in full for every agent at startup
 - `docker/claude/agent-container/`: Claude-specific seed assets baked into the image at `/home/node/.agent-container/claude/` (statusline script, statusline settings overlay, settings defaults; no skills or workflows — those all arrive via the `dev-skills@roubtec` plugin)
 - (the Codex seed dir `/home/node/.agent-container/codex/` has no in-tree source anymore: its `skills/` are copied entirely from the `Roubtec/agent-skills` staging clone at build time)
-- `docs/`: deep-dive design chapters (architecture, entrypoint & runtime, worktree `node_modules` hardlinks, skills refresh & provenance, rootless Podman, the [smoke-test stage inventory](docs/smoke-tests.md)) — referenced from the relevant README section and from [AGENTS.md](AGENTS.md), read on demand rather than front-loaded
+- `docs/`: deep-dive design chapters (architecture, entrypoint & runtime, worktree `node_modules` hardlinks, skills refresh & provenance, rootless Podman, the [smoke tests](docs/smoke-tests.md)) — referenced from the relevant README section and from [AGENTS.md](AGENTS.md), read on demand rather than front-loaded
 
 ## Build Modes
 
@@ -860,7 +860,7 @@ Smoke test the built image with:
 ```
 
 The run is layered: a hermetic tier of nine unit-suite entries (Stages 0 through 0h, over seven distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network — hermetic, but not container-free, since only Stages 0 and 0c run purely on the host and the other seven run the suite inside a throwaway container, mostly against the **baked** artifact — then six image/host stages — tool presence and key image config, a `pg-dev-up` functional test, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
-Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with two narrow exceptions the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the stage-by-stage inventory: what each stage asserts, where it runs, when it self-skips, which stages reach the network, and which self-skips the banner cannot see.
+Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with a narrow exception the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the orientation the scripts do not give you: what each stage is for, which entries run the `/repo` source and which the baked artifact, which stages reach the network and what a failed pull or clone costs, and which self-skips the banner cannot see. For what an individual stage asserts, read that stage's script.
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-container `agent-nm-<agent>-<project>` and `agent-wt-<agent>-<project>` volumes (for a dir-mounted JS/powbox project; a `go.mod`-only repo gets only the latter, a non-dev folder neither, and `--isolated` an `agent-ws-<container>` volume instead), a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
 
@@ -941,7 +941,7 @@ ignores filemode, the bind mount reports `0755`, uid semantics differ) is caught
 automatically on PRs instead of during a manual VPS stand-up. Two layered
 workflows keep cost proportional to the change:
 
-- **Tier 0 — every PR** (`.github/workflows/native-linux-ci.yml`, seconds, no
+- **Tier 0 — every PR except a `non-code`-labelled one** (`.github/workflows/native-linux-ci.yml`, seconds, no
   Docker): static guards — an exec-bit check (`scripts/check-exec-bits.sh`, the
   PR #51 class), `shellcheck` (error severity) over all `*.sh`, an advisory
   `shfmt` on the scripts a PR changes, and `Invoke-ScriptAnalyzer`
@@ -961,8 +961,10 @@ workflows keep cost proportional to the change:
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
   `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints; skill/docs PRs run
-  Tier 0 only. The expensive base image is cached (a `docker save` tarball keyed
-  on its inputs) so the common Tier-1 run rebuilds only the agent layers.
+  Tier 0 only, and it carries the same `non-code` label gate as Tier 0, so that
+  label turns both tiers off. The expensive base image is cached (a `docker
+  save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
+  agent layers.
 
 ### What CI covers vs. what stays VPS-only
 

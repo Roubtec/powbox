@@ -88,4 +88,4 @@ The deep architecture/runtime detail lives in chapter docs under `docs/` so it d
 | The unified image spec / migration order | [docs/unified-agent-image.md](docs/unified-agent-image.md) |
 | Skill refresh, ownership markers, pruning, provenance internals | [docs/skills-refresh-and-provenance.md](docs/skills-refresh-and-provenance.md) |
 | Rootless Podman / nested containers / the shared image store | [docs/rootless-podman.md](docs/rootless-podman.md) · [docs/podman-shared-image-store.md](docs/podman-shared-image-store.md) |
-| Adding, changing, or interpreting a smoke-test stage: what each one asserts, where it runs, when it self-skips, the skip variables and the partial-run banner | [docs/smoke-tests.md](docs/smoke-tests.md) |
+| Adding, changing, or interpreting a smoke-test stage: what each one is for, host source vs. baked artifact, which stages need the network, the skip variables and what the partial-run banner cannot see | [docs/smoke-tests.md](docs/smoke-tests.md) |

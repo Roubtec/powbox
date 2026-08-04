@@ -42,6 +42,7 @@ param(
 # serve, and the port cannot be validated from inside an agent container. Tracked as
 # tasks/053a-mirror-mountpoint-ownership-smoke-in-powershell-driver.md; until it lands,
 # run commands/smoke-test.sh on Linux for the ownership coverage.
+#
 # Privileges: the durable bind is a `mount --bind`, so the container needs
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile - the launch-time wiring the
 # launcher supplies via compose.shared.yml and that smoke-test-podman.ps1 replicates.

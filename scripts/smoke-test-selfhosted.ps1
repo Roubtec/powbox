@@ -251,6 +251,15 @@ try {
     Fail "stopped container with a case-only NUGET_PACKAGES mismatch was not recreated"
   }
 
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_NUGET = "$migrationNuget/"
+  $migrationTrailingSlashOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationTrailingSlashExit = $LASTEXITCODE
+  if ($migrationTrailingSlashExit -ne 0) { Fail "trailing-slash NuGet migration fixture failed: $($migrationTrailingSlashOutput -join ' ')" }
+  if ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer") {
+    Fail "stopped container with an equivalent trailing-slash NUGET_PACKAGES value was recreated"
+  }
+
   $migrationIsolatedId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "nuget-migration")
   $migrationIsolatedContainer = $migrationIsolatedId["CONTAINER_NAME"]
   Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
@@ -293,7 +302,7 @@ finally {
   else { $env:GIT_CONFIG_PATH = $oldGitConfigPath }
   Remove-Item -Recurse -Force $migrationRoot -ErrorAction SilentlyContinue
 }
-Ok "frozen NuGet env migration: missing/mixed-case paths recreate; running ones warn; resume explains its skip"
+Ok "frozen NuGet env migration: missing/mixed-case paths recreate; trailing-slash paths reuse; running ones warn; resume explains its skip"
 
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")

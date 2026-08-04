@@ -112,6 +112,8 @@ ok "dir-mounted has nm/wt volumes and no ws volume"
 MATRIX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-gate-XXXXXX")"
 MATRIX_INACCESSIBLE="$MATRIX_ROOT/dotnet-inaccessible/blocked"
 MATRIX_INACCESSIBLE_LOCKED=false
+LINKED_DIRECTORY_CREATED=false
+LINKED_FILE_CREATED=false
 cleanup_matrix() {
 	if [ "$MATRIX_INACCESSIBLE_LOCKED" = true ]; then
 		chmod 700 "$MATRIX_INACCESSIBLE" 2>/dev/null || :
@@ -180,8 +182,16 @@ else
 	INACCESSIBLE_EXPECTED=false
 fi
 : >"$MATRIX_ROOT/dotnet-link-target/App.csproj"
-ln -s ../dotnet-link-target "$MATRIX_ROOT/dotnet-linked-dir/external"
-ln -s ../dotnet-link-target/App.csproj "$MATRIX_ROOT/dotnet-linked-file/App.csproj"
+if ln -s ../dotnet-link-target "$MATRIX_ROOT/dotnet-linked-dir/external" 2>/dev/null; then
+	LINKED_DIRECTORY_CREATED=true
+else
+	echo "  note: directory-link fixture unavailable on this host"
+fi
+if ln -s ../dotnet-link-target/App.csproj "$MATRIX_ROOT/dotnet-linked-file/App.csproj" 2>/dev/null; then
+	LINKED_FILE_CREATED=true
+else
+	echo "  note: file-link fixture unavailable on this host"
+fi
 : >"$MATRIX_ROOT/dotnet-deep/src/App/App.vbproj"
 : >"$MATRIX_ROOT/both/package.json"
 : >"$MATRIX_ROOT/both/go.mod"
@@ -204,8 +214,12 @@ gate_case dotnet-shallow-sln false true
 gate_case dotnet-root-case false true
 gate_case dotnet-hidden false true
 gate_case dotnet-inaccessible false "$INACCESSIBLE_EXPECTED"
-gate_case dotnet-linked-dir false false
-gate_case dotnet-linked-file false false
+if [ "$LINKED_DIRECTORY_CREATED" = true ]; then
+	gate_case dotnet-linked-dir false false
+fi
+if [ "$LINKED_FILE_CREATED" = true ]; then
+	gate_case dotnet-linked-file false false
+fi
 gate_case dotnet-deep false false
 gate_case both true true
 gate_case powbox-yml true true
@@ -299,6 +313,22 @@ MIGRATION_MIXED_CASE_OUTPUT="$({
 grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
 	fail "stopped container with a case-only NUGET_PACKAGES mismatch was not recreated"
 
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_TRAILING_SLASH_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=true \
+		POWBOX_FAKE_NUGET="${MIGRATION_NUGET}/" \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "trailing-slash NuGet migration fixture failed: $MIGRATION_TRAILING_SLASH_OUTPUT"
+if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
+	fail "stopped container with an equivalent trailing-slash NUGET_PACKAGES value was recreated"
+fi
+
 MIGRATION_ISOLATED_ID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration 2>/dev/null)"
 MIGRATION_ISOLATED_CONTAINER="$(id_field "$MIGRATION_ISOLATED_ID" CONTAINER_NAME)"
 : >"$MIGRATION_ROOT/docker.log"
@@ -347,7 +377,7 @@ printf '%s\n' "$MIGRATION_RESUME_OUTPUT" | grep -Fq "persistent NUGET_PACKAGES w
 	fail "resume did not explain that frozen NUGET_PACKAGES migration is skipped"
 rm -rf "$MIGRATION_ROOT"
 trap - EXIT
-ok "frozen NuGet env migration: missing/mixed-case paths recreate; running ones warn; resume explains its skip"
+ok "frozen NuGet env migration: missing/mixed-case paths recreate; trailing-slash paths reuse; running ones warn; resume explains its skip"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"

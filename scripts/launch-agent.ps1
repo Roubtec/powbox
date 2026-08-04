@@ -1241,9 +1241,10 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
 # mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
 # to compare at all; either shape would otherwise exit through reuse above the new
 # run-argument assembly and keep restoring into ephemeral ~/.nuget/packages forever.
-# Compare the exact expected path for every worktrees-backed launch. Follow the
-# mount-mismatch lifecycle: warn without disrupting a running process, and
-# recreate a stopped mismatch so the new environment takes effect.
+# Compare the case-sensitive expected path for every worktrees-backed launch,
+# ignoring only redundant trailing slashes. Follow the mount-mismatch lifecycle:
+# warn without disrupting a running process, and recreate a stopped mismatch so
+# the new environment takes effect.
 if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExists) {
   $existingContainerEnv = @(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $existingContainerEnv = @() }
@@ -1256,7 +1257,8 @@ if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExi
       break
     }
   }
-  if ($existingNugetPackages -cne $worktreesNugetPackagesDir) {
+  $normalizedExistingNugetPackages = if ($null -eq $existingNugetPackages) { $null } else { $existingNugetPackages.TrimEnd('/') }
+  if ($normalizedExistingNugetPackages -cne $worktreesNugetPackagesDir) {
     $existingNugetDisplay = if (-not $existingNugetPackagesFound) { "<unset>" } elseif ($existingNugetPackages -ceq "") { "<empty>" } else { $existingNugetPackages }
     if ($containerRunning) {
       Write-Host "Note: container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay', but this launch expects '$worktreesNugetPackagesDir'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent NuGet packages." -ForegroundColor Yellow

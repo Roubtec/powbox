@@ -1570,9 +1570,10 @@ fi
 # mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
 # to compare at all; either shape would otherwise exit through reuse above the new
 # EXTRA_ENV assembly and keep restoring into ephemeral ~/.nuget/packages forever.
-# Compare the exact expected path for every worktrees-backed launch. Follow the
-# mount-mismatch lifecycle: warn without disrupting a running process, and
-# recreate a stopped mismatch so the new environment takes effect.
+# Compare the case-sensitive expected path for every worktrees-backed launch,
+# ignoring only redundant trailing slashes. Follow the mount-mismatch lifecycle:
+# warn without disrupting a running process, and recreate a stopped mismatch so
+# the new environment takes effect.
 if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 	[ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CONTAINER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
@@ -1587,7 +1588,12 @@ if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 			;;
 		esac
 	done <<<"$EXISTING_CONTAINER_ENV"
-	if [ "$EXISTING_NUGET_PACKAGES" != "$WT_NUGET_PACKAGES_DIR" ]; then
+	NORMALIZED_EXISTING_NUGET_PACKAGES="$EXISTING_NUGET_PACKAGES"
+	while [ "$NORMALIZED_EXISTING_NUGET_PACKAGES" != "/" ] &&
+		[ "${NORMALIZED_EXISTING_NUGET_PACKAGES%/}" != "$NORMALIZED_EXISTING_NUGET_PACKAGES" ]; do
+		NORMALIZED_EXISTING_NUGET_PACKAGES="${NORMALIZED_EXISTING_NUGET_PACKAGES%/}"
+	done
+	if [ "$NORMALIZED_EXISTING_NUGET_PACKAGES" != "$WT_NUGET_PACKAGES_DIR" ]; then
 		if [ "$EXISTING_NUGET_PACKAGES_SET" != true ]; then
 			EXISTING_NUGET_DISPLAY="<unset>"
 		elif [ -z "$EXISTING_NUGET_PACKAGES" ]; then
@@ -1608,7 +1614,7 @@ if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 			CONTAINER_EXISTS=false
 		fi
 	fi
-	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_PACKAGES_SET EXISTING_NUGET_DISPLAY env_entry
+	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_PACKAGES_SET NORMALIZED_EXISTING_NUGET_PACKAGES EXISTING_NUGET_DISPLAY env_entry
 fi
 
 # Detect whether the existing container predates the per-container Podman storage

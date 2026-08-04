@@ -239,9 +239,10 @@ else {
 # `--version` option: it treats that token as an input glob while its human-facing
 # startup banner happens to show a version. Rather than parse that presentation
 # output without exercising linting, its probe invokes the PATH binary on a real
-# temporary Markdown file and separately reads the exact installed pin from npm's
-# machine-readable global package metadata. A pin bump must update this inventory
-# and its Bash mirror.
+# temporary Markdown file, asserts the lint status reports exactly that one file,
+# and separately reads the exact installed pin from npm's machine-readable global
+# package metadata. It does not interpret the startup banner. A pin bump must
+# update this inventory and its Bash mirror.
 # Every probe below is handed to the driver (scripts/smoke-test-image.ps1) as a
 # separate ARGUMENT, and the driver passes it to the container the same way: as
 # one element of `"$@"` for a fixed one-line runner that executes each probe in
@@ -363,7 +364,7 @@ else {
     'command -v peer-review-run >/dev/null'
     'shellcheck --version >/dev/null'
     'actionlint_output="$(actionlint --version)" && test "$(printf "%s\n" "$actionlint_output" | sed -n "1p")" = 1.7.12'
-    'markdownlint_file="$(mktemp --suffix=.md)" && printf "# Smoke test\n" > "$markdownlint_file" && markdownlint-cli2 "$markdownlint_file" >/dev/null && rm -- "$markdownlint_file" && test "$(npm list --global --depth=0 --json | jq -r ".dependencies[\"markdownlint-cli2\"].version")" = 0.23.2'
+    'markdownlint_file="$(mktemp --suffix=.md)" && printf "# Smoke test\n" > "$markdownlint_file" && markdownlint_output="$(markdownlint-cli2 "$markdownlint_file")" && test "$(printf "%s\n" "$markdownlint_output" | grep -Fxc "Linting: 1 file")" -eq 1 && rm -- "$markdownlint_file" && test "$(npm list --global --depth=0 --json | jq -r ".dependencies[\"markdownlint-cli2\"].version")" = 0.23.2'
     'ping -V >/dev/null'
     'nc -h >/dev/null 2>&1'
     'bc --version >/dev/null'

@@ -16,7 +16,7 @@ Included:
 - Install `actionlint` (pinned current release, static binary) into the agent image on `PATH`.
 - Install `markdownlint-cli2` (pinned version) globally into the agent image on `PATH`.
 - Add both to the tooling table in `docker/shared/container-agent.md.tmpl` (and the README/docs tooling mentions if present), with one line each noting: repos that pin a different version in CI should still invoke their pinned version (`npx markdownlint-cli2@<pin>` or a repo wrapper) — the baked copy is the default, not an override of repo policy.
-- Extend the image smoke (`scripts/smoke-test-image.sh`) with presence/version checks, matching how other baked tools are asserted.
+- Extend the Stage 1 image assertions in the host smoke umbrellas (`commands/smoke-test.sh` and `commands/smoke-test.ps1`) with presence/version checks, matching how other baked tools are asserted; those umbrellas pass the probes to their `scripts/smoke-test-image.*` drivers.
 
 Out of scope:
 
@@ -33,7 +33,8 @@ Out of scope:
 
 - `docker/agent/Dockerfile`
 - `docker/shared/container-agent.md.tmpl`
-- `scripts/smoke-test-image.sh`
+- `commands/smoke-test.sh`
+- `commands/smoke-test.ps1`
 - README tooling section if it mirrors the table.
 
 ## Implementation notes
@@ -51,7 +52,7 @@ Out of scope:
 
 ## Validation
 
-- Host: `./build.sh all` then `scripts/smoke-test-image.sh` passes including the new checks.
+- Host: `./build.sh all` then `POWBOX_SMOKE_REQUIRE_IMAGE=1 ./commands/smoke-test.sh powbox-agent:latest` passes, including the new Stage 1 checks (on Windows, run `./commands/smoke-test.ps1 -Image powbox-agent:latest -RequireImage`).
 - Tier 1 CI green on the PR.
 
 ## Review plan

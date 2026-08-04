@@ -47,8 +47,8 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 
 Consequence:
 
-- **Claude updates** (the common case) change only the top layer → clients pull only the Claude layer. Codex layer underneath is reused. This is the bandwidth win, achieved with one image and one tag.
-- **Codex updates** (rare) change the lower layer → the stable shared-linter layers and Claude layer above rebuild. Unavoidable with any single-image stacking, and accepted.
+- **Claude updates** (the common case) rebuild the Claude install layer plus the cheap shared-asset, metadata, and entrypoint layers above it → clients reuse the Codex and stable shared-linter layers underneath. This is the bandwidth win, achieved with one image and one tag.
+- **Codex updates** (rare) change the lower layer → the stable shared-linter, Claude, and cheap shared-asset, metadata, and entrypoint layers above rebuild. Unavoidable with any single-image stacking, and accepted.
 
 Each agent binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`), while the stable linter installs are separate layers keyed by literal version pins in the Dockerfile; edits to hooks/skills therefore do not trigger any of those reinstalls.
 
@@ -91,7 +91,7 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 - `check-updates.sh` reads both baked versions in **one** container start (`docker run … sh -c 'claude --version; codex --version'`) — the win the single image unlocks — and resolves both npm latests. Its `--porcelain` mode emits a machine-readable table: `name<TAB>status<TAB>baked<TAB>latest`.
 - `agent-update` reads that table once and rebuilds `agent` pinning each agent binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
-- Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the stable shared-linter layers and Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
+- Layer order does the rest: a Claude-only update rebuilds its install layer plus the cheap shared-asset, metadata, and entrypoint layers above it; a Codex update rebuilds the stable shared-linter and Claude layers plus those cheap upper layers too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
 
 ### Launcher and macros
 

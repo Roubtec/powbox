@@ -26,7 +26,10 @@
 #     between probes while filesystem effects do - the deliberate behaviour
 #     change the argv form buys;
 #   * newline-bearing, empty and line-continuation probes are rejected before
-#     docker is invoked;
+#     docker is invoked, and the rejection message renders the offending probe
+#     on ONE line (newline/CR escaped) while leaving its trailing backslash run
+#     byte-exact - in BOTH drivers, since the rendering is what a regression
+#     would silently drop;
 #   * the .sh and .ps1 drivers hand docker a byte-identical argument vector.
 #
 # Section K re-tests holes the earlier `if`-condition form left open, each with
@@ -556,8 +559,62 @@ PS
 	else
 		bad ".ps1 rejected the continuation probe for the wrong reason" "$(cat "$TMP/h3.out")"
 	fi
+
+	# Rejection MESSAGE parity, not just rejection parity. The checks above match
+	# the rationale text only, so a regression from $display back to $probe in the
+	# .ps1 would leave this half green while section G caught the identical
+	# regression in the .sh half instantly. The three checks below mirror G's
+	# rendering assertions - newline, CR, and the byte-exact backslash run.
+	#
+	# They cannot read pwsh's stderr banner: its error formatter word-wraps at the
+	# console width and injects ANSI colour, so `Probe: a\nb` lands mid-wrap and no
+	# line-anchored match is possible. This caller catches the exception and writes
+	# the driver's OWN message verbatim on one line instead, via
+	# [Console]::Out.WriteLine (Write-Output would go through the same formatter).
+	# Note the .ps1 appends `Probe: <display>` to the sentence rather than printing
+	# the .sh's separate `  probe: <display>` line - hence the different prefix.
+	# ps1_reject_message <outfile> <PowerShell statement assigning $p>
+	ps1_reject_message() {
+		local outfile="$1" ctor="$2"
+		{
+			printf '$ErrorActionPreference = "Stop"\n'
+			printf '%s\n' "$ctor"
+			printf 'try { & "%s" -Image fake-image:latest -Commands @($p) }\n' "$DRIVER_PS1"
+			printf 'catch { [Console]::Out.WriteLine($_.Exception.Message); exit 1 }\n'
+		} >"$TMP/reject-msg.ps1"
+		rm -f "$CAPTURE"
+		pwsh -NoProfile -File "$TMP/reject-msg.ps1" >"$outfile" 2>&1
+	}
+
+	if ps1_reject_message "$TMP/h4.out" '$p = "a" + [char]10 + "b"'; then
+		bad ".ps1 accepted a newline-bearing probe (rendering check)" "$(cat "$TMP/h4.out")"
+	elif grep -q 'Probe: a\\nb$' "$TMP/h4.out"; then
+		ok ".ps1 echoes the rejected probe with its newline escaped, on one line"
+	else
+		bad ".ps1 echoed a newline-bearing probe unescaped" "$(cat "$TMP/h4.out")"
+	fi
+
+	if ps1_reject_message "$TMP/h5.out" '$p = "a" + [char]13 + "b"'; then
+		bad ".ps1 accepted a CR-bearing probe (rendering check)" "$(cat "$TMP/h5.out")"
+	elif grep -q 'Probe: a\\rb$' "$TMP/h5.out"; then
+		ok ".ps1 echoes the rejected probe with its carriage return escaped"
+	else
+		bad ".ps1 echoed a CR-bearing probe unescaped" "$(cat "$TMP/h5.out")"
+	fi
+
+	# Byte-exact, exactly as in section G: this message is about the trailing
+	# backslash COUNT, so an OVER-eager renderer that doubled backslashes would
+	# contradict its own sentence. The `$` anchor is what catches that - a doubled
+	# run would print `printf x \\` and fail to match.
+	if ps1_reject_message "$TMP/h6.out" "\$p = 'printf x \'"; then
+		bad ".ps1 accepted a line-continuation probe (rendering check)" "$(cat "$TMP/h6.out")"
+	elif grep -q 'Probe: printf x \\$' "$TMP/h6.out"; then
+		ok ".ps1 echoes the line-continuation probe with its backslash run intact"
+	else
+		bad ".ps1 echoed the line-continuation probe with a mangled backslash run" "$(cat "$TMP/h6.out")"
+	fi
 else
-	printf '  skip  pwsh unavailable - .sh/.ps1 parity not checked here\n'
+	printf '  skip  pwsh unavailable - .sh/.ps1 argv, rejection and message-rendering parity not checked here\n'
 fi
 
 printf 'I. the shipped Stage 1 probe lists are byte-identical across .sh/.ps1\n'

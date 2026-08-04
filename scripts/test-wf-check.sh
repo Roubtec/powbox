@@ -130,6 +130,13 @@ return null;
 EOF
 run_fail "body syntax error reports the original source line" "$WORK/body-syntax.js" "$WORK/body-syntax.js:8"
 
+{
+	printf 'export const meta = { name: "oversize", description: "limit" };\n/*'
+	head -c 524289 /dev/zero | tr '\0' x
+	printf '*/\n'
+} >"$WORK/oversize.js"
+run_fail "runtime source-size limit is enforced" "$WORK/oversize.js" "runtime limit of 524288 characters"
+
 if "$HELPER" --help | grep -Fq "Top-level await and return"; then
 	ok "help documents async-wrapper semantics"
 else

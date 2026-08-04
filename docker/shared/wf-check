@@ -6,6 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
+const MAX_SOURCE_LENGTH = 524288;
 const USAGE = `Usage: wf-check <script.js>
 
 Validate a Claude Workflow script without running it.
@@ -354,6 +355,10 @@ function main(argv) {
     source = fs.readFileSync(filename, "utf8");
   } catch (error) {
     process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  if (source.length > MAX_SOURCE_LENGTH) {
+    process.stderr.write(`wf-check: ${filename}: script exceeds the Workflow runtime limit of ${MAX_SOURCE_LENGTH} characters\n`);
     return 1;
   }
 

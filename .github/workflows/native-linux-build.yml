@@ -15,10 +15,11 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # (.github/workflows/native-linux-ci.yml) covers the rest — every PR EXCEPT one
 # carrying the repo's `non-code` label, whose job `if:` gates the static guards
 # off too (see that file's header). The scripts/smoke-test* glob below matches
-# every per-stage smoke script, so a newly added one triggers Tier 1 and joins
-# the run automatically (the smoke entrypoint runs whatever stages exist at run
-# time) — that is how task 005's scripts/smoke-test-dirmount.* arrived as
-# Stage 5.
+# every per-stage smoke script, so adding one is enough to TRIGGER Tier 1 — but
+# not to join the smoke run: commands/smoke-test.sh (and its PowerShell mirror)
+# invokes each stage script by name, with its own gate and skip wiring, so a new
+# stage runs here only once the umbrella is edited to call it. Task 005's
+# scripts/smoke-test-dirmount.* took both steps before it ran here as Stage 5.
 #
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),

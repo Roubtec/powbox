@@ -129,9 +129,16 @@ if ($Commands.Count -eq 0) {
 # property 1 guarantees. But property 1 says nothing about a probe's own
 # VERDICT, and the third shape below gets that wrong, so it is a correctness
 # reason, not a cosmetic one. Rejection is kept identical in the .sh driver so
-# a probe one driver refuses is never run by the other:
+# a probe one driver refuses is never run by the other - including for the first
+# shape below, where "identical" costs that driver an explicit list rather than
+# coming free:
 #   * an empty or whitespace-only probe - AUTHORING MISTAKE, always, and nothing
-#     more subtle than that;
+#     more subtle than that. [string]::IsNullOrWhiteSpace() below is
+#     Unicode-aware, so it covers the whole White_Space property; the .sh
+#     driver's `[[:space:]]` matches only the ASCII whitespace bytes in the C
+#     locale, so it strips the non-ASCII White_Space code points from an
+#     explicit list to reach the same verdict. Keep that list in step with this
+#     test - sections G/H of scripts/test-smoke-probe-wrapper.sh pin the parity;
 #   * a newline or carriage return - DIAGNOSABILITY and the Windows argument
 #     path: the failure manifest prints one line per probe, and this driver
 #     would have to hand `docker` a multi-line native-command argument, which is

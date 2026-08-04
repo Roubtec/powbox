@@ -14,7 +14,8 @@
 #                   --worktree <ABS_DIR> \
 #                   --prompt-file <FILE> \
 #                   --artifact-root <ABS_DIR> \
-#                   [--base <REF>] [--timeout <SECONDS>]
+#                   [--base <REF>] [--timeout <SECONDS>] \
+#                   [--model <ID>] [--effort <LEVEL>]
 #
 #   --provider       claude | codex — the PEER that reviews (the opposite agent).
 #   --worktree       absolute path to the checkout the peer reviews (read-only).
@@ -29,17 +30,42 @@
 #   --base           optional base/reference metadata (recorded, not injected).
 #   --timeout        wall-clock seconds before the provider tree is reaped
 #                    (default 900).
+#   --model          model the PEER reviews with. Default: `opus` for claude;
+#                    unset for codex, which has no rolling alias to pin to and
+#                    so keeps its CLI default. Passed as `--model` (claude) or
+#                    `-m` (codex).
+#   --effort         reasoning effort: low | medium | high | xhigh | max
+#                    (`max` is claude-only). Default: high, for BOTH providers.
+#
+# Why the strength knobs default rather than inherit: without them the peer runs
+# at whatever model and effort a container most recently selected, because
+# `~/.claude/settings.json` and `~/.codex/config.toml` are shared mutable state
+# that every container writes through `/model`. A review is not the place to
+# discover that someone picked an economy tier an hour ago in another container.
+# Worse for codex specifically — the adapter's own `--ignore-user-config`
+# (config/hook isolation, see build_cmd_codex) DISCARDS that config, so before
+# these defaults a codex peer ran at `reasoning effort: none`. Both knobs are
+# per-invocation and never write back to the shared configuration.
 #
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
 #   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
-#     retried, liveProgress, artifactDir, reason }
+#     retried, liveProgress, model, effort, artifactDir, reason }
 #   outcome  ∈ passed | issues | unavailable | timeout | forfeited | failed
 #   verdict  ∈ pass | issues | none   (normalized from the peer's final message)
 #   elapsedSeconds  total wall time across ALL attempts — a retried run reports
 #               the sum, never the final attempt alone.
 #   exitStatus  the provider exit code, or null when unknown (missing binary /
 #               killed on timeout).
+#   model / effort  the strength the peer ACTUALLY ran at, or null where the
+#               knob was not applied — an unset --model for codex, or an
+#               installed CLI whose probe shows no `--effort` support. These
+#               report the effective value rather than the requested one
+#               precisely so a caller can VERIFY review strength instead of
+#               trusting that its flags landed; a null `effort` is the honest
+#               signal that the pin degraded, which no exit status would show.
+#               Additive within schema v1: consumers read keys by name, and
+#               every field the contract already promised is unchanged.
 # The helper NEVER reports success because an output file is absent or empty.
 # It exits 0 for ANY produced outcome (the outcome is a non-blocking signal for
 # the caller to weigh) and non-zero ONLY for its own usage/operational errors.
@@ -61,7 +87,10 @@ readonly DEFAULT_TIMEOUT=900
 EX_USAGE=64
 
 usage() {
-	sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+	# Range end tracks the LAST line of the header comment block (the line above
+	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
+	# truncating mid-sentence.
+	sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -482,6 +511,10 @@ PROMPT_FILE=""
 ARTIFACT_ROOT=""
 BASE=""
 TIMEOUT="$DEFAULT_TIMEOUT"
+# Empty means "not requested"; the provider-specific defaults are resolved after
+# --provider is known (see the strength-knob validation below).
+MODEL=""
+EFFORT=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -513,6 +546,14 @@ while [ $# -gt 0 ]; do
 		TIMEOUT="${2:-}"
 		shift 2 || die_usage "--timeout needs a value"
 		;;
+	--model)
+		MODEL="${2:-}"
+		shift 2 || die_usage "--model needs a value"
+		;;
+	--effort)
+		EFFORT="${2:-}"
+		shift 2 || die_usage "--effort needs a value"
+		;;
 	--)
 		shift
 		break
@@ -529,6 +570,47 @@ case "$PROVIDER" in
 claude | codex) ;;
 "") die_usage "--provider is required (claude|codex)" ;;
 *) die_usage "unsupported --provider '$PROVIDER' (claude|codex)" ;;
+esac
+
+# --- strength knobs ----------------------------------------------------------
+# Resolved here, before any filesystem side effect, for the same reason --timeout
+# is: a usage error must exit 64 without littering the artifact root.
+#
+# Effort defaults to `high` for BOTH providers. This is a deliberate floor, not a
+# preference: the caller that omits --effort is the caller that has not thought
+# about review strength, and the failure mode of guessing low is a peer that
+# passes work it should have caught.
+[ -n "$EFFORT" ] || EFFORT=high
+case "$EFFORT" in
+low | medium | high | xhigh) ;;
+max)
+	# claude documents `max`; codex has no such level. Rejecting it here beats
+	# passing it through, because `codex exec -c model_reasoning_effort=<junk>`
+	# does NOT fail fast — it echoes the bogus level in its session header and
+	# then dies on a 400 from the API, mid-review, after the timeout budget has
+	# already been spent.
+	[ "$PROVIDER" = claude ] ||
+		die_usage "--effort max is claude-only (got provider '$PROVIDER'; use xhigh)"
+	;;
+*) die_usage "--effort must be low|medium|high|xhigh|max (got '$EFFORT')" ;;
+esac
+# `none` and `minimal` are deliberately NOT accepted. `none` is precisely the
+# silent-weakness this flag exists to prevent (it is what a codex peer inherited
+# before these defaults), and `minimal` is rejected by the API on current models
+# anyway — neither is a level anyone should be able to ask a REVIEWER for.
+
+# Model defaults per provider. Claude has stable rolling aliases, so `opus` names
+# the current top tier without going stale. Codex's families (gpt-5.6-luna /
+# -sol / -terra) expose no rolling alias, and hard-coding one dated ID here would
+# rot into a WRONG pin that outlives the model — worse than the CLI's own default,
+# which at least tracks the installed release. So codex stays unpinned unless the
+# caller names a model explicitly.
+if [ -z "$MODEL" ] && [ "$PROVIDER" = claude ]; then
+	MODEL=opus
+fi
+# A model spelled like a flag would silently become one on the provider's argv.
+case "$MODEL" in
+-*) die_usage "--model must not start with '-' (got '$MODEL')" ;;
 esac
 
 # Validate --timeout BEFORE any filesystem side effect (the artifact-root mkdir
@@ -659,17 +741,28 @@ ensure_private_dir "$SESSION_DIR"
 PEER_BIN="$PROVIDER"
 
 # --- provider capability probe ----------------------------------------------
-# The Codex adapter adapts to the INSTALLED CLI: `--json` live streaming and the
-# config/hook-isolation flags below all exist only on sufficiently new CLIs, so
-# each is probed against one cached `codex exec --help` capture and omitted when
-# absent — honest degradation, never an unknown-flag hard failure. Claude's
-# `-p --output-format json` buffers its single final result — no live events —
-# so it is always liveProgress:false and needs no probe.
-CODEX_EXEC_HELP=""
-CODEX_HELP_PROBED=0
-codex_supports() {
-	if [ "$CODEX_HELP_PROBED" = 0 ]; then
-		# Bound the probe: `codex exec --help` should return instantly, but it must
+# Both adapters adapt to the INSTALLED CLI: codex's `--json` live streaming and
+# config/hook-isolation flags, and claude's `--effort`, all exist only on
+# sufficiently new CLIs, so each is probed against ONE cached help capture and
+# omitted when absent — honest degradation, never an unknown-flag hard failure.
+# Only the selected provider is ever probed (PROVIDER is fixed for the run), so
+# this stays one subprocess whichever side we are on. The help COMMAND differs
+# per provider; everything below it — the bounded budget, the process-group
+# supervision, the reaping — is provider-neutral and shared verbatim.
+#
+# Claude's `-p --output-format json` still buffers its single final result — no
+# live events — so it remains liveProgress:false regardless of what the probe
+# finds; the probe exists for `--effort`, not for progress.
+case "$PROVIDER" in
+codex) PROVIDER_HELP_CMD=(codex exec --help) ;;
+claude) PROVIDER_HELP_CMD=(claude --help) ;;
+esac
+PROVIDER_HELP_FILE="$SESSION_DIR/$PROVIDER-help.txt"
+PROVIDER_HELP=""
+PROVIDER_HELP_PROBED=0
+provider_supports() {
+	if [ "$PROVIDER_HELP_PROBED" = 0 ]; then
+		# Bound the probe: the provider help command should return instantly, but it must
 		# never be able to hang or leak descendants, so it runs under the SAME
 		# process-group supervision as an attempt — `set -m` isolates it into its
 		# own validated group, the captured-descendant set is seeded/refreshed
@@ -681,7 +774,7 @@ codex_supports() {
 		# min(--timeout, 10s) (see the budget derivation below) — an inner
 		# `timeout -k <grace> <term>` plus a poll deadline at that budget, belt-and-
 		# suspenders against a hanging `--help` — so a small --timeout caps the probe
-		# too: a `codex exec --help` that hangs cannot stall the run past the
+		# too: a help command that hangs cannot stall the run past the
 		# requested deadline before any attempt even starts, honoring the timeout
 		# contract. If the probe
 		# times out or fails, the capture stays empty, no flag matches, and every
@@ -725,8 +818,8 @@ codex_supports() {
 		probe_grace="$(awk -v b="$probe_budget" 'BEGIN{printf "%.3f", b/4}')"
 		probe_bs="$probe_budget"
 		set -m
-		(exec timeout -k "$probe_grace" "$probe_term" codex exec --help \
-			>"$SESSION_DIR/codex-exec-help.txt" 2>&1 </dev/null) &
+		(exec timeout -k "$probe_grace" "$probe_term" "${PROVIDER_HELP_CMD[@]}" \
+			>"$PROVIDER_HELP_FILE" 2>&1 </dev/null) &
 		probe_child=$!
 		# Register the probe with the EXIT trap IMMEDIATELY, mirroring the
 		# attempt launch (see run_attempt for the full ordering rationale):
@@ -770,15 +863,23 @@ codex_supports() {
 		CURRENT_LEADER=""
 		CURRENT_PGID=""
 		CAPTURED_DESC=" "
-		CODEX_EXEC_HELP="$(cat "$SESSION_DIR/codex-exec-help.txt" 2>/dev/null || true)"
-		CODEX_HELP_PROBED=1
+		PROVIDER_HELP="$(cat "$PROVIDER_HELP_FILE" 2>/dev/null || true)"
+		PROVIDER_HELP_PROBED=1
 	fi
-	printf '%s' "$CODEX_EXEC_HELP" | grep -Eq -- "$1"
+	printf '%s' "$PROVIDER_HELP" | grep -Eq -- "$1"
 }
 
 # LIVE=1 when the provider streams progress this run; drives forward_tick and
 # the liveProgress result field.
 LIVE=0
+
+# The strength the peer ACTUALLY ran at, as opposed to what was requested. Empty
+# means "not applied" and is reported as JSON null. Seeded empty because the
+# builders are the only writers and an `unavailable` run (missing binary) never
+# reaches one — under `set -u` an unset variable at the emit site would abort the
+# result the caller is waiting for.
+EFFECTIVE_MODEL=""
+EFFECTIVE_EFFORT=""
 
 # --- provider command builders ----------------------------------------------
 # Each builder populates the CMD array. The prompt is NEVER placed on argv or
@@ -825,6 +926,26 @@ build_cmd_claude() {
 		--allowedTools Read Grep Glob
 		--disallowedTools Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch
 		--add-dir "$WORKTREE")
+	# Strength pin. `--model` is unprobed: it has been part of `claude -p` for as
+	# long as the headless mode has existed, so probing it would buy nothing and
+	# cost a branch. `--effort` IS probed, because it is recent enough that a
+	# lagging image can lack it — and an unknown flag would abort the review
+	# outright rather than merely losing the pin.
+	#
+	# When the probe says no, we drop the flag and record effort as null. That is
+	# the ONE case where the peer runs at inherited strength, and it must be
+	# visible: silently omitting the flag would leave the caller believing it got
+	# `high` while the CLI quietly used whatever the shared config last said,
+	# which is the exact failure this knob exists to end.
+	CMD+=(--model "$MODEL")
+	EFFECTIVE_MODEL="$MODEL"
+	if provider_supports '--effort'; then
+		CMD+=(--effort "$EFFORT")
+		EFFECTIVE_EFFORT="$EFFORT"
+	else
+		EFFECTIVE_EFFORT=""
+		echo "peer-review-run: installed claude has no --effort; running at the CLI's inherited effort (result reports effort:null)" >&2
+	fi
 	# Auth mode is chosen by the orchestrator (see "Claude peer auth precedence"):
 	# in `login` mode ALL inherited env credentials — ANTHROPIC_API_KEY,
 	# ANTHROPIC_AUTH_TOKEN, AND CLAUDE_CODE_OAUTH_TOKEN — are cleared so the
@@ -876,7 +997,27 @@ build_cmd_codex() {
 		-c "mcp_servers={}"
 		-c "approval_policy=never"
 		-c "project_doc_max_bytes=0"
+		-c "model_reasoning_effort=$EFFORT"
 		--output-last-message "$dir/codex-last-message.txt")
+	# The effort override rides unprobed and unconditionally, on the same
+	# version-independence argument as approval_policy above: `-c` is the highest
+	# precedence layer and an unrecognized key is ignored without --strict-config,
+	# so it cannot become an unknown-flag failure on an older CLI.
+	#
+	# It also has to ride LAST among the strength inputs for a reason specific to
+	# this adapter: --ignore-user-config (below) drops $CODEX_HOME/config.toml to
+	# stop the reviewed worktree steering its own reviewer, and that same drop
+	# takes `model_reasoning_effort` with it. Without this line the isolation we
+	# want silently buys a peer reviewing at `reasoning effort: none`.
+	EFFECTIVE_EFFORT="$EFFORT"
+	# Model stays unpinned unless asked for — see the --model default rationale in
+	# the header. `-m` is a long-standing `codex exec` flag, so it needs no probe.
+	if [ -n "$MODEL" ]; then
+		CMD+=(-m "$MODEL")
+		EFFECTIVE_MODEL="$MODEL"
+	else
+		EFFECTIVE_MODEL=""
+	fi
 	# Config/hook isolation — the Codex analog of the Claude adapter's
 	# --safe-mode: the code under review must not be able to steer its own
 	# reviewer. Clearing mcp_servers alone is not enough — for a TRUSTED project,
@@ -893,14 +1034,14 @@ build_cmd_codex() {
 	# Each flag is probed (one cached `codex exec --help`) and omitted on an
 	# older CLI that lacks it — degrading to the mcp-only isolation rather than
 	# failing on an unknown flag.
-	codex_supports '--ignore-user-config' && CMD+=(--ignore-user-config)
-	codex_supports '--ignore-rules' && CMD+=(--ignore-rules)
-	codex_supports '--disable( |=|<)' && CMD+=(--disable hooks)
+	provider_supports '--ignore-user-config' && CMD+=(--ignore-user-config)
+	provider_supports '--ignore-rules' && CMD+=(--ignore-rules)
+	provider_supports '--disable( |=|<)' && CMD+=(--disable hooks)
 	# The explicit flag form of the approvals-off policy, where `codex exec`
 	# accepts it (current CLIs, e.g. 0.144.6, do not list it on exec — there the
 	# `-c approval_policy=never` override above already applies).
-	codex_supports '--ask-for-approval' && CMD+=(--ask-for-approval never)
-	if codex_supports '--json'; then
+	provider_supports '--ask-for-approval' && CMD+=(--ask-for-approval never)
+	if provider_supports '--json'; then
 		CMD+=(--json)
 		LIVE=1
 	else
@@ -1175,8 +1316,8 @@ run_attempt() {
 		return 0
 	fi
 
-	# Start the attempt clock BEFORE build_cmd. For Codex, build_cmd_codex runs the
-	# bounded `codex exec --help` capability probe (once per run, on the first
+	# Start the attempt clock BEFORE build_cmd. Both adapters run the bounded
+	# provider help capability probe (once per run, on the first
 	# attempt) — real wall time the caller waited. elapsedSeconds is the contract's
 	# TOTAL wall time across all attempts, so the probe must be COUNTED; timing from
 	# after build_cmd would silently drop it (a slow-but-successful probe made the
@@ -1521,6 +1662,13 @@ case "$exit_json" in
 esac
 live_json=false
 [ "$LIVE" = 1 ] && live_json=true
+# Empty effective strength → JSON null, not "". A caller checking `.effort` for
+# the level it asked for must be able to tell "not applied" from a real value,
+# and an empty string reads as neither.
+model_json=null
+[ -n "$EFFECTIVE_MODEL" ] && model_json="$(jq -n --arg m "$EFFECTIVE_MODEL" '$m')"
+effort_json=null
+[ -n "$EFFECTIVE_EFFORT" ] && effort_json="$(jq -n --arg e "$EFFECTIVE_EFFORT" '$e')"
 
 # Emitting this single JSON object IS the helper's contract with the caller — if
 # jq cannot produce it, the run has no parseable result, so fail as an OPERATIONAL
@@ -1537,9 +1685,11 @@ if ! jq -nc \
 	--argjson attempts "$ATTEMPTS" \
 	--argjson retried "$RETRIED" \
 	--argjson liveProgress "$live_json" \
+	--argjson model "$model_json" \
+	--argjson effort "$effort_json" \
 	--arg artifactDir "$ATTEMPT_DIR" \
 	--arg reason "$ATT_REASON" \
-	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,artifactDir:$artifactDir,reason:$reason}'; then
+	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,model:$model,effort:$effort,artifactDir:$artifactDir,reason:$reason}'; then
 	echo "peer-review-run: internal error — could not emit the result JSON" >&2
 	exit 70
 fi

@@ -138,6 +138,23 @@ function compileBody(source, metaEnd, filename) {
   return new vm.Script(transformed, { filename, displayErrors: true });
 }
 
+function readSourceBytes(filename) {
+  const bytes = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
+  let descriptor;
+  let length = 0;
+  try {
+    descriptor = fs.openSync(filename, "r");
+    while (length < bytes.byteLength) {
+      const bytesRead = fs.readSync(descriptor, bytes, length, bytes.byteLength - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  return bytes.subarray(0, length);
+}
+
 function main(argv) {
   if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {
     process.stdout.write(USAGE);
@@ -149,17 +166,20 @@ function main(argv) {
   }
 
   const filename = path.resolve(argv[0]);
-  let source;
+  let sourceBytes;
   try {
-    source = fs.readFileSync(filename, "utf8");
+    // Claude 2.1.221's Workflow loader reads at most limit + 1 raw bytes,
+    // rejects that buffer by byteLength, and only then decodes it as UTF-8.
+    sourceBytes = readSourceBytes(filename);
   } catch (error) {
     process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
-  if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_BYTES) {
+  if (sourceBytes.byteLength > MAX_SOURCE_BYTES) {
     process.stderr.write(`wf-check: ${filename}: script exceeds the Workflow runtime limit of ${MAX_SOURCE_BYTES} bytes\n`);
     return 1;
   }
+  const source = sourceBytes.toString("utf8");
 
   let parsed;
   try {

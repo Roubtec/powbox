@@ -179,6 +179,46 @@ run_fail "runtime ASCII source-size limit is enforced" "$WORK/oversize.js" "runt
 } >"$WORK/oversize-multibyte.js"
 run_fail "runtime source-size limit counts UTF-8 bytes" "$WORK/oversize-multibyte.js" "runtime limit of 524288 bytes"
 
+node - "$WORK/max-invalid-utf8.js" <<'NODE'
+const fs = require("fs");
+const target = process.argv[2];
+const limit = 524288;
+const prefix = Buffer.from('export const meta = { name: "max-invalid-utf8", description: "raw byte accounting" };\n/*');
+const suffix = Buffer.from('*/\nreturn null;\n');
+const source = Buffer.alloc(limit, 0xff);
+prefix.copy(source);
+suffix.copy(source, source.byteLength - suffix.byteLength);
+fs.writeFileSync(target, source);
+NODE
+run_ok "runtime accepts exactly-limit raw bytes even when decoded UTF-8 re-encodes larger" "$WORK/max-invalid-utf8.js"
+
+node - "$WORK/oversize-invalid-utf8.js" <<'NODE'
+const fs = require("fs");
+const target = process.argv[2];
+const source = Buffer.alloc(524289, 0xff);
+Buffer.from('export const meta = { name: "oversize-invalid-utf8", description: "raw byte accounting" };\n/*').copy(source);
+fs.writeFileSync(target, source);
+NODE
+run_fail "runtime rejects limit-plus-one invalid UTF-8 raw byte" "$WORK/oversize-invalid-utf8.js" "runtime limit of 524288 bytes"
+
+mkfifo "$WORK/unbounded-source.js"
+yes '/* open-ended workflow source */' >"$WORK/unbounded-source.js" 2>/dev/null &
+writer_pid=$!
+if output="$(timeout 5 "$HELPER" "$WORK/unbounded-source.js" 2>&1)"; then
+	bad "source reads stop after limit-plus-one bytes" "unexpected pass: $output"
+else
+	status=$?
+	if [[ "$status" -eq 124 ]]; then
+		bad "source reads stop after limit-plus-one bytes" "helper timed out while reading an open-ended stream"
+	elif grep -Fq -- "runtime limit of 524288 bytes" <<<"$output"; then
+		ok "source reads stop after limit-plus-one bytes"
+	else
+		bad "source reads stop after limit-plus-one bytes" "expected size-limit failure in: $output"
+	fi
+fi
+kill "$writer_pid" 2>/dev/null || true
+wait "$writer_pid" 2>/dev/null || true
+
 if "$HELPER" --help | grep -Fq "Top-level await and return"; then
 	ok "help documents async-wrapper semantics"
 else

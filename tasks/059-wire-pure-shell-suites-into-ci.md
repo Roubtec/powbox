@@ -15,7 +15,7 @@ Multiple reviewers flagged this independently during that batch. It is a systemi
 Included:
 
 - Decide and implement **where** these suites run. The two credible homes:
-  - **Tier 0** (`native-linux-ci.yml`) — they need no image and no Docker daemon, so they fit the static-guard tier and give the fastest signal on every PR.
+  - **Tier 0** (`native-linux-ci.yml`) — they need no image and no Docker daemon, so they fit the static-guard tier and give the fastest signal on every PR — bar one carrying the repo's `non-code` label, which gates the whole static-guards job off.
   - **`commands/smoke-test.sh` Stage 0** — already the "hermetic" stage, and already runs seven of them; extending it keeps one list rather than two. Note that "hermetic" there does not mean container-free: seven of its nine entries run the suite inside the image — six of them (Stages 0a, 0b, 0d, 0f, 0g, 0h) pointed at the **baked** artifact, while Stage 0e runs in-image purely for the `yq`/`jq` toolchain, since what it validates is a `/repo` script with no baked counterpart. Either way this home needs a built image where Tier 0 does not.
   Pick one as the primary home and say why; do not silently run the same suite in both.
 - Enumerate every `scripts/test-*.sh` that is genuinely hermetic (no image, no daemon, no network, no sudo/mount) and wire the full set, rather than hand-picking — the current selection looks arbitrary and that is how the gap arose.

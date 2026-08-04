@@ -3,17 +3,22 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # Tier 1: the heavy native-Linux check — build the real agent image with real
 # Docker on a hosted ubuntu-latest runner (a native-Linux VM running a
 # first-class Docker daemon, not Docker Desktop on Windows/WSL), then run the
-# full smoke test. This reproduces the build / mount / identity / exec-bit defect
-# class that only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and
-# previously cost a human a VPS stand-up.
+# smoke test. Green here is a PARTIAL smoke, not a full one: the hosted runner
+# exposes no /dev/net/tun, so Stage 3's nested half self-skips (see the smoke
+# step's comment at the bottom of this file, and docs/smoke-tests.md). What it
+# does reproduce is the build / mount / identity / exec-bit defect class that
+# only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost
+# a human a VPS stand-up.
 #
 # Path-gated: across recent history most PRs are skill/docs/launcher edits, so
 # this runs ONLY when an image-affecting file changes. Tier 0
-# (.github/workflows/native-linux-ci.yml) still covers every PR. The
-# scripts/smoke-test* glob below also future-proofs task 005's
-# scripts/smoke-test-dirmount.* — its dir-mount stage will trigger Tier 1 and
-# join the smoke run automatically once it merges (the smoke entrypoint runs
-# whatever stages exist at run time).
+# (.github/workflows/native-linux-ci.yml) covers the rest — every PR EXCEPT one
+# carrying the repo's `non-code` label, whose job `if:` gates the static guards
+# off too (see that file's header). The scripts/smoke-test* glob below matches
+# every per-stage smoke script, so a newly added one triggers Tier 1 and joins
+# the run automatically (the smoke entrypoint runs whatever stages exist at run
+# time) — that is how task 005's scripts/smoke-test-dirmount.* arrived as
+# Stage 5.
 #
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
@@ -53,8 +58,9 @@ on:
     # to labeled/unlabeled activity types, so including them could let a bare
     # label change start this heavy build+smoke regardless of which files
     # changed — exactly the path-gating this workflow exists to enforce. Tier 0
-    # has no `paths:` filter and runs on every PR, so it DOES keep
-    # labeled/unlabeled — there the label gate must re-run/skip on toggle.
+    # has no `paths:` filter, so every PR triggers it and only its job-level
+    # `non-code` gate decides whether it does any work — which is why it DOES
+    # keep labeled/unlabeled: there the label gate must re-run/skip on toggle.
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:

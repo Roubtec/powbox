@@ -676,8 +676,10 @@ if [ "${#skipped[@]}" -gt 0 ]; then
 		echo "  - $s"
 	done
 	echo "This was a PARTIAL smoke test — the stages above did not run."
-	echo "For a full run (e.g. in CI) unset the POWBOX_SMOKE_SKIP_* vars; set"
-	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image."
+	echo "To run the stages above, unset the POWBOX_SMOKE_SKIP_* vars; set"
+	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image. That"
+	echo "alone is not a full run everywhere: hosted CI has no /dev/net/tun,"
+	echo "so Stage 3's nested half self-skips there. See docs/smoke-tests.md."
 	echo "==========================================================="
 else
 	echo "Smoke test complete (all stages ran)."

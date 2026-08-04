@@ -958,12 +958,15 @@ workflows keep cost proportional to the change:
   `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`, and
   `test-wt-orphan-safety.sh`. A new suite is selected automatically; a
   suite-named log heading makes any non-zero exit obvious. The detect-shadows
-  and Podman-health-check suites need the
-  **jq-backed python-yq**, so the job installs it into a throwaway venv from
+  suite needs the jq-compatible filters provided by **jq-backed python-yq**, so
+  the job installs it into a throwaway venv from
   `.github/requirements/python-yq.txt` — the whole dependency closure pinned and
   SHA256-verified via `pip --require-hashes`, the same pinned-and-hashed contract
   as the `shfmt` step — and puts it ahead of the runner image's preinstalled
-  mikefarah Go `yq`, which cannot parse the jq filters they issue.
+  mikefarah Go `yq`, which cannot parse the detect-shadows filters.
+  The Podman-health-check suite only requires the `yq -r` operations that its
+  behavioral capability probe exercises; any implementation that passes that
+  probe works, including mikefarah `yq` v4.45.1.
   Three suites are explicitly routed to Tier 1 instead: `test-gh-review-threads.sh`
   needs the separately fetched/baked helper, `test-pnpm-shadow-wrapper.sh` needs
   the image's writable `/workspace` production root, and

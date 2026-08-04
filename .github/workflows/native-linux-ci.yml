@@ -153,8 +153,9 @@ jobs:
             throw "PSScriptAnalyzer found $($errors.Count) error/parse-severity finding(s) (see ::error annotations above)."
           }
 
-      # Two of the auto-discovered pure-shell suites parse YAML with JQ filters:
-      # scripts/test-detect-shadows.sh parses .powbox.yml through
+      # Two auto-discovered pure-shell suites parse YAML with yq, but only
+      # scripts/test-detect-shadows.sh specifically requires jq-compatible
+      # filters. It parses .powbox.yml through
       # docker/shared/detect-shadows.sh, which calls yq with JQ filters
       # (`yq -r '.shadow[]? // empty'`, `yq -r 'has("shadow")'`). That is
       # python-yq (kislyuk) — a jq wrapper — and it is what the agent image
@@ -162,8 +163,10 @@ jobs:
       #
       # ubuntu-latest preinstalls mikefarah's Go yq (v4.x) instead, which is a
       # DIFFERENT tool with the same name: it rejects the alternative operator's
-      # `empty` ("invalid input text \"empty\""), and 22 of the suite's 170
-      # assertions fail under it. So install python-yq and make it win on PATH.
+      # `empty` ("invalid input text \"empty\""), and 22 of the detect-shadows
+      # suite's 170 assertions fail under it. The Podman health-check suite's
+      # behavioral probe does accept mikefarah yq v4.45.1. Install python-yq and
+      # make it win on PATH because detect-shadows still requires it.
       #
       # Pinned AND SHA256-verified, the same contract as the `Install shfmt` step
       # above: .github/requirements/python-yq.txt pins python-yq and its whole

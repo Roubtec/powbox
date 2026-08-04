@@ -957,12 +957,20 @@ workflows keep cost proportional to the change:
   mikefarah Go `yq`, which cannot parse the jq filters `detect-shadows.sh` issues.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
   builds the agent image and runs `./commands/smoke-test.sh` under
-  `POWBOX_SMOKE_REQUIRE_IMAGE=1` so no stage self-skips into a false green. It
+  `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error instead of a
+  run whose image-gated checks self-skip into a false green. That flag reaches
+  only the image-dependent skips — the hosted runner still exposes no
+  `/dev/net/tun`, so Stage 3's nested half self-skips there and a green Tier 1 is
+  a partial smoke (see "What CI covers vs. what stays VPS-only" below). It
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
   `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints; skill/docs PRs run
-  Tier 0 only, and it carries the same `non-code` label gate as Tier 0, so that
-  label turns both tiers off. The expensive base image is cached (a `docker
+  Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
+  only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
+  re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next
+  `opened`/`synchronize`/`reopened` event and an already-queued or running Tier 1
+  is not called off (there the gate is belt-and-suspenders anyway: a docs PR
+  never matches the paths above). The expensive base image is cached (a `docker
   save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
   agent layers.
 

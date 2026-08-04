@@ -79,10 +79,10 @@ So read the banner as complete for a run against the default public repo, or one
 
 ## CI gating
 
-Two layered workflows cover this from CI, and **both are skipped by the repo's `non-code` label**:
+Two layered workflows cover this from CI, and **both carry the repo's `non-code` label gate** — though only Tier 0 subscribes to `labeled`/`unlabeled` events, so toggling the label re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next `opened`/`synchronize`/`reopened` event and an already-queued or running Tier 1 is not called off:
 
 - **Tier 0** (`.github/workflows/native-linux-ci.yml`) — static guards plus the hermetic `scripts/test-detect-shadows.sh` suite against the `/repo` source. No image, no Docker, seconds.
-- **Tier 1** (`.github/workflows/native-linux-build.yml`) — builds the agent image and runs the full smoke under `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so no stage self-skips into a false green. Additionally path-gated to image-affecting paths and to PRs targeting `main`.
+- **Tier 1** (`.github/workflows/native-linux-build.yml`) — builds the agent image and runs the smoke under `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error rather than a run whose image-gated checks self-skip into a false green. That flag reaches only the image-dependent skips: the hosted runner exposes no `/dev/net/tun`, so Stage 3's nested half self-skips there — see "Partial runs, host gates, and skipping" above — and a green Tier 1 is a partial smoke, not a full one. Additionally path-gated to image-affecting paths and to PRs targeting `main`.
 
 See README "Continuous Integration" for the trigger paths and caching.
 

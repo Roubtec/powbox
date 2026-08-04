@@ -9,7 +9,7 @@
 # so the common case re-pulls just the Claude layer. Bumping CODEX_VERSION
 # rebuilds the stable shared-linter layers and Claude layer on top as a side
 # effect — an accepted, rarer cost. `agent-update` pins concrete versions per
-# binary so Docker rebuilds the minimum set of layers for any single update.
+# agent binary so Docker rebuilds the minimum set of layers for those updates.
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 
@@ -26,7 +26,8 @@ USER node
 # actionlint is the current stable v1.7.12 release. Fetch its static Linux
 # tarball directly from GitHub and verify the per-architecture SHA256 published
 # in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
-# the version, both checksums, and the exact smoke assertions together.
+# the version, both checksums, the tooling-table row, and the exact Bash and
+# PowerShell Stage 1 smoke assertions together.
 USER root
 RUN ACTIONLINT_VERSION=1.7.12 \
     && arch="$(dpkg --print-architecture)" \
@@ -44,7 +45,9 @@ RUN ACTIONLINT_VERSION=1.7.12 \
 
 # markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
 # default reproducible and omit optional dependencies; repository wrappers and
-# CI pins remain authoritative when they require another version.
+# CI pins remain authoritative when they require another version. Bump this
+# literal pin, the tooling-table row, and the exact Bash and PowerShell Stage 1
+# smoke assertions together.
 RUN npm install -g --omit=optional markdownlint-cli2@0.23.2
 USER node
 

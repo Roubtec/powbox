@@ -75,7 +75,7 @@ Cached builds are the default.
 
 Use the root build wrappers to rebuild the images you need. Build targets are `base`, `agent`, and `all`.
 
-Both `--claude-version` and `--codex-version` feed the single `agent` image. The Dockerfile installs Codex directly on the base, stable shared-linter layers above it, and Claude above those, so bumping the Claude version (the common, frequent case) busts only the Claude layer and the cheap asset/entrypoint layers above it, while the Codex and linter layers underneath are reused from cache. Bumping the Codex version rebuilds the linter and Claude layers on top as a side effect — an accepted, rarer cost. `agent-update` exploits this by pinning each binary's version per build (see [Profile Shortcuts](#profile-shortcuts)).
+Both `--claude-version` and `--codex-version` feed the single `agent` image. The Dockerfile installs Codex directly on the base, stable shared-linter layers above it, and Claude above those, so bumping the Claude version (the common, frequent case) busts only the Claude layer and the cheap asset/entrypoint layers above it, while the Codex and linter layers underneath are reused from cache. Bumping the Codex version rebuilds the linter and Claude layers on top as a side effect — an accepted, rarer cost. `agent-update` exploits this by pinning each agent binary's version per build (see [Profile Shortcuts](#profile-shortcuts)).
 
 Examples:
 

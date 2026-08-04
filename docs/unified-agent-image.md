@@ -50,7 +50,7 @@ Consequence:
 - **Claude updates** (the common case) change only the top layer → clients pull only the Claude layer. Codex layer underneath is reused. This is the bandwidth win, achieved with one image and one tag.
 - **Codex updates** (rare) change the lower layer → the stable shared-linter layers and Claude layer above rebuild. Unavoidable with any single-image stacking, and accepted.
 
-Each binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`) so that edits to hooks/skills do not trigger binary reinstalls.
+Each agent binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`), while the stable linter installs are separate layers keyed by literal version pins in the Dockerfile; edits to hooks/skills therefore do not trigger any of those reinstalls.
 
 ### Entrypoint: seed both, exec one
 
@@ -87,10 +87,10 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 ### Minimal-layer updates
 
-`agent-update` must rebuild the fewest layers for any single update. The mechanism is **per-binary version pinning**, because with `latest` tags Docker can't see that an upstream release advanced (the `RUN` text is unchanged) and would either never update or, with `--no-cache`, rebuild both binaries.
+`agent-update` must rebuild the fewest layers for any single agent update. The mechanism is **per-agent-binary version pinning**, because with `latest` tags Docker can't see that an upstream release advanced (the `RUN` text is unchanged) and would either never update or, with `--no-cache`, rebuild both agent binaries.
 
 - `check-updates.sh` reads both baked versions in **one** container start (`docker run … sh -c 'claude --version; codex --version'`) — the win the single image unlocks — and resolves both npm latests. Its `--porcelain` mode emits a machine-readable table: `name<TAB>status<TAB>baked<TAB>latest`.
-- `agent-update` reads that table once and rebuilds `agent` pinning each binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
+- `agent-update` reads that table once and rebuilds `agent` pinning each agent binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
 - Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
 
 ### Launcher and macros

@@ -103,10 +103,11 @@ ok "dir-mounted has nm/wt volumes and no ws volume"
 # agent-nm-* keys on the JS/powbox gate (package.json / pnpm-workspace.yaml /
 # committed .powbox.yml / local shadow: → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
-# go.mod (MOUNT_WORKTREES_VOLUME, which gates GOMODCACHE/GOCACHE) — so a pure-Go
-# repo gets persistent Go caches + worktrees WITHOUT an empty node_modules/
-# mountpoint littering the host folder. The local ctx:-only case must not opt a
-# non-dev folder into project volumes.
+# go.mod or bounded .NET markers (root solutions/projects and one-level project
+# files). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES, so a
+# pure Go or .NET repo gets persistent caches + worktrees WITHOUT an empty
+# node_modules/ mountpoint littering the host folder. The local ctx:-only case
+# must not opt a non-dev folder into project volumes.
 MATRIX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-gate-XXXXXX")"
 trap 'rm -rf "$MATRIX_ROOT"' EXIT
 gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / MOUNT_WORKTREES_VOLUME
@@ -116,10 +117,29 @@ gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / 
 		fail "gate matrix $1: MOUNT_WORKSPACE_VOLUMES is '$(id_field "$out" MOUNT_WORKSPACE_VOLUMES)', want '$2'"
 	[ "$(id_field "$out" MOUNT_WORKTREES_VOLUME)" = "$3" ] ||
 		fail "gate matrix $1: MOUNT_WORKTREES_VOLUME is '$(id_field "$out" MOUNT_WORKTREES_VOLUME)', want '$3'"
+	if [ "$2" = true ]; then
+		[ "$(id_field "$out" PNPM_STORE_DIR)" = "$(id_field "$out" WORKSPACE_MOUNT)/.worktrees/.pnpm-store" ] ||
+			fail "gate matrix $1: PNPM_STORE_DIR does not point into the worktrees volume"
+	else
+		[ -z "$(id_field "$out" PNPM_STORE_DIR)" ] ||
+			fail "gate matrix $1: PNPM_STORE_DIR must stay omitted outside the JS/powbox gate"
+	fi
+	if [ "$3" = true ]; then
+		[ "$(id_field "$out" NUGET_PACKAGES)" = "$(id_field "$out" WORKSPACE_MOUNT)/.worktrees/.nuget" ] ||
+			fail "gate matrix $1: NUGET_PACKAGES does not point into the worktrees volume"
+	else
+		[ -z "$(id_field "$out" NUGET_PACKAGES)" ] ||
+			fail "gate matrix $1: NUGET_PACKAGES must be omitted when the worktrees gate is false"
+	fi
 }
 mkdir -p \
 	"$MATRIX_ROOT/pkg-only" \
 	"$MATRIX_ROOT/gomod-only" \
+	"$MATRIX_ROOT/dotnet-sln" \
+	"$MATRIX_ROOT/dotnet-slnx" \
+	"$MATRIX_ROOT/dotnet-root-project" \
+	"$MATRIX_ROOT/dotnet-shallow/src" \
+	"$MATRIX_ROOT/dotnet-deep/src/App" \
 	"$MATRIX_ROOT/both" \
 	"$MATRIX_ROOT/powbox-yml" \
 	"$MATRIX_ROOT/local-shadow" \
@@ -128,6 +148,11 @@ mkdir -p \
 	"$MATRIX_ROOT/neither"
 : >"$MATRIX_ROOT/pkg-only/package.json"
 : >"$MATRIX_ROOT/gomod-only/go.mod"
+: >"$MATRIX_ROOT/dotnet-sln/App.sln"
+: >"$MATRIX_ROOT/dotnet-slnx/App.slnx"
+: >"$MATRIX_ROOT/dotnet-root-project/App.fsproj"
+: >"$MATRIX_ROOT/dotnet-shallow/src/App.csproj"
+: >"$MATRIX_ROOT/dotnet-deep/src/App/App.vbproj"
 : >"$MATRIX_ROOT/both/package.json"
 : >"$MATRIX_ROOT/both/go.mod"
 : >"$MATRIX_ROOT/powbox-yml/.powbox.yml"
@@ -141,6 +166,11 @@ ctx: []
 YAML
 gate_case pkg-only true true
 gate_case gomod-only false true
+gate_case dotnet-sln false true
+gate_case dotnet-slnx false true
+gate_case dotnet-root-project false true
+gate_case dotnet-shallow false true
+gate_case dotnet-deep false false
 gate_case both true true
 gate_case powbox-yml true true
 gate_case local-shadow true true
@@ -149,7 +179,7 @@ gate_case local-ctx-only false false
 gate_case neither false false
 rm -rf "$MATRIX_ROOT"
 trap - EXIT
-ok "volume-gate matrix: nm keys on JS/powbox/local-shadow gate, wt also on go.mod; local ctx-only stays non-dev"
+ok "volume-gate matrix: nm stays on JS/powbox; wt and NuGet also cover bounded .NET/Go; deep .NET and local ctx-only stay non-dev"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"
@@ -159,6 +189,10 @@ N2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.gi
 	fail "named instance is not deterministic across launches"
 [ "$(id_field "$N1" WORKSPACE_MOUNT)" = "$(id_field "$N2" WORKSPACE_MOUNT)" ] ||
 	fail "named instance workspace path (→ Claude session slug) is not stable"
+[ "$(id_field "$N1" NUGET_PACKAGES)" = "$(id_field "$N1" WORKSPACE_MOUNT)/.worktrees/.nuget" ] ||
+	fail "self-hosted identity does not place NUGET_PACKAGES inside its workspace volume"
+[ "$(id_field "$N1" PNPM_STORE_DIR)" = "$(id_field "$N1" WORKSPACE_MOUNT)/.worktrees/.pnpm-store" ] ||
+	fail "self-hosted identity does not place PNPM_STORE_DIR inside its workspace volume"
 ok "named instance is deterministic (same workspace path / session slug on relaunch)"
 
 # --- the --name slug is visible in the container name (so cc-list / docker ps show

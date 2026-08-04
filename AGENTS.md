@@ -29,8 +29,8 @@ The container sets `push.useForceIfIncludes=true` (in `docker/shared/entrypoint-
 | `/home/node/.agent-container/<agent>` | Per-agent image-baked seed assets (template, skills, statusline, build epoch); read via `AGENT_SEED_DIR` |
 | `/home/node/.config/gh` | Shared GitHub CLI auth volume |
 | `/workspace/<project-slug>/node_modules` | Per-container package volume (`agent-nm-<agent>-<project>`); dir-mounted JS/powbox projects only |
-| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds the durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`, so worktrees survive container recycle), the per-container pnpm store at `.worktrees/.pnpm-store` (JS/powbox gate only), the Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), and the opt-in ccache compiler cache (`.worktrees/.ccache`); dir-mounted JS/powbox **or** `go.mod` projects |
-| `/workspace/<repo-slug>[-<name-slug>]-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / ccache as subdirs; replaces the bind mount and the two volumes above |
+| `/workspace/<project-slug>/.worktrees` | Per-container worktrees volume (`agent-wt-<agent>-<project>`); also holds durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`), the per-container pnpm store at `.worktrees/.pnpm-store` (JS/powbox gate only), Go caches (`.worktrees/.gomodcache`, `.worktrees/.gocache`, per-worktree `.worktrees/.golangci-cache/…`), the shared NuGet packages folder (`.worktrees/.nuget`), and opt-in ccache (`.worktrees/.ccache`); dir-mounted JS/powbox, `go.mod`, or boundedly detected .NET projects |
+| `/workspace/<repo-slug>[-<name-slug>]-<instance-hash>` | Self-hosted (`--isolated`) per-instance workspace volume (`agent-ws-<container>`) — the clone plus `node_modules`, `.worktrees`, and the pnpm store / Go caches / NuGet packages / ccache as subdirs; replaces the bind mount and the two volumes above |
 
 Both config volumes are always mounted (not just the primary agent's) so the primary agent can invoke the other in-container; see README "Cross-Agent Delegation".
 
@@ -85,7 +85,7 @@ The deep architecture/runtime detail lives in chapter docs under `docs/` so it d
 | Volumes, the pnpm store, worktree `node_modules` hardlinking | [docs/architecture.md](docs/architecture.md) → "Volumes and Stores" · [docs/worktree-node-modules-hardlinks.md](docs/worktree-node-modules-hardlinks.md) |
 | Bundled PostgreSQL build rationale | [docs/architecture.md](docs/architecture.md) → "Bundled PostgreSQL" |
 | Bundled Go toolchain rationale (version pinning, GOTOOLCHAIN, golangci-lint) | [docs/architecture.md](docs/architecture.md) → "Bundled Go toolchain" |
-| Bundled .NET SDK rationale (band pinning, env opt-outs, first-use sentinels, NuGet cache gap) | [docs/architecture.md](docs/architecture.md) → "Bundled .NET SDK" |
+| Bundled .NET SDK rationale (band pinning, env opt-outs, first-use sentinels, persistent NuGet packages) | [docs/architecture.md](docs/architecture.md) → "Bundled .NET SDK" |
 | Container startup: entrypoint chain, per-agent hooks, ordering, workspace-perms healing, the mid-session pnpm/shadow wrapper, the bash/zsh split | [docs/entrypoint-and-runtime.md](docs/entrypoint-and-runtime.md) |
 | The unified image spec / migration order | [docs/unified-agent-image.md](docs/unified-agent-image.md) |
 | Skill refresh, ownership markers, pruning, provenance internals | [docs/skills-refresh-and-provenance.md](docs/skills-refresh-and-provenance.md) |

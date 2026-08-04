@@ -227,7 +227,8 @@ fi
 #
 # Same derivation shape as the workspace globs above (a project manifest implies
 # an artifact directory beside it), and the same reason: MSBuild bakes ABSOLUTE
-# paths into obj/.  A container restore writes `/home/node/.nuget/packages/`
+# paths into obj/. A powbox container restore writes its persistent
+# `/workspace/<slug>/.worktrees/.nuget/` packages path
 # into obj/project.assets.json and obj/*.nuget.g.props, while the same project
 # built on a Windows host writes `C:\Users\<user>\.nuget\packages\`.  Sharing
 # those directories over the bind mount makes a container build and a host

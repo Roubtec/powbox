@@ -379,8 +379,10 @@ fi
 # producer emits and so could flip a probe green→141 with no code change.
 # scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
-# The dotnet probes pin the two pieces of the SDK layer that can regress
-# silently.
+# The dotnet probes pin the SDK layer pieces that can regress silently, including
+# an offline `dotnet nuget locals` check that the NUGET_PACKAGES override resolves
+# to the exact requested path after tolerating the command's label and trailing
+# separator formatting.
 # The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up
 # RUN does and asserts both marker files exist under $HOME/.dotnet, are owned by
 # the runtime user, and that $HOME/.dotnet is writable by it — which pins that
@@ -466,6 +468,7 @@ fi
 	"opa version >/dev/null" \
 	'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"' \
 	"dotnet --version >/dev/null" \
+	'NUGET_PACKAGES=/tmp/powbox-nuget-packages-probe dotnet nuget locals global-packages --list | sed "s/^[^:]*:[[:space:]]*//; s:/*$::" | grep -Fqx /tmp/powbox-nuget-packages-probe' \
 	'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ]' \
 	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]' \
 	"file --version >/dev/null" \

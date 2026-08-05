@@ -198,6 +198,45 @@ function Test-Powbox-LocalShadowConfigPresent ([string]$Workspace) {
   return (Test-Powbox-TopSection (Join-Path $Workspace ".powbox.local.yml") "shadow")
 }
 
+# A deliberately bounded .NET repo detector for the worktrees-volume-only gate.
+# Solutions and project files are recognized at the repo root or exactly one
+# directory below it (for layouts such as src/App.sln or src/App.csproj).
+# GetFiles is non-recursive at each explicitly visited level, so unrelated deep
+# trees are never scanned. Extension matching is explicitly case-insensitive on
+# every host, and dot-prefixed direct children count. Reparse-point files and
+# child directories are not followed; inaccessible or concurrently removed
+# children are skipped. Keep this predicate in sync with launch-agent.sh and the
+# identity fixtures in smoke-test-selfhosted.{sh,ps1}.
+function Test-Powbox-DotNetRepoPresent ([string]$Workspace) {
+  try { $rootFiles = [System.IO.Directory]::GetFiles($Workspace) }
+  catch { $rootFiles = @() }
+  foreach ($file in $rootFiles) {
+    try {
+      if (([System.IO.File]::GetAttributes($file) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    }
+    catch { continue }
+    if (@(".sln", ".slnx", ".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
+  }
+  try { $directories = [System.IO.Directory]::GetDirectories($Workspace) }
+  catch { $directories = @() }
+  foreach ($directory in $directories) {
+    try {
+      if (([System.IO.File]::GetAttributes($directory) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    }
+    catch { continue }
+    try { $childFiles = [System.IO.Directory]::GetFiles($directory) }
+    catch { continue }
+    foreach ($file in $childFiles) {
+      try {
+        if (([System.IO.File]::GetAttributes($file) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+      }
+      catch { continue }
+      if (@(".sln", ".slnx", ".csproj", ".fsproj", ".vbproj") -icontains [System.IO.Path]::GetExtension($file)) { return $true }
+    }
+  }
+  return $false
+}
+
 function Complete-Powbox-CtxObject ([ref]$Current, [System.Collections.IList]$Entries) {
   $obj = $Current.Value
   if ($null -eq $obj) { return }
@@ -583,11 +622,12 @@ $workspaceVolume = ""
 # gate — because PNPM_STORE_DIR and the pnpm wrapper's regression guard key on it.
 $mountWorkspaceVolumes = $false
 # Whether to mount the dir-mounted worktrees volume (a SUPERSET gate): true
-# whenever $mountWorkspaceVolumes is, PLUS for a go.mod-only repo — Go projects
-# want the persistent worktrees volume (it now also holds the Go caches, see
-# below) but have no use for an isolated node_modules mount, which would only
-# litter an empty node_modules/ dir in the host folder.
+# whenever $mountWorkspaceVolumes is, PLUS for a Go- or .NET-only repo. Those
+# projects want the persistent worktrees volume and language caches but have no
+# use for an isolated node_modules mount, which would only litter the host.
 $mountWorktreesVolume = $false
+$worktreesOnlyRepoDescription = "worktrees-only repo"
+$worktreesOnlyCacheDescription = "language caches"
 $repoSpec = ""
 
 if ($Isolated) {
@@ -743,14 +783,28 @@ else {
     (Test-Powbox-LocalShadowConfigPresent $resolvedProject)) {
     $mountWorkspaceVolumes = $true
   }
-  # The worktrees volume has a second, WIDER trigger: go.mod. A pure-Go repo gets
-  # agent-wt-* (persistent Go caches + worktrees) but NOT agent-nm-* — no empty
-  # node_modules/ litter on the host (the empty .worktrees/ mountpoint dir is
-  # accepted; it appears for every gated repo). PNPM_STORE_DIR stays keyed to the
-  # JS/powbox gate above so the pnpm wrapper's host-litter warning still fires
-  # for a stray root `pnpm install` in a go.mod-only repo.
-  if ($mountWorkspaceVolumes -or (Test-Path (Join-Path $resolvedProject 'go.mod') -PathType Leaf)) {
+  # The worktrees volume has WIDER, non-Node triggers: go.mod and a bounded .NET
+  # predicate (solution/project files at the root or exactly one directory below
+  # it). A pure Go or .NET repo gets agent-wt-*
+  # (persistent caches + worktrees) but NOT agent-nm-* — no empty node_modules/
+  # litter on the host. PNPM_STORE_DIR stays keyed to the JS/powbox gate above,
+  # so the pnpm wrapper's host-litter warning still fires for a stray root
+  # `pnpm install` in a Go/.NET-only repo.
+  $goModPresent = Test-Path (Join-Path $resolvedProject 'go.mod') -PathType Leaf
+  if ($mountWorkspaceVolumes) {
     $mountWorktreesVolume = $true
+  }
+  elseif ($goModPresent) {
+    $mountWorktreesVolume = $true
+    $worktreesOnlyRepoDescription = "go.mod-only repo"
+    $worktreesOnlyCacheDescription = "Go caches"
+  }
+  else {
+    if (Test-Powbox-DotNetRepoPresent $resolvedProject) {
+      $mountWorktreesVolume = $true
+      $worktreesOnlyRepoDescription = ".NET-only repo"
+      $worktreesOnlyCacheDescription = "NuGet packages"
+    }
   }
 }
 
@@ -776,6 +830,12 @@ $worktreesGoCacheDir = "/workspace/$projectSlug/.worktrees/.gocache"
 # Its in-container default (~/.cache/ccache) dies with the container. Opt-in per
 # build (baked binary + persistent dir only; no global CC/CXX interposition).
 $worktreesCcacheDir = "/workspace/$projectSlug/.worktrees/.ccache"
+# NuGet's global packages folder beside the other shared, persistent caches.
+# NUGET_PACKAGES is the documented override and the global packages folder is
+# designed for reuse by many projects/processes; NuGet coordinates concurrent
+# access with filesystem locks. Sharing it across this repo's worktrees avoids
+# duplicate restores while each outer agent container keeps its own volume.
+$worktreesNugetPackagesDir = "/workspace/$projectSlug/.worktrees/.nuget"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
 # container (agent + project), NOT just the project: a project's Claude and Codex
@@ -786,7 +846,7 @@ $podmanVolume = "agent-podman-$containerName"
 if ($Isolated) {
   # The one per-instance workspace volume that REPLACES the host bind mount plus the
   # dir-mounted agent-nm-*/agent-wt-* shadows: the clone, node_modules, .worktrees,
-  # and the pnpm store, Go caches, and ccache all live inside it as ordinary subdirs
+  # and the pnpm store, Go/NuGet caches, and ccache all live inside it as ordinary subdirs
   # (one mount → pnpm hardlinks everywhere). Keyed by the full container name, like
   # the podman volume.
   $workspaceVolume = "agent-ws-$containerName"
@@ -807,6 +867,10 @@ if ($env:POWBOX_PRINT_IDENTITY -eq "1") {
   # bool as "True"/"False"), keeping the two launchers' identity output identical.
   Write-Output "MOUNT_WORKSPACE_VOLUMES=$($mountWorkspaceVolumes.ToString().ToLowerInvariant())"
   Write-Output "MOUNT_WORKTREES_VOLUME=$($mountWorktreesVolume.ToString().ToLowerInvariant())"
+  if ($Isolated -or $mountWorkspaceVolumes) { Write-Output "PNPM_STORE_DIR=$worktreesStoreDir" }
+  else { Write-Output "PNPM_STORE_DIR=" }
+  if ($Isolated -or $mountWorktreesVolume) { Write-Output "NUGET_PACKAGES=$worktreesNugetPackagesDir" }
+  else { Write-Output "NUGET_PACKAGES=" }
   Write-Output "REPO_SPEC=$repoSpec"
   Write-Output "CLONE_REF=$Ref"
   exit 0
@@ -928,6 +992,9 @@ if ($Resume) {
   }
   if ($Ref -ne "") {
     Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
+  }
+  if ($Isolated -or $mountWorktreesVolume) {
+    Write-Host "Note: -Resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES wiring, are skipped. Omit -Resume to apply them." -ForegroundColor Yellow
   }
 
   # A running container (e.g. launched -Detach, or its terminal was lost) can't be
@@ -1088,8 +1155,8 @@ if (-not $Volatile -and $containerExists) {
 # mount at each destination depends on the (split) host-litter gate:
 #   * JS/powbox project ($mountWorkspaceVolumes=$true)  -> BOTH per-agent volumes
 #     agent-{nm,wt}-<container>;
-#   * go.mod-only repo ($mountWorktreesVolume=$true only) -> ONLY agent-wt-<container>
-#     (Go caches + worktrees), NO node_modules mount;
+#   * Go/.NET-only repo ($mountWorktreesVolume=$true only) -> ONLY agent-wt-<container>
+#     (language caches + worktrees), NO node_modules mount;
 #   * non-dev folder (both gates false)                    -> NO mount at all.
 # This covers three upgrade/mismatch paths:
   #   * predates the .worktrees volume entirely (no .worktrees mount) — it still
@@ -1102,7 +1169,7 @@ if (-not $Volatile -and $containerExists) {
 #     and
 #   * predates the host-litter gate (or the SPLIT gate), OR the folder changed shape — it
 #     still mounts node_modules/.worktrees in a non-dev folder (or node_modules in a
-#     go.mod-only repo), so a bare `docker start` keeps re-creating empty mountpoint dirs
+#     Go/.NET-only repo), so a bare `docker start` keeps re-creating empty mountpoint dirs
 #     in the host folder and the gate never takes effect for the upgraded container.
 #     Recreating without those mounts stops the litter.
 # Mere presence of a .worktrees mount can't distinguish these, so we compare the actual
@@ -1139,10 +1206,10 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
     }
     elseif ($mountWorktreesVolume) {
       if ($containerRunning) {
-        Write-Host "Note: container $containerName does not match this go.mod-only repo's expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); Go caches/worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
+        Write-Host "Note: container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); $worktreesOnlyCacheDescription and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
       }
       else {
-        Write-Host "Container $containerName does not match this go.mod-only repo's expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent Go caches + worktrees) and no node_modules mount."
+        Write-Host "Container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent $worktreesOnlyCacheDescription + worktrees) and no node_modules mount."
         $recreateStaleMounts = $true
       }
     }
@@ -1161,6 +1228,48 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
         docker container inspect $containerName *> $null
         if ($LASTEXITCODE -eq 0) {
           Write-Error "Failed to remove container $containerName after detecting outdated workspace volume mounts."
+          exit 1
+        }
+      }
+      $containerExists = $false
+    }
+  }
+}
+
+# NUGET_PACKAGES is frozen in Config.Env when a container is created. A container
+# from before persistent NuGet caching can already have the correct .worktrees
+# mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
+# to compare at all; either shape would otherwise exit through reuse above the new
+# run-argument assembly and keep restoring into ephemeral ~/.nuget/packages forever.
+# Compare the case-sensitive expected path for every worktrees-backed launch,
+# ignoring only redundant trailing slashes. Follow the mount-mismatch lifecycle:
+# warn without disrupting a running process, and recreate a stopped mismatch so
+# the new environment takes effect.
+if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExists) {
+  $existingContainerEnv = @(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $containerName 2>$null)
+  if ($LASTEXITCODE -ne 0) { $existingContainerEnv = @() }
+  $existingNugetPackages = $null
+  $existingNugetPackagesFound = $false
+  foreach ($envEntry in $existingContainerEnv) {
+    if ($envEntry.StartsWith("NUGET_PACKAGES=", [System.StringComparison]::Ordinal)) {
+      $existingNugetPackages = $envEntry.Substring("NUGET_PACKAGES=".Length)
+      $existingNugetPackagesFound = $true
+      break
+    }
+  }
+  $normalizedExistingNugetPackages = if ($null -eq $existingNugetPackages) { $null } else { $existingNugetPackages.TrimEnd('/') }
+  if ($normalizedExistingNugetPackages -cne $worktreesNugetPackagesDir) {
+    $existingNugetDisplay = if (-not $existingNugetPackagesFound) { "<unset>" } elseif ($existingNugetPackages -ceq "") { "<empty>" } else { $existingNugetPackages }
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay', but this launch expects '$worktreesNugetPackagesDir'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent NuGet packages." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "Container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay'; recreating it with '$worktreesNugetPackagesDir' so NuGet packages persist."
+      docker rm $containerName *> $null
+      if ($LASTEXITCODE -ne 0) {
+        docker container inspect $containerName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Failed to remove container $containerName after detecting an outdated NUGET_PACKAGES environment."
           exit 1
         }
       }
@@ -1383,7 +1492,7 @@ if ($Isolated) {
 else {
   # Always pre-create the per-container Podman store + the global image store; add
   # the node_modules/worktrees volumes only when this project uses them (see the
-  # split $mountWorkspaceVolumes / $mountWorktreesVolume gates — a go.mod-only
+  # split $mountWorkspaceVolumes / $mountWorktreesVolume gates — a Go/.NET-only
   # repo gets just the worktrees volume) so a non-dev folder leaves no host litter.
   $prepVolArgs = @(
     "-v", "${podmanVolume}:/mnt/containers",
@@ -1496,20 +1605,21 @@ if ($ctxDesiredPresent) {
 if ($Isolated -or $mountWorkspaceVolumes) {
   $envArgs += @("-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 }
-# Point the Go module + build caches (and the ccache compiler cache) into the same
+# Point the Go module + build caches, ccache, and NuGet global packages into the same
 # persistent mount — keyed on the WIDER worktrees gate (or self-hosted mode, where
 # .worktrees is a subdir of the one workspace volume), NOT the JS gate above: a
-# go.mod-only repo mounts only the worktrees volume. Omitting them for a non-dev
+# Go/.NET-only repo mounts only the worktrees volume. Omitting them for a non-dev
 # dir-mounted folder stops the entrypoint from mkdir-ing cache dirs onto the host
-# bind mount — go/ccache just keep their image-default (container-ephemeral) cache
-# paths there instead. Plain env is all these tools need (no `go env -w`, no ccache
+# bind mount — go/ccache/NuGet keep their image-default (container-ephemeral) cache
+# paths there instead. Plain env is all these tools need (no `go env -w`, ccache, or NuGet
 # config), matching the PNPM_STORE_DIR precedent; the entrypoint pre-creates the
 # dirs (guarded, warn-don't-abort).
 if ($Isolated -or $mountWorktreesVolume) {
   $envArgs += @(
     "-e", "GOMODCACHE=$worktreesGoModCacheDir",
     "-e", "GOCACHE=$worktreesGoCacheDir",
-    "-e", "CCACHE_DIR=$worktreesCcacheDir"
+    "-e", "CCACHE_DIR=$worktreesCcacheDir",
+    "-e", "NUGET_PACKAGES=$worktreesNugetPackagesDir"
   )
 }
 
@@ -1555,7 +1665,7 @@ if (-not $Isolated) {
 # never re-wipes the agent's work on a later restart. In dir-mounted mode the root
 # node_modules and .worktrees are separate per-container named volumes mounted over the
 # bind mount — but only for a project that uses them (the split $mountWorkspaceVolumes /
-# $mountWorktreesVolume gates: a JS/powbox project gets both, a go.mod-only repo gets
+# $mountWorktreesVolume gates: a JS/powbox project gets both, a Go/.NET-only repo gets
 # just .worktrees); a non-dev folder gets neither. In self-hosted mode they are ordinary
 # subdirs of the one workspace volume (mounted via compose.selfhosted.yml), so no extra
 # -v args are added here.

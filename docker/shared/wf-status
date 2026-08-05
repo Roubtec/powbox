@@ -309,7 +309,6 @@ function buildCalls(snapshot, journal, agentFiles) {
       error: undefined,
     };
     calls.push(call);
-    byAgentId.set(agentId, call);
   }
   return calls;
 }

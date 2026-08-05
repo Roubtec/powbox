@@ -121,15 +121,15 @@ return null;
 EOF
 run_ok "valid escaped metadata property identifiers pass" "$WORK/escaped-property-identifiers.js"
 
-cat >"$WORK/runtime-phase-filter.js" <<'EOF'
+cat >"$WORK/uninterpreted-phases.js" <<'EOF'
 export const meta = {
-  name: "phase-filter",
-  description: "the installed runtime ignores malformed optional phase entries",
+  name: "phase-metadata",
+  description: "optional literal metadata is accepted without interpretation",
   phases: [null, {}, { title: 4 }, { title: "kept", detail: 9 }],
 };
 return null;
 EOF
-run_ok "optional phases follow the installed runtime's filtering behavior" "$WORK/runtime-phase-filter.js"
+run_ok "optional literal phase metadata is accepted without interpretation" "$WORK/uninterpreted-phases.js"
 
 cat >"$WORK/missing-meta.js" <<'EOF'
 return "missing";

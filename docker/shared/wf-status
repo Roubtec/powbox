@@ -46,14 +46,15 @@ function listDirectories(directory) {
 }
 
 function candidateMtime(candidate) {
+  let newest = 0;
   for (const filename of [candidate.snapshotPath, path.join(candidate.runDir, "journal.jsonl"), candidate.runDir]) {
     try {
-      return fs.statSync(filename).mtimeMs;
+      newest = Math.max(newest, fs.statSync(filename).mtimeMs);
     } catch {
-      // Keep trying less-specific artifacts.
+      // Keep checking the remaining artifacts.
     }
   }
-  return 0;
+  return newest;
 }
 
 function findRun(runId) {
@@ -250,12 +251,13 @@ function buildCalls(snapshot, journal, agentFiles) {
   for (const [index, entry] of [...progressByIndex.entries()].sort((left, right) => left[0] - right[0])) {
     const agentId = typeof entry.agentId === "string" ? entry.agentId : undefined;
     const fallback = agentId ? agentFiles.get(agentId) : undefined;
+    const snapshotState = normalizeState(entry.state);
     const call = {
       index,
       agentId,
       label: compactLabel(entry.label || fallback?.label),
       phase: compactLabel(entry.phaseTitle),
-      state: normalizeState(entry.state),
+      state: snapshotState === "pending" && fallback?.state === "failed" ? "failed" : snapshotState,
       error: typeof entry.error === "string" ? entry.error : undefined,
       journalKey: undefined,
     };

@@ -156,6 +156,49 @@ assert_has "transcript failure survives a matching journal result" "$partial_out
 assert_has "partial run has no invented final return" "$partial_output" "(not available)"
 assert_has "missing snapshot is a warning" "$partial_output" "workflow snapshot is missing"
 
+MERGE_ID="wf_merge-047"
+MERGE_DIR="$SESSION/subagents/workflows/$MERGE_ID"
+mkdir -p "$MERGE_DIR"
+cat >"$MERGE_DIR/journal.jsonl" <<'EOF'
+{"type":"started","key":"v2:failed","agentId":"m1"}
+{"type":"result","key":"v2:failed","agentId":"m1","result":{"ok":false}}
+EOF
+cat >"$MERGE_DIR/agent-m1.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"snapshot pending transcript failure"}}
+{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API error"}]}}
+EOF
+cat >"$SESSION/workflows/$MERGE_ID.json" <<'EOF'
+{
+  "runId": "wf_merge-047",
+  "status": "running",
+  "workflowProgress": [
+    {"type":"workflow_agent","index":1,"label":"snapshot-pending","agentId":"m1","state":"start"}
+  ]
+}
+EOF
+merge_output="$($HELPER "$MERGE_DIR")"
+assert_has "transcript failure overrides a pending snapshot with a matching result" "$merge_output" "failed    snapshot-pending [m1]"
+
+DUPLICATE_ID="wf_duplicate-047"
+DUPLICATE_A="$CONFIG/projects/-workspace-fixture/session-duplicate-a"
+DUPLICATE_B="$CONFIG/projects/-workspace-fixture/session-duplicate-b"
+DUPLICATE_A_RUN="$DUPLICATE_A/subagents/workflows/$DUPLICATE_ID"
+DUPLICATE_B_RUN="$DUPLICATE_B/subagents/workflows/$DUPLICATE_ID"
+mkdir -p "$DUPLICATE_A_RUN" "$DUPLICATE_A/workflows" "$DUPLICATE_B_RUN" "$DUPLICATE_B/workflows"
+printf '%s\n' '{"type":"started","key":"v2:a","agentId":"a"}' >"$DUPLICATE_A_RUN/journal.jsonl"
+printf '%s\n' '{"runId":"wf_duplicate-047","status":"older-snapshot-newer-journal"}' >"$DUPLICATE_A/workflows/$DUPLICATE_ID.json"
+printf '%s\n' '{"type":"started","key":"v2:b","agentId":"b"}' >"$DUPLICATE_B_RUN/journal.jsonl"
+printf '%s\n' '{"runId":"wf_duplicate-047","status":"newer-snapshot-older-journal"}' >"$DUPLICATE_B/workflows/$DUPLICATE_ID.json"
+touch -d '@1000000000' "$DUPLICATE_A/workflows/$DUPLICATE_ID.json"
+touch -d '@1200000000' "$DUPLICATE_A_RUN"
+touch -d '@1400000000' "$DUPLICATE_A_RUN/journal.jsonl"
+touch -d '@1100000000' "$DUPLICATE_B_RUN/journal.jsonl"
+touch -d '@1200000000' "$DUPLICATE_B_RUN"
+touch -d '@1300000000' "$DUPLICATE_B/workflows/$DUPLICATE_ID.json"
+duplicate_output="$(CLAUDE_CONFIG_DIR="$CONFIG" "$HELPER" "$DUPLICATE_ID")"
+assert_has "duplicate run lookup uses the newest artifact across each candidate" "$duplicate_output" "Directory: $DUPLICATE_A_RUN"
+assert_has "duplicate run lookup reports its selection" "$duplicate_output" "using the newest artifact"
+
 BOUNDARY_ID="wf_boundary-047"
 BOUNDARY_DIR="$SESSION/subagents/workflows/$BOUNDARY_ID"
 mkdir -p "$BOUNDARY_DIR"

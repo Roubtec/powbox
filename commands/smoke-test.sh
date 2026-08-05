@@ -439,6 +439,8 @@ fi
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \
 	"command -v peer-review-run >/dev/null" \
+	'wf_check_file="$(mktemp --suffix=.js)" && printf "%s\n" "export const meta = { name: \"smoke\", description: \"parser\" };" "return null;" > "$wf_check_file" && wf-check "$wf_check_file" >/dev/null && rm -- "$wf_check_file" && test "$(jq -r .version /usr/local/lib/wf-check/node_modules/acorn/package.json)" = 8.15.0 && test "$(jq -r .version /usr/local/lib/wf-check/node_modules/acorn-walk/package.json)" = 8.3.4' \
+	"wf-status --help >/dev/null" \
 	"shellcheck --version >/dev/null" \
 	'actionlint_output="$(actionlint --version)" && test "$(printf "%s\n" "$actionlint_output" | sed -n "1p")" = 1.7.12' \
 	'markdownlint_file="$(mktemp --suffix=.md)" && printf "# Smoke test\n" > "$markdownlint_file" && markdownlint_output="$(markdownlint-cli2 "$markdownlint_file")" && test "$(printf "%s\n" "$markdownlint_output" | grep -Fxc "Linting: 1 file")" -eq 1 && rm -- "$markdownlint_file" && test "$(npm list --global --depth=0 --json | jq -r ".dependencies[\"markdownlint-cli2\"].version")" = 0.23.2' \

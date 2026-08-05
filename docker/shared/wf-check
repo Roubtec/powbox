@@ -1,0 +1,257 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const MAX_SOURCE_BYTES = 524288;
+const ACORN_VERSION = "8.15.0";
+const ACORN_PATHS = [
+  process.env.WF_CHECK_ACORN,
+  "/usr/local/lib/wf-check/node_modules/acorn",
+  "/usr/local/lib/node_modules/acorn",
+  "acorn",
+].filter(Boolean);
+const ACORN_WALK_PATHS = [
+  process.env.WF_CHECK_ACORN_WALK,
+  "/usr/local/lib/wf-check/node_modules/acorn-walk",
+  "/usr/local/lib/node_modules/acorn-walk",
+  "acorn-walk",
+].filter(Boolean);
+const RESERVED_IDENTIFIER_PREFIX = "__wRg$";
+const USAGE = `Usage: wf-check <script.js>
+
+Validate a Claude Workflow script without running it.
+
+The checker mirrors the installed Workflow loader: the first statement must be
+\`export const meta = { ... }\`, metadata must be recursively literal, name and
+description must be non-empty strings, and the remaining source is parsed as a
+strict async body with agent, parallel, pipeline, log, phase, args, budget, and
+workflow hooks. Top-level await and return are therefore valid. The compiler's
+reserved __wRg$ identifier prefix and unsupported await-using declarations are
+also rejected.
+`;
+
+const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function loadAcorn() {
+  const failures = [];
+  for (const candidate of ACORN_PATHS) {
+    try {
+      const acorn = require(candidate);
+      if (typeof acorn.parse !== "function") failures.push(`${candidate}: module has no parse function`);
+      else if (acorn.version !== ACORN_VERSION) failures.push(`${candidate}: expected ${ACORN_VERSION}, found ${acorn.version || "unknown"}`);
+      else return acorn;
+    } catch (error) {
+      failures.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`Acorn is unavailable; rebuild the agent image (${failures.join("; ")})`);
+}
+
+function loadAcornWalk() {
+  const failures = [];
+  for (const candidate of ACORN_WALK_PATHS) {
+    try {
+      const walk = require(candidate);
+      if (typeof walk.full !== "function" || typeof walk.ancestor !== "function") {
+        failures.push(`${candidate}: module has no full/ancestor walkers`);
+      } else {
+        return walk;
+      }
+    } catch (error) {
+      failures.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`Acorn-walk is unavailable; rebuild the agent image (${failures.join("; ")})`);
+}
+
+function parsePureValue(node) {
+  switch (node.type) {
+    case "Literal":
+      return node.value;
+    case "ArrayExpression":
+      return node.elements.map((element) => {
+        if (element === null) throw new Error("sparse arrays not allowed");
+        if (element.type === "SpreadElement") throw new Error("spread not allowed in meta");
+        return parsePureValue(element);
+      });
+    case "ObjectExpression":
+      return parseObject(node);
+    case "TemplateLiteral":
+      if (node.expressions.length > 0) throw new Error("template interpolation not allowed in meta");
+      return node.quasis.map((quasi) => quasi.value.cooked ?? "").join("");
+    case "UnaryExpression":
+      if (node.operator === "-" && node.argument.type === "Literal" && typeof node.argument.value === "number") {
+        return -node.argument.value;
+      }
+      throw new Error("only negative-number unary allowed in meta");
+    default:
+      throw new Error(`non-literal node type in meta: ${node.type}`);
+  }
+}
+
+function propertyKey(property) {
+  let key;
+  if (property.key.type === "Identifier") key = property.key.name;
+  else if (property.key.type === "Literal") key = String(property.key.value);
+  else throw new Error(`unsupported key type in meta: ${property.key.type}`);
+  if (RESERVED_KEYS.has(key)) throw new Error(`reserved key name not allowed in meta: ${key}`);
+  return key;
+}
+
+function parseObject(node) {
+  const value = Object.create(null);
+  for (const property of node.properties) {
+    if (property.type !== "Property") throw new Error("only plain properties allowed in meta");
+    if (property.computed) throw new Error("computed keys not allowed in meta");
+    if (property.method || property.kind !== "init") throw new Error("methods/accessors not allowed in meta");
+    value[propertyKey(property)] = parsePureValue(property.value);
+  }
+  return value;
+}
+
+function parseMeta(source) {
+  const { parse } = loadAcorn();
+  const program = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "module",
+    allowAwaitOutsideFunction: true,
+    allowReturnOutsideFunction: true,
+  });
+  const statement = program.body[0];
+  const declaration = statement?.declaration;
+  const declarator = declaration?.declarations?.[0];
+  if (
+    statement?.type !== "ExportNamedDeclaration" ||
+    declaration?.type !== "VariableDeclaration" ||
+    declaration.kind !== "const" ||
+    declaration.declarations.length !== 1 ||
+    declarator?.id?.type !== "Identifier" ||
+    declarator.id.name !== "meta" ||
+    declarator.init?.type !== "ObjectExpression"
+  ) {
+    throw new Error("`export const meta = { name, description, phases }` must be the FIRST statement in the script");
+  }
+  return { meta: parseObject(declarator.init), statementEnd: statement.end };
+}
+
+function validateMeta(meta) {
+  if (typeof meta.name !== "string" || meta.name.length === 0) throw new Error("meta.name must be a non-empty string");
+  if (typeof meta.description !== "string" || meta.description.length === 0) throw new Error("meta.description must be a non-empty string");
+  return meta.name;
+}
+
+function blankPrefix(source, end) {
+  return source.slice(0, end).replace(/[^\r\n]/g, " ") + source.slice(end);
+}
+
+function compileBody(source, metaEnd, filename) {
+  const transformed = `async function __body() {'use strict';${blankPrefix(source, metaEnd)}\n}`;
+  return new vm.Script(transformed, { filename, displayErrors: true });
+}
+
+function workflowBody(source, metaEnd) {
+  return source.slice(metaEnd).replace(/^[;\s]*\n/, "").trimStart();
+}
+
+function validateCompilerPass(source, metaEnd) {
+  const { parse } = loadAcorn();
+  const walk = loadAcornWalk();
+  const body = workflowBody(source, metaEnd);
+  const program = parse(`(async () => {'use strict';\n${body}\n})()`, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+  });
+
+  // Claude's compiler reserves this prefix for the await/return wrappers that
+  // it injects after this validation pass. Use the same AST walk rather than a
+  // text scan: strings and comments containing the prefix remain valid.
+  walk.full(program, (node) => {
+    if (typeof node.name === "string" && node.name.startsWith(RESERVED_IDENTIFIER_PREFIX)) {
+      throw new SyntaxError(`Identifier '${node.name}' is reserved.`);
+    }
+    if (node.type === "WithStatement") {
+      throw new SyntaxError("'with' statements are not supported in workflow scripts.");
+    }
+  });
+  walk.ancestor(program, {
+    VariableDeclaration(node) {
+      if (node.kind === "await using") {
+        throw new SyntaxError("'await using' declarations are not supported in workflow scripts.");
+      }
+    },
+  });
+}
+
+function readSourceBytes(filename) {
+  const bytes = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
+  let descriptor;
+  let length = 0;
+  try {
+    descriptor = fs.openSync(filename, "r");
+    while (length < bytes.byteLength) {
+      const bytesRead = fs.readSync(descriptor, bytes, length, bytes.byteLength - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  return bytes.subarray(0, length);
+}
+
+function main(argv) {
+  if (argv.length === 1 && (argv[0] === "-h" || argv[0] === "--help")) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (argv.length !== 1) {
+    process.stderr.write(USAGE);
+    return 2;
+  }
+
+  const filename = path.resolve(argv[0]);
+  let sourceBytes;
+  try {
+    // Claude 2.1.221's Workflow loader reads at most limit + 1 raw bytes,
+    // rejects that buffer by byteLength, and only then decodes it as UTF-8.
+    sourceBytes = readSourceBytes(filename);
+  } catch (error) {
+    process.stderr.write(`wf-check: ${filename}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  if (sourceBytes.byteLength > MAX_SOURCE_BYTES) {
+    process.stderr.write(`wf-check: ${filename}: script exceeds the Workflow runtime limit of ${MAX_SOURCE_BYTES} bytes\n`);
+    return 1;
+  }
+  const source = sourceBytes.toString("utf8");
+
+  let parsed;
+  try {
+    parsed = parseMeta(source);
+  } catch (error) {
+    const location = error && typeof error === "object" && "loc" in error ? error.loc : undefined;
+    const suffix = location ? `:${location.line}:${location.column + 1}` : "";
+    process.stderr.write(`wf-check: ${filename}${suffix}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+
+  let workflowName;
+  try {
+    workflowName = validateMeta(parsed.meta);
+    compileBody(source, parsed.statementEnd, filename);
+    validateCompilerPass(source, parsed.statementEnd);
+  } catch (error) {
+    const message = error instanceof Error && error.stack ? error.stack : String(error);
+    process.stderr.write(`wf-check: ${message}\n`);
+    return 1;
+  }
+
+  process.stdout.write(`OK ${filename}: workflow ${JSON.stringify(workflowName)} is valid\n`);
+  return 0;
+}
+
+process.exitCode = main(process.argv.slice(2));

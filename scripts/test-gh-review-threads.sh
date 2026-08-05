@@ -47,9 +47,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Which helper binary to exercise. gh-review-threads is no longer kept in-tree: it
 # is vendored in Roubtec/agent-skills and baked into the image from the pinned
-# clone, so the default source here is that staging clone — present only after a
-# `build.sh` fetch has populated .agent-skills-src (smoke Stage 0b guards on it).
-# Smoke Stage 0b overrides it with GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads
+# clone, so the default source here is that staging clone. A direct source run
+# must first populate .agent-skills-src through `build.sh`; smoke Stage 0b does not
+# use or guard that default. It overrides GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads
 # so an in-image run actually validates the BAKED artifact on PATH, not a source
 # checkout — otherwise a stale or behaviorally broken installed helper would slip
 # past Stage 1's `command -v` presence probe untested.

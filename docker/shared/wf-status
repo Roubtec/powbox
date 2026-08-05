@@ -70,8 +70,10 @@ function findRun(runId) {
       if (fs.existsSync(runDir) || fs.existsSync(snapshotPath)) candidates.push({ runDir, snapshotPath });
     }
   }
-  candidates.sort((left, right) => candidateMtime(right) - candidateMtime(left));
-  return candidates;
+  return candidates
+    .map((candidate) => ({ candidate, mtime: candidateMtime(candidate) }))
+    .sort((left, right) => right.mtime - left.mtime)
+    .map(({ candidate }) => candidate);
 }
 
 function resolveInput(input) {
@@ -177,15 +179,15 @@ function transcriptHints(filename) {
       break;
     }
   }
-  let completed = false;
-  let failed = false;
+  let state = "pending";
   for (const line of lastLines) {
     const record = parseLine(line);
     if (!record) continue;
-    if (record.type === "assistant" && record.isApiErrorMessage === true) failed = true;
-    if (record.type === "assistant" && record.message?.stop_reason === "end_turn") completed = true;
+    if (record.type !== "assistant") continue;
+    if (record.isApiErrorMessage === true) state = "failed";
+    else if (record.message?.stop_reason === "end_turn") state = "completed";
   }
-  return { prompt, completed, failed };
+  return { prompt, state };
 }
 
 function normalizeState(state) {
@@ -218,11 +220,10 @@ function readAgents(runDir, warnings) {
     const transcriptPath = path.join(runDir, `agent-${agentId}.jsonl`);
     const hints = transcriptHints(transcriptPath);
     const metadataState = normalizeState(metadata.state || metadata.status);
-    const hintState = normalizeState(hints.failed ? "failed" : hints.completed ? "completed" : "pending");
     agents.set(agentId, {
       agentId,
       label: compactLabel(metadata.label || metadata.name || metadata.description || hints.prompt),
-      state: metadataState === "pending" ? hintState : metadataState,
+      state: metadataState === "pending" ? hints.state : metadataState,
     });
   }
   for (const entry of entries) {
@@ -233,7 +234,7 @@ function readAgents(runDir, warnings) {
     agents.set(agentId, {
       agentId,
       label: compactLabel(hints.prompt),
-      state: normalizeState(hints.failed ? "failed" : hints.completed ? "completed" : "pending"),
+      state: hints.state,
     });
   }
   return agents;
@@ -272,7 +273,7 @@ function buildCalls(snapshot, journal, agentFiles) {
   const journalCalls = new Map();
   for (const record of journal) {
     if (record.type !== "started" && record.type !== "result") continue;
-    const key = typeof record.key === "string" ? record.key : `unkeyed:${journalCalls.size + 1}`;
+    const key = typeof record.key === "string" ? record.key : Symbol("unkeyed journal record");
     const current = journalCalls.get(key) || { starts: [], result: null };
     if (record.type === "started") current.starts.push(record);
     else current.result = record;
@@ -333,7 +334,6 @@ function phasesSeen(snapshot) {
 }
 
 function displayValue(value) {
-  if (typeof value === "string") return JSON.stringify(value);
   try {
     const encoded = JSON.stringify(value);
     return encoded === undefined ? String(value) : encoded;

@@ -185,6 +185,18 @@ EOF
 merge_output="$($HELPER "$MERGE_DIR")"
 assert_has "transcript failure overrides a pending snapshot with a matching result" "$merge_output" "failed    snapshot-pending [m1]"
 
+JOURNAL_COLLISION_ID="wf_journal-collision-047"
+JOURNAL_COLLISION_DIR="$SESSION/subagents/workflows/$JOURNAL_COLLISION_ID"
+mkdir -p "$JOURNAL_COLLISION_DIR"
+cat >"$JOURNAL_COLLISION_DIR/journal.jsonl" <<'EOF'
+{"type":"started","agentId":"j1"}
+{"type":"result","key":"unkeyed:1","agentId":"j2","result":{"ok":true}}
+EOF
+journal_collision_output="$($HELPER "$JOURNAL_COLLISION_DIR")"
+assert_has "a keyless journal record cannot replace an explicit lookalike key" "$journal_collision_output" "pending   ? [j1]"
+assert_has "an explicit journal key resembling the old fallback is retained" "$journal_collision_output" "completed ? [j2]"
+assert_has "keyless and explicitly keyed journal agents are both counted" "$journal_collision_output" "Agents: 2 total (1 completed, 0 failed, 1 pending)"
+
 UNINDEXED_ID="wf_unindexed-047"
 UNINDEXED_DIR="$SESSION/subagents/workflows/$UNINDEXED_ID"
 mkdir -p "$UNINDEXED_DIR"
@@ -242,6 +254,24 @@ boundary_output="$($HELPER "$BOUNDARY_DIR")"
 assert_has "newline-aligned tail retains its first failure record" "$boundary_output" "failed    boundary failure prompt [b1]"
 assert_has "newline-aligned tail retains its first completion record" "$boundary_output" "completed boundary completion prompt [b2]"
 assert_has "boundary-aligned transcript states are counted" "$boundary_output" "Agents: 2 total (1 completed, 1 failed, 0 pending)"
+
+TERMINAL_ORDER_ID="wf_terminal-order-047"
+TERMINAL_ORDER_DIR="$SESSION/subagents/workflows/$TERMINAL_ORDER_ID"
+mkdir -p "$TERMINAL_ORDER_DIR"
+cat >"$TERMINAL_ORDER_DIR/agent-t1.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"recovered agent"}}
+{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[]}}
+{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}
+EOF
+cat >"$TERMINAL_ORDER_DIR/agent-t2.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"late failure agent"}}
+{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}
+{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[]}}
+EOF
+terminal_order_output="$($HELPER "$TERMINAL_ORDER_DIR")"
+assert_has "a completion after an API error marks a recovered transcript completed" "$terminal_order_output" "completed recovered agent [t1]"
+assert_has "an API error after completion remains the final failed state" "$terminal_order_output" "failed    late failure agent [t2]"
+assert_has "the last terminal transcript signals determine the counts" "$terminal_order_output" "Agents: 2 total (1 completed, 1 failed, 0 pending)"
 
 EMPTY_ID="wf_empty-047"
 EMPTY_DIR="$SESSION/subagents/workflows/$EMPTY_ID"

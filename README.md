@@ -950,13 +950,14 @@ workflows keep cost proportional to the change:
   (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1` —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to Tier 1. The current 12-suite set is `test-claude-hook-skew.sh`,
+  routed to Tier 1. The current 14-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
   `test-peer-review-run.sh`, `test-podman-compose-healthcheck.sh`,
   `test-seed-marker-source.sh`, `test-sensitive-host-path.sh`,
   `test-shadow-mounts-chown.sh`, `test-shadow-refresh-guard.sh`,
-  `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`, and
-  `test-wt-orphan-safety.sh`. A new suite is selected automatically; a
+  `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`,
+  `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
+  A new suite is selected automatically; a
   suite-named log heading makes any non-zero exit obvious. The detect-shadows
   suite needs the jq-compatible filters provided by **jq-backed python-yq**, so
   the job installs it into a throwaway venv from
@@ -967,6 +968,9 @@ workflows keep cost proportional to the change:
   The Podman-health-check suite only requires the `yq -r` operations that its
   behavioral capability probe exercises; any implementation that passes that
   probe works, including mikefarah `yq` v4.45.1.
+  The source `wf-check` suite needs the helper's exact Acorn 8.15.0 and
+  acorn-walk 8.3.4 pins, so the job installs them without lifecycle scripts in a
+  throwaway npm prefix and exposes only those private module paths to the test.
   Three suites are explicitly routed to Tier 1 instead: `test-gh-review-threads.sh`
   needs the separately fetched/baked helper, `test-pnpm-shadow-wrapper.sh` needs
   the image's writable `/workspace` production root, and

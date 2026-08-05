@@ -40,7 +40,7 @@ pct_color_usage() {
     fi
 }
 
-# Format seconds-until epoch → "H:MM"
+# Format epoch seconds (resets_at) → remaining time as "H:MM"
 fmt_hhmm() {
     resets_at="$1"
     now=$(date +%s)

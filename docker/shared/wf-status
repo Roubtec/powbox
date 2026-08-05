@@ -221,7 +221,6 @@ function readAgents(runDir, warnings) {
     const hints = transcriptHints(transcriptPath);
     const metadataState = normalizeState(metadata.state || metadata.status);
     agents.set(agentId, {
-      agentId,
       label: compactLabel(metadata.label || metadata.name || metadata.description || hints.prompt),
       state: metadataState === "pending" ? hints.state : metadataState,
     });
@@ -232,7 +231,6 @@ function readAgents(runDir, warnings) {
     const agentId = match[1];
     const hints = transcriptHints(path.join(runDir, entry.name));
     agents.set(agentId, {
-      agentId,
       label: compactLabel(hints.prompt),
       state: hints.state,
     });

@@ -138,21 +138,10 @@ function parseMeta(source) {
   return { meta: parseObject(declarator.init), statementEnd: statement.end };
 }
 
-function normalizeMeta(meta) {
+function validateMeta(meta) {
   if (typeof meta.name !== "string" || meta.name.length === 0) throw new Error("meta.name must be a non-empty string");
   if (typeof meta.description !== "string" || meta.description.length === 0) throw new Error("meta.description must be a non-empty string");
-  const phases = [];
-  if (Array.isArray(meta.phases)) {
-    for (const entry of meta.phases) {
-      if (!entry || typeof entry !== "object" || typeof entry.title !== "string") continue;
-      phases.push({
-        title: entry.title,
-        ...(typeof entry.detail === "string" ? { detail: entry.detail } : {}),
-        ...(typeof entry.model === "string" ? { model: entry.model } : {}),
-      });
-    }
-  }
-  return { name: meta.name, description: meta.description, phases: phases.length > 0 ? phases : undefined };
+  return meta.name;
 }
 
 function blankPrefix(source, end) {
@@ -251,9 +240,9 @@ function main(argv) {
     return 1;
   }
 
-  let meta;
+  let workflowName;
   try {
-    meta = normalizeMeta(parsed.meta);
+    workflowName = validateMeta(parsed.meta);
     compileBody(source, parsed.statementEnd, filename);
     validateCompilerPass(source, parsed.statementEnd);
   } catch (error) {
@@ -262,7 +251,7 @@ function main(argv) {
     return 1;
   }
 
-  process.stdout.write(`OK ${filename}: workflow ${JSON.stringify(meta.name)} is valid\n`);
+  process.stdout.write(`OK ${filename}: workflow ${JSON.stringify(workflowName)} is valid\n`);
   return 0;
 }
 

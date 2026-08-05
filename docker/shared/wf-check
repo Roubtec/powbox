@@ -242,8 +242,8 @@ function main(argv) {
   let workflowName;
   try {
     workflowName = validateMeta(parsed.meta);
-    compileBody(source, parsed.statementEnd, filename);
     validateCompilerPass(source, parsed.statementEnd);
+    compileBody(source, parsed.statementEnd, filename);
   } catch (error) {
     const message = error instanceof Error && error.stack ? error.stack : String(error);
     process.stderr.write(`wf-check: ${message}\n`);

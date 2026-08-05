@@ -6,8 +6,8 @@ name: Native Linux CI - Tier 0 (static guards)
 # Windows/WSL masks (git there ignores filemode), in seconds, with no image
 # build. Tier 0 alone would have caught PR #51 (a shell script committed without
 # its exec bit). Alongside the static linters it runs the hermetic
-# detect-shadows unit suite, which needs no image and guards load-bearing
-# security properties of docker/shared/detect-shadows.sh (see the step). The
+# source-level pure-shell suites, which need no image and guard behavior that
+# static analysis cannot prove (see the step). The
 # heavier image build + smoke test lives in the path-gated Tier 1 workflow
 # (.github/workflows/native-linux-build.yml).
 #
@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   static-guards:
-    name: Static guards (exec bits, shellcheck, shfmt, PSScriptAnalyzer, detect-shadows suite)
+    name: Static guards + pure-shell suites
     runs-on: ubuntu-latest
     # Skip the static guards when the PR carries the repo's `non-code` label
     # (docs/tasks-only changes that need no rebuild + full CI). This is the real
@@ -153,7 +153,9 @@ jobs:
             throw "PSScriptAnalyzer found $($errors.Count) error/parse-severity finding(s) (see ::error annotations above)."
           }
 
-      # scripts/test-detect-shadows.sh parses .powbox.yml through
+      # Two auto-discovered pure-shell suites parse YAML with yq, but only
+      # scripts/test-detect-shadows.sh specifically requires jq-compatible
+      # filters. It parses .powbox.yml through
       # docker/shared/detect-shadows.sh, which calls yq with JQ filters
       # (`yq -r '.shadow[]? // empty'`, `yq -r 'has("shadow")'`). That is
       # python-yq (kislyuk) — a jq wrapper — and it is what the agent image
@@ -161,8 +163,10 @@ jobs:
       #
       # ubuntu-latest preinstalls mikefarah's Go yq (v4.x) instead, which is a
       # DIFFERENT tool with the same name: it rejects the alternative operator's
-      # `empty` ("invalid input text \"empty\""), and 22 of the suite's 170
-      # assertions fail under it. So install python-yq and make it win on PATH.
+      # `empty` ("invalid input text \"empty\""), and 22 of the detect-shadows
+      # suite's 170 assertions fail under it. The Podman health-check suite's
+      # behavioral probe does accept mikefarah yq v4.45.1. Install python-yq and
+      # make it win on PATH because detect-shadows still requires it.
       #
       # Pinned AND SHA256-verified, the same contract as the `Install shfmt` step
       # above: .github/requirements/python-yq.txt pins python-yq and its whole
@@ -188,6 +192,20 @@ jobs:
           ln -sf "$RUNNER_TEMP/python-yq/bin/yq" "$RUNNER_TEMP/bin/yq"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
+      # test-wf-check.sh exercises the source helper added by task 047. The
+      # helper deliberately refuses a different parser version, and a host CI
+      # runner does not have the agent image's private /usr/local/lib/wf-check
+      # install, so provision the same exact, script-free pins in a throwaway
+      # prefix and point the helper at them explicitly. Keep these literals in
+      # sync with docker/agent/Dockerfile and docker/shared/wf-check.
+      - name: Install wf-check parser dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/wf-check" --package-lock=false \
+            --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund \
+            acorn@8.15.0 acorn-walk@8.3.4
+          echo "WF_CHECK_ACORN=$RUNNER_TEMP/wf-check/node_modules/acorn" >>"$GITHUB_ENV"
+          echo "WF_CHECK_ACORN_WALK=$RUNNER_TEMP/wf-check/node_modules/acorn-walk" >>"$GITHUB_ENV"
+
       # The detect-shadows unit suite: a real regression net for security
       # properties that only this test covers —
       # the under-workspace-root validation, the symlink skip, the Git-tracked-
@@ -195,13 +213,25 @@ jobs:
       # workspace-glob containment. It is hermetic (throwaway repos in a tmpdir,
       # no image, no Docker, no root), so it belongs in Tier 0 where an edit to
       # detect-shadows.sh gets the feedback in seconds instead of waiting for the
-      # path-gated Tier 1 build. commands/smoke-test.sh runs it too (Stage 0g,
-      # in-image, against the same source); this step is the fast path.
+      # path-gated Tier 1 build. This Tier 0 run validates the checkout source;
+      # commands/smoke-test.sh Stage 0g validates the baked /usr/local/bin copy.
       #
       # The suite probes its own toolchain and exits with one clear FATAL when the
       # yq on PATH is the wrong implementation, so a runner-image change that
       # reorders PATH fails legibly rather than as 22 mystery assertion failures.
-      - name: detect-shadows unit suite
+      # scripts/run-pure-shell-tests.sh auto-discovers every scripts/test-*.sh
+      # source suite except three explicitly routed to Tier 1 because they need
+      # a build-staged helper, a writable /workspace, or PostgreSQL daemons.
+      # It runs the independent suites in parallel, captures their logs
+      # separately, and prints a loud suite-named heading for every failure.
+      # A newly added suite therefore runs automatically without another
+      # workflow edit; adding a routed exception requires an explicit, reviewed
+      # runner change and matching smoke wiring.
+      #
+      # The detect-shadows source run here and Stage 0g's baked-artifact run are
+      # deliberately different targets, not duplicate coverage. The same rule
+      # applies to the other Stage 0 baked-helper entries.
+      - name: Pure-shell source suites (auto-discovered, parallel)
         run: |
           echo "yq: $(command -v yq) — $(yq --version)"
-          ./scripts/test-detect-shadows.sh
+          ./scripts/run-pure-shell-tests.sh

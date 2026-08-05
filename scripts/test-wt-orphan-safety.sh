@@ -485,9 +485,9 @@ make_repo() {
 }
 
 # Does this git support the `reftable` ref backend (2.45+)? The cases that need
-# it are SKIPPED rather than failed when it does not — the suite runs on the
-# host as well as in the image (commands/smoke-test.sh Stage 0c/0d), and an
-# older host git can no more create a reftable repo than wt-remove can meet one.
+# it are SKIPPED rather than failed when it does not — Tier 0 and direct callers
+# can provide an older host git that can no more create a reftable repo than
+# wt-remove can meet one.
 REFTABLE_OK=""
 if git_quiet -C "$WORK_ROOT" init -q --ref-format=reftable "$WORK_ROOT/.reftable-probe" >/dev/null 2>&1 &&
 	[ "$(git -C "$WORK_ROOT/.reftable-probe" rev-parse --show-ref-format 2>/dev/null)" = reftable ]; then

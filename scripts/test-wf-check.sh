@@ -104,6 +104,19 @@ return value;
 EOF
 run_fail "await using declarations fail the compiler pass" "$WORK/await-using.js" "'await using' declarations are not supported"
 
+# The Acorn pass must run before vm.Script: the agent image's newer Node accepts
+# enough `await using` syntax to reach Acorn's explicit compatibility guard, but
+# older host Node releases reject it first with a generic parser diagnostic.
+# Keep the helper's result independent of whichever Node happens to launch it.
+compiler_pass_line="$(grep -nF '    validateCompilerPass(source, parsed.statementEnd);' "$HELPER" | cut -d: -f1)"
+vm_compile_line="$(grep -nF '    compileBody(source, parsed.statementEnd, filename);' "$HELPER" | cut -d: -f1)"
+if [[ "$compiler_pass_line" =~ ^[0-9]+$ && "$vm_compile_line" =~ ^[0-9]+$ && "$compiler_pass_line" -lt "$vm_compile_line" ]]; then
+	ok "compiler compatibility guards run before the host Node parser"
+else
+	bad "compiler compatibility guards run before the host Node parser" \
+		"validateCompilerPass line=${compiler_pass_line:-missing}, compileBody line=${vm_compile_line:-missing}"
+fi
+
 cat >"$WORK/reserved-text.js" <<'EOF'
 export const meta = { name: "reserved-text", description: "reserved-prefix text is not an identifier" };
 // __wRg$insideAComment is harmless.

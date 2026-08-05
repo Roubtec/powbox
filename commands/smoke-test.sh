@@ -28,83 +28,49 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 export POWBOX_SMOKE_REQUIRE_IMAGE
 
-# Stage 0 — sensitive-host-path predicate unit test. Hermetic (no image, root, or
-# native-Linux host needed), so it runs unconditionally up front: it guards the predicate
-# and the /proc/self/mountinfo source lookup that stop the workspace-perms heal from
-# recursively chowning a mount whose host source is a system/home dir (the VPS-lockout
-# incident — an accidental `cc`/`cx` from ~ re-owning the home tree and breaking sshd
-# StrictModes on ~/.ssh). The live end-to-end guard is Stage 5's sensitive-skip /
-# fix-mountinfo-backstop cases.
-echo "Running sensitive-host-path predicate unit test ..."
-"${ROOT_DIR}/scripts/test-sensitive-host-path.sh"
-
-# Stage 0a — sensitive-host-path predicate unit test against the BAKED library. Stage 0
-# above ran the test on the host against the /repo source checkout; this run points it at
+# Stage 0a — sensitive-host-path predicate unit test against the BAKED library. Tier 0
+# runs the /repo source on every eligible PR; this smoke entry points the suite at
 # the base-layer copy at /usr/local/bin/sensitive-host-path.sh (via SENSITIVE_HOST_PATH_LIB)
 # so it exercises the BAKED library that entrypoint-core.sh, fix-workspace-perms.sh, and
 # heal-workspace-perms.sh actually source at runtime (they fall back to that path). Without
-# it the smoke only ever validated the /repo source, so a stale or behaviorally broken baked
-# copy in the base layer would slip through untested. Needs the agent image; when it is absent
-# the host Stage 0 already covered the source, so this simply records a skip — no second host
-# run, which would be redundant with Stage 0.
+# it a stale or behaviorally broken baked copy in the base layer would slip through untested.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running sensitive-host-path predicate unit test (baked library in $IMAGE) ..."
 	# Point LIB at the baked artifact so the in-image run validates the installed
 	# /usr/local/bin/sensitive-host-path.sh containers source, not the mounted /repo source.
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" -e SENSITIVE_HOST_PATH_LIB=/usr/local/bin/sensitive-host-path.sh --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-sensitive-host-path.sh
 else
-	echo "WARNING: skipping in-image sensitive-host-path baked-library test (Stage 0a) — image '$IMAGE' absent; Stage 0 already covered the /repo source on the host."
+	echo "WARNING: skipping in-image sensitive-host-path baked-library test (Stage 0a) — image '$IMAGE' absent."
 	skipped+=("Stage 0a: sensitive-host-path baked-library test (image absent)")
 fi
 
 # Stage 0b — gh-review-threads helper unit test. Hermetic (stubs `gh` with a PATH
-# shim serving canned fixtures — no live GitHub or root needed), so like Stage 0 it
-# runs up front. It guards the baked gh-review-threads helper (vendored in
+# shim serving canned fixtures — no live GitHub or root needed). It guards the
+# baked gh-review-threads helper (vendored in
 # Roubtec/agent-skills, baked from the pinned clone): manual
 # pagination (never `gh api graphql --paginate`, which under concurrent runs has
 # returned another PR's threads) and the boundary-safe, repo-qualified PR-scope
 # assertion that fails closed (exit 3) on a contaminated response.
 #
-# Prefer the IN-IMAGE run whenever the agent image is present: it exercises the BAKED
+# Run in-image so this exercises the BAKED
 # /usr/local/bin/gh-review-threads on PATH — the artifact agents actually use — so a
 # stale or behaviorally broken baked helper is caught here rather than waved through
-# by Stage 1's `command -v` presence probe. Fall back to a host run against the source
-# only when the image is absent. Since the helper is no longer kept in-tree — it is
-# vendored in Roubtec/agent-skills and materialized into .agent-skills-src only by a
-# `build.sh` fetch — that host path needs both the staged clone present AND `jq` (the
-# helper and its test parse JSON), which a stock host may lack — the README
-# prerequisites only require Docker/buildx, and a default macOS install has no jq. If
-# neither the image nor a testable host source is available, record a skip.
-STAGED_HELPER="${ROOT_DIR}/.agent-skills-src/plugins/dev-skills/bin/gh-review-threads"
+# by Stage 1's `command -v` presence probe. The helper is not kept in this repo,
+# so this suite is one of Tier 0's explicit Tier 1 routes.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running gh-review-threads helper unit test (baked helper in $IMAGE) ..."
 	# Point HELPER at the baked artifact so the in-image run validates the installed
 	# /usr/local/bin/gh-review-threads on PATH, not the mounted /repo source checkout.
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" -e GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-gh-review-threads.sh
-elif [ -x "$STAGED_HELPER" ] && command -v jq >/dev/null 2>&1; then
-	echo "Running gh-review-threads helper unit test (host source from agent-skills clone — image '$IMAGE' absent) ..."
-	"${ROOT_DIR}/scripts/test-gh-review-threads.sh"
 else
-	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent and the host fallback is unavailable (it needs both the staged agent-skills helper and host 'jq')."
-	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent; host fallback needs the staged helper and jq)")
+	echo "WARNING: skipping gh-review-threads helper unit test (Stage 0b) — image '$IMAGE' absent."
+	skipped+=("Stage 0b: gh-review-threads helper unit test (image absent)")
 fi
 
-# Stage 0c — worktree orphan-safety unit test. Hermetic (a throwaway git repo in a
-# tmpdir; no image, root, or volume needed), so it runs up front on the host source.
-# It guards the durable-worktree-metadata safety contract (task 017): a dir that is
-# no longer a live worktree (e.g. a pre-durable-metadata leftover whose tmpfs
-# .git/worktrees was lost) is reaped only when EMPTY and otherwise PRESERVED (moved
-# to .worktrees/.orphaned/), so wt-bootstrap/wt-enter/wt-remove never delete the sole
-# surviving copy of dirty work when metadata disappears.
-echo "Running worktree orphan-safety unit test ..."
-"${ROOT_DIR}/scripts/test-wt-orphan-safety.sh"
-
-# Stage 0d — the same test against the BAKED helpers. Stage 0c ran the /repo source;
-# this points POWBOX_WT_ENTER/POWBOX_WT_REMOVE/POWBOX_WT_COMMON at the agent-layer
-# copies at /usr/local/bin so it exercises the installed wt-enter/wt-remove and the
+# Stage 0d — worktree orphan-safety against the BAKED helpers. Tier 0 runs the
+# /repo source; this points POWBOX_WT_ENTER/POWBOX_WT_REMOVE/POWBOX_WT_COMMON at
+# the agent-layer copies at /usr/local/bin so it exercises the installed wt-enter/wt-remove and the
 # wt-common.sh they source (and their exec bits) — the artifacts agents actually run.
-# Needs the agent image; when absent, Stage 0c already covered the source, so record a
-# skip rather than re-run on the host.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running worktree orphan-safety unit test (baked helpers in $IMAGE) ..."
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
@@ -113,62 +79,19 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		-e POWBOX_WT_REMOVE=/usr/local/bin/wt-remove \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-wt-orphan-safety.sh
 else
-	echo "WARNING: skipping in-image worktree orphan-safety baked-helper test (Stage 0d) — image '$IMAGE' absent; Stage 0c already covered the /repo source on the host."
+	echo "WARNING: skipping in-image worktree orphan-safety baked-helper test (Stage 0d) — image '$IMAGE' absent."
 	skipped+=("Stage 0d: worktree orphan-safety baked-helper test (image absent)")
 fi
 
-# Stage 0e — Podman Compose exec-form health-check probe invariants (task 025).
-# Hermetic guard for scripts/smoke-test-podman.sh's Compose health-check block: it
-# parses the embedded fixture with yq and asserts the health check stays an EXEC-form
-# CMD array (not CMD-SHELL), that the probe INSPECTS+classifies the wired translation
-# (so a CMD->CMD-SHELL rewrite is a detected KNOWN-XFAIL, not a silent pass), that it
-# drives the check and requires "healthy" while a never-succeeding negative control
-# must be driven to exactly terminal "unhealthy" (not merely "not healthy"), that cleanup
-# tears down the project + only the temp dir, and
-# that the Bash/PowerShell probes stay in parity — the load-bearing bits that a plain
-# edit could silently neuter. It validates the /repo SOURCE probe (smoke-test-podman.sh is a repo script,
-# not a baked artifact), so a host run suffices — but it needs the jq-backed
-# `yq -r <filter>` interface (python-yq). Prefer the in-image run (that yq is
-# guaranteed in the agent image) when the image is present; else fall back to a host
-# run only when the test's own `--check-yq` capability probe passes — not a bare
-# `command -v yq`, because an incompatible host implementation (e.g. mikefarah's Go
-# yq v3) would fail the smoke spuriously instead of recording a skip — else skip.
-if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-	echo "Running Podman Compose health-check probe unit test (in $IMAGE) ..."
-	docker run --rm -v "${ROOT_DIR}:/repo:ro" --entrypoint /bin/bash "$IMAGE" /repo/scripts/test-podman-compose-healthcheck.sh
-elif "${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh" --check-yq >/dev/null 2>&1; then
-	echo "Running Podman Compose health-check probe unit test (host source — image '$IMAGE' absent) ..."
-	"${ROOT_DIR}/scripts/test-podman-compose-healthcheck.sh"
-else
-	echo "WARNING: skipping Podman Compose health-check probe unit test (Stage 0e) — image '$IMAGE' absent and no compatible host 'yq' (the jq-backed 'yq -r <filter>' interface is needed to parse the embedded fixture)."
-	skipped+=("Stage 0e: Podman Compose health-check probe unit test (image absent; host fallback needs a compatible jq-backed yq)")
-fi
-
-# Stage 0f — peer-review-run unit test. Hermetic (fake `claude`/`codex` binaries on
-# a per-case PATH — no real providers, image, or network), so it runs up front like
-# the others. It guards the bidirectional peer-review runner's contract: the versioned
+# Stage 0f — peer-review-run unit test against the BAKED helper. Tier 0 covers
+# the /repo source. This guards the bidirectional peer-review runner's contract:
+# the versioned
 # result schema, both provider directions, read-only permission flags, literal
 # stdin-fed prompts, Codex progress forwarding, the six normalized outcomes, timeout
-# with process-tree reaping, and retry-once. The host-source run is gated to LINUX
-# hosts with jq: beyond bash + jq, the helper and test lean on a Linux userland —
-# /proc/<pid>/stat, `pgrep -P`, GNU `realpath -m`, `date +%N`, plus ps/timeout/
-# find/awk/sed/stat — so on macOS or another non-Linux host it is skipped and the
-# test runs only inside the (Linux) image below. When the image is present the test
-# also runs against the BAKED /usr/local/bin/peer-review-run so a stale installed
-# helper is caught here rather than waved through by Stage 1's `command -v`
+# with process-tree reaping, and retry-once. It runs against the BAKED
+# /usr/local/bin/peer-review-run so a stale installed helper is caught here
+# rather than waved through by Stage 1's `command -v`
 # presence probe.
-stage0f_host_ran=0
-if [ "$(uname -s)" = Linux ] && command -v jq >/dev/null 2>&1; then
-	echo "Running peer-review-run unit test (host /repo source) ..."
-	"${ROOT_DIR}/scripts/test-peer-review-run.sh"
-	stage0f_host_ran=1
-elif [ "$(uname -s)" != Linux ]; then
-	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — non-Linux host (the test needs a Linux userland: /proc, pgrep -P, GNU realpath -m, date +%N); the in-image run covers it when the image is present."
-	skipped+=("Stage 0f: peer-review-run host unit test (non-Linux host)")
-else
-	echo "WARNING: skipping peer-review-run host unit test (Stage 0f) — host 'jq' unavailable."
-	skipped+=("Stage 0f: peer-review-run host unit test (host jq unavailable)")
-fi
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "Running peer-review-run unit test (baked helper in $IMAGE) ..."
 	# --init matters here: the test's reap assertions probe killed descendants
@@ -181,12 +104,9 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	docker run --rm --init -v "${ROOT_DIR}:/repo:ro" \
 		-e PEER_REVIEW_RUN=/usr/local/bin/peer-review-run \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-peer-review-run.sh
-elif [ "$stage0f_host_ran" = 1 ]; then
-	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent; the host run already covered the /repo source."
-	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent)")
 else
-	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent, and the host run was skipped too (see above), so the peer-review-run test did not run at all."
-	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent; host run also skipped — no coverage)")
+	echo "WARNING: skipping in-image peer-review-run baked-helper test (Stage 0f) — image '$IMAGE' absent."
+	skipped+=("Stage 0f: peer-review-run baked-helper test (image absent)")
 fi
 
 # Stage 0g — detect-shadows unit suite (task 053). Hermetic (throwaway repos in a
@@ -197,30 +117,12 @@ fi
 # and its fail-closed paths, the newline rejection, and the workspace-glob
 # containment — every one of which was verified to fail against the pre-fix script.
 #
-# The suite needs git, jq, and a JQ-BACKED yq — python-yq, since detect-shadows.sh
-# issues jq filters like `.shadow[]? // empty`, which mikefarah's Go yq rejects
-# outright. The agent image guarantees that toolchain and an arbitrary host does
-# not, so prefer the in-image run; fall back to the host only when the suite's own
-# `--check-deps` capability probe passes — not a bare `command -v yq`, because the
-# WRONG yq implementation would then turn 22 assertions red instead of recording an
-# honest skip — else skip.
-#
-# That toolchain probe is necessary but NOT sufficient: like Stage 0f/0h, the host
-# fallback is additionally gated on a LINUX host, because the CODE UNDER TEST needs a
-# GNU userland that `--check-deps` cannot speak for. detect-shadows.sh calls GNU-only
-# `realpath -m --` and drives its .NET artifact scan through `find -H … -printf '%h\0'
-# | sort -zu` — neither `realpath -m` nor `find -printf`/`sort -z` exists on BSD/macOS.
-# Without the gate, a macOS host that happens to have git, jq and python-yq installed
-# passes `--check-deps` and then fails the whole smoke on a toolchain difference,
-# instead of recording the honest skip this stage intends. The two skips are kept
-# distinct so the banner says which one actually applies.
-#
 # The in-image run points the suite at the BAKED /usr/local/bin copies (via
-# POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR, the shape Stage 0c/0d uses for
+# POWBOX_DETECT_SHADOWS / POWBOX_PNPM_SHADOW_DOCTOR, the shape Stage 0d uses for
 # the wt-* helpers), so a STALE baked detect-shadows.sh is caught by a real suite
 # instead of being waved through by Stage 1's `command -v` presence probe. The /repo
-# SOURCE is covered by the host fallback below and by Tier 0 CI
-# (.github/workflows/native-linux-ci.yml), which runs the suite unset on every PR
+# SOURCE is covered by Tier 0 CI (`.github/workflows/native-linux-ci.yml`), which
+# runs the suite unset on every PR
 # EXCEPT one carrying the repo's `non-code` label — that label gates the whole
 # static-guards job, so a `non-code` PR gets no Tier 0 detect-shadows run at all.
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -229,15 +131,9 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		-e POWBOX_DETECT_SHADOWS=/usr/local/bin/detect-shadows.sh \
 		-e POWBOX_PNPM_SHADOW_DOCTOR=/usr/local/bin/pnpm-shadow-doctor \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-detect-shadows.sh
-elif [ "$(uname -s)" != Linux ]; then
-	echo "WARNING: skipping detect-shadows unit suite (Stage 0g) — image '$IMAGE' absent and this is a non-Linux host (detect-shadows.sh itself calls GNU-only 'realpath -m' and 'find -printf'/'sort -z', which BSD/macOS reject)."
-	skipped+=("Stage 0g: detect-shadows unit suite (image absent; host fallback needs a GNU/Linux userland)")
-elif "${ROOT_DIR}/scripts/test-detect-shadows.sh" --check-deps >/dev/null 2>&1; then
-	echo "Running detect-shadows unit suite (host source — image '$IMAGE' absent) ..."
-	"${ROOT_DIR}/scripts/test-detect-shadows.sh"
 else
-	echo "WARNING: skipping detect-shadows unit suite (Stage 0g) — image '$IMAGE' absent and the host toolchain is unusable (it needs git, jq, and the jq-backed python-yq; mikefarah's Go yq cannot parse the filters detect-shadows.sh issues)."
-	skipped+=("Stage 0g: detect-shadows unit suite (image absent; host fallback needs git, jq and a jq-backed yq)")
+	echo "WARNING: skipping detect-shadows baked-script unit suite (Stage 0g) — image '$IMAGE' absent."
+	skipped+=("Stage 0g: detect-shadows baked-script unit suite (image absent)")
 fi
 
 # Stage 0h — shadow-mounts mountpoint-ownership unit test (task 053). Fully
@@ -249,15 +145,6 @@ fi
 # that fails. Without the chown, a mountpoint shadow-mounts.sh creates outlives
 # the container as a root-owned directory on the host's own checkout.
 #
-# The test itself needs only bash + coreutils, but the CODE UNDER TEST does not:
-# the suite deliberately leaves `realpath` unshimmed so the directory walk is the
-# real one, and shadow-mounts.sh calls `realpath -m --` / `realpath -e --`, which
-# are GNU-only (BSD/macOS realpath has neither flag). So mirror Stage 0e/0g/0f:
-# prefer the in-image run — Linux userland guaranteed — and fall back to a host
-# run only on a LINUX host, recording an honest skip otherwise rather than
-# failing a macOS host smoke on a toolchain difference. It stays unconditional on
-# every Linux host and in CI, so it cannot decay into a permanent skip.
-#
 # Like Stage 0g, the in-image run points the suite at the BAKED copy (via
 # SHADOW_MOUNTS_SH), not at /repo/docker/shared/shadow-mounts.sh: /usr/local/bin/
 # shadow-mounts.sh is what actually runs under sudo in a live container, so a
@@ -266,12 +153,8 @@ fi
 # the unprivileged container user can read it — the suite only ever COPIES it and
 # rewrites the /workspace literal, never executes the baked path itself.
 #
-# The /repo SOURCE is covered by the host-fallback branch below (a Linux host that
-# has not built the image yet) and by running the suite directly, which AGENTS.md →
-# "Validating Changes" lists as an in-container gate. Unlike Stage 0g there is no
-# Tier 0 CI step for it yet; wiring every hermetic scripts/test-*.sh into Tier 0 is
-# tasks/059-wire-pure-shell-suites-into-ci.md, and this stage is deliberately not
-# front-running it.
+# Tier 0's auto-discovered source runner covers the /repo source on every
+# eligible PR.
 #
 # The privileged end-to-end counterpart (real root, real bind mount, real
 # ownership on disk) is Stage 6's scripts/smoke-test-worktree-metadata.sh.
@@ -280,12 +163,29 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
 		-e SHADOW_MOUNTS_SH=/usr/local/bin/shadow-mounts.sh \
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-shadow-mounts-chown.sh
-elif [ "$(uname -s)" = Linux ]; then
-	echo "Running shadow-mounts mountpoint-ownership unit test (host source — image '$IMAGE' absent) ..."
-	"${ROOT_DIR}/scripts/test-shadow-mounts-chown.sh"
 else
-	echo "WARNING: skipping shadow-mounts mountpoint-ownership unit test (Stage 0h) — image '$IMAGE' absent and this is a non-Linux host (shadow-mounts.sh itself calls GNU-only 'realpath -m/-e', which BSD/macOS realpath rejects)."
-	skipped+=("Stage 0h: shadow-mounts mountpoint-ownership unit test (image absent; host fallback needs a GNU/Linux userland)")
+	echo "WARNING: skipping shadow-mounts baked-script unit test (Stage 0h) — image '$IMAGE' absent."
+	skipped+=("Stage 0h: shadow-mounts baked-script unit test (image absent)")
+fi
+
+# Stage 0i — pnpm shadow-wrapper source unit test. The test shims every mount and
+# sudo interaction, but the wrapper's production contract hard-requires a writable
+# /workspace fixture. An arbitrary Tier 0 host checkout does not provide that root,
+# while the agent image does, so this is one of the pure-shell runner's explicit
+# Tier 1 routes. It validates the /repo source (the wrapper has no test override for
+# a baked path) and needs no daemon, network, or privileged operation once inside
+# the image. The explicit POWBOX_TEST_REQUIRE_WORKSPACE guard promotes the suite's
+# generic-host self-skip to a failure here: an image that cannot provide its promised
+# writable production root is broken, not partial coverage. POWBOX_SMOKE_REQUIRE_IMAGE
+# separately makes an absent image fatal in CI; a local partial smoke records that skip.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running pnpm shadow-wrapper unit test (source in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e POWBOX_TEST_REQUIRE_WORKSPACE=1 \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-pnpm-shadow-wrapper.sh
+else
+	echo "WARNING: skipping pnpm shadow-wrapper unit test (Stage 0i) — image '$IMAGE' absent; the suite needs the image's writable /workspace production root."
+	skipped+=("Stage 0i: pnpm shadow-wrapper unit test (image absent; needs a writable /workspace root)")
 fi
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
@@ -547,6 +447,14 @@ pa=${ua##*:}; pa=${pa%%/*}; pb=${ub##*:}; pb=${pb%%/*}
 echo "scoped isolation OK ($pa vs $pb)"
 '
 	echo "pg-dev-up functional test passed."
+
+	# The scoped suite starts several real PostgreSQL daemons on loopback and needs
+	# the server binaries baked into the image, so it is deliberately routed out of
+	# Tier 0's Docker-free source runner and into this database stage. It tests the
+	# /repo pg-dev-up source against the baked server toolchain.
+	echo "Running pg-dev-up scoped unit/integration suite in $IMAGE ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-pg-dev-up-scoped.sh
 fi
 
 # Stage 3 — rootless Podman engine: the agent image bakes podman + a docker shim
@@ -663,7 +571,7 @@ fi
 # (tracked mod + untracked file); the second recreates on the same volume and
 # asserts git status still works, the branch/HEAD is intact, both dirty changes
 # survived, and the host checkout's real .git/worktrees gained no registrations.
-# scripts/test-wt-orphan-safety.sh (Stage 0c/0d) only unit-tests the orphan-reaping
+# scripts/test-wt-orphan-safety.sh (Tier 0 / Stage 0d) only unit-tests the orphan-reaping
 # SAFETY net, not this central bind/survive path, so this stage is what guards it.
 # Needs the image AND a runtime that can grant the container CAP_SYS_ADMIN for the
 # `mount --bind` — it self-skips (exit 0) when the image is absent (honouring

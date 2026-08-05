@@ -1,5 +1,5 @@
 # Hash-pinned install set for python-yq (kislyuk's jq-backed `yq`), used by the
-# Tier 0 "detect-shadows unit suite" step in .github/workflows/native-linux-ci.yml.
+# Tier 0 pure-shell source-suite step in .github/workflows/native-linux-ci.yml.
 #
 # Why this file exists
 # --------------------

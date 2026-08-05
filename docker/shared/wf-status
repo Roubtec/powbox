@@ -135,6 +135,22 @@ function readBytesAt(descriptor, length, position) {
   return bytes.subarray(0, offset);
 }
 
+function readCompleteTail(descriptor, size, chunkSize) {
+  let offset = Math.max(0, size - chunkSize);
+  const fragments = [readBytesAt(descriptor, chunkSize, offset)];
+  while (offset > 0) {
+    const boundary = readBytesAt(descriptor, 1, offset - 1);
+    if (boundary.length === 1 && boundary[0] === 0x0a) break;
+    const previousSize = Math.min(chunkSize, offset);
+    offset -= previousSize;
+    const previous = readBytesAt(descriptor, previousSize, offset);
+    const newline = previous.lastIndexOf(0x0a);
+    fragments.push(newline === -1 ? previous : previous.subarray(newline + 1));
+    if (newline !== -1) break;
+  }
+  return Buffer.concat(fragments.reverse());
+}
+
 function readEdgeLines(filename) {
   let descriptor;
   try {
@@ -142,15 +158,10 @@ function readEdgeLines(filename) {
     const size = fs.fstatSync(descriptor).size;
     const chunkSize = Math.min(size, 65536);
     const first = readBytesAt(descriptor, chunkSize, 0);
-    const tailOffset = Math.max(0, size - chunkSize);
-    const last = readBytesAt(descriptor, chunkSize, tailOffset);
+    const last = readCompleteTail(descriptor, size, chunkSize);
     const firstLines = first.toString("utf8").split("\n");
     if (first.length < size || firstLines[firstLines.length - 1] === "") firstLines.pop();
     const lastLines = last.toString("utf8").split("\n");
-    if (tailOffset > 0) {
-      const boundary = readBytesAt(descriptor, 1, tailOffset - 1);
-      if (boundary.length !== 1 || boundary[0] !== 0x0a) lastLines.shift();
-    }
     return { firstLines, lastLines };
   } catch {
     return { firstLines: [], lastLines: [] };
@@ -261,7 +272,7 @@ function buildCalls(snapshot, journal, agentFiles) {
       agentId,
       label: compactLabel(entry.label || fallback?.label),
       phase: compactLabel(entry.phaseTitle),
-      state: snapshotState === "pending" && fallback?.state === "failed" ? "failed" : snapshotState,
+      state: snapshotState === "pending" ? fallback?.state || snapshotState : snapshotState,
       error: typeof entry.error === "string" ? entry.error : undefined,
     };
     calls.push(call);
@@ -320,6 +331,22 @@ function phasesSeen(snapshot) {
     if (!entry || entry.type !== "workflow_phase" || typeof entry.title !== "string") continue;
     const index = Number.isFinite(entry.index) ? entry.index : Symbol("unindexed workflow phase");
     phases.set(index, entry.title);
+  }
+  if (phases.size === 0 && Array.isArray(snapshot?.phases)) {
+    for (let index = 0; index < snapshot.phases.length; index += 1) {
+      const entry = snapshot.phases[index];
+      if (!entry || typeof entry.title !== "string") continue;
+      phases.set(index + 1, entry.title);
+    }
+  }
+  if (phases.size === 0) {
+    const titles = new Set();
+    for (const entry of progress) {
+      if (!entry || entry.type !== "workflow_agent" || typeof entry.phaseTitle !== "string" || titles.has(entry.phaseTitle)) continue;
+      titles.add(entry.phaseTitle);
+      const index = Number.isFinite(entry.phaseIndex) ? entry.phaseIndex : Symbol("unindexed agent phase");
+      phases.set(index, entry.phaseTitle);
+    }
   }
   return [...phases.entries()]
     .sort((left, right) => {

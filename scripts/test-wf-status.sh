@@ -173,17 +173,53 @@ EOF
 cat >"$MERGE_DIR/agent-m1.meta.json" <<'EOF'
 {"agentType":"workflow-subagent","state":"start"}
 EOF
+cat >"$MERGE_DIR/agent-m2.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"snapshot pending transcript completion"}}
+{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}
+EOF
 cat >"$SESSION/workflows/$MERGE_ID.json" <<'EOF'
 {
   "runId": "wf_merge-047",
   "status": "running",
   "workflowProgress": [
-    {"type":"workflow_agent","index":1,"label":"snapshot-pending","agentId":"m1","state":"start"}
+    {"type":"workflow_agent","index":1,"label":"snapshot-pending","agentId":"m1","state":"start"},
+    {"type":"workflow_agent","index":2,"label":"snapshot-stale-completed","agentId":"m2","state":"start"}
   ]
 }
 EOF
 merge_output="$($HELPER "$MERGE_DIR")"
 assert_has "transcript failure overrides a pending snapshot with a matching result" "$merge_output" "failed    snapshot-pending [m1]"
+assert_has "transcript completion overrides a stale pending snapshot without a result" "$merge_output" "completed snapshot-stale-completed [m2]"
+
+PHASES_ID="wf_phases-047"
+PHASES_DIR="$SESSION/subagents/workflows/$PHASES_ID"
+mkdir -p "$PHASES_DIR"
+cat >"$SESSION/workflows/$PHASES_ID.json" <<'EOF'
+{
+  "runId": "wf_phases-047",
+  "status": "running",
+  "phases": [{"title":"Snapshot phase one"},{"title":"Snapshot phase two"}],
+  "workflowProgress": []
+}
+EOF
+phases_output="$($HELPER "$PHASES_DIR")"
+assert_has "top-level snapshot phase definitions are used when progress events are absent" "$phases_output" "1. Snapshot phase one"
+assert_has "all top-level snapshot phase definitions are retained" "$phases_output" "2. Snapshot phase two"
+
+AGENT_PHASE_ID="wf_agent-phase-047"
+AGENT_PHASE_DIR="$SESSION/subagents/workflows/$AGENT_PHASE_ID"
+mkdir -p "$AGENT_PHASE_DIR"
+cat >"$SESSION/workflows/$AGENT_PHASE_ID.json" <<'EOF'
+{
+  "runId": "wf_agent-phase-047",
+  "status": "running",
+  "workflowProgress": [
+    {"type":"workflow_agent","index":1,"label":"legacy-agent","phaseIndex":3,"phaseTitle":"Agent row phase","agentId":"ap1","state":"start"}
+  ]
+}
+EOF
+agent_phase_output="$($HELPER "$AGENT_PHASE_DIR")"
+assert_has "agent phase titles are used when phase definitions and events are absent" "$agent_phase_output" "3. Agent row phase"
 
 JOURNAL_COLLISION_ID="wf_journal-collision-047"
 JOURNAL_COLLISION_DIR="$SESSION/subagents/workflows/$JOURNAL_COLLISION_ID"
@@ -272,6 +308,18 @@ terminal_order_output="$($HELPER "$TERMINAL_ORDER_DIR")"
 assert_has "a completion after an API error marks a recovered transcript completed" "$terminal_order_output" "completed recovered agent [t1]"
 assert_has "an API error after completion remains the final failed state" "$terminal_order_output" "failed    late failure agent [t2]"
 assert_has "the last terminal transcript signals determine the counts" "$terminal_order_output" "Agents: 2 total (1 completed, 1 failed, 0 pending)"
+
+LONG_TERMINAL_ID="wf_long-terminal-047"
+LONG_TERMINAL_DIR="$SESSION/subagents/workflows/$LONG_TERMINAL_ID"
+mkdir -p "$LONG_TERMINAL_DIR"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"long terminal record"}}' >"$LONG_TERMINAL_DIR/agent-l1.jsonl"
+{
+	printf '%s' '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"'
+	printf '%70000s' ''
+	printf '%s' '"}]}}'
+} >>"$LONG_TERMINAL_DIR/agent-l1.jsonl"
+long_terminal_output="$($HELPER "$LONG_TERMINAL_DIR")"
+assert_has "a terminal transcript record larger than the edge chunk is read completely" "$long_terminal_output" "completed long terminal record [l1]"
 
 EMPTY_ID="wf_empty-047"
 EMPTY_DIR="$SESSION/subagents/workflows/$EMPTY_ID"

@@ -148,6 +148,9 @@ cat >"$PARTIAL_DIR/agent-p3.jsonl" <<'EOF'
 {"type":"user","message":{"role":"user","content":"failed result transcript"}}
 {"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API error"}]}}
 EOF
+cat >"$PARTIAL_DIR/agent-p3.meta.json" <<'EOF'
+{"agentType":"workflow-subagent","state":"running"}
+EOF
 partial_output="$($HELPER "$PARTIAL_DIR")"
 assert_has "missing snapshot degrades to partial" "$partial_output" "Status: partial"
 assert_has "partial journal plus transcript still produce useful counts" "$partial_output" "Agents: 3 total (1 completed, 1 failed, 1 pending)"
@@ -167,6 +170,9 @@ cat >"$MERGE_DIR/agent-m1.jsonl" <<'EOF'
 {"type":"user","message":{"role":"user","content":"snapshot pending transcript failure"}}
 {"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API error"}]}}
 EOF
+cat >"$MERGE_DIR/agent-m1.meta.json" <<'EOF'
+{"agentType":"workflow-subagent","state":"start"}
+EOF
 cat >"$SESSION/workflows/$MERGE_ID.json" <<'EOF'
 {
   "runId": "wf_merge-047",
@@ -178,6 +184,28 @@ cat >"$SESSION/workflows/$MERGE_ID.json" <<'EOF'
 EOF
 merge_output="$($HELPER "$MERGE_DIR")"
 assert_has "transcript failure overrides a pending snapshot with a matching result" "$merge_output" "failed    snapshot-pending [m1]"
+
+UNINDEXED_ID="wf_unindexed-047"
+UNINDEXED_DIR="$SESSION/subagents/workflows/$UNINDEXED_ID"
+mkdir -p "$UNINDEXED_DIR"
+cat >"$SESSION/workflows/$UNINDEXED_ID.json" <<'EOF'
+{
+  "runId": "wf_unindexed-047",
+  "status": "running",
+  "workflowProgress": [
+    {"type":"workflow_phase","index":2,"title":"Indexed phase"},
+    {"type":"workflow_phase","title":"Unindexed phase"},
+    {"type":"workflow_agent","index":2,"label":"indexed agent","agentId":"u1","state":"done"},
+    {"type":"workflow_agent","label":"unindexed agent","agentId":"u2","state":"start"}
+  ]
+}
+EOF
+unindexed_output="$($HELPER "$UNINDEXED_DIR")"
+assert_has "an unindexed phase cannot replace an indexed phase" "$unindexed_output" "2. Indexed phase"
+assert_has "an unindexed phase is retained with an unknown index" "$unindexed_output" "?. Unindexed phase"
+assert_has "an unindexed agent cannot replace an indexed agent" "$unindexed_output" "completed indexed agent [u1]"
+assert_has "an unindexed agent is retained" "$unindexed_output" "pending   unindexed agent [u2]"
+assert_has "indexed and unindexed agents are both counted" "$unindexed_output" "Agents: 2 total (1 completed, 0 failed, 1 pending)"
 
 DUPLICATE_ID="wf_duplicate-047"
 DUPLICATE_A="$CONFIG/projects/-workspace-fixture/session-duplicate-a"

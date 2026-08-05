@@ -217,11 +217,12 @@ function readAgents(runDir, warnings) {
     const metadata = readJson(path.join(runDir, entry.name), warnings, entry.name) || {};
     const transcriptPath = path.join(runDir, `agent-${agentId}.jsonl`);
     const hints = transcriptHints(transcriptPath);
+    const metadataState = normalizeState(metadata.state || metadata.status);
+    const hintState = normalizeState(hints.failed ? "failed" : hints.completed ? "completed" : "pending");
     agents.set(agentId, {
       agentId,
       label: compactLabel(metadata.label || metadata.name || metadata.description || hints.prompt),
-      state: normalizeState(metadata.state || metadata.status || (hints.failed ? "failed" : hints.completed ? "completed" : "pending")),
-      agentType: typeof metadata.agentType === "string" ? metadata.agentType : undefined,
+      state: metadataState === "pending" ? hintState : metadataState,
     });
   }
   for (const entry of entries) {
@@ -245,21 +246,24 @@ function buildCalls(snapshot, journal, agentFiles) {
   const progressByIndex = new Map();
   for (const entry of progress) {
     if (!entry || entry.type !== "workflow_agent") continue;
-    const index = Number.isFinite(entry.index) ? entry.index : progressByIndex.size + 1;
+    const index = Number.isFinite(entry.index) ? entry.index : Symbol("unindexed workflow agent");
     progressByIndex.set(index, entry);
   }
-  for (const [index, entry] of [...progressByIndex.entries()].sort((left, right) => left[0] - right[0])) {
+  const sortedProgress = [...progressByIndex.entries()].sort((left, right) => {
+    if (typeof left[0] !== "number") return typeof right[0] === "number" ? 1 : 0;
+    if (typeof right[0] !== "number") return -1;
+    return left[0] - right[0];
+  });
+  for (const [, entry] of sortedProgress) {
     const agentId = typeof entry.agentId === "string" ? entry.agentId : undefined;
     const fallback = agentId ? agentFiles.get(agentId) : undefined;
     const snapshotState = normalizeState(entry.state);
     const call = {
-      index,
       agentId,
       label: compactLabel(entry.label || fallback?.label),
       phase: compactLabel(entry.phaseTitle),
       state: snapshotState === "pending" && fallback?.state === "failed" ? "failed" : snapshotState,
       error: typeof entry.error === "string" ? entry.error : undefined,
-      journalKey: undefined,
     };
     calls.push(call);
     if (agentId) byAgentId.set(agentId, call);
@@ -269,7 +273,7 @@ function buildCalls(snapshot, journal, agentFiles) {
   for (const record of journal) {
     if (record.type !== "started" && record.type !== "result") continue;
     const key = typeof record.key === "string" ? record.key : `unkeyed:${journalCalls.size + 1}`;
-    const current = journalCalls.get(key) || { key, starts: [], result: null };
+    const current = journalCalls.get(key) || { starts: [], result: null };
     if (record.type === "started") current.starts.push(record);
     else current.result = record;
     journalCalls.set(key, current);
@@ -283,18 +287,15 @@ function buildCalls(snapshot, journal, agentFiles) {
     if (!call) {
       const fallback = agentId ? agentFiles.get(agentId) : undefined;
       call = {
-        index: calls.length + 1,
         agentId,
         label: compactLabel(fallback?.label),
         phase: "?",
         state: fallback?.state === "failed" ? "failed" : journalCall.result ? "completed" : fallback?.state || "pending",
         error: undefined,
-        journalKey: journalCall.key,
       };
       calls.push(call);
       if (agentId) byAgentId.set(agentId, call);
     } else {
-      call.journalKey = journalCall.key;
       if (journalCall.result && call.state !== "failed") call.state = "completed";
     }
   }
@@ -302,13 +303,11 @@ function buildCalls(snapshot, journal, agentFiles) {
   for (const [agentId, fileAgent] of agentFiles) {
     if (byAgentId.has(agentId)) continue;
     const call = {
-      index: calls.length + 1,
       agentId,
       label: compactLabel(fileAgent.label),
       phase: "?",
       state: fileAgent.state,
       error: undefined,
-      journalKey: undefined,
     };
     calls.push(call);
     byAgentId.set(agentId, call);
@@ -321,10 +320,16 @@ function phasesSeen(snapshot) {
   const phases = new Map();
   for (const entry of progress) {
     if (!entry || entry.type !== "workflow_phase" || typeof entry.title !== "string") continue;
-    const index = Number.isFinite(entry.index) ? entry.index : phases.size + 1;
+    const index = Number.isFinite(entry.index) ? entry.index : Symbol("unindexed workflow phase");
     phases.set(index, entry.title);
   }
-  return [...phases.entries()].sort((left, right) => left[0] - right[0]);
+  return [...phases.entries()]
+    .sort((left, right) => {
+      if (typeof left[0] !== "number") return typeof right[0] === "number" ? 1 : 0;
+      if (typeof right[0] !== "number") return -1;
+      return left[0] - right[0];
+    })
+    .map(([index, title]) => [typeof index === "number" ? index : "?", title]);
 }
 
 function displayValue(value) {

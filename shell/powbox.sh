@@ -347,9 +347,10 @@ _powbox_agent_porcelain() {
 #   $3            build target (agent|all)
 #   $4..          extra args forwarded to build.sh
 # Agents not in the force list are pinned to their currently baked version so
-# Docker reuses that layer. Because Codex sits below Claude in the image, a
-# Claude-only update rebuilds just the Claude layer; a Codex update also
-# rebuilds the Claude layer above it (the accepted, rarer cost).
+# Docker reuses that install layer. The image stack is Codex -> stable linters ->
+# Claude -> cheap upper layers: a Claude-only update rebuilds Claude plus those
+# upper layers, while a Codex update also rebuilds the linters (the accepted,
+# rarer cost).
 _powbox_build_from_table() {
     local table="$1" force=" $2 " target="$3"
     shift 3

@@ -41,15 +41,16 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 
 1. base (`powbox-agent-base`)
 2. Codex install layer (infrequent updates)
-3. Claude install layer (frequent, larger updates)
-4. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
+3. stable shared-linter layers (`actionlint`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the base image used by the provenance resolver
+4. Claude install layer (frequent, larger updates)
+5. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
 
 Consequence:
 
-- **Claude updates** (the common case) change only the top layer → clients pull only the Claude layer. Codex layer underneath is reused. This is the bandwidth win, achieved with one image and one tag.
-- **Codex updates** (rare) change the lower layer → the Claude layer above rebuilds and both are pulled. Unavoidable with any single-image stacking, and accepted.
+- **Claude updates** (the common case) rebuild the Claude install layer plus the cheap shared-asset, metadata, and entrypoint layers above it → clients reuse the Codex and stable shared-linter layers underneath. This is the bandwidth win, achieved with one image and one tag.
+- **Codex updates** (rare) change the lower layer → the stable shared-linter, Claude, and cheap shared-asset, metadata, and entrypoint layers above rebuild. Unavoidable with any single-image stacking, and accepted.
 
-Each binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`) so that edits to hooks/skills do not trigger binary reinstalls.
+Each agent binary install is its own layer keyed by its own build arg (`CLAUDE_CODE_VERSION`, `CODEX_VERSION`), while the stable linter installs are separate layers keyed by literal version pins in the Dockerfile; edits to hooks/skills therefore do not trigger any of those reinstalls.
 
 ### Entrypoint: seed both, exec one
 
@@ -86,11 +87,11 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 ### Minimal-layer updates
 
-`agent-update` must rebuild the fewest layers for any single update. The mechanism is **per-binary version pinning**, because with `latest` tags Docker can't see that an upstream release advanced (the `RUN` text is unchanged) and would either never update or, with `--no-cache`, rebuild both binaries.
+`agent-update` must rebuild the fewest layers for any single agent update. The mechanism is **per-agent-binary version pinning**, because with `latest` tags Docker can't see that an upstream release advanced (the `RUN` text is unchanged) and would either never update or, with `--no-cache`, rebuild both agent binaries.
 
 - `check-updates.sh` reads both baked versions in **one** container start (`docker run … sh -c 'claude --version; codex --version'`) — the win the single image unlocks — and resolves both npm latests. Its `--porcelain` mode emits a machine-readable table: `name<TAB>status<TAB>baked<TAB>latest`.
-- `agent-update` reads that table once and rebuilds `agent` pinning each binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
-- Layer order does the rest: a Claude-only update rebuilds just the Claude layer; a Codex update rebuilds the Claude layer above it too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
+- `agent-update` reads that table once and rebuilds `agent` pinning each agent binary: the stale binary to its **latest** version (busting its layer), the unchanged binary to its **baked** version (so Docker reuses that layer). No `--no-cache`.
+- Layer order does the rest: a Claude-only update rebuilds its install layer plus the cheap shared-asset, metadata, and entrypoint layers above it; a Codex update rebuilds the stable shared-linter and Claude layers plus those cheap upper layers too (accepted). A stale base falls back to a full `build.sh all --pull --no-cache`.
 
 ### Launcher and macros
 
@@ -130,7 +131,7 @@ Because the peer list is the same for every agent now, it can be rendered from t
 
 ## Implementation order
 
-1. Add `docker/agent/Dockerfile` (base → Codex layer → Claude layer → shared assets) and the unified `entrypoint-agent.sh`; keep both hooks.
+1. Add `docker/agent/Dockerfile` (base → Codex layer → stable shared-tool layers → Claude layer → shared assets) and the unified `entrypoint-agent.sh`; keep both hooks.
 2. Update `docker-bake.hcl` and `scripts/build-image.sh` for the single `agent` target.
 3. Merge compose files; mount both config volumes; thread `PRIMARY_AGENT`.
 4. Update `launch-agent.sh` (image, env, both-volume ensure) and verify `cc`/`cx` unchanged in behavior.

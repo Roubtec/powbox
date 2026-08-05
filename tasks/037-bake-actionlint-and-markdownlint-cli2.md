@@ -16,7 +16,7 @@ Included:
 - Install `actionlint` (pinned current release, static binary) into the agent image on `PATH`.
 - Install `markdownlint-cli2` (pinned version) globally into the agent image on `PATH`.
 - Add both to the tooling table in `docker/shared/container-agent.md.tmpl` (and the README/docs tooling mentions if present), with one line each noting: repos that pin a different version in CI should still invoke their pinned version (`npx markdownlint-cli2@<pin>` or a repo wrapper) — the baked copy is the default, not an override of repo policy.
-- Extend the image smoke (`scripts/smoke-test-image.sh`) with presence/version checks, matching how other baked tools are asserted.
+- Extend the Stage 1 image assertions in the host smoke umbrellas (`commands/smoke-test.sh` and `commands/smoke-test.ps1`) with presence/version checks, matching how other baked tools are asserted; those umbrellas pass the probes to their `scripts/smoke-test-image.*` drivers.
 
 Out of scope:
 
@@ -33,24 +33,26 @@ Out of scope:
 
 - `docker/agent/Dockerfile`
 - `docker/shared/container-agent.md.tmpl`
-- `scripts/smoke-test-image.sh`
+- `commands/smoke-test.sh`
+- `commands/smoke-test.ps1`
 - README tooling section if it mirrors the table.
 
 ## Implementation notes
 
 - Pin exact versions (release tag for actionlint, npm version for markdownlint-cli2) so image builds are reproducible; note the versions in the Dockerfile comment.
 - Keep image-size impact minimal: actionlint is a single small binary; markdownlint-cli2 adds a node_modules subtree under the global prefix — acceptable, but avoid pulling optional deps.
+- `markdownlint-cli2 --version` is not a dedicated version option: the CLI treats `--version` as an input glob while its startup banner happens to include the version. The smoke should therefore exercise the PATH binary by linting a real file and verify the exact pin separately through npm's machine-readable global package metadata, rather than parsing presentation output that lints no files.
 - This is an image change: full validation needs a host rebuild + smoke run (Tier 1 CI covers image-affecting PRs to main). In-container validation is limited to Dockerfile lint/review.
 
 ## Acceptance criteria
 
-- A rebuilt agent image has `actionlint --version` and `markdownlint-cli2 --version` working on `PATH` for the `node` user.
+- A rebuilt agent image has `actionlint --version` working and `markdownlint-cli2` linting a real Markdown file on `PATH` for the `node` user; npm's global package metadata reports the pinned markdownlint-cli2 version.
 - The tooling table documents both, including the repo-pin caveat for markdownlint-cli2.
 - Image smoke asserts both binaries.
 
 ## Validation
 
-- Host: `./build.sh all` then `scripts/smoke-test-image.sh` passes including the new checks.
+- Host: `./build.sh all` then `POWBOX_SMOKE_REQUIRE_IMAGE=1 ./commands/smoke-test.sh powbox-agent:latest` passes, including the new Stage 1 checks (on Windows, run `./commands/smoke-test.ps1 -Image powbox-agent:latest -RequireImage`).
 - Tier 1 CI green on the PR.
 
 ## Review plan

@@ -5,11 +5,13 @@
 #
 # Layer order is deliberate. Codex (updated less often, smaller) is installed
 # BELOW Claude (updated most often, larger). Bumping CLAUDE_CODE_VERSION then
-# busts only the Claude layer plus the cheap asset/entrypoint layers above it,
-# so the common case re-pulls just the Claude layer. Bumping CODEX_VERSION
-# rebuilds the Claude layer on top as a side effect — an accepted, rarer cost.
-# `agent-update` pins concrete versions per binary so Docker rebuilds the
-# minimum set of layers for any single update.
+# busts only the Claude layer plus the cheap asset/metadata/entrypoint layers
+# above it, so the common case reuses the Codex and stable shared-linter
+# layers below it while pulling Claude plus the changed cheap upper layers.
+# Bumping CODEX_VERSION rebuilds the stable shared-linter layers and Claude
+# layer on top as a side effect — an accepted, rarer cost. `agent-update` pins
+# concrete versions per agent binary so Docker rebuilds the minimum set of
+# layers for those updates.
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 
@@ -20,6 +22,37 @@ USER root
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 USER node
 
+# --- Shared linters (stable layers between the agent installs) ---------------
+# Keep these above Codex so its cache parent remains the base image; the
+# provenance resolver deliberately models that exact parent plus CODEX_VERSION.
+# actionlint is the current stable v1.7.12 release. Fetch its static Linux
+# tarball directly from GitHub and verify the per-architecture SHA256 published
+# in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
+# the version, both checksums, the tooling-table row, and the exact Bash and
+# PowerShell Stage 1 smoke assertions together.
+USER root
+RUN ACTIONLINT_VERSION=1.7.12 \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) actionlint_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 ;; \
+        arm64) actionlint_sha256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 ;; \
+        *) echo "no pinned actionlint checksum for architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/actionlint.tar.gz \
+        "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz" \
+    && echo "${actionlint_sha256}  /tmp/actionlint.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local/bin --no-same-owner -xzf /tmp/actionlint.tar.gz actionlint \
+    && chmod 0755 /usr/local/bin/actionlint \
+    && rm /tmp/actionlint.tar.gz
+
+# markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
+# default reproducible and omit optional dependencies; repository wrappers and
+# CI pins remain authoritative when they require another version. Bump this
+# literal pin, the tooling-table row, and the exact Bash and PowerShell Stage 1
+# smoke assertions together.
+RUN npm install -g --omit=optional markdownlint-cli2@0.23.2
+USER node
+
 # --- Claude (upper layer: updated most often) --------------------------------
 ARG CLAUDE_CODE_VERSION=latest
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude
@@ -27,8 +60,9 @@ ENV DISABLE_AUTOUPDATER=1
 # Intentionally runs the remote install script without pinning a checksum.
 # These images are built locally by each user as a personal harness and the
 # goal is always the latest agent tooling. Pinning a concrete
-# CLAUDE_CODE_VERSION (which agent-update does) is what lets Docker rebuild only
-# this layer when Claude — and only Claude — has a new release. Downloaded to a
+# CLAUDE_CODE_VERSION (which agent-update does) gives this install layer its own
+# cache key: it changes only for a Claude release, though the cheap asset,
+# metadata, and entrypoint layers above it rebuild too. Downloaded to a
 # file first (not `curl | bash`) so a failed download fails the build instead
 # of being masked by the pipeline's exit status. --retry ... --retry-all-errors
 # --http1.1 rides out the same transient HTTP/2 stream resets / CDN blips that
@@ -62,9 +96,9 @@ COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.ag
 # build-commit records the powbox commit that built these top (asset/claude)
 # layers; the .powbox-seeded skill marker copies it so a seeded skill can be
 # traced back to its source. Referencing POWBOX_COMMIT here busts only this
-# metadata layer (and the cheap entrypoint COPY below it) when the commit
-# changes — the expensive Codex/Claude install layers sit ABOVE and are never
-# affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
+# metadata layer (and the cheap entrypoint COPY above it) when the commit
+# changes — the expensive Codex/linter/Claude install layers sit BELOW and are
+# never affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
 # default keeps standalone `docker build` working.
 #
 # /home/node/.powbox/{claude,codex}.commit are the in-container provenance

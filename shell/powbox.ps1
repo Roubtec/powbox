@@ -422,9 +422,10 @@ function _Powbox-InvokeBuild {
 #   -Target       build target (agent|all)
 #   @ExtraArgs    extra args forwarded to build.ps1
 # Agents not in the force list are pinned to their currently baked version so
-# Docker reuses that layer. Because Codex sits below Claude in the image, a
-# Claude-only update rebuilds just the Claude layer; a Codex update also
-# rebuilds the Claude layer above it (the accepted, rarer cost).
+# Docker reuses that install layer. The image stack is Codex -> stable linters ->
+# Claude -> cheap upper layers: a Claude-only update rebuilds Claude plus those
+# upper layers, while a Codex update also rebuilds the linters (the accepted,
+# rarer cost).
 function _Powbox-BuildFromTable {
     param(
         [string[]]$Table,

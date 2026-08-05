@@ -266,8 +266,9 @@ fi
 echo ""
 echo "Agent update check:"
 if [ -n "$base_baked" ] || [ -n "$base_latest" ] || [ "$recipe_stale" = true ]; then compare_base "$base_baked" "$base_latest" "$recipe_stale"; fi
-# Codex before Claude: Codex updates less often and the Claude layer is built on
-# top of it, so the report mirrors the Docker layer stacking (base -> codex -> claude).
+# Codex before Claude: the report mirrors their order in the Docker layer stack
+# (base -> codex -> stable linters -> claude -> cheap upper layers); the stable
+# and cheap layers have no version rows of their own.
 if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi
 if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
 echo ""

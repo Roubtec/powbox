@@ -69,10 +69,11 @@ codex-config volume — see `entrypoint-codex-hook.sh:155-160`.)
 this way and is the precedent to follow for commit provenance.
 
 Agent image layer order (`docker/agent/Dockerfile`): `FROM base` → **codex install
-(low)** → **claude install (high)** → asset COPY + `RUN date +%s%N` epoch → entrypoint
-COPY. The epoch `RUN` is non-deterministic, so the asset/epoch/entrypoint layers
-rebuild on **every** agent build; codex's install layer is the only one that is
-reused on a claude-only update.
+(low)** → shared-linter installs → **claude install (high)** → asset COPY +
+`RUN date +%s%N` epoch → entrypoint COPY. Codex stays directly on the base because
+the provenance resolver models that parent exactly. The epoch `RUN` is
+non-deterministic, so the asset/epoch/entrypoint layers rebuild on **every** agent
+build; codex and the stable linter layers are reused on a claude-only update.
 
 ---
 

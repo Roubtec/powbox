@@ -65,6 +65,10 @@ eval "$(cat | jq -r '
 # effort is not in the JSON input; read it from settings as a static label
 effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/null)
 
+# logged-in account is not in the JSON input either; read it from Claude's config
+account_email=$(jq -r '.oauthAccount.emailAddress // empty' /home/node/.claude/.claude.json 2>/dev/null)
+account="${account_email%%@*}"
+
 # ── line 1: dir + model + effort ────────────────────────────────────────────────
 if [ -n "$effort" ]; then
     line1=$(printf "${BLU}dir${RST}  ${CYN}%s${RST}  ${BLU}model${RST} ${MAG}%s${RST} %s" "$cwd" "$model" "$effort")
@@ -119,5 +123,7 @@ if [ -n "$api_dur_ms" ] && [ "$api_dur_ms" != "0" ]; then
     fi
     line2="${line2}$(printf "  ${GRY}%s${RST}" "$dur_str")"
 fi
+
+[ -n "$account" ] && line2="${line2}$(printf "  ${GRY}%s${RST}" "$account")"
 
 printf "%s\n" "$line2"

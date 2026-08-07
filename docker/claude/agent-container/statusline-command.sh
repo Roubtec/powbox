@@ -89,7 +89,7 @@ auth_label() {
     # cache — a name harvested from a malformed probe.
     _j=$(timeout 10 claude --safe-mode auth status --json 2>/dev/null) || return 0
     _out=$(printf '%s' "$_j" | jq -r '
-        if .loggedIn == false then empty
+        if .loggedIn != true then empty
         elif (.email // "") != "" then (.email | sub("@.*"; ""))
         elif (.apiKeySource // "") == "apiKeyHelper" then "key helper"
         elif (.apiKeySource // "") == "/login managed key" then "managed key"
@@ -114,35 +114,46 @@ auth_label() {
 # would spawn a subprocess on EVERY render instead of one per TTL.
 account=""
 auth_cache_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-')
+if [ -z "$auth_cache_id" ]; then
+    # No session_id in the payload: use a stable key, or every render re-probes
+    # forever. Fold in which credentials are present so two session-less renders
+    # sharing this container cannot serve each other a wrong answer.
+    auth_cache_id="no-session"
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && auth_cache_id="${auth_cache_id}k"
+    [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && auth_cache_id="${auth_cache_id}a"
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && auth_cache_id="${auth_cache_id}o"
+fi
 auth_cache_dir="${TMPDIR:-/tmp}/claude-statusline-auth"
-# The `s-` prefix is containment, not decoration: a session_id that sanitizes to
-# "." or ".." would otherwise name the cache dir or its PARENT. A payload with no
-# session_id at all still gets a stable key — without one, every render would
-# re-probe forever.
-auth_cache="$auth_cache_dir/s-${auth_cache_id:-no-session}"
+# The `s-`/`c-` prefixes are containment, not decoration: a session_id that
+# sanitizes to "." or ".." would otherwise name the cache dir or its PARENT.
+auth_cache="$auth_cache_dir/s-$auth_cache_id"   # the value; its mtime is its true age
+auth_claim="$auth_cache_dir/c-$auth_cache_id"   # in-flight marker, separate on purpose
 if [ -n "$(find "$auth_cache" -mmin -10 2>/dev/null)" ]; then
     account=$(cat "$auth_cache" 2>/dev/null)
-elif mkdir -p "$auth_cache_dir" 2>/dev/null; then
-    # Claim the slot BEFORE the ~0.55s probe. Claude Code cancels an in-flight
-    # statusline script when a new update arrives, so a cancelled run would never
-    # reach the write below and every render during a busy turn would respawn the
-    # probe — a large short-lived process each time. `touch` bounds that to one
-    # probe per TTL, and because it only moves the mtime it PRESERVES any previous
-    # value: a cancelled refresh keeps showing the last known account instead of
-    # going blank. Only a session whose very first probe is cancelled shows an
-    # empty segment, until the TTL lets it retry.
-    touch "$auth_cache" 2>/dev/null
+elif [ -n "$(find "$auth_claim" -mmin -1 2>/dev/null)" ]; then
+    # A refresh started within the last minute and never wrote a value — Claude
+    # Code cancels an in-flight statusline script when a new update arrives, so
+    # during a busy turn every render would otherwise respawn the ~0.55s probe.
+    # Serve the last known value instead of stampeding, and retry in a minute.
+    account=$(cat "$auth_cache" 2>/dev/null)
+elif mkdir -p "$auth_cache_dir" 2>/dev/null && touch "$auth_claim" 2>/dev/null; then
+    # The claim `touch` doubles as the writability test: `mkdir -p` returns 0 for
+    # an existing directory whatever its mode, so it cannot tell us that on its
+    # own. Marking the claim rather than the value file is what keeps the value's
+    # mtime honest — touching the value would restart its TTL without refreshing
+    # it, so repeated cancellations could serve stale data indefinitely.
     account=$(auth_label)
     # Braces so the redirect failure itself is silenced: `>file 2>/dev/null` sets
-    # up the redirect BEFORE stderr is diverted, so a read-only cache dir would
+    # up the redirect BEFORE stderr is diverted, so an unwritable cache dir would
     # otherwise print "cannot create ..." into the terminal.
     { printf '%s' "$account" >"$auth_cache"; } 2>/dev/null
-    # Reap abandoned session entries. Only runs on a refresh, never per render.
+    # Reap abandoned entries. Only runs on a refresh, never per render.
     find "$auth_cache_dir" -type f -mmin +1440 -delete 2>/dev/null
+else
+    # Nowhere to store an answer, so do not probe: ~0.55s and a large short-lived
+    # process on EVERY render is a worse trade than an absent segment.
+    account=$(cat "$auth_cache" 2>/dev/null)
 fi
-# No usable cache dir means no probe at all: with nowhere to store the answer it
-# would cost ~0.55s and a large process on EVERY render, which is a worse trade
-# than an absent segment.
 
 # ── line 1: dir + model + effort ────────────────────────────────────────────────
 if [ -n "$effort" ]; then

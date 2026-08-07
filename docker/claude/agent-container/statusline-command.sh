@@ -70,10 +70,16 @@ effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/n
 # checks ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
 # AHEAD of the stored login with no fall-through (the precedence peer-review-run
 # documents and drives with `env -u`), and compose.agent.yml always passes
-# ANTHROPIC_API_KEY through. So whenever one of those is set the session
-# authenticates — and bills — through it, and naming the cached subscriber here
-# would identify an account this session is not using. Say "env auth" instead.
-# Not detected: a settings.json `apiKeyHelper`, which also outranks the login.
+# ANTHROPIC_API_KEY through. So whenever one of those carries a value the cached
+# subscriber MAY not be the identity in use, and naming it would assert an
+# account — and a billing target — this session may not have. Say "env auth"
+# instead: a flag that the name is unreliable, not a claim about which
+# credential won. This deliberately under-claims, because what is observable
+# here is presence, not selection — an interactive session gates a detected key
+# behind an approval prompt, and a settings.json `apiKeyHelper` outranks the
+# login without touching the environment at all.
+# Test with an EMPTY value too: compose.agent.yml passes ${ANTHROPIC_API_KEY:-},
+# so the variable is always SET and usually empty. `-n` is the correct test.
 if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     account="env auth"
 else

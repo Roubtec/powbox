@@ -1,8 +1,9 @@
 # House formatting rules.
 #
 # This file exists so shell style is stated rather than inferred. `shfmt` reads
-# .editorconfig, and CI's advisory step runs `shfmt -d` with no flags, so what is
-# written here is what CI checks against — locally and on the runner alike.
+# .editorconfig, and CI's advisory step runs `shfmt -d` with no style-override
+# flags, so what is written here is what CI checks against — locally and on the
+# runner alike.
 #
 # Line endings are NOT declared here. `.gitattributes` already owns them
 # (`* text=auto eol=lf` with CRLF for `*.ps1`/`*.bat`/`*.cmd`); restating that

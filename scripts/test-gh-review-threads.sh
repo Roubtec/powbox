@@ -45,9 +45,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# Which helper binary to exercise. gh-review-threads is no longer kept in-tree: it
-# is vendored in Roubtec/agent-skills and baked into the image from the pinned
-# clone, so the default source here is that staging clone. A direct source run
+# Which helper binary to exercise. gh-review-threads is not kept in-tree, so the
+# default source here is the agent-skills staging clone. A direct source run
 # must first populate .agent-skills-src through `build.sh`; smoke Stage 0b does not
 # use or guard that default. It overrides GH_REVIEW_THREADS_HELPER=/usr/local/bin/gh-review-threads
 # so an in-image run actually validates the BAKED artifact on PATH, not a source

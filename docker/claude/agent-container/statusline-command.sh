@@ -82,15 +82,22 @@ effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/n
 # Note `"" | split("@")` is [] in jq, not [""], so `[0]` on it yields a literal
 # "null" — hence sub() rather than split() for the local part.
 auth_label() {
-    # `timeout` bounds a hung CLI; any failure yields empty, which just omits the
-    # segment rather than printing something untrue.
+    # `timeout` bounds a hung CLI; any failure yields empty, which omits the
+    # segment rather than printing something untrue. jq's exit status is checked
+    # deliberately: given valid JSON followed by trailing garbage it prints the
+    # parsed value and THEN fails, so an unchecked pipeline would display — and
+    # cache — a name harvested from a malformed probe.
     _j=$(timeout 10 claude --safe-mode auth status --json 2>/dev/null) || return 0
-    printf '%s' "$_j" | jq -r '
-        if .loggedIn != true then empty
+    _out=$(printf '%s' "$_j" | jq -r '
+        if .loggedIn == false then empty
         elif (.email // "") != "" then (.email | sub("@.*"; ""))
+        elif (.apiKeySource // "") == "apiKeyHelper" then "key helper"
+        elif (.apiKeySource // "") == "/login managed key" then "managed key"
         elif (.apiKeySource // "") != "" then
             (.apiKeySource | sub("^ANTHROPIC_"; "") | ascii_downcase | gsub("_"; " "))
-        else empty end' 2>/dev/null
+        elif (.authMethod // "") == "oauth_token" then "env token"
+        else empty end' 2>/dev/null) || return 0
+    printf '%s' "$_out"
 }
 
 # ~0.55s per call and this script re-runs on every assistant message, so cache it.
@@ -107,22 +114,35 @@ auth_label() {
 # would spawn a subprocess on EVERY render instead of one per TTL.
 account=""
 auth_cache_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-')
-if [ -n "$auth_cache_id" ]; then
-    auth_cache_dir="${TMPDIR:-/tmp}/claude-statusline-auth"
-    auth_cache="$auth_cache_dir/$auth_cache_id"
-    if [ -n "$(find "$auth_cache" -mmin -10 2>/dev/null)" ]; then
-        account=$(cat "$auth_cache" 2>/dev/null)
-    elif mkdir -p "$auth_cache_dir" 2>/dev/null; then
-        account=$(auth_label)
-        printf '%s' "$account" > "$auth_cache" 2>/dev/null
-        # Reap abandoned session entries. Only runs on a refresh, never per render.
-        find "$auth_cache_dir" -type f -mmin +1440 -delete 2>/dev/null
-    else
-        account=$(auth_label)
-    fi
-else
+auth_cache_dir="${TMPDIR:-/tmp}/claude-statusline-auth"
+# The `s-` prefix is containment, not decoration: a session_id that sanitizes to
+# "." or ".." would otherwise name the cache dir or its PARENT. A payload with no
+# session_id at all still gets a stable key — without one, every render would
+# re-probe forever.
+auth_cache="$auth_cache_dir/s-${auth_cache_id:-no-session}"
+if [ -n "$(find "$auth_cache" -mmin -10 2>/dev/null)" ]; then
+    account=$(cat "$auth_cache" 2>/dev/null)
+elif mkdir -p "$auth_cache_dir" 2>/dev/null; then
+    # Claim the slot BEFORE the ~0.55s probe. Claude Code cancels an in-flight
+    # statusline script when a new update arrives, so a cancelled run would never
+    # reach the write below and every render during a busy turn would respawn the
+    # probe — a large short-lived process each time. `touch` bounds that to one
+    # probe per TTL, and because it only moves the mtime it PRESERVES any previous
+    # value: a cancelled refresh keeps showing the last known account instead of
+    # going blank. Only a session whose very first probe is cancelled shows an
+    # empty segment, until the TTL lets it retry.
+    touch "$auth_cache" 2>/dev/null
     account=$(auth_label)
+    # Braces so the redirect failure itself is silenced: `>file 2>/dev/null` sets
+    # up the redirect BEFORE stderr is diverted, so a read-only cache dir would
+    # otherwise print "cannot create ..." into the terminal.
+    { printf '%s' "$account" >"$auth_cache"; } 2>/dev/null
+    # Reap abandoned session entries. Only runs on a refresh, never per render.
+    find "$auth_cache_dir" -type f -mmin +1440 -delete 2>/dev/null
 fi
+# No usable cache dir means no probe at all: with nowhere to store the answer it
+# would cost ~0.55s and a large process on EVERY render, which is a worse trade
+# than an absent segment.
 
 # ── line 1: dir + model + effort ────────────────────────────────────────────────
 if [ -n "$effort" ]; then

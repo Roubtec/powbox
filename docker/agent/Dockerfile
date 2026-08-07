@@ -158,15 +158,12 @@ COPY --chmod=755 \
     docker/shared/wt-remove \
     /usr/local/bin/
 
-# gh-review-threads (the safe PR review-thread fetcher used by both agents'
-# address-review skills and the dev-skills wf-address-review workflow) is NOT
-# kept in-tree:
-# it is vendored in Roubtec/agent-skills (plugins/dev-skills/bin/) as the single
-# source of truth — the very file the dev-skills plugin ships to non-powbox users
-# — and baked here from the same pinned agent-skills clone that feeds the Codex
-# skill palette above (AGENT_SKILLS_COMMIT). Powbox therefore carries exactly one
-# copy, refreshed in lockstep with the skills whenever the pin moves. The
-# .dockerignore re-includes just this path from the otherwise-excluded staging tree.
+# gh-review-threads is NOT kept in-tree: the dev-skills plugin ships the same
+# file to non-powbox users, so agent-skills is its single source of truth and the
+# COPY below takes it from the staging clone that feeds the Codex palette above.
+# Powbox carries exactly one copy, refreshed whenever that clone is re-fetched —
+# which is every agent build, since the builders fetch a moving ref.
+# .dockerignore re-includes just this path from the otherwise-excluded tree.
 COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads /usr/local/bin/
 
 # --- Provenance labels -------------------------------------------------------

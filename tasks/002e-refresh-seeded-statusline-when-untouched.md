@@ -28,7 +28,7 @@ Straight epoch-gating is the wrong fix, because no-clobber is protecting somethi
 
 ## Design direction
 
-Follow the marker convention the repo already has rather than inventing a second one. Task 043 (`tasks/done/043-powbox-seeded-markers-carry-source-provenance.md`) established `.powbox-seeded` markers carrying `epoch=`, `commit=` and `source=` lines for seeded skills and workflows, with `seed_marker_content` in `docker/shared/seed-skills.sh` as the builder and a documented rule that consumers parse specific keys and never assume a fixed line count. A statusline marker — e.g. `$AGENT_CONFIG_DIR/.statusline-command.sh.powbox-seeded` holding `epoch=`, `sha256=`, and `source=` — fits that shape and inherits its documentation in `docs/skills-refresh-and-provenance.md`.
+Follow the marker convention the repo already has rather than inventing a second one. Task 043 (`tasks/done/043-powbox-seeded-markers-carry-source-provenance.md`) established `.powbox-seeded` markers carrying `epoch=`, `commit=` and `source=` lines for seeded skills and workflows, with `seed_marker_content` (`docker/shared/seed-skills.sh:93`) as the body builder and `seed_workflow_marker_path` (`:260`) producing exactly the `.<filename>.powbox-seeded` sidecar name proposed below and a documented rule that consumers parse specific keys and never assume a fixed line count. A statusline marker — e.g. `$AGENT_CONFIG_DIR/.statusline-command.sh.powbox-seeded` holding `epoch=`, `sha256=`, and `source=` — fits that shape and inherits its documentation in `docs/skills-refresh-and-provenance.md`.
 
 The resulting logic in the hook:
 
@@ -45,8 +45,8 @@ Note the ordering constraint: the statusline seed currently runs *before* the ep
 ## Target files or areas
 
 - `docker/shared/entrypoint-claude-hook.sh` (~lines 40-60, 98) — the seeding step, the epoch block, and their ordering.
-- `docker/shared/seed-skills.sh` (~lines 26-43) — `seed_marker_content` and the marker naming convention to mirror; reuse rather than reimplement if the shape fits.
-- `scripts/test-entrypoint-claude-hook.sh` or the nearest existing hermetic entrypoint suite — add the three transition cases. If no such suite exists, the case belongs wherever `scripts/run-pure-shell-tests.sh` already covers hook behavior; check before creating a new file.
+- `docker/shared/seed-skills.sh` — `seed_marker_content` (~93-104) and `seed_workflow_marker_path` (~260-265), the marker body and sidecar-name builders to mirror. Note `entrypoint-claude-hook.sh` does **not** source this file today (only `update-skills-incontainer.sh` does), so reusing them means taking a new dependency on `/usr/local/bin/seed-skills.sh` — weigh that against writing the two lines inline.
+- `scripts/test-claude-hook-skew.sh` — the existing hermetic suite for this hook, and the natural home for the three transition cases. Add to it rather than starting a new file.
 - `docs/entrypoint-and-runtime.md` — the per-agent hook section describing what is seeded and when it refreshes.
 - `docs/skills-refresh-and-provenance.md` — if the marker reuses the `.powbox-seeded` convention, document the statusline as a producer.
 - `README.md` (~line 254) — currently ends the statusline paragraph with "reaches an existing container only after you delete `~/.claude/statusline-command.sh`, which is seeded no-clobber". That sentence becomes wrong for untouched files and needs to state the new rule.

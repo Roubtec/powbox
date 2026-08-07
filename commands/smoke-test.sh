@@ -46,10 +46,10 @@ fi
 
 # Stage 0b — gh-review-threads helper unit test. Hermetic (stubs `gh` with a PATH
 # shim serving canned fixtures — no live GitHub or root needed). It guards the
-# baked gh-review-threads helper: manual
-# pagination (never `gh api graphql --paginate`, which under concurrent runs has
-# returned another PR's threads) and the boundary-safe, repo-qualified PR-scope
-# assertion that fails closed (exit 3) on a contaminated response.
+# baked gh-review-threads helper: manual pagination (never `gh api graphql
+# --paginate`, which under concurrent runs has returned another PR's threads)
+# and the boundary-safe, repo-qualified PR-scope assertion that fails closed
+# (exit 3) on a contaminated response.
 #
 # Run in-image so this exercises the BAKED
 # /usr/local/bin/gh-review-threads on PATH — the artifact agents actually use — so a

@@ -938,6 +938,23 @@ Claude likewise preserves existing `settings.json` values in the `claude-config`
 That keeps a fresh Claude config's `!` bash commands context-only — their output feeds your next prompt instead of triggering a reply after each one (Claude Code's pre-2.1.186 behavior).
 Unlike the status line above, this default never re-asserts: set `respondToBashCommands` to `true` yourself and your choice survives every restart.
 
+## House Lint and Format Configuration
+
+Three repo-root files state the house Markdown and shell style instead of leaving each contributor and editor to infer it.
+PowerShell's house rules live separately in `PSScriptAnalyzerSettings.psd1` — see AGENTS.md "PowerShell Linting".
+The two checks below differ in reach: Markdown lint is local-only, while `shfmt` also runs as an advisory Tier 0 step — so read this section alongside "Continuous Integration" rather than as part of it.
+
+`.markdownlint.jsonc` carries the Markdown rule set — shared in spirit with the other Roubtec projects, with powbox-specific deviations noted inline — and `.markdownlint-cli2.jsonc` carries only the ignore globs for generated, vendored and container-local trees.
+Run it with `markdownlint-cli2 "**/*.md"`; the agent image bakes `markdownlint-cli2` 0.23.2, and a repository pin or wrapper stays authoritative wherever one exists.
+Markdown lint is **not** a CI gate today: no workflow lints this repo's Markdown, so its findings are advisory until someone adds the step.
+Tier 1's smoke test does invoke `markdownlint-cli2`, but only to probe that the binary is baked at its pinned version — it lints a throwaway file, never the repository.
+The tree is not clean under this config yet (81 findings across 26 files as of this commit), so compare against the base branch rather than expecting a zero exit — the same "not yet normalized" caveat the `shfmt` step carries.
+
+`.editorconfig` states the shell indentation convention (`indent_style = tab` for `*.sh`), which is the form `shfmt` itself reads.
+Tier 0's advisory `shfmt` step runs `shfmt -d` with no style-override flags over the scripts a PR changes.
+The declaration records the convention `shfmt` already applies by default rather than changing what it checks, so editors and `shfmt` agree on the same style.
+See AGENTS.md "Validating Changes" for the `docker/shared/` extensionless-helper exception, and `.editorconfig`'s own comment for the handful of scripts that predate the convention.
+
 ## Continuous Integration
 
 GitHub Actions validate powbox on `ubuntu-latest` — a hosted native-Linux VM

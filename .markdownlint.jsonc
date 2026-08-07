@@ -1,0 +1,52 @@
+// House Markdown rules, shared in spirit with the other Roubtec projects
+// (jabko / kalm2 / scribz carry the same rule set). Deviations from those are
+// noted inline; everything else is deliberately identical so the rules do not
+// have to be re-inferred per repo.
+{
+  "default": true,
+
+  // Prose is intentionally unwrapped: one logical paragraph per source line.
+  // AGENTS.md states this as a repo convention, so the default 80-column rule
+  // would fire on essentially every paragraph and drown real findings.
+  "MD013": false,
+
+  // Duplicate headings are acceptable when they occur under different sections.
+  // Task files repeat "Scope", "Status", "Validation" under distinct parents.
+  "MD024": { "siblings_only": true },
+
+  // Ordered list source should reflect its actual sequence — this catches a
+  // real class of edit damage, e.g. two list items both numbered 6.
+  "MD029": { "style": "ordered" },
+
+  // Use fenced code blocks with backticks.
+  "MD046": { "style": "fenced" },
+  "MD048": { "style": "backtick" },
+
+  // Technical documents need punctuation in headings and bare URLs.
+  "MD026": false,
+  "MD034": false,
+
+  // powbox addition: MD060 is off because no supported value describes the house
+  // table style — padded content cells over a compact delimiter row
+  // (`| a | b |` over `|---|---|`). Its "style" accepts only "aligned", "any",
+  // "compact" and "tight": "any" and "compact" each report the same 84 findings,
+  // every one of them on a delimiter row (14 tables, 42 columns, across 7
+  // files — the rule emits two findings per column), while "aligned" reports
+  // 223 and "tight" 484.
+  //
+  // Spelled `false` on purpose. An unrecognized value leaves all three of the
+  // rule's style branches disabled, so it reports zero and reads like a passing
+  // pin while enforcing nothing — which is what an earlier revision's "padded"
+  // (and the "consistent" it was compared against) actually did.
+  //
+  // Adopting "compact" was considered and declined, not overlooked. It is the
+  // one cheap alternative — MD060 ships fixInfo for these violations, so
+  // `markdownlint-cli2 --fix` pads the 14 delimiter rows into the
+  // `| --- | --- |` form and leaves content cells alone. It only inserts the
+  // spaces, so an existing run like `|------|` becomes `| ------ |` rather than
+  // being normalized to three dashes. It is declined because it changes the
+  // established table style repo-wide (including archived task files) to buy
+  // enforcement on an advisory, non-gating check. Revisit it as a deliberate
+  // reformat if the house style itself is up for a decision.
+  "MD060": false
+}

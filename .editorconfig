@@ -1,0 +1,25 @@
+# House formatting rules.
+#
+# This file exists so shell style is stated rather than inferred. `shfmt` reads
+# .editorconfig, and CI's advisory step runs `shfmt -d` with no style-override
+# flags, so what is written here is what CI checks against — locally and on the
+# runner alike.
+#
+# Line endings are NOT declared here. `.gitattributes` already owns them
+# (`* text=auto eol=lf` with CRLF for `*.ps1`/`*.bat`/`*.cmd`); restating that
+# would create a second place to keep in sync.
+
+root = true
+
+# Shell scripts follow shfmt's own defaults — tab indentation, normalized
+# arithmetic spacing, single-space comment separation. That is not an arbitrary
+# pick: 53 of the 57 tracked *.sh files already match it, as do all the
+# extensionless helpers in docker/shared/ except pg-dev-up, whose indented `case`
+# bodies AGENTS.md records as accepted house style.
+#
+# The remaining outliers (entrypoint-claude-hook.sh, entrypoint-codex-hook.sh,
+# pnpm-shadow-wrapper.sh, shell/powbox.sh) predate this file and are left alone;
+# normalizing one is cheap whenever it is being edited anyway, and pointless
+# churn otherwise.
+[*.sh]
+indent_style = tab

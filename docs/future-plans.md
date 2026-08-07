@@ -17,6 +17,6 @@ This file is intentionally kept small and only tracks possible future enhancemen
 - **Additional host mounts**: `~/.npmrc`, `~/.config`, local CA certificates, or other config directories as needs arise.
 - **Windows batch wrapper** (`claude-container.bat`): Thin wrapper around the PowerShell launcher for `cmd.exe` users.
 - **Automated image rebuilds**: A scheduled task (Windows Task Scheduler or cron in WSL) to run `build.sh` daily/weekly.
-- **ANTHROPIC_API_KEY fallback**: Add to `.env` if OAuth sessions prove unreliable in the container.
+- **ANTHROPIC_API_KEY in `.env`**: Set it if OAuth sessions prove unreliable in the container. `compose.agent.yml` already passes the variable through, so this is only about where the value comes from — and note it is not a *fallback*: Claude Code checks the env credential ahead of the stored login (see README "Cross-Agent Delegation"), so setting it switches the session's credential rather than standing by for OAuth to fail.
 - **Custom Oh My Zsh plugins**: zsh-autosuggestions, zsh-syntax-highlighting, etc.
 - **Validation automation**: Convert the manual smoke checks into an automated validation script that exercises startup, networking, auth, and volume behavior.

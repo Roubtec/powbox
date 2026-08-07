@@ -1,9 +1,14 @@
 // markdownlint-cli2 reads rule configuration from .markdownlint.jsonc.
 // This file only excludes generated, vendored or container-local content.
 {
+  // Both worktree roots are listed: `.worktrees/` holds the wt-* helpers' trees
+  // (alongside their caches) and `.claude/worktrees/` the harness-native ones.
+  // Each holds full repo copies, so an unignored root re-reports every finding
+  // in the repo once per worktree present.
   "ignores": [
     "**/node_modules/**",
     ".worktrees/**",
+    ".claude/worktrees/**",
     ".agent-skills-src/**"
   ]
 }

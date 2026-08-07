@@ -26,10 +26,27 @@
   "MD026": false,
   "MD034": false,
 
-  // powbox addition: tables are GFM-style — padded content cells over a compact
-  // delimiter row (`| a | b |` over `|---|---|`). Left unset the rule reports 84
-  // findings; "padded" and "consistent" both report zero. "padded" is the pin
-  // because it states the intent, where "consistent" would silently bless
-  // whichever style a future table happens to introduce first.
-  "MD060": { "style": "padded" }
+  // powbox addition: MD060 is off because no supported value describes the house
+  // table style — padded content cells over a compact delimiter row
+  // (`| a | b |` over `|---|---|`). Its "style" accepts only "aligned", "any",
+  // "compact" and "tight": "any" and "compact" each report the same 84 findings,
+  // every one of them on a delimiter row (14 tables, 42 columns, across 7
+  // files — the rule emits two findings per column), while "aligned" reports
+  // 223 and "tight" 484.
+  //
+  // Spelled `false` on purpose. An unrecognized value leaves all three of the
+  // rule's style branches disabled, so it reports zero and reads like a passing
+  // pin while enforcing nothing — which is what an earlier revision's "padded"
+  // (and the "consistent" it was compared against) actually did.
+  //
+  // Adopting "compact" was considered and declined, not overlooked. It is the
+  // one cheap alternative — MD060 ships fixInfo for these violations, so
+  // `markdownlint-cli2 --fix` pads the 14 delimiter rows into the
+  // `| --- | --- |` form and leaves content cells alone. It only inserts the
+  // spaces, so an existing run like `|------|` becomes `| ------ |` rather than
+  // being normalized to three dashes. It is declined because it changes the
+  // established table style repo-wide (including archived task files) to buy
+  // enforcement on an advisory, non-gating check. Revisit it as a deliberate
+  // reformat if the house style itself is up for a decision.
+  "MD060": false
 }

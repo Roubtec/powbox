@@ -59,32 +59,69 @@ eval "$(cat | jq -r '
   @sh "five_pct=\(.rate_limits.five_hour.used_percentage // "")",
   @sh "five_resets=\(.rate_limits.five_hour.resets_at // "")",
   @sh "seven_pct=\(.rate_limits.seven_day.used_percentage // "")",
-  @sh "api_dur_ms=\(.cost.total_api_duration_ms // "")"
+  @sh "api_dur_ms=\(.cost.total_api_duration_ms // "")",
+  @sh "session_id=\(.session_id // "")"
 ' | tr '\n' ' ')"
 
 # effort is not in the JSON input; read it from settings as a static label
 effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/null)
 
-# The account is not in the JSON input either. `.claude.json` caches the OAuth
-# login, but that cache is not proof it is the credential in use: Claude Code
-# checks ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
-# AHEAD of the stored login with no fall-through (the precedence peer-review-run
-# documents and drives with `env -u`), and compose.agent.yml always passes
-# ANTHROPIC_API_KEY through. So whenever one of those carries a value the cached
-# subscriber MAY not be the identity in use, and naming it would assert an
-# account — and a billing target — this session may not have. Say "env auth"
-# instead: a flag that the name is unreliable, not a claim about which
-# credential won. This deliberately under-claims, because what is observable
-# here is presence, not selection — an interactive session gates a detected key
-# behind an approval prompt, and a settings.json `apiKeyHelper` outranks the
-# login without touching the environment at all.
-# Test with an EMPTY value too: compose.agent.yml passes ${ANTHROPIC_API_KEY:-},
-# so the variable is always SET and usually empty. `-n` is the correct test.
-if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    account="env auth"
+# The account is not in the JSON input either — so ASK, rather than guess from
+# `.claude.json`'s cached oauthAccount. That cache is not proof of the credential
+# in use: an env credential (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY /
+# CLAUDE_CODE_OAUTH_TOKEN) and a settings.json apiKeyHelper all outrank the
+# stored login, so the cached name can point at an account this session is not
+# using. `auth status` reports the winner directly, and it declines to guess:
+# measured with a stray ANTHROPIC_API_KEY set it returns `email: null` — the
+# stored login's address is withheld rather than misattributed — alongside
+# `apiKeySource` naming the credential actually in play ("ANTHROPIC_API_KEY").
+# So: show the address when there is one, else name the source. An API-key
+# session has no locally knowable account NAME (an opaque key maps to no
+# identity without a network round trip), but the SOURCE is knowable and is the
+# useful thing to surface. Nothing at all is shown if neither resolves.
+# Note `"" | split("@")` is [] in jq, not [""], so `[0]` on it yields a literal
+# "null" — hence sub() rather than split() for the local part.
+auth_label() {
+    # `timeout` bounds a hung CLI; any failure yields empty, which just omits the
+    # segment rather than printing something untrue.
+    _j=$(timeout 10 claude --safe-mode auth status --json 2>/dev/null) || return 0
+    printf '%s' "$_j" | jq -r '
+        if .loggedIn != true then empty
+        elif (.email // "") != "" then (.email | sub("@.*"; ""))
+        elif (.apiKeySource // "") != "" then
+            (.apiKeySource | sub("^ANTHROPIC_"; "") | ascii_downcase | gsub("_"; " "))
+        else empty end' 2>/dev/null
+}
+
+# ~0.55s per call and this script re-runs on every assistant message, so cache it.
+# Two invalidations, matching how the answer can actually change:
+#   - keyed on session_id (stable for a session's lifetime), so a new or resumed
+#     session always refetches — a re-login between sessions is picked up free;
+#   - a 10-minute mtime TTL, for a re-auth inside one long session.
+# On disk because Claude Code spawns this script FRESH per render: there is no
+# in-memory state to keep it in. A backgrounded refresh was considered and
+# rejected — Claude Code cancels an in-flight statusline script when a new update
+# arrives and child reaping is undocumented, so a detached refresh could be
+# killed mid-write, for no gain over a cost paid once per session.
+# A failed probe is cached too (as empty): otherwise a CLI without `auth status`
+# would spawn a subprocess on EVERY render instead of one per TTL.
+account=""
+auth_cache_id=$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-')
+if [ -n "$auth_cache_id" ]; then
+    auth_cache_dir="${TMPDIR:-/tmp}/claude-statusline-auth"
+    auth_cache="$auth_cache_dir/$auth_cache_id"
+    if [ -n "$(find "$auth_cache" -mmin -10 2>/dev/null)" ]; then
+        account=$(cat "$auth_cache" 2>/dev/null)
+    elif mkdir -p "$auth_cache_dir" 2>/dev/null; then
+        account=$(auth_label)
+        printf '%s' "$account" > "$auth_cache" 2>/dev/null
+        # Reap abandoned session entries. Only runs on a refresh, never per render.
+        find "$auth_cache_dir" -type f -mmin +1440 -delete 2>/dev/null
+    else
+        account=$(auth_label)
+    fi
 else
-    account_email=$(jq -r '.oauthAccount.emailAddress // empty' /home/node/.claude/.claude.json 2>/dev/null)
-    account="${account_email%%@*}"
+    account=$(auth_label)
 fi
 
 # ── line 1: dir + model + effort ────────────────────────────────────────────────

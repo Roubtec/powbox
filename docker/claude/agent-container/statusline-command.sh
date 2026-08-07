@@ -142,6 +142,15 @@ elif mkdir -p "$auth_cache_dir" 2>/dev/null && touch "$auth_claim" 2>/dev/null; 
     # own. Marking the claim rather than the value file is what keeps the value's
     # mtime honest — touching the value would restart its TTL without refreshing
     # it, so repeated cancellations could serve stale data indefinitely.
+    # Two residuals, both accepted deliberately for a statusline:
+    #   - the claim is advisory, not exclusive. `touch` is not atomic, so truly
+    #     simultaneous cold renders can both claim and both probe (measured: 2 of
+    #     12 got through; 1 of 8 at a realistic render cadence). A lock would cost
+    #     more than the stampede it prevents here.
+    #   - while refreshes keep failing — cancelled, or the dir turned unwritable —
+    #     the last successfully probed value keeps being served past its TTL. That
+    #     is the intended trade: a known-slightly-old account beats a blank one,
+    #     and one completed probe corrects it.
     account=$(auth_label)
     # Braces so the redirect failure itself is silenced: `>file 2>/dev/null` sets
     # up the redirect BEFORE stderr is diverted, so an unwritable cache dir would

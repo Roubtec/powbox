@@ -250,7 +250,7 @@ Agent-specific state volumes remain separate, and both are always mounted regard
 `cc` and `cx` still produce distinct, separately-resumable containers per project — the launcher selects the primary agent via `PRIMARY_AGENT` and keeps the per-agent container-name prefix (`claude-` / `codex-`), so Claude and Codex sessions on the same repo never collide.
 
 Both API keys are always passed through to the container — `OPENAI_API_KEY` for Codex and the optional `ANTHROPIC_API_KEY` for Claude — so that whichever agent is primary, a delegated peer invocation of the other agent can still authenticate.
-Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless); Claude optionally accepts `ANTHROPIC_API_KEY` as a fallback if the OAuth session expires.
+Codex requires `OPENAI_API_KEY` set on the host before launching (interactively or headless); Claude optionally accepts `ANTHROPIC_API_KEY`. Note that the key is not a *standby* credential: Claude Code checks `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` ahead of the stored OAuth login with no fall-through, so a key set on the host is used immediately rather than only once the OAuth session expires — and the session bills to that account. The statusline says `env auth` in place of the account name whenever one of the three is active, so which credential is in play stays visible. The login-first-then-key ordering powbox documents for the headless peer is something `peer-review-run` drives itself with `env -u`; it is not Claude Code's own precedence.
 
 Either agent can be started first in a clean Docker environment.
 

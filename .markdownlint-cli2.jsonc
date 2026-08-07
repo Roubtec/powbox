@@ -1,0 +1,9 @@
+// markdownlint-cli2 reads rule configuration from .markdownlint.jsonc.
+// This file only excludes generated, vendored or container-local content.
+{
+  "ignores": [
+    "**/node_modules/**",
+    ".worktrees/**",
+    ".agent-skills-src/**"
+  ]
+}

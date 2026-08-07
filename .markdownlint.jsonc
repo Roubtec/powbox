@@ -1,0 +1,35 @@
+// House Markdown rules, shared in spirit with the other Roubtec projects
+// (jabko / kalm2 / scribz carry the same rule set). Deviations from those are
+// noted inline; everything else is deliberately identical so the rules do not
+// have to be re-inferred per repo.
+{
+  "default": true,
+
+  // Prose is intentionally unwrapped: one logical paragraph per source line.
+  // AGENTS.md states this as a repo convention, so the default 80-column rule
+  // would fire on essentially every paragraph and drown real findings.
+  "MD013": false,
+
+  // Duplicate headings are acceptable when they occur under different sections.
+  // Task files repeat "Scope", "Status", "Validation" under distinct parents.
+  "MD024": { "siblings_only": true },
+
+  // Ordered list source should reflect its actual sequence — this catches a
+  // real class of edit damage, e.g. two list items both numbered 6.
+  "MD029": { "style": "ordered" },
+
+  // Use fenced code blocks with backticks.
+  "MD046": { "style": "fenced" },
+  "MD048": { "style": "backtick" },
+
+  // Technical documents need punctuation in headings and bare URLs.
+  "MD026": false,
+  "MD034": false,
+
+  // powbox addition: tables are GFM-style — padded content cells over a compact
+  // delimiter row (`| a | b |` over `|---|---|`). Left unset the rule reports 84
+  // findings; "padded" and "consistent" both report zero. "padded" is the pin
+  // because it states the intent, where "consistent" would silently bless
+  // whichever style a future table happens to introduce first.
+  "MD060": { "style": "padded" }
+}

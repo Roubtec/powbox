@@ -48,7 +48,7 @@ Out of scope: loading the rest of Codex user configuration into the peer, weaken
 - Add an additive `reviewFile` field to `powbox.peer-review-run/v1`; for `passed` and `issues`, it is an absolute path inside `artifactDir` to an owner-only UTF-8 plain-text file containing the full provider final review message used for verdict parsing, with provider JSON envelopes decoded and no helper-authored summary substituted for the provider's prose.
 - For `passed` and `issues`, `reviewFile` must be non-null, the file must exist when the result is emitted, and the same semantics must hold for Claude and Codex; other outcomes report `reviewFile:null` unless a future contract explicitly defines usable review prose for them.
 - Callers read the path from the result and must not construct provider-specific paths, inspect `provider.stdout`, know Codex's final-message filename, or parse provider-native JSON.
-- Preserve `artifactDir` unchanged as the audit root containing attempts and provider-native artifacts; the normalized review file is an additional stable consumption surface, not a replacement for diagnostic evidence.
+- Preserve `artifactDir` unchanged as the returned final-attempt directory containing that attempt's provider-native artifacts; earlier retry-attempt directories remain siblings under the existing parent session tree, and the normalized review file inside the returned `artifactDir` is an additional stable consumption surface rather than a replacement for diagnostic evidence.
 
 ## Result reporting and compatibility
 
@@ -56,7 +56,7 @@ Out of scope: loading the rest of Codex user configuration into the peer, weaken
 - For a Codex run whose configured model was resolved and passed with `-m`, return that exact applied value in `model`; continue returning the explicit override when one was supplied.
 - Keep `effort` independent and report the explicitly applied level even when the model came from configuration.
 - Never report a configured model merely because it was present in the file: the field is non-null only when the adapter actually added it to provider argv, profile-selected or degraded resolution reports null, and an unavailable run that never reached the command builder continues to report null strength fields.
-- Preserve existing callers: consumers that ignore unknown result keys keep working, explicit model invocations, Claude invocations, and Codex installations with no usable configured root model retain their current command behavior, and `artifactDir` remains available at the same meaning.
+- Preserve existing callers: consumers that ignore unknown result keys keep working, explicit model invocations, Claude invocations, and Codex installations with no usable configured root model retain their current command behavior, and `artifactDir` remains the returned final-attempt directory.
 
 ## Target files or areas
 
@@ -75,7 +75,7 @@ Out of scope: loading the rest of Codex user configuration into the peer, weaken
 - Preserve precedence: explicit CLI model, then a usable root configured Codex model when no profile is selected, then the bare Codex CLI default with honest warning/null reporting for unsupported or degraded configured selection.
 - Preserve the existing effort floor and validation independently of model resolution; a configured `model_reasoning_effort` must not override the helper's default or caller-selected `--effort`.
 - Keep config lookup outside the reviewed worktree and do not copy the config or its unrelated contents into retained attempt artifacts or diagnostics.
-- Normalize the already-parsed final provider message into an owner-only file in the session artifact tree before constructing the terminal result; do not make the stable payload path an alias for undocumented provider-native files.
+- Normalize the already-parsed final provider message into an owner-only file inside the final attempt's returned `artifactDir` before constructing the terminal result; retain earlier attempts as sibling directories under the existing session parent, and do not make the stable payload path an alias for undocumented provider-native files.
 - Use fixture-only model names in tests so neither implementation nor documentation acquires a dated production model pin.
 
 ## Acceptance criteria
@@ -88,7 +88,7 @@ Out of scope: loading the rest of Codex user configuration into the peer, weaken
 - Tests prove `--ignore-user-config`, rules/hooks isolation, MCP disabling, approvals-off behavior, project-document disabling, read-only sandboxing, and ephemeral execution remain present alongside configured-model passthrough.
 - Claude defaults and explicit model behavior remain unchanged.
 - Every `passed` or `issues` result from either provider has a non-null absolute `.reviewFile` inside `.artifactDir` whose plain-text contents are the complete provider review message used for the verdict; callers can relay it without inspecting native artifacts or parsing provider formats.
-- Non-success outcomes follow the documented null rule, existing `.artifactDir` audit behavior is unchanged, and existing schema-v1 consumers that ignore the additive field remain compatible.
+- Non-success outcomes follow the documented null rule, existing `.artifactDir` final-attempt behavior and sibling retry-attempt retention under the session parent are unchanged, and existing schema-v1 consumers that ignore the additive field remain compatible.
 - The result contract keeps `.model` and `.effort` describing values actually applied rather than merely requested or discovered.
 - No implementation, test, or documentation requires Roubtec/agent-skills to name a dated Codex model ID or to know provider-native result filenames/formats.
 

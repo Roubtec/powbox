@@ -4,7 +4,8 @@
 
 `peer-review-run` reaps a provider's process tree after every attempt, and `reap_tree` can report that a descendant survived SIGKILL.
 Today that survivor only annotates the terminal `reason`: `REAP_WARN=1` is read once at result-emission time and gates nothing.
-Every retry route therefore may start a second provider attempt while a process from the first is known to still be live, which is the one state the helper's own supervision contract says must not happen.
+Every retry route therefore may start a second provider attempt while a process from the first is known to still be live — two peer providers running at once, which the retry's fresh-attempt-directory isolation does nothing to separate.
+The helper's supervision contract does not speak to overlapping attempts; it promises that no live peer process is left behind and that a failed reap is reported honestly. Overlap is a hazard that contract simply does not cover, which is why it needs closing here rather than a violation of something already written down.
 
 Task 029d closes this for the supervised-timeout retry it introduces, and deliberately stops there — it defines terminal semantics, reason normalization, and test coverage for that route only.
 The same hazard remains on the two pre-existing routes that 029d leaves untouched:
@@ -17,10 +18,10 @@ Consolidating the gate across routes is not a mechanical extension of 029d: each
 
 ## Scope
 
-- Make a confirmed reap of the attempt's own process tree a precondition for starting a further attempt on every retry route, not only the supervised-timeout route 029d covers.
-- Define the terminal result for each suppressed route, including which outcome it keeps and what its reason says.
-- Normalize the optimistic per-attempt reason on every route where suppression prevents the retry it promised.
-- Separate attempt-scoped reap failure from the run-global `REAP_WARN` annotation, so a capability-probe survivor never gates an attempt it has nothing to do with.
+- Extend the reap-confirmation precondition to the two remaining retry routes — the non-timeout transient retry and the Claude login-to-env-credential fallback — reusing the attempt-scoped signal and the suppression vocabulary task 029d introduces rather than rebuilding either.
+- Define the terminal result for each newly suppressed route, including which outcome it keeps and what its reason says.
+- Normalize the optimistic per-attempt reason, and the stderr progress event that announces the retry, on every route where suppression prevents the retry they promised.
+- Supersede the two boundary assertions task 029d leaves behind: after this task a non-timeout transient attempt with a survivor no longer retries. The probe-survivor assertion is *not* superseded — a capability-probe survivor must still suppress nothing, on any route.
 - Extend `scripts/test-peer-review-run.sh` with a suppression case per route, and align the helper header, README, and architecture documentation with the consolidated rule.
 
 Out of scope: changing the two-attempt cap, changing which failures are classified transient, changing provider authentication precedence, changing the result schema or outcome vocabulary, re-opening the supervised-timeout suppression that task 029d delivers, and any configured-model or review-payload work from task 029c.
@@ -40,8 +41,17 @@ Out of scope: changing the two-attempt cap, changing which failures are classifi
 - The suppressed result keeps the outcome the completed attempt earned rather than being reclassified: a transient non-timeout failure stays `outcome:failed`, an `unavailable` first attempt stays `outcome:unavailable`, and the supervised-timeout route keeps the `timeout` semantics task 029d defines.
 - Each suppressed result reports `attempts:1` and `retried:false`, and its reason states that the retry or fallback was suppressed because reaping could not confirm the tree was gone, alongside the existing survivor warning.
 - No suppressed result may carry an optimistic "retrying" reason, and none may claim the process group was reaped.
+- The same honesty applies to the streamed channel: the gate sits ahead of the stderr `{"event":"note",…"retrying"}` announcements the helper prints before launching attempt two, so a suppressed run never emits a machine-parseable claim of a retry it will not perform.
 - The Claude fallback case is the one with a real cost: suppressing it turns a run that might have authenticated on the env credential into a terminal `unavailable`. State that trade explicitly in the reason so the caller can distinguish "both credentials failed" from "the fallback was never attempted".
 - The gate reads an attempt-scoped signal. A survivor from the capability help probe annotates the reason as it does today but suppresses nothing, because no provider attempt produced it.
+
+## Implementation notes
+
+- Reuse task 029d's attempt-scoped reap-confirmation flag as-is: it is already set only at the attempt's own post-provider reap sites and cleared in `run_attempt()`'s per-attempt reset block. Do not introduce a second signal, and do not fall back to reading `REAP_WARN`, which is run-global and also raised by the help probe.
+- Keep the gate as one shared decision covering all three routes rather than three copies, so a later route cannot be added without inheriting it.
+- Place the gate ahead of each route's stderr announcement and ahead of the branch that increments the attempt count, so the suppressed result needs no after-the-fact correction of either.
+- Per-route reason normalization is the fiddly part: the transient reason is set optimistically inside `run_attempt()` and corrected only in the retry branches today, so a suppressed route needs its own correction where the retry used to be.
+- Task 029d's non-timeout-transient boundary assertion is expected to fail once this lands; update it in the same commit that changes the behavior rather than leaving a red test, and keep the probe-survivor assertion passing untouched.
 
 ## Target files or areas
 

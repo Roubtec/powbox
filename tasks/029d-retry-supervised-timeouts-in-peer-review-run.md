@@ -27,9 +27,9 @@ Out of scope: changing the default or caller-selected timeout duration, allowing
 
 - Completed task `tasks/done/029-provider-neutral-peer-review-runner.md` defines explicit timeouts as transient and requires retry-once behavior with fresh attempt directories.
 - Deferred task `tasks/deferred/029b-peer-writable-overlay-for-test-execution.md` is a separate execution-surface enhancement and must remain unchanged.
-- Remote branch `origin/report/peer-review-run-codex-model-passthrough` carries task `tasks/029c-preserve-configured-codex-model-in-peer-review-run.md`; that model/prose work is separate from timeout retry behavior and must not be folded into this task.
+- Task `tasks/029c-preserve-configured-codex-model-in-peer-review-run.md` covers configured Codex model passthrough and the provider-neutral review payload; that model/prose work is separate from timeout retry behavior and must not be folded into this task.
 - Powbox issue [#145](https://github.com/Roubtec/powbox/issues/145) is downstream adoption context only; do not mutate it as part of this task.
-- Historical task 029a was re-homed to `Roubtec/agent-skills`, 029b already exists in this repository, and the remote report branch owns 029c, so 029d is the intentional next suffix.
+- Historical task 029a was re-homed to `Roubtec/agent-skills`, 029b already exists in this repository, and 029c lands alongside this task, so 029d is the intentional next suffix.
 - `docker/shared/peer-review-run` documents the transient allowlist in its header and `looks_transient()`, sets per-attempt state in `run_attempt()`, applies Claude authentication fallback and transient retry policy in the main attempt loop, accumulates `TOTAL_ELAPSED`, and emits the final `powbox.peer-review-run/v1` result.
 - `scripts/test-peer-review-run.sh` has existing timeout, process-tree reaping, transient-retry, elapsed-time, attempt-directory, and Claude authentication-fallback coverage that should be extended rather than duplicated in a separate harness.
 - `README.md` “Cross-Agent Delegation” and `docs/architecture.md` “Rules the file map does not state” are the durable public and architectural contracts for the helper.

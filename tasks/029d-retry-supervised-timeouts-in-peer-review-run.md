@@ -7,7 +7,27 @@
 When the poll deadline expires, that path records `ATT_OUTCOME=timeout`, `ATT_EXIT=null`, `ATT_REASON`, and timeout metadata, then returns; the main retry loop therefore emits a one-attempt terminal timeout instead of starting the promised second attempt.
 
 Repeated live Claude-peer runs exposed the mismatch.
-One representative result was `{"schema":"powbox.peer-review-run/v1","provider":"claude","outcome":"timeout","verdict":"none","elapsedSeconds":260.448,"exitStatus":null,"attempts":1,"retried":false,"liveProgress":false,"model":"opus","effort":"medium","artifactDir":"/tmp/peer-035b-r1.rx20ku/prr-c6nN8B2qk4rc/peer-review-claude-TqD4Kl","reason":"provider exceeded the 260s timeout and its process group was reaped"}`; an earlier run reported `elapsedSeconds:260.372` with the same `attempts:1` and `retried:false` mismatch.
+One representative result was:
+
+```json
+{
+  "schema": "powbox.peer-review-run/v1",
+  "provider": "claude",
+  "outcome": "timeout",
+  "verdict": "none",
+  "elapsedSeconds": 260.448,
+  "exitStatus": null,
+  "attempts": 1,
+  "retried": false,
+  "liveProgress": false,
+  "model": "opus",
+  "effort": "medium",
+  "artifactDir": "/tmp/peer-035b-r1.rx20ku/prr-c6nN8B2qk4rc/peer-review-claude-TqD4Kl",
+  "reason": "provider exceeded the 260s timeout and its process group was reaped"
+}
+```
+
+An earlier run reported `elapsedSeconds:260.372` with the same `attempts:1` and `retried:false` mismatch.
 
 Those `/tmp` paths are ephemeral session evidence only.
 The implementation and its acceptance criteria must depend on the helper contract, named symbols, and hermetic tests rather than on the artifacts surviving.
@@ -47,6 +67,11 @@ The outcome vocabulary already defines `timeout` as deadline exhaustion, so pres
 - Every timed-out attempt completes the existing TERM, bounded grace, KILL escalation, confirmation, and wait/cleanup path before another attempt begins or the helper returns.
 No provider leader, in-group descendant, or captured group-escaping descendant may remain live after either attempt.
 - Existing survivor-warning behavior remains honest: if reaping reports a survivor, the terminal reason still carries the warning rather than claiming a clean process-tree reap.
+- A reap confirmation that reports a survivor suppresses the retry: no further attempt may start while a process from the attempt that just ended is known to be live.
+Such a run stays terminal `outcome:timeout`, `verdict:none`, `exitStatus:null`, `attempts:1`, and `retried:false`, with a reason that states the retry was suppressed because reaping could not confirm the tree was gone, alongside the existing survivor warning.
+Launching attempt two on top of a known survivor is the one way timeout retry could put two peer attempts on the machine at once, and it would contradict the no-survivor requirement above while the retry's own fresh-directory isolation does nothing to separate the two live providers.
+- Because a single shared attempt-budget decision governs every retry route, the same suppression applies to the pre-existing non-timeout transient retry and to the Claude env-credential fallback: a confirmed survivor ends the run at the attempt that produced it.
+This tightens a pre-existing gap — today `REAP_WARN` only annotates the reason and never gates the retry — and is in scope precisely because this task is what consolidates that decision.
 
 ## Claude authentication fallback interaction
 
@@ -71,6 +96,9 @@ No provider leader, in-group descendant, or captured group-escaping descendant m
 The first timeout needs to request a retry, while the second timeout needs to retain its `timeout` outcome and replace any optimistic per-attempt reason with a cap-exhausted terminal reason.
 - Avoid special cases that can accidentally create a third attempt.
 One shared attempt-budget decision should govern both the Claude auth fallback and transient retry routes.
+- Gate that shared decision on the reap confirmation as well as on `ATT_TRANSIENT`.
+`reap_tree`'s failure already sets `REAP_WARN=1` at the point the attempt ends, so the budget decision can read it directly; what is missing today is that nothing consults it before starting attempt two.
+Keep the flag's existing reason-annotation behavior intact — suppression is an additional consequence of a survivor, not a replacement for the warning.
 - Preserve the current fresh-directory behavior by invoking `run_attempt 2` normally rather than reusing or clearing the first attempt directory.
 - Preserve `ATT_EXIT=null` for supervised timeouts; the provider was terminated by the helper's deadline, so a synthetic process exit code would be less accurate.
 - Keep `ATT_VERDICT=none` for a terminal timeout, but allow the second attempt's parsed pass or issues verdict to replace the first timeout normally.
@@ -86,6 +114,7 @@ One shared attempt-budget decision should govern both the Claude auth fallback a
 - The timeout-then-recovery and two-timeout cases create two distinct attempt directories, retain both, and return only the second through `artifactDir`.
 - Retried timeout results report total `elapsedSeconds` across both attempts rather than only the final attempt.
 - Each timeout attempt reaps its provider process tree before the next attempt or final return; fixtures cover a provider leader and descendants, including TERM-to-KILL escalation or the existing captured group-escapee path where practical, and assert that no provider process remains live.
+- A fixture whose provider tree survives TERM and KILL on a timed-out first attempt starts no second attempt: the result is `attempts:1`, `retried:false`, terminal `outcome:timeout`, and its reason carries both the suppression statement and the existing survivor warning; the assertion proves no second attempt directory was created rather than only inspecting the final result.
 - A Claude login-unavailable first attempt followed by an env-credential-fallback timeout stops at two attempts and returns terminal `timeout` with `exitStatus:null`, `retried:true`, and a cap-exhausted reason; it never starts a third attempt.
 - A first login-mode timeout does not also trigger env-credential fallback, while existing login-unavailable fallback, missing-binary, deterministic failure, and positively identified non-timeout transient behavior remain unchanged.
 - The helper header, `--help` output, README, and architecture documentation agree with the implemented timeout retry and terminal outcome semantics.
@@ -95,7 +124,7 @@ One shared attempt-budget decision should govern both the Claude auth fallback a
 
 - Run `shellcheck docker/shared/peer-review-run scripts/test-peer-review-run.sh`.
 - Run `shfmt -d docker/shared/peer-review-run scripts/test-peer-review-run.sh` and compare any advisory output with the base branch under the repository's extensionless-helper formatting policy.
-- Run `./scripts/test-peer-review-run.sh` and confirm the targeted timeout cases cover timeout-then-pass, recovered issues normalization, two timeouts, fallback-attempt timeout, fresh attempt directories, total elapsed time, final `artifactDir`, and process-tree reaping.
+- Run `./scripts/test-peer-review-run.sh` and confirm the targeted timeout cases cover timeout-then-pass, recovered issues normalization, two timeouts, fallback-attempt timeout, fresh attempt directories, total elapsed time, final `artifactDir`, process-tree reaping, and the survivor path that suppresses the retry.
 - Run `./scripts/run-pure-shell-tests.sh` to catch interactions with the rest of the native-Linux helper surface.
 - Run `markdownlint-cli2 "**/*.md"` and compare findings with the base branch because this repository documents existing advisory Markdown debt.
 - Because `peer-review-run` is baked agent-image behavior, rebuild the agent image on the host or in CI, relaunch from that image, and perform a live smoke at the timeout boundary; do not treat an in-container source-only run as proof that the installed helper changed.
@@ -104,5 +133,5 @@ One shared attempt-budget decision should govern both the Claude auth fallback a
 ## Review plan
 
 Review the supervised-deadline classification in `run_attempt()`, the shared two-attempt budget, terminal reason normalization, and the final outcome after the second attempt.
-Trace timeout-then-pass, timeout-then-issues, timeout-then-timeout, login-unavailable-then-fallback-timeout, and login-timeout-with-env-credential-present as separate state paths.
+Trace timeout-then-pass, timeout-then-issues, timeout-then-timeout, timeout-with-surviving-descendant, login-unavailable-then-fallback-timeout, and login-timeout-with-env-credential-present as separate state paths.
 Confirm each executed attempt contributes elapsed time exactly once, the second attempt gets a fresh directory, `artifactDir` names that final directory, earlier artifacts remain retained, every process tree is reaped before progress continues, and documentation plus rebuilt-image smoke evidence match the hermetic behavior.

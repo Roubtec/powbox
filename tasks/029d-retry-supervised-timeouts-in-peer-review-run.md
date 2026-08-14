@@ -39,9 +39,10 @@ The implementation and its acceptance criteria must depend on the helper contrac
 - Preserve `timeout` as the terminal outcome when the final allowed attempt also exhausts its supervised deadline.
 - Keep retry attempts isolated in fresh attempt directories while retaining both attempts under the existing per-invocation session directory.
 - Keep total elapsed-time accounting, final-attempt artifact reporting, and process-tree reaping correct across timeout recovery and timeout exhaustion.
+- Make a confirmed reap of the timed-out attempt's own process tree a precondition of that attempt's retry, so the new retry never starts over a provider process known to be live, and keep the resulting terminal reason honest about both the survivor and the un-reaped group.
 - Update the helper header and durable documentation so the documented retry and terminal-timeout semantics agree with implementation and tests.
 
-Out of scope: changing the default or caller-selected timeout duration, allowing more than two total attempts, retrying deterministic or unclassified failures, changing provider authentication precedence, changing the result schema or outcome vocabulary, implementing the writable review overlay from task 029b, implementing configured Codex model or provider-neutral prose work from task 029c, or changing review policy in `Roubtec/agent-skills`.
+Out of scope: changing the default or caller-selected timeout duration, allowing more than two total attempts, retrying deterministic or unclassified failures, changing provider authentication precedence, changing the result schema or outcome vocabulary, gating the pre-existing non-timeout transient retry or the Claude env-credential fallback on reap confirmation (task 029e), implementing the writable review overlay from task 029b, implementing configured Codex model or provider-neutral prose work from task 029c, or changing review policy in `Roubtec/agent-skills`.
 
 ## Context and references
 
@@ -49,7 +50,8 @@ Out of scope: changing the default or caller-selected timeout duration, allowing
 - Deferred task `tasks/deferred/029b-peer-writable-overlay-for-test-execution.md` is a separate execution-surface enhancement and must remain unchanged.
 - Task `tasks/029c-preserve-configured-codex-model-in-peer-review-run.md` covers configured Codex model passthrough and the provider-neutral review payload; that model/prose work is separate from timeout retry behavior and must not be folded into this task.
 - Powbox issue [#145](https://github.com/Roubtec/powbox/issues/145) is downstream adoption context only; do not mutate it as part of this task.
-- Historical task 029a was re-homed to `Roubtec/agent-skills`, 029b already exists in this repository, and 029c lands alongside this task, so 029d is the intentional next suffix.
+- Task `tasks/029e-gate-every-retry-route-on-reap-confirmation.md` generalizes this task's survivor suppression to the pre-existing non-timeout transient retry and the Claude env-credential fallback. It depends on this task landing first, which is what establishes the attempt-scoped reap signal and the suppression vocabulary; do not implement its routes here.
+- Historical task 029a was re-homed to `Roubtec/agent-skills`, 029b already exists in this repository, and 029c lands alongside this task, so 029d is the intentional next suffix and 029e is the follow-up queued behind it.
 - `docker/shared/peer-review-run` documents the transient allowlist in its header and `looks_transient()`, sets per-attempt state in `run_attempt()`, applies Claude authentication fallback and transient retry policy in the main attempt loop, accumulates `TOTAL_ELAPSED`, and emits the final `powbox.peer-review-run/v1` result.
 - `scripts/test-peer-review-run.sh` has existing timeout, process-tree reaping, transient-retry, elapsed-time, attempt-directory, and Claude authentication-fallback coverage that should be extended rather than duplicated in a separate harness.
 - `README.md` “Cross-Agent Delegation” and `docs/architecture.md` “Rules the file map does not state” are the durable public and architectural contracts for the helper.
@@ -65,13 +67,16 @@ The outcome vocabulary already defines `timeout` as deadline exhaustion, so pres
 - `elapsedSeconds` is the accumulated wall time across both attempts, including the first timed-out attempt, the second attempt, and the existing first-attempt capability-probe accounting.
 - `artifactDir` points to the final attempt directory, while the first and second fresh attempt directories both remain retained as siblings under the invocation's session directory according to the current artifact model.
 - Every timed-out attempt completes the existing TERM, bounded grace, KILL escalation, confirmation, and wait/cleanup path before another attempt begins or the helper returns.
-No provider leader, in-group descendant, or captured group-escaping descendant may remain live after either attempt.
+The invariant is that the helper does not continue while a provider process is known to be live: a confirmed reap is the precondition for starting another attempt, and an unconfirmed one is the explicit terminal exception defined below rather than a state the retry may proceed over.
 - Existing survivor-warning behavior remains honest: if reaping reports a survivor, the terminal reason still carries the warning rather than claiming a clean process-tree reap.
-- A reap confirmation that reports a survivor suppresses the retry: no further attempt may start while a process from the attempt that just ended is known to be live.
-Such a run stays terminal `outcome:timeout`, `verdict:none`, `exitStatus:null`, `attempts:1`, and `retried:false`, with a reason that states the retry was suppressed because reaping could not confirm the tree was gone, alongside the existing survivor warning.
-Launching attempt two on top of a known survivor is the one way timeout retry could put two peer attempts on the machine at once, and it would contradict the no-survivor requirement above while the retry's own fresh-directory isolation does nothing to separate the two live providers.
-- Because a single shared attempt-budget decision governs every retry route, the same suppression applies to the pre-existing non-timeout transient retry and to the Claude env-credential fallback: a confirmed survivor ends the run at the attempt that produced it.
-This tightens a pre-existing gap — today `REAP_WARN` only annotates the reason and never gates the retry — and is in scope precisely because this task is what consolidates that decision.
+Today's timeout reason hard-codes "its process group was reaped" and merely appends the survivor warning after it, so the emitted sentence asserts a clean reap and a survivor at once.
+Condition that clause on the attempt's actual reap result instead of annotating around it, so a survivor result never claims the group was reaped.
+- A timed-out attempt whose reap confirmation reports a survivor suppresses this task's retry: attempt two does not start while a process from that timed-out attempt is known to be live.
+Such a run stays terminal `outcome:timeout`, `verdict:none`, `exitStatus:null`, `attempts:1`, and `retried:false`, with a reason that states the retry was suppressed because reaping could not confirm the tree was gone, alongside the existing survivor warning and without the "was reaped" claim.
+Launching attempt two on top of a known survivor is the one way timeout retry could put two peer attempts on the machine at once, and the retry's own fresh-directory isolation does nothing to separate two live providers.
+- That suppression is scoped to the supervised-timeout route this task introduces, and to a survivor reported by the timed-out attempt's own reap.
+The pre-existing non-timeout transient retry and the Claude env-credential fallback keep their current behavior here, unchanged and untouched, so this task adds no gate to a route it defines no terminal semantics or coverage for.
+The same hazard does exist on those routes — `REAP_WARN` annotates the reason and gates nothing — but consolidating the gate across every route needs its own terminal outcomes, reason normalization, and tests; that is `tasks/029e-gate-every-retry-route-on-reap-confirmation.md`, deliberately not folded in here.
 
 ## Claude authentication fallback interaction
 
@@ -96,9 +101,11 @@ This tightens a pre-existing gap — today `REAP_WARN` only annotates the reason
 The first timeout needs to request a retry, while the second timeout needs to retain its `timeout` outcome and replace any optimistic per-attempt reason with a cap-exhausted terminal reason.
 - Avoid special cases that can accidentally create a third attempt.
 One shared attempt-budget decision should govern both the Claude auth fallback and transient retry routes.
-- Gate that shared decision on the reap confirmation as well as on `ATT_TRANSIENT`.
-`reap_tree`'s failure already sets `REAP_WARN=1` at the point the attempt ends, so the budget decision can read it directly; what is missing today is that nothing consults it before starting attempt two.
-Keep the flag's existing reason-annotation behavior intact — suppression is an additional consequence of a survivor, not a replacement for the warning.
+- Gate the timeout retry on the reap confirmation as well as on the attempt's transient classification, and use an **attempt-scoped** signal to do it.
+`REAP_WARN` is the wrong input read directly: it is declared once, is never reset, and is set from three sites — the timeout reap, the normal/failed-exit reap, and the capability help probe, which runs inside attempt one before the provider is launched at all.
+Reading it would suppress the retry over a stray `--help` descendant that has nothing to do with the timed-out provider tree, which is a broader gate than the requirement above states.
+Set a per-attempt reap-confirmation flag beside `REAP_WARN` and clear it in `run_attempt()`'s existing per-attempt reset block alongside `ATT_VERDICT`, `ATT_EXIT`, and `ATT_TRANSIENT`.
+Keep `REAP_WARN`'s existing run-global reason-annotation behavior intact — suppression is an additional consequence of a survivor in this attempt, not a replacement for the warning.
 - Preserve the current fresh-directory behavior by invoking `run_attempt 2` normally rather than reusing or clearing the first attempt directory.
 - Preserve `ATT_EXIT=null` for supervised timeouts; the provider was terminated by the helper's deadline, so a synthetic process exit code would be less accurate.
 - Keep `ATT_VERDICT=none` for a terminal timeout, but allow the second attempt's parsed pass or issues verdict to replace the first timeout normally.
@@ -114,7 +121,11 @@ Keep the flag's existing reason-annotation behavior intact — suppression is an
 - The timeout-then-recovery and two-timeout cases create two distinct attempt directories, retain both, and return only the second through `artifactDir`.
 - Retried timeout results report total `elapsedSeconds` across both attempts rather than only the final attempt.
 - Each timeout attempt reaps its provider process tree before the next attempt or final return; fixtures cover a provider leader and descendants, including TERM-to-KILL escalation or the existing captured group-escapee path where practical, and assert that no provider process remains live.
-- A fixture whose provider tree survives TERM and KILL on a timed-out first attempt starts no second attempt: the result is `attempts:1`, `retried:false`, terminal `outcome:timeout`, and its reason carries both the suppression statement and the existing survivor warning; the assertion proves no second attempt directory was created rather than only inspecting the final result.
+- A timed-out first attempt whose reap confirmation reports a survivor starts no second attempt: the result is `attempts:1`, `retried:false`, terminal `outcome:timeout`, and its reason carries the suppression statement and the existing survivor warning without claiming the group was reaped; the assertion proves no second attempt directory was created rather than only inspecting the final result.
+This case needs a named test-only mechanism for forcing that failed confirmation, and the task is not complete until one is implemented and used.
+A real post-SIGKILL survivor is not constructible from an unprivileged fixture, and `group_alive` deliberately reports zombie and dying states as dead, so the existing suite has no reap-failure case at all — `scripts/test-peer-review-run.sh` only ever asserts the stubborn descendant *is* killed and that `reap_tree` does *not* falsely report a survivor.
+Choose either an env-gated injection point that makes `reap_tree` return failure, or a shim of the liveness probe's `/proc` reads under the harness's existing `PATH="$d/bin:…"` convention; whichever is chosen must be inert in normal operation and must not weaken the genuine reaping assertions that already exist.
+Do not satisfy this criterion by asserting on the reason string alone, and do not drop it as unconstructible.
 - A Claude login-unavailable first attempt followed by an env-credential-fallback timeout stops at two attempts and returns terminal `timeout` with `exitStatus:null`, `retried:true`, and a cap-exhausted reason; it never starts a third attempt.
 - A first login-mode timeout does not also trigger env-credential fallback, while existing login-unavailable fallback, missing-binary, deterministic failure, and positively identified non-timeout transient behavior remain unchanged.
 - The helper header, `--help` output, README, and architecture documentation agree with the implemented timeout retry and terminal outcome semantics.

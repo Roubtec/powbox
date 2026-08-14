@@ -220,7 +220,7 @@ jobs:
       # yq on PATH is the wrong implementation, so a runner-image change that
       # reorders PATH fails legibly rather than as 22 mystery assertion failures.
       # scripts/run-pure-shell-tests.sh auto-discovers every scripts/test-*.sh
-      # source suite except three explicitly routed to Tier 1 because they need
+      # source suite except four explicitly routed to Tier 1 because they need
       # a build-staged helper, a writable /workspace, or PostgreSQL daemons.
       # It runs the independent suites in parallel, captures their logs
       # separately, and prints a loud suite-named heading for every failure.

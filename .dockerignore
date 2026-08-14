@@ -6,13 +6,18 @@ tasks
 .worktrees
 # The agent-skills staging clone (build.sh populates it) holds a whole repo —
 # its own .git, docs, and non-Codex flavor dirs — but the Dockerfile COPYs only
-# two subpaths: .agent-skills-src/codex/dev-skills/skills/ (the Codex skill
-# palette) and .agent-skills-src/plugins/dev-skills/bin/gh-review-threads (the
-# single-source-of-truth review-thread helper). Exclude the entire staging tree
-# and re-include just those, so the rest (notably .git) never enters the build
-# context: smaller context uploads and no unrelated files exposed to a remote
-# builder. Nested re-include under an excluded parent is honored by both BuildKit
-# and buildah/podman.
+# the subpaths re-included below: .agent-skills-src/codex/dev-skills/skills/
+# (the Codex skill palette) plus the single-source-of-truth helpers baked to
+# /usr/local/bin from .agent-skills-src/plugins/dev-skills/bin/ (gh-review-threads,
+# and the disposable-clone pair dc-enter/dc-remove). Exclude the entire staging
+# tree and re-include just those, so the rest (notably .git) never enters the
+# build context: smaller context uploads and no unrelated files exposed to a
+# remote builder. Keep this list in step with the Dockerfile's COPY — a helper
+# baked without its re-include here fails the build on a missing COPY source.
+# Nested re-include under an excluded parent is honored by both BuildKit and
+# buildah/podman.
 .agent-skills-src
 !.agent-skills-src/codex/dev-skills/skills
 !.agent-skills-src/plugins/dev-skills/bin/gh-review-threads
+!.agent-skills-src/plugins/dev-skills/bin/dc-enter
+!.agent-skills-src/plugins/dev-skills/bin/dc-remove

@@ -115,14 +115,18 @@ No image was built.
       Write-Error "agent-skills at $($script:AgentSkillsCommit) has an empty codex/dev-skills/skills/; refusing to build an empty Codex skill bake."
       exit 1
     }
-    # The agent image also bakes gh-review-threads straight from this clone (the
-    # single source of truth - powbox no longer keeps an in-tree copy). The
-    # Dockerfile COPYs exactly this path; a missing file would otherwise fail the
-    # build with a cryptic BuildKit cache-key error, so check it here loudly.
-    $helper = Join-Path $script:AgentSkillsStaging "plugins/dev-skills/bin/gh-review-threads"
-    if (-not (Test-Path $helper -PathType Leaf)) {
-      Write-Error "agent-skills at $($script:AgentSkillsCommit) is missing plugins/dev-skills/bin/gh-review-threads; refusing to build without the baked helper."
-      exit 1
+    # The agent image also bakes these helpers straight from this clone (their
+    # single source of truth - powbox keeps no in-tree copy). The Dockerfile COPYs
+    # exactly these paths; a missing file would otherwise fail the build with a
+    # cryptic BuildKit cache-key error, so check each here loudly and name it.
+    # Presence only, deliberately: Windows carries no exec bit, so the Bash
+    # driver's extra -x check has no counterpart here.
+    foreach ($helperName in @('gh-review-threads', 'dc-enter', 'dc-remove')) {
+      $helper = Join-Path $script:AgentSkillsStaging "plugins/dev-skills/bin/$helperName"
+      if (-not (Test-Path $helper -PathType Leaf)) {
+        Write-Error "agent-skills at $($script:AgentSkillsCommit) is missing plugins/dev-skills/bin/$helperName; refusing to build without the baked helper."
+        exit 1
+      }
     }
     Write-Host "agent-skills at $($script:AgentSkillsCommit)"
   }

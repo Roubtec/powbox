@@ -158,13 +158,30 @@ COPY --chmod=755 \
     docker/shared/wt-remove \
     /usr/local/bin/
 
-# gh-review-threads is NOT kept in-tree: the dev-skills plugin ships the same
-# file to non-powbox users, so agent-skills is its single source of truth and the
-# COPY below takes it from the staging clone that feeds the Codex palette above.
-# Powbox carries exactly one copy, refreshed whenever that clone is re-fetched —
-# which is every agent build, since the builders fetch a moving ref.
-# .dockerignore re-includes just this path from the otherwise-excluded tree.
-COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads /usr/local/bin/
+# The helpers below are NOT kept in-tree: the dev-skills plugin ships the same
+# files to non-powbox users, so agent-skills is their single source of truth and
+# the COPY below takes them from the staging clone that feeds the Codex palette
+# above. Powbox carries exactly one copy of each, refreshed whenever that clone
+# is re-fetched — which is every agent build, since the builders fetch a moving
+# ref. .dockerignore re-includes exactly these paths from the otherwise-excluded
+# tree, and both build drivers refuse to build when one is missing (so a staging
+# snapshot predating a helper fails by name rather than as a cryptic BuildKit
+# cache-key error here).
+#   - gh-review-threads: the concurrency-safe PR review-thread fetcher.
+#   - dc-enter / dc-remove: the disposable-clone pair. Baking them serves the
+#     CODEX flavor, whose palette is seeded from .agent-skills-src/codex/… and
+#     carries no bin/; a Claude container may resolve the plugin's own copy on
+#     PATH first, which tracks the same upstream file and can only be staler,
+#     never divergent. Both halves are baked deliberately: dc-remove is how a
+#     slug is freed, and shipping the creator without the reaper would leave
+#     agents to `rm -rf` the path themselves — the exact class of command the
+#     pair exists to keep them away from.
+# scripts/check-exec-bits.sh has nothing to assert about any of these: they are
+# not tracked in this repo, and --chmod=755 sets the bit at COPY time.
+COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads \
+    .agent-skills-src/plugins/dev-skills/bin/dc-enter \
+    .agent-skills-src/plugins/dev-skills/bin/dc-remove \
+    /usr/local/bin/
 
 # --- Provenance labels -------------------------------------------------------
 # Host-side introspection surface (docker image inspect / docker inspect). The

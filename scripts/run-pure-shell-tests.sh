@@ -11,15 +11,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 #
 # - test-gh-review-threads.sh needs the helper fetched from the separately
 #   versioned agent-skills repository (or its baked /usr/local/bin copy).
+# - test-dc-helpers.sh needs the dc-enter/dc-remove pair from that same
+#   separately versioned repository (or their baked /usr/local/bin copies).
 # - test-pg-dev-up-scoped.sh starts real PostgreSQL daemons and needs the server
 #   binaries baked into the agent image.
 # - test-pnpm-shadow-wrapper.sh must create its fixture below the production
 #   /workspace root, which an arbitrary host checkout does not provide.
 #
-# commands/smoke-test.sh runs all three with the built image. Keep this list in
+# commands/smoke-test.sh runs all four with the built image. Keep this list in
 # step with that routing; everything not listed here is selected by the glob.
 routed_to_tier1=(
 	test-gh-review-threads.sh
+	test-dc-helpers.sh
 	test-pg-dev-up-scoped.sh
 	test-pnpm-shadow-wrapper.sh
 )

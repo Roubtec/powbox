@@ -63,8 +63,8 @@ Out of scope: changing the two-attempt cap, changing which failures are classifi
 
 - A non-timeout transient first attempt whose post-exit reap reports a survivor starts no retry: `attempts:1`, `retried:false`, `outcome:failed`, a reason carrying the suppression statement and the survivor warning, and no second attempt directory.
 - A Claude login-mode `unavailable` first attempt whose reap reports a survivor starts no env-credential fallback: `attempts:1`, `retried:false`, `outcome:unavailable`, and a reason that says the fallback was suppressed rather than that both credentials failed.
-- The supervised-timeout suppression from task 029d still behaves exactly as that task specifies; this task changes none of its assertions.
-- A capability-probe survivor with a healthy provider attempt still retries normally and still carries the survivor warning in the terminal reason, proving the gate is attempt-scoped.
+- The supervised-timeout suppression from task 029d still behaves exactly as that task specifies. The only assertion of 029d's this task changes is its non-timeout-transient boundary case, which the scope section above records as superseded; nothing about the timeout route itself moves.
+- A capability-probe survivor does not suppress anything, proving the gate is attempt-scoped. Assert it on a **retry-eligible** attempt whose own reap succeeded — a supervised timeout, or a non-timeout transient failure — which then proceeds to attempt two normally while the terminal reason still carries the run-global survivor warning. A healthy attempt is no test at all here, since it enters no retry route to be suppressed.
 - No suppressed result anywhere carries an optimistic "retrying" reason or a "was reaped" claim.
 - Existing retry, fallback, deterministic-failure, missing-binary, elapsed-accounting, and artifact-selection behavior is unchanged when reaping succeeds, which is every existing test case.
 

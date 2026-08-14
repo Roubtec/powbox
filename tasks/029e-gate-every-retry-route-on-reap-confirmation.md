@@ -21,7 +21,7 @@ Consolidating the gate across routes is not a mechanical extension of 029d: each
 - Extend the reap-confirmation precondition to the two remaining retry routes — the non-timeout transient retry and the Claude login-to-env-credential fallback — reusing the attempt-scoped signal and the suppression vocabulary task 029d introduces rather than rebuilding either.
 - Define the terminal result for each newly suppressed route, including which outcome it keeps and what its reason says.
 - Normalize the optimistic per-attempt reason, and the stderr progress event that announces the retry, on every route where suppression prevents the retry they promised.
-- Supersede the two boundary assertions task 029d leaves behind: after this task a non-timeout transient attempt with a survivor no longer retries. The probe-survivor assertion is *not* superseded — a capability-probe survivor must still suppress nothing, on any route.
+- Supersede one of the two boundary assertions task 029d leaves behind: after this task a non-timeout transient attempt with a survivor no longer retries. The probe-survivor assertion is *not* superseded — a capability-probe survivor must still suppress nothing, on any route.
 - Extend `scripts/test-peer-review-run.sh` with a suppression case per route, and align the helper header, README, and architecture documentation with the consolidated rule.
 
 Out of scope: changing the two-attempt cap, changing which failures are classified transient, changing provider authentication precedence, changing the result schema or outcome vocabulary, re-opening the supervised-timeout suppression that task 029d delivers, and any configured-model or review-payload work from task 029c.

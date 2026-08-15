@@ -49,7 +49,7 @@ Considered and declined:
 
 ### (c) Share or duplicate — share the Bash, duplicate the host-side assertions
 
-Factor the **Container A additions** into one place both drivers embed. They are already plain Bash in the PowerShell driver too — the `$setupScript = @(` array in `scripts/smoke-test-worktree-metadata.ps1`, handed to `/bin/bash` by that file's Container A `docker run @runArgs … --entrypoint /bin/bash $Image -c $setupScript` call — so a single shared source of that inner script removes the largest drift surface at the lowest cost.
+Factor the **Container A additions** into one place both drivers embed. They were already plain Bash in the PowerShell driver too — before this change, its own inline `$setupScript` array literal in `scripts/smoke-test-worktree-metadata.ps1`, handed to `/bin/bash` by that file's Container A `docker run @runArgs … --entrypoint /bin/bash $Image -c $setupScript` call — so a single shared source of that inner script removes the largest drift surface at the lowest cost.
 Write the ~40 lines of **host-side assertions** natively in each driver instead. Duplicating that much is acceptable; sharing it is what would require a bad mechanism (see below).
 
 Considered and declined:

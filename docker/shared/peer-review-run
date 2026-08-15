@@ -64,6 +64,21 @@
 # these defaults a codex peer ran at `reasoning effort: none`. Both knobs are
 # per-invocation and never write back to the shared configuration.
 #
+# Timeout and retry: an exhausted supervised deadline is a TRANSIENT attempt
+# result, so a first timeout starts the helper's one retry in a fresh attempt
+# directory. Two attempts is the whole budget — the transient retry and the
+# Claude login-to-env-credential fallback are alternative routes through it,
+# never additive — and a final attempt that also exhausts its deadline stays
+# `timeout`: that is the most specific terminal class the vocabulary has for
+# deadline exhaustion, and retry exhaustion is carried by `attempts`, `retried`
+# and `reason` rather than by collapsing it into the generic `failed`. ONE
+# exception suppresses the retry entirely: a timed-out attempt whose own reap
+# could not CONFIRM its process tree was gone returns terminal `timeout` at
+# attempts:1, because launching attempt two beside a provider process known to
+# be live is the single way this retry could put two peer reviews on the machine
+# at once — and the retry's fresh attempt directory isolates artifacts, not
+# processes. The other retry routes are not gated on that confirmation.
+#
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
 #   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
@@ -140,7 +155,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,130p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,145p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -537,6 +552,39 @@ reap_tree() {
 	return 1
 }
 
+# reaped_ok <site> <leader_pid> <pgid|""> — reap_tree, plus the one TEST-ONLY way
+# to make a reap CONFIRMATION report a survivor. <site> names which reap this is
+# — `probe`, `timeout`, or `exit` — and PRR_TEST_REAP_FAIL is a space-separated
+# list of the sites whose confirmation must fail. Nothing in this helper sets that
+# variable, so in normal operation it is unset or empty, matches no site, and
+# leaves this exactly reap_tree. It is read from the environment, not enforced, so
+# a caller CAN set it outside a test — but that direction is fail-closed: the
+# genuine reap still runs and still short-circuits on its own failure, and an
+# overridden verdict only warns and withholds ATT_REAP_CONFIRMED, suppressing a
+# retry rather than permitting one.
+#
+# It exists because the survivor branches are otherwise unreachable from a test:
+# a genuine post-SIGKILL survivor cannot be constructed by an unprivileged
+# fixture, and group_alive deliberately classifies zombie/dying states as dead.
+# Selectable PER SITE rather than per run because the two behaviors that must be
+# told apart differ only in WHICH reap failed — the attempt's own reap suppresses
+# the timeout retry, the capability probe's reap does not.
+#
+# The genuine reap always RUNS first and only its verdict is overridden, so a
+# fixture's descendants are still really signalled and killed under injection and
+# the suite's existing "the descendant is gone" assertions keep their meaning.
+reaped_ok() {
+	local site="$1" rc
+	shift
+	reap_tree "$@"
+	rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	case " ${PRR_TEST_REAP_FAIL:-} " in
+	*" $site "*) return 1 ;;
+	esac
+	return 0
+}
+
 on_exit() {
 	# shellcheck disable=SC2317  # invoked indirectly by the EXIT trap
 	if [ -n "$CURRENT_LEADER" ] && ! reap_tree "$CURRENT_LEADER" "$CURRENT_PGID"; then
@@ -597,9 +645,12 @@ trap 'exit 143' TERM
 # drawn — no real model ID carries a control character, and it keeps "the
 # configured value is passed exactly" true for everything that is passed at all.
 #
-# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: unset in every non-test
-# path, it exists because a single os.read behaves identically to a looped one on
-# an ordinary regular file, so nothing else would ever exercise the loop.
+# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: nothing here sets it, so an
+# ordinary run leaves it unset, and it is read from the environment, not enforced,
+# so a caller CAN export it — which costs nothing, because all it does is shorten
+# the first read and the loop below reassembles the same bytes. It exists because
+# a single os.read behaves identically to a looped one on an ordinary regular
+# file, so nothing else would ever exercise the loop.
 PRR_CONFIG_MODEL_PY='
 import os, stat, sys
 
@@ -705,11 +756,24 @@ sys.exit(0)
 # assertion — exactly the expected bytes passes, anything shorter or a byte more
 # fails, so truncation and overrun are caught by one read.
 #
-# Every PRR_TEST_* name below is a TEST-ONLY injection point, inert in normal
-# operation because each is unset in every non-test path. They exist because the
-# behaviors they drive — a short syscall, a failing or wrong-applying mode set, a
-# silently truncated write, an ambient umask — live INSIDE this invocation, so a
-# PATH shim replacing it would prove nothing about the shipped code.
+# Every PRR_TEST_* name below is a TEST-ONLY injection point. Nothing here sets
+# any of them, so an ordinary run leaves them unset — but they are read from the
+# environment, not enforced, so a caller CAN export one, and unlike the reap hook
+# above they do not share one safety story. SHORT_WRITE and SHORT_READ only split
+# a syscall their own loops reassemble, so those two are inert. UMASK is set and
+# restored inside this `python3 -I` child, around a create the umask(0) below
+# already neutralises, so a well-formed value changes nothing and a non-octal one
+# aborts the writer; TRUNCATE is caught by the read-back and exits 4. Both of
+# those failures reach the caller as exit 70 — a discarded review, never a false
+# `passed`. MODE_FAIL only skips the fchmod, which that same umask(0) create has
+# already satisfied at 0600. MODE_WRONG is the one that costs something: the file
+# really does end up 0644, warned about below, its privacy then resting on the
+# 0700 attempt directory alone.
+#
+# They exist because the behaviors they drive — a short syscall, a failing or
+# wrong-applying mode set, a silently truncated write, an ambient umask — live
+# INSIDE this invocation, so a PATH shim replacing it would prove nothing about
+# the shipped code.
 PRR_WRITE_REVIEW_PY='
 import errno, os, stat, sys
 
@@ -1199,7 +1263,7 @@ provider_supports() {
 			fi
 			sleep 0.1
 		done
-		reap_tree "$probe_child" "$probe_pgid" || {
+		reaped_ok probe "$probe_child" "$probe_pgid" || {
 			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after the help probe"}\n' "$PROVIDER" >&2
 		}
@@ -1667,6 +1731,16 @@ run_attempt() {
 	ATT_VERDICT=none
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
+	# 0 until a reap of THIS attempt's OWN provider tree confirms it is gone;
+	# raised ONLY at the two post-provider reap sites below. Fail-closed by
+	# construction: an attempt that never reached a reap at all has confirmed
+	# nothing, so the flag must not read as confirmation there (the preflight
+	# early return below is such a path today). Attempt-scoped deliberately —
+	# REAP_WARN is run-global, is never reset, and is also raised by the
+	# capability probe, which runs inside attempt one AFTER this reset block, so
+	# gating a retry on it would suppress over a stray `--help` descendant that
+	# has nothing to do with the timed-out provider tree.
+	ATT_REAP_CONFIRMED=0
 	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
 	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
@@ -1813,10 +1887,12 @@ run_attempt() {
 	if [ "$timed_out" = 1 ]; then
 		# Deadline hit while the tree was still running: TERM it, wait a bounded
 		# grace, escalate to KILL for survivors, and confirm nothing remains.
-		reap_tree "$child" "$pgid" || {
+		if reaped_ok timeout "$child" "$pgid"; then
+			ATT_REAP_CONFIRMED=1
+		else
 			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after timeout"}\n' "$PROVIDER" >&2
-		}
+		fi
 		wait "$child" 2>/dev/null || true
 	else
 		# The leader exited on its own (that is why the poll loop ended). Collect
@@ -1824,10 +1900,12 @@ run_attempt() {
 		# failed provider left behind in the group — TERM, grace, KILL, confirm —
 		# so no grandchild outlives the run.
 		if wait "$child"; then rc=0; else rc=$?; fi
-		reap_tree "$child" "$pgid" || {
+		if reaped_ok exit "$child" "$pgid"; then
+			ATT_REAP_CONFIRMED=1
+		else
 			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after exit"}\n' "$PROVIDER" >&2
-		}
+		fi
 	fi
 	CURRENT_LEADER=""
 	CURRENT_PGID=""
@@ -1843,8 +1921,24 @@ run_attempt() {
 
 	if [ "$timed_out" = 1 ]; then
 		ATT_OUTCOME=timeout
+		# Pinned null — already null from the per-attempt reset, restated here
+		# because THIS branch owns that contract: the provider was terminated by
+		# the helper's own deadline, so reporting no exit status is more accurate
+		# than a synthetic one. The redundancy is deliberate; keep it so a future
+		# exit assignment added above this check cannot leak into a timeout.
 		ATT_EXIT=null
-		ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group was reaped"
+		# An exhausted supervised deadline IS transient, and it is classified here
+		# — at the point the outcome is set — rather than left for looks_transient
+		# to recognize in a human-readable reason after the fact.
+		ATT_TRANSIENT=1
+		if [ "$ATT_REAP_CONFIRMED" = 1 ]; then
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group was reaped"
+		else
+			# A survivor and a clean reap cannot both be true. State the un-reaped
+			# group instead of asserting the reap and letting the REAP_WARN
+			# annotation contradict it in the same sentence.
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group could not be confirmed reaped"
+		fi
 		write_meta "$dir" "$attempt_no" "timeout"
 		return 0
 	fi
@@ -1993,6 +2087,19 @@ run_attempt 1
 ATTEMPTS=1
 TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 
+# A supervised timeout whose OWN reap could not confirm the tree was gone
+# suppresses the timeout retry: attempt two would run beside a provider process
+# known to be live, and the retry's fresh attempt directory isolates artifacts,
+# not processes. Decided HERE, ahead of the branch that announces the retry on
+# stderr, so a retry that never happens is never claimed on the streamed channel
+# either. Scoped to the timeout route and to the timed-out attempt's own reap:
+# the pre-existing non-timeout transient retry and the Claude env-credential
+# fallback keep their current behavior, which task 029e revisits.
+TIMEOUT_RETRY_SUPPRESSED=0
+if [ "$ATT_OUTCOME" = timeout ] && [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_REAP_CONFIRMED" = 0 ]; then
+	TIMEOUT_RETRY_SUPPRESSED=1
+fi
+
 if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
 	# The login attempt could not AUTHENTICATE the peer (expired session, or a
 	# session limit) — fall back to the documented env-credential path ONCE, in a
@@ -2011,12 +2118,21 @@ if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOM
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
 		# The env-credential fallback attempt ITSELF failed transiently. The
-		# 2-attempt cap means no further retry, so correct the per-attempt
-		# "…; retrying" reason (run_attempt leaves it optimistic) to reflect that
-		# this was the last try.
-		ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		# 2-attempt cap means no further retry, so correct the per-attempt reason
+		# (run_attempt leaves it optimistic) to reflect that this was the last try.
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the env-credential fallback attempt; attempt cap reached, not retried further"
+		else
+			ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		fi
 	fi
-elif [ "$ATT_TRANSIENT" = 1 ]; then
+elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
+	# Attempt one's class, captured before run_attempt 2 overwrites the ATT_*
+	# state. The two attempts can be DIFFERENT transient classes now that a
+	# deadline is transient too (a reset connection then a slow provider is an
+	# ordinary flaky run), so the terminal reason below must not assert a
+	# first-attempt timeout that never happened.
+	FIRST_ATT_OUTCOME="$ATT_OUTCOME"
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
 	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
 	run_attempt 2
@@ -2024,10 +2140,26 @@ elif [ "$ATT_TRANSIENT" = 1 ]; then
 	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
-		# Both attempts failed transiently → exhausted.
-		ATT_OUTCOME=failed
-		ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			# The last allowed attempt also exhausted its supervised deadline.
+			# `timeout` is the most specific terminal class the outcome vocabulary
+			# has for that, so it is kept rather than collapsed into `failed`; the
+			# exhaustion itself is carried by attempts/retried and this reason. The
+			# wording claims no reap, so a survivor annotation cannot contradict it.
+			if [ "$FIRST_ATT_OUTCOME" = timeout ]; then
+				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on both attempts; timeout retry exhausted, two-attempt cap reached"
+			else
+				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the final attempt after a transient failure; retry exhausted, two-attempt cap reached"
+			fi
+		else
+			# Both attempts failed transiently → exhausted.
+			ATT_OUTCOME=failed
+			ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
+		fi
 	fi
+elif [ "$TIMEOUT_RETRY_SUPPRESSED" = 1 ]; then
+	printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+	ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
 fi
 
 # --- emit the versioned result ----------------------------------------------

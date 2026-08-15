@@ -106,6 +106,21 @@ set -uo pipefail
 #       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
 #       proved by composing the two injections; short write/read syscalls
 #       survived; and a missing python3 caught by the preflight at exit 70
+#  (17) supervised-timeout retry — a deadline is TRANSIENT and starts the one
+#       retry in a fresh attempt dir (timeout-then-pass, timeout-then-issues
+#       through the ordinary final-attempt normalization), two deadlines stay
+#       terminal `timeout` with a cap-exhausted reason and total elapsed time,
+#       both attempt dirs are retained while artifactDir names the final one,
+#       every timed-out attempt's tree is reaped BEFORE the next attempt starts
+#       (asserted by the second attempt, over a TERM-ignoring descendant), the
+#       auth fallback and the timeout retry share ONE two-attempt budget, and a
+#       login-mode timeout does not also switch to the env-credential fallback.
+#       The retry is SUPPRESSED when that attempt's own reap could not confirm
+#       the tree was gone — driven by PRR_TEST_REAP_FAIL, the helper's test-only
+#       per-reap-site confirmation override (a real post-SIGKILL survivor is not
+#       constructible unprivileged), which also pins the two NEGATIVE boundaries
+#       the suppression must not cross: a non-timeout transient survivor still
+#       retries, and a capability-probe survivor suppresses nothing
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -3075,6 +3090,323 @@ assert_eq "16l: forfeited reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewF
 assert_eq "16l: schema is unchanged by the additive field" "$(jqf "$RUN_RESULT" .schema)" "powbox.peer-review-run/v1"
 assert_eq "16l: artifactDir is still the final attempt dir" \
 	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
+
+# ============================================================================
+# (17) supervised-timeout retry — a deadline is transient, retried once, and
+#      suppressed when that attempt's own reap could not confirm the tree
+# ============================================================================
+
+# retained_attempts <artifact-root> — the attempt numbers recorded by every
+# RETAINED attempt dir under the invocation's session dir, sorted and joined.
+# Attempt dirs carry mktemp-random names, so the recorded number in meta.json —
+# not the directory name — is what identifies which attempt a dir belongs to.
+retained_attempts() {
+	find "$1" -type d -name 'peer-review-*' -exec jq -r '.attempt' {}/meta.json \; 2>/dev/null |
+		sort -n | tr '\n' ' ' | sed 's/ $//'
+}
+# attempt_dir_count <artifact-root>
+attempt_dir_count() {
+	find "$1" -type d -name 'peer-review-*' | wc -l | tr -d ' '
+}
+# 17a: attempt one reaches the supervised deadline, attempt two passes. The
+# first attempt leaves a TERM-IGNORING grandchild, so this also proves the
+# deadline's reap completes its KILL escalation BEFORE attempt two starts — the
+# second attempt reports what it observed, rather than the test inspecting only
+# the final state. It classifies by /proc state for the same reason still_live
+# does: a KILLed orphan is a zombie until an init collects it.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+if [ ! -f "$MARK" ]; then
+	: >"$MARK"
+	bash -c 'trap "" TERM; echo $$ >"$STUBBORN_PID"; while :; do sleep 0.2; done' &
+	wait   # hold the deadline open
+fi
+stub="$(cat "$STUBBORN_PID" 2>/dev/null || echo)"
+st=""
+[ -n "$stub" ] && st="$(sed 's/^.*) //' "/proc/$stub/stat" 2>/dev/null | awk '{print $1}')"
+case "${st:-}" in "" | Z | X | x) echo gone >"$PRIOR_STATE" ;; *) echo alive >"$PRIOR_STATE" ;; esac
+printf 'Reviewed it.\nVERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark" STUBBORN_PID="$d/stubborn.pid" PRIOR_STATE="$d/prior.state"
+export MARK STUBBORN_PID PRIOR_STATE
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+assert_eq "17a: timeout then pass → passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "17a: verdict pass" "$(jqf "$RUN_RESULT" .verdict)" pass
+assert_eq "17a: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17a: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "17a: both attempt dirs retained" "$(retained_attempts "$d/artifacts")" "1 2"
+assert_eq "17a: artifactDir is the FINAL attempt dir" \
+	"$(jq -r '.attempt' "$(jqf "$RUN_RESULT" .artifactDir)/meta.json")" 2
+# The timed-out tree — including a descendant only KILL can remove — was gone
+# before attempt two ran a single line.
+assert_eq "17a: the timed-out tree was reaped BEFORE attempt two started" "$(cat "$d/prior.state" 2>/dev/null)" gone
+stub="$(cat "$STUBBORN_PID" 2>/dev/null || echo)"
+checks=$((checks + 1))
+if [ -z "$stub" ] || still_live "$stub"; then
+	fails=$((fails + 1))
+	printf 'FAIL [17a: stubborn descendant KILLed]: pid %s still alive (or unrecorded)\n' "${stub:-<none>}" >&2
+	[ -n "$stub" ] && kill -9 "$stub" 2>/dev/null
+fi
+unset MARK STUBBORN_PID PRIOR_STATE
+
+# 17b: the recovered verdict is normalized by the ORDINARY final-attempt path,
+# not a timeout-specific one — the same fixture shape as 17a returns issues and
+# gets the full issues treatment, reviewFile included.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; sleep 60; fi
+printf 'Found a problem.\nVERDICT: ISSUES\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+assert_eq "17b: timeout then issues → issues" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "17b: verdict issues" "$(jqf "$RUN_RESULT" .verdict)" issues
+assert_eq "17b: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17b: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+# The recovered attempt went through the ordinary reviewFile write, so the
+# normalization path is the shared one rather than a timeout-only branch.
+review="$(jqf "$RUN_RESULT" .reviewFile)"
+assert_file "17b: recovered issues still writes the review file" "$review"
+assert_contains "17b: review file holds the final attempt prose" "$(cat "$review" 2>/dev/null)" "Found a problem."
+unset MARK
+
+# 17c: BOTH attempts exhaust the deadline. The outcome stays the most specific
+# terminal class (`timeout`, never a generic `failed`), the reason states the
+# exhausted cap without promising another try, elapsedSeconds totals both
+# attempts, and each attempt's own process tree was reaped.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+sleep 60 &                       # a grandchild in the provider's own group
+echo $! >>"$SLEEPER_PIDS"        # appended: one line per attempt
+wait
+EOF
+chmod +x "$d/bin/codex"
+SLEEPER_PIDS="$d/sleepers.pids"
+export SLEEPER_PIDS
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+assert_eq "17c: two timeouts stay terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "17c: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "17c: exitStatus null" "$(jqf "$RUN_RESULT" .exitStatus)" null
+assert_eq "17c: attempts 2" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17c: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_contains "17c: reason states the exhausted cap" "$(jqf "$RUN_RESULT" .reason)" "two-attempt cap reached"
+assert_not_contains "17c: reason promises no further retry" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+assert_eq "17c: both attempt dirs retained" "$(retained_attempts "$d/artifacts")" "1 2"
+assert_eq "17c: artifactDir is the FINAL attempt dir" \
+	"$(jq -r '.attempt' "$(jqf "$RUN_RESULT" .artifactDir)/meta.json")" 2
+# Two 1s deadlines, so a value that only reported the final attempt (~1s) fails.
+elapsed="$(jqf "$RUN_RESULT" .elapsedSeconds)"
+checks=$((checks + 1))
+if ! awk -v e="$elapsed" 'BEGIN{exit !(e>=2.0)}'; then
+	fails=$((fails + 1))
+	printf 'FAIL [17c: elapsedSeconds totals both timed-out attempts]: got %s, want >= 2.0\n' "$elapsed" >&2
+fi
+# EVERY timed-out attempt reaped its own tree, not just the final one.
+sleeper_count=0
+while IFS= read -r sp; do
+	[ -n "$sp" ] || continue
+	sleeper_count=$((sleeper_count + 1))
+	checks=$((checks + 1))
+	if still_live "$sp"; then
+		fails=$((fails + 1))
+		printf 'FAIL [17c: attempt sleeper reaped]: pid %s still alive after the run\n' "$sp" >&2
+		kill -9 "$sp" 2>/dev/null || true
+	fi
+done <"$SLEEPER_PIDS"
+assert_eq "17c: both attempts really launched a provider tree" "$sleeper_count" 2
+unset SLEEPER_PIDS
+
+# 17d: a timed-out attempt whose OWN reap confirmation reports a survivor starts
+# NO second attempt — attempt two must never run beside a provider process known
+# to be live. PRR_TEST_REAP_FAIL is the helper's test-only, per-reap-site
+# confirmation override: the genuine reap still runs and still kills the tree, so
+# this forces the survivor branch without weakening any reaping assertion above.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+sleep 60
+EOF
+chmod +x "$d/bin/codex"
+export PRR_TEST_REAP_FAIL=timeout
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+unset PRR_TEST_REAP_FAIL
+assert_eq "17d: survivor keeps the run terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "17d: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "17d: exitStatus null" "$(jqf "$RUN_RESULT" .exitStatus)" null
+assert_eq "17d: no second attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "17d: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+# The strongest form of "no second attempt": no second attempt DIRECTORY exists.
+assert_eq "17d: no second attempt directory was created" "$(attempt_dir_count "$d/artifacts")" 1
+assert_contains "17d: reason states the suppression" "$(jqf "$RUN_RESULT" .reason)" "the timeout retry was suppressed"
+assert_contains "17d: reason keeps the survivor warning" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
+# The reason may not claim a clean reap and a survivor in one sentence.
+assert_not_contains "17d: reason does not claim the group was reaped" "$(jqf "$RUN_RESULT" .reason)" "was reaped"
+assert_contains "17d: stderr announces the suppression" "$RUN_ERR" "timeout retry suppressed"
+assert_not_contains "17d: stderr never announces a retry that will not happen" "$RUN_ERR" "retrying once"
+
+# 17e: NEGATIVE boundary — the suppression is scoped to the timeout route. A
+# pre-existing NON-timeout transient failure whose post-exit reap reports a
+# survivor still retries exactly as it does today. An implementer who gated the
+# shared retry branch wholesale would deliver task 029e's behavior here and fail.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK PRR_TEST_REAP_FAIL=exit
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset MARK PRR_TEST_REAP_FAIL
+assert_eq "17e: non-timeout transient with a survivor still retries" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17e: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "17e: and still recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "17e: a second attempt directory was created" "$(attempt_dir_count "$d/artifacts")" 2
+
+# 17f: NEGATIVE boundary — a CAPABILITY-PROBE survivor suppresses nothing. The
+# probe's reap runs inside attempt one, before the provider is launched at all,
+# so a gate reading the run-global REAP_WARN would suppress the retry over a
+# stray `--help` descendant. The retry must proceed, while the terminal reason
+# still carries the run-global warning.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; sleep 60; fi
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK PRR_TEST_REAP_FAIL=probe
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+unset MARK PRR_TEST_REAP_FAIL
+assert_eq "17f: a probe survivor does not suppress the timeout retry" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17f: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "17f: the retry still recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "17f: the run-global survivor warning is still reported" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
+assert_contains "17f: the probe survivor is announced on stderr" "$RUN_ERR" "survived KILL after the help probe"
+assert_not_contains "17f: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)" "suppressed"
+
+# 17g: the Claude auth fallback and the timeout retry share ONE budget. A
+# login-unavailable first attempt spends attempt two on the env-credential
+# fallback; when THAT attempt times out there is no third try, and the reason
+# names the fallback attempt's timeout instead of an optimistic retry.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+cat >/dev/null
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+	echo "Error: usage limit reached. Please try again later." >&2   # login mode → unavailable
+	exit 1
+fi
+sleep 60   # key mode → the fallback attempt times out
+EOF
+chmod +x "$d/bin/claude"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="key-whose-attempt-times-out"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude 1)
+unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+assert_eq "17g: fallback attempt timeout → terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "17g: exitStatus null" "$(jqf "$RUN_RESULT" .exitStatus)" null
+assert_eq "17g: capped at two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17g: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "17g: never a third attempt directory" "$(attempt_dir_count "$d/artifacts")" 2
+assert_contains "17g: reason names the fallback attempt's timeout" "$(jqf "$RUN_RESULT" .reason)" "env-credential fallback attempt"
+assert_contains "17g: reason reflects the attempt cap" "$(jqf "$RUN_RESULT" .reason)" "attempt cap reached"
+assert_not_contains "17g: reason not left optimistic" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+
+# 17h: a first LOGIN-mode timeout takes the transient-timeout route and spends
+# attempt two in login mode. Timeout is not an `unavailable` authentication
+# result, so it must not also switch to the env-credential fallback — the key
+# stays cleared on BOTH attempts even though one is available.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+printf 'API_KEY=[%s]\n' "${ANTHROPIC_API_KEY-<unset>}" >>"$ENV_LOG"
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; sleep 60; fi
+jq -n '{type:"result",is_error:false,result:"ok.\nVERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"works"}}\n' >"$d/claude-cfg/.credentials.json"
+MARK="$d/mark" ENV_LOG="$d/envlog"
+export MARK ENV_LOG
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="key-that-must-not-be-used"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude 1)
+unset MARK ENV_LOG CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+assert_eq "17h: login-mode timeout recovers on the retry" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "17h: two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17h: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+# Both attempts ran in login mode: neither saw the key.
+assert_eq "17h: the key stayed cleared on BOTH attempts" "$(grep -c 'API_KEY=\[<unset>\]' "$d/envlog")" 2
+assert_not_contains "17h: the key was never used" "$(cat "$d/envlog")" "key-that-must-not-be-used"
+assert_not_contains "17h: no env-credential fallback was announced" "$RUN_ERR" "env-credential fallback"
+
+# 17i: the two attempts are DIFFERENT transient classes. Now that a deadline is
+# transient, a non-timeout transient first attempt can be followed by a
+# timed-out second one — a reset connection then a slow provider, an ordinary
+# flaky run rather than a hand-crafted input. The terminal reason must report
+# the exhausted cap without claiming a first-attempt timeout that never
+# happened.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
+sleep 60   # attempt two exhausts the deadline
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+unset MARK
+assert_eq "17i: transient then timeout stays terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "17i: exitStatus null" "$(jqf "$RUN_RESULT" .exitStatus)" null
+assert_eq "17i: two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17i: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_contains "17i: reason states the exhausted cap" "$(jqf "$RUN_RESULT" .reason)" "two-attempt cap reached"
+assert_contains "17i: reason names the final attempt's deadline" \
+	"$(jqf "$RUN_RESULT" .reason)" "on the final attempt after a transient failure"
+assert_not_contains "17i: reason claims no first-attempt timeout" "$(jqf "$RUN_RESULT" .reason)" "on both attempts"
+assert_not_contains "17i: reason promises no further retry" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

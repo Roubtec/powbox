@@ -30,10 +30,21 @@
 #   --base           optional base/reference metadata (recorded, not injected).
 #   --timeout        wall-clock seconds before the provider tree is reaped
 #                    (default 900).
-#   --model          model the PEER reviews with. Default: `opus` for claude;
-#                    unset for codex, which has no rolling alias to pin to and
-#                    so keeps its CLI default. Passed as `--model` (claude) or
-#                    `-m` (codex).
+#   --model          model the PEER reviews with. Default: `opus` for claude.
+#                    For codex with no --model, the ROOT top-level `model` in
+#                    ${CODEX_HOME:-~/.codex}/config.toml is recovered and passed
+#                    as `-m`, so the container's rolling /model selection
+#                    survives this adapter's own --ignore-user-config — but ONLY
+#                    when no root `profile` and no root `model_provider` is set,
+#                    since either makes that bare name meaningless without the
+#                    configuration this helper deliberately does not forward
+#                    ([profiles.*] and [model_providers.*] are never consulted).
+#                    A missing config, a profile/provider-dependent selection, or
+#                    an unreadable/unparseable/unusable value degrades to the
+#                    bare CLI default with a stderr warning and `model:null` —
+#                    never a failed review. An explicit --model wins and skips
+#                    the lookup entirely. Passed as `--model` (claude) or `-m`
+#                    (codex).
 #   --effort         reasoning effort: low | medium | high | xhigh | max
 #                    (`max` is claude-only). Default: high, for BOTH providers.
 #
@@ -50,7 +61,7 @@
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
 #   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
-#     retried, liveProgress, model, effort, artifactDir, reason }
+#     retried, liveProgress, model, effort, artifactDir, reviewFile, reason }
 #   outcome  ∈ passed | issues | unavailable | timeout | forfeited | failed
 #   verdict  ∈ pass | issues | none   (normalized from the peer's final message)
 #   elapsedSeconds  total wall time across ALL attempts — a retried run reports
@@ -66,9 +77,42 @@
 #               signal that the pin degraded, which no exit status would show.
 #               Additive within schema v1: consumers read keys by name, and
 #               every field the contract already promised is unchanged.
+#   reviewFile  for `passed`/`issues`, the absolute path of
+#               <artifactDir>/review.txt: the peer's FULL final review message as
+#               PLAIN TEXT, provider JSON envelopes already decoded, identical
+#               for both providers. A caller relays the prose from this one path
+#               instead of knowing codex's final-message filename or claude's
+#               JSON shape. null for every other outcome. The guarantee is
+#               "plain text, byte-identical to the parsed message" and no more:
+#               that message reaches the writer through a command substitution,
+#               which drops NUL bytes AND strips trailing newlines, and nothing
+#               here validates UTF-8. The file is created O_CREAT|O_EXCL at 0600
+#               and its bytes are read back and compared before the result is
+#               emitted, so a refused creation or unprovable content EXITS 70
+#               with no result — a completed review CAN be discarded by a
+#               post-review write failure. The mode is defence in depth on top of
+#               the 0700 attempt dir, so a mode problem only WARNS. And the
+#               fail-closed promise is against a STANDING obstacle at that path:
+#               O_EXCL protects the final path component only, and a same-UID
+#               descendant can still swap the path after the helper exits.
+#               <artifactDir> keeps its provider-native artifacts unchanged for
+#               debugging; review.txt is an additional consumption surface, not a
+#               replacement for them.
 # The helper NEVER reports success because an output file is absent or empty.
-# It exits 0 for ANY produced outcome (the outcome is a non-blocking signal for
-# the caller to weigh) and non-zero ONLY for its own usage/operational errors.
+# It exits 0 for any produced outcome (the outcome is a non-blocking signal for
+# the caller to weigh) EXCEPT one whose reviewFile could not be created or
+# verified — that exits 70 and emits NO result, discarding an otherwise complete
+# review rather than reporting one whose prose cannot be trusted — and non-zero
+# otherwise ONLY for its own usage/operational errors.
+#
+# Requires: `jq`, and `python3` — which creates, writes, verifies and modes the
+# reviewFile, making the interpreter a HARD precondition: it is preflighted
+# before any provider is launched and its absence exits 70, because discovering
+# it after a completed review would throw away work nobody can get back. Python 3
+# is baked into the agent image this helper ships in, so this is a documented
+# precondition rather than a live degradation path. Its `tomllib` module is
+# OPTIONAL: an interpreter without it (it arrived in 3.11) degrades codex
+# configured-model passthrough with a warning, exactly like an unparseable config.
 #
 # Progress: while running, `liveProgress:true` providers (Codex, when the
 # installed CLI supports `--json`) stream normalized progress events to STDERR;
@@ -90,7 +134,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,124p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -504,6 +548,238 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# --- embedded python programs -------------------------------------------------
+# Two `python3 -I -c` programs, distinguishable by their FIRST argv element
+# (--prr-config-model / --prr-write-review) so a test shim can replace one
+# without disturbing the other.
+#
+# Both are embedded in SINGLE-QUOTED shell strings and therefore must contain no
+# ASCII single quote anywhere in their source.
+#
+# `-I` is load-bearing, not hygiene. A plain `python3 -c` puts the invocation's
+# working directory at sys.path[0], and this helper is routinely run FROM the
+# checkout under review — so a reviewed branch that adds a `tomllib.py` would
+# execute arbitrary code inside the unsandboxed helper before the peer is ever
+# launched. Isolated mode also ignores PYTHONPATH, PYTHONSTARTUP and the user
+# site directory, closing the same vector through a poisoned `sitecustomize.py`.
+# Dropping `-I` is a silent reintroduction of code execution from the reviewed
+# tree, not a style regression.
+
+# Root configured-model reader for the codex adapter. Exit status is the
+# interface: 0 = the usable model on stdout; 3 = nothing configured, which is the
+# backward-compatible silent case; anything else = degraded, with the reason
+# already written to stderr.
+#
+# The config file is ordinary user state read before any artifact root, session
+# dir or supervised deadline exists, so nothing downstream could interrupt a bad
+# read: a FIFO, or a symlink to an unbounded character device, would turn the
+# documented warn-and-degrade path into a hang or an unbounded allocation. Hence
+# the non-blocking open, the fstat classification on THAT SAME descriptor (a
+# stat-then-open sequence is check-then-act on a path a same-UID process may
+# control), and the read cap. Symlinks are followed as normal — a config.toml
+# symlinked to a regular file is ordinary user state, and the final target's type
+# is what decides.
+#
+# CAP is the largest payload ACCEPTED; the read asks for one sentinel byte past
+# it, so reaching that byte is how over-cap is detected rather than a larger cap.
+# A few hundred KiB is generous for a file whose whole job is a handful of keys.
+#
+# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: unset in every non-test
+# path, it exists because a single os.read behaves identically to a looped one on
+# an ordinary regular file, so nothing else would ever exercise the loop.
+PRR_CONFIG_MODEL_PY='
+import os, stat, sys
+
+CAP = 262144
+path = sys.argv[2]
+
+def degrade(msg):
+    sys.stderr.write("peer-review-run: configured-model passthrough degraded: " + msg + "; running codex at its CLI default (model:null)\n")
+    sys.exit(2)
+
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+except FileNotFoundError:
+    sys.exit(3)
+except OSError as exc:
+    degrade("cannot open " + path + " (" + str(exc.strerror) + ")")
+
+short = os.environ.get("PRR_TEST_CONFIG_SHORT_READ") == "1"
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        degrade(path + " is not a regular file (rejected by type)")
+    buf = b""
+    while len(buf) < CAP + 1:
+        want = CAP + 1 - len(buf)
+        if short:
+            short = False
+            want = 1
+        try:
+            chunk = os.read(fd, want)
+        except OSError as exc:
+            degrade("cannot read " + path + " (" + str(exc.strerror) + ")")
+        if not chunk:
+            break
+        buf += chunk
+finally:
+    os.close(fd)
+
+if len(buf) > CAP:
+    degrade(path + " is larger than the " + str(CAP) + " byte read cap (rejected by size)")
+
+try:
+    import tomllib
+except ImportError:
+    degrade("this python3 has no tomllib (it arrived in 3.11)")
+
+try:
+    cfg = tomllib.loads(buf.decode("utf-8"))
+except Exception as exc:
+    degrade("cannot parse " + path + " as TOML (" + str(exc) + ")")
+
+if not isinstance(cfg, dict):
+    degrade(path + " is not a TOML table")
+if "profile" in cfg or "model_provider" in cfg:
+    degrade("a root profile or model_provider is selected in " + path + ", and a profile- or provider-dependent model cannot be preserved through isolated execution")
+if "model" not in cfg:
+    sys.exit(3)
+chosen = cfg["model"]
+if not isinstance(chosen, str):
+    degrade("the root model in " + path + " is not a string")
+if chosen.strip() == "":
+    degrade("the root model in " + path + " is empty")
+if chosen.startswith("-"):
+    degrade("the root model in " + path + " is flag-shaped (" + chosen + ")")
+sys.stdout.write(chosen)
+sys.exit(0)
+'
+
+# Review-file writer: create, write, mode, verify — all on ONE descriptor, in one
+# invocation. The path arrives in argv, the prose on stdin.
+#
+# One descriptor is what makes the guarantee whole: after the exclusive create
+# nothing is re-resolved by path, so neither the read-back nor the mode set can
+# be steered onto a replica, a FIFO or /dev/null by a live descendant.
+#
+# O_CREAT|O_EXCL, and the two mechanisms that look equivalent are not. `test ! -e`
+# follows symlinks, so a dangling one reads as absent and the write lands on the
+# attacker's target out of tree; shell `noclobber` stats first and adds O_EXCL
+# only when that stat FAILS, so it writes THROUGH an existing non-regular target
+# — silently through a /dev/null symlink, by blocking on a FIFO. Only the atomic
+# pair refuses every shape, symlinks included whatever they point at.
+#
+# The umask is cleared around the create so the mode really is 0600: under a
+# restrictive umask the create could land at 0400/0200/0000, and the
+# warn-and-continue mode rule below would then report `passed` pointing at a file
+# the caller can neither read nor write.
+#
+# Exit convention: NON-ZERO for any failure — refused creation (3), failed write,
+# seek, read, or a content mismatch (4) — EXCEPT the mode set, which warns on
+# stderr and exits 0. The mode is defence in depth over a 0700 directory
+# ensure_private_dir already proved enforces modes; failing over it would discard
+# a completed, already-paid-for review. Content is the opposite case and stays
+# fail-closed, because the full-prose contract is what callers actually consume.
+# The refused-creation diagnostic is deliberately distinguishable from the
+# content one: an exit 70 that arrived by the wrong route must not read as the
+# right one.
+#
+# The read-back is bounded to len(expected)+1 and looped: a regular-file read may
+# legally return short, so a single call would fail closed on a complete file and
+# discard a paid-for review, while an unbounded read-to-EOF would consume every
+# byte an appending survivor writes before noticing. The bound doubles as the
+# assertion — exactly the expected bytes passes, anything shorter or a byte more
+# fails, so truncation and overrun are caught by one read.
+#
+# Every PRR_TEST_* name below is a TEST-ONLY injection point, inert in normal
+# operation because each is unset in every non-test path. They exist because the
+# behaviors they drive — a short syscall, a failing or wrong-applying mode set, a
+# silently truncated write, an ambient umask — live INSIDE this invocation, so a
+# PATH shim replacing it would prove nothing about the shipped code.
+PRR_WRITE_REVIEW_PY='
+import os, stat, sys
+
+path = sys.argv[2]
+data = sys.stdin.buffer.read()
+env = os.environ.get
+
+def fail_create(msg):
+    sys.stderr.write("peer-review-run: refused to create the review file " + path + ": " + msg + "\n")
+    sys.exit(3)
+
+def fail_content(msg):
+    sys.stderr.write("peer-review-run: could not verify the review file contents at " + path + ": " + msg + "\n")
+    sys.exit(4)
+
+def warn(msg):
+    sys.stderr.write("peer-review-run: " + msg + "\n")
+
+injected_umask = env("PRR_TEST_WRITER_UMASK")
+if injected_umask:
+    os.umask(int(injected_umask, 8))
+
+previous_umask = os.umask(0)
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+except OSError as exc:
+    fail_create(str(exc.strerror) + " (the path was already taken)")
+finally:
+    os.umask(previous_umask)
+
+short_write = env("PRR_TEST_WRITER_SHORT_WRITE") == "1"
+short_read = env("PRR_TEST_WRITER_SHORT_READ") == "1"
+
+view = memoryview(data)
+offset = 0
+while offset < len(data):
+    part = view[offset:]
+    if short_write:
+        short_write = False
+        part = view[offset:offset + 1]
+    try:
+        written = os.write(fd, part)
+    except OSError as exc:
+        fail_content("write failed (" + str(exc.strerror) + ")")
+    if written <= 0:
+        fail_content("write made no progress")
+    offset += written
+
+if env("PRR_TEST_WRITER_TRUNCATE") == "1":
+    os.ftruncate(fd, max(0, len(data) - 1))
+
+try:
+    if env("PRR_TEST_WRITER_MODE_FAIL") == "1":
+        raise OSError(1, "injected mode failure")
+    os.fchmod(fd, 0o644 if env("PRR_TEST_WRITER_MODE_WRONG") == "1" else 0o600)
+    applied = stat.S_IMODE(os.fstat(fd).st_mode)
+    if applied != 0o600:
+        warn("the review file " + path + " reads back as mode " + oct(applied) + ", not 0600; continuing, its privacy rests on the 0700 attempt directory")
+except OSError as exc:
+    warn("could not set the review file " + path + " to mode 0600 (" + str(exc.strerror) + "); continuing, its privacy rests on the 0700 attempt directory")
+
+try:
+    os.lseek(fd, 0, os.SEEK_SET)
+except OSError as exc:
+    fail_content("cannot rewind for the read-back (" + str(exc.strerror) + ")")
+
+expected = len(data)
+got = b""
+while len(got) < expected + 1:
+    want = expected + 1 - len(got)
+    if short_read:
+        short_read = False
+        want = 1
+    try:
+        chunk = os.read(fd, want)
+    except OSError as exc:
+        fail_content("read-back failed (" + str(exc.strerror) + ")")
+    if not chunk:
+        break
+    got += chunk
+if got != data:
+    fail_content(str(len(got)) + " bytes read back, " + str(expected) + " written")
+sys.exit(0)
+'
+
 # --- argument parsing --------------------------------------------------------
 PROVIDER=""
 WORKTREE=""
@@ -565,6 +841,16 @@ done
 
 # --- validation --------------------------------------------------------------
 command -v jq >/dev/null 2>&1 || die_usage "jq is required but not on PATH"
+# python3 is a HARD precondition, preflighted here rather than discovered later:
+# every `passed`/`issues` result must carry a verified reviewFile, and finding
+# the interpreter missing AFTER a completed review would throw away work nobody
+# can get back — a run that cannot produce a reviewFile should never have paid a
+# provider. It exits 70 (operational), NOT die_usage's 64: the invocation was
+# well-formed, and this path introduces no new exit-64 case.
+command -v python3 >/dev/null 2>&1 || {
+	echo "peer-review-run: python3 is required but not on PATH (it writes and verifies the result's reviewFile)" >&2
+	exit 70
+}
 
 case "$PROVIDER" in
 claude | codex) ;;
@@ -612,6 +898,36 @@ fi
 case "$MODEL" in
 -*) die_usage "--model must not start with '-' (got '$MODEL')" ;;
 esac
+
+# Codex, and ONLY when the caller named no model: recover the root top-level
+# `model` from $CODEX_HOME/config.toml — the file the container's rolling /model
+# workflow writes — which this adapter's own --ignore-user-config would otherwise
+# discard, leaving the peer on the bare CLI default. Only a ROOT `model` crosses
+# the isolation boundary, and only when NO root `profile` and NO root
+# `model_provider` is selected: either makes the name profile- or
+# provider-dependent, and forwarding it without the configuration that interprets
+# it would silently review with something else. Any explicit provider selection
+# is conservatively provider-dependent even when its value resembles a built-in,
+# so no provider identity is hard-coded as safe.
+#
+# Resolved HERE, in the strength-knob block, before the artifact root, the
+# session dir, the help-probe capture, or any other filesystem side effect —
+# never deferred to build_cmd_codex() — so the degradation warning is on stderr
+# even for a run that later dies creating its artifact root, and so the lookup
+# can never be influenced by the reviewed worktree.
+#
+# The parsed value is data: it rides through the Bash argv array in
+# build_cmd_codex, so whitespace, quotes or shell metacharacters in it can never
+# become shell syntax.
+if [ -z "$MODEL" ] && [ "$PROVIDER" = codex ]; then
+	CODEX_CONFIG_FILE="${CODEX_HOME:-$HOME/.codex}/config.toml"
+	CONFIGURED_MODEL="$(python3 -I -c "$PRR_CONFIG_MODEL_PY" --prr-config-model "$CODEX_CONFIG_FILE" </dev/null)"
+	case "$?" in
+	0) MODEL="$CONFIGURED_MODEL" ;;
+	3) ;; # nothing usable configured — the documented no-`-m`, model:null default
+	*) ;; # degraded; the reader has already named the reason on stderr
+	esac
+fi
 
 # Validate --timeout BEFORE any filesystem side effect (the artifact-root mkdir
 # and session-dir mktemp below): a usage error must exit 64 without littering
@@ -1281,6 +1597,40 @@ detect_verdict() {
 	echo none
 }
 
+# Absolute path of the normalized review file for the CURRENT attempt, or empty
+# when this attempt produced no usable review prose. Reset per attempt so a retry
+# that ends in a non-success outcome can never report the earlier attempt's file.
+REVIEW_FILE=""
+
+# write_review_file <attempt_dir> <parsed_final_message> — normalize the peer's
+# already-parsed final message into <dir>/review.txt, the provider-neutral
+# payload the result points at, and prove the bytes landed. FAIL CLOSED: a caller
+# handed `passed` must never be handed a truncated, empty or absent review, so
+# any writer failure ends the run at 70 with no result rather than reporting one
+# whose prose cannot be trusted. 70 is the helper's operational status — the
+# invocation was well-formed and the filesystem gave out afterwards — so this
+# never routes through die_usage, whose synopsis would reprint the required flags
+# for an invocation that had nothing wrong with it.
+#
+# The prose rides through a PIPE with `printf %s`: a here-string appends a
+# newline and a $( ) capture strips them, either of which would make the writer's
+# byte-equality check pass or fail for reasons unrelated to the code.
+#
+# The status is tested explicitly because the helper runs without `set -e` —
+# nothing else would notice — and the contract's status is 70, not whatever the
+# interpreter happened to return.
+write_review_file() {
+	local dir="$1" text="$2" f rc
+	f="$dir/review.txt"
+	printf '%s' "$text" | python3 -I -c "$PRR_WRITE_REVIEW_PY" --prr-write-review "$f"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		echo "peer-review-run: the review file '$f' could not be produced (writer exit $rc); discarding an otherwise complete review rather than emitting a result that points at unverified prose" >&2
+		exit 70
+	fi
+	REVIEW_FILE="$f"
+}
+
 # --- a single attempt --------------------------------------------------------
 # Sets: ATTEMPT_DIR ATT_OUTCOME ATT_VERDICT ATT_EXIT ATT_ELAPSED ATT_REASON
 #       ATT_TRANSIENT (1 when the failure is retryable)
@@ -1289,6 +1639,7 @@ run_attempt() {
 	ATT_VERDICT=none
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
+	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
 	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
 	# key-fallback keys off this: a missing binary cannot be fixed by switching
@@ -1528,14 +1879,18 @@ run_attempt() {
 	fi
 
 	ATT_VERDICT="$(detect_verdict "$text")"
+	# The review file is written HERE, where the outcome is set, because `text` is
+	# a `local` of this function and is gone by the time run_attempt returns.
 	case "$ATT_VERDICT" in
 	pass)
 		ATT_OUTCOME=passed
 		ATT_REASON="provider exited 0 with an explicit pass verdict"
+		write_review_file "$dir" "$text"
 		;;
 	issues)
 		ATT_OUTCOME=issues
 		ATT_REASON="provider exited 0 and reported an issues verdict"
+		write_review_file "$dir" "$text"
 		;;
 	none)
 		ATT_OUTCOME=forfeited
@@ -1669,6 +2024,10 @@ model_json=null
 [ -n "$EFFECTIVE_MODEL" ] && model_json="$(jq -n --arg m "$EFFECTIVE_MODEL" '$m')"
 effort_json=null
 [ -n "$EFFECTIVE_EFFORT" ] && effort_json="$(jq -n --arg e "$EFFECTIVE_EFFORT" '$e')"
+# Same null discipline for the additive review payload: only a `passed`/`issues`
+# attempt that actually produced and verified the file reports a path.
+review_json=null
+[ -n "$REVIEW_FILE" ] && review_json="$(jq -n --arg r "$REVIEW_FILE" '$r')"
 
 # Emitting this single JSON object IS the helper's contract with the caller — if
 # jq cannot produce it, the run has no parseable result, so fail as an OPERATIONAL
@@ -1688,8 +2047,9 @@ if ! jq -nc \
 	--argjson model "$model_json" \
 	--argjson effort "$effort_json" \
 	--arg artifactDir "$ATTEMPT_DIR" \
+	--argjson reviewFile "$review_json" \
 	--arg reason "$ATT_REASON" \
-	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,model:$model,effort:$effort,artifactDir:$artifactDir,reason:$reason}'; then
+	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,model:$model,effort:$effort,artifactDir:$artifactDir,reviewFile:$reviewFile,reason:$reason}'; then
 	echo "peer-review-run: internal error — could not emit the result JSON" >&2
 	exit 70
 fi

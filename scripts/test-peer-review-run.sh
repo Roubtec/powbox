@@ -32,8 +32,10 @@ set -uo pipefail
 #       in-worktree target, an in-worktree SYMLINK that resolves out (10h), and a
 #       `..`-escaping spelling through such a symlink (10h2)), bad flags exit 64,
 #       0700 attempt dirs, prompt copied into the attempt
-#       dir, an invalid --timeout exits 64 BEFORE the session dir is created (a
-#       usage error never litters the artifact root), the Codex capability probe
+#       dir, `--help` proved to cover the whole header comment and no code (its
+#       line range is hand-maintained, so both edges are derived from the helper
+#       rather than restated), an invalid --timeout exits 64 BEFORE the session
+#       dir is created (a usage error never litters the artifact root), the Codex capability probe
 #       is bounded by --timeout so a hung `codex exec --help` cannot stall past
 #       the deadline (10i), and the Claude peer's login-PRIMARY/key-FALLBACK auth
 #       precedence is driven by the runner: the login wins in one attempt when it
@@ -81,7 +83,29 @@ set -uo pipefail
 #       reaps a probe-spawned in-group stray (supervised probe, group sweep)
 #  (14) strength knobs — per-invocation model/effort pins, their provider-specific
 #       spellings, honest degradation when the CLI lacks --effort, and the usage
-#       rejections that keep a reviewer from being asked for a weak level
+#       rejections that keep a reviewer from being asked for a weak level — or
+#       from being handed an EMPTY --model, which is a usage error rather than
+#       the omission it is otherwise indistinguishable from
+#  (15) configured-model passthrough for codex — a usable root `model` from a
+#       harness-owned $CODEX_HOME survives --ignore-user-config as one -m with
+#       isolation and effort untouched; an explicit --model wins AND provably
+#       bypasses the lookup; a symlinked regular config is accepted while a root
+#       profile/model_provider (rejected on PRESENCE, not truthiness), a damaged
+#       or unusable value, an absent tomllib, a FIFO or /dev/zero config path, and
+#       an over-cap file all degrade with a warning to model:null; the warning is
+#       proved to precede any artifact side effect; parser isolation is proved
+#       against BOTH a shadow tomllib.py in the working directory and a
+#       sitecustomize.py on PYTHONPATH; and the read cap is asserted from both sides
+#  (16) the provider-neutral reviewFile payload — <artifactDir>/review.txt, 0600,
+#       byte-identical to the parsed message for both providers and consumed only
+#       through the result JSON; fail-closed (exit 70, no result) for a failed
+#       writer, a silently truncated write, six pre-created path shapes, and a
+#       path raced into place, each demanding a refused-creation diagnostic that
+#       names the standing obstacle — and a non-EEXIST refusal (an unwritable
+#       attempt dir) proving that claim is dropped where no obstacle stands;
+#       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
+#       proved by composing the two injections; short write/read syscalls
+#       survived; and a missing python3 caught by the preflight at exit 70
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -137,6 +161,31 @@ assert_not_contains() {
 	esac
 }
 
+assert_file() {
+	checks=$((checks + 1))
+	[ -f "$2" ] || {
+		fails=$((fails + 1))
+		printf 'FAIL [%s]: %q is not an existing regular file\n' "$1" "$2" >&2
+	}
+}
+assert_absent() {
+	checks=$((checks + 1))
+	if [ -e "$2" ] || [ -L "$2" ]; then
+		fails=$((fails + 1))
+		printf 'FAIL [%s]: %q exists but must not\n' "$1" "$2" >&2
+	fi
+}
+# Byte-exact comparison. `[ "$(cat a)" = "$(cat b)" ]` strips trailing newlines
+# from BOTH sides, which would hide exactly the trailing-byte truncation the
+# review file's read-back exists to catch.
+assert_same_bytes() {
+	checks=$((checks + 1))
+	cmp -s "$2" "$3" || {
+		fails=$((fails + 1))
+		printf 'FAIL [%s]: %q is not byte-identical to %q\n' "$1" "$3" "$2" >&2
+	}
+}
+
 jqf() { jq -r "$2" <<<"$1"; }
 
 # --- per-case scaffolding ----------------------------------------------------
@@ -146,10 +195,16 @@ jqf() { jq -r "$2" <<<"$1"; }
 # mktemp (not a counter) keeps each case unique even though new_case runs in a
 # command-substitution subshell where a shared counter would never advance in
 # the parent.
+# codex-home/ is a harness-OWNED, empty $CODEX_HOME that run() exports for every
+# case. Without it a Codex case would read the developer's real
+# ~/.codex/config.toml, so whichever model the container's rolling /model
+# workflow last selected would decide what the configured-model assertions (and
+# the pre-existing default/explicit-model ones) see. Cases that test
+# configuration behavior write their own config.toml into this same dir.
 new_case() {
 	local d
 	d="$(mktemp -d "$WORK/case-XXXXXX")"
-	mkdir -p "$d/bin" "$d/wt" "$d/artifacts"
+	mkdir -p "$d/bin" "$d/wt" "$d/artifacts" "$d/codex-home"
 	printf 'Please review the diff and end with a VERDICT line.\n' >"$d/prompt.txt"
 	printf '%s' "$d"
 }
@@ -158,16 +213,37 @@ new_case() {
 # needs (jq/awk/sed/coreutils), but NOT the system claude/codex, so only the
 # fakes this case installs are visible. Sets RUN_OUT/RUN_RC/RUN_ERR/RUN_RESULT
 # (RESULT = the final stdout line, the JSON object).
+#
+# Five optional per-call knobs, all empty by default; a caller sets one
+# immediately before a run and clears it immediately after:
+#   RUN_CWD      working directory for the helper — the parser-isolation cases
+#                need it invoked FROM a directory that plants a shadow module.
+#   RUN_TIMEOUT  an OUTER `timeout`, so a case whose whole point is that the
+#                helper must not block fails an assertion instead of hanging the
+#                whole suite.
+#   RUN_ULIMIT_V address-space cap, so an unbounded read cannot OOM the runner
+#                before that outer timeout fires.
+#   RUN_PATH     replaces the default curated PATH (the python3-preflight case
+#                needs one carrying jq but no interpreter).
 run() {
 	local d="$1"
 	shift
+	local rpath="${RUN_PATH:-$d/bin:/usr/bin:/bin}"
 	# The harness runs under `set -uo pipefail` WITHOUT -e, so a non-zero helper
 	# exit lands in RUN_RC without any errexit toggling. (An earlier version
 	# bracketed this with `set +e` / `set -e`, but that ENABLED errexit globally
 	# from the first run() call onward — the script never turns it on — changing
 	# control flow so an unexpected non-zero status could abort the harness
 	# instead of being recorded as a failed assertion.)
-	RUN_OUT="$(PATH="$d/bin:/usr/bin:/bin" bash "$HELPER" "$@" 2>"$d/err")"
+	RUN_OUT="$( (
+		if [ -n "${RUN_CWD:-}" ]; then cd "$RUN_CWD" || exit 99; fi
+		if [ -n "${RUN_ULIMIT_V:-}" ]; then ulimit -v "$RUN_ULIMIT_V" || exit 99; fi
+		if [ -n "${RUN_TIMEOUT:-}" ]; then
+			PATH="$rpath" CODEX_HOME="$d/codex-home" timeout "$RUN_TIMEOUT" bash "$HELPER" "$@"
+			exit $?
+		fi
+		PATH="$rpath" CODEX_HOME="$d/codex-home" bash "$HELPER" "$@"
+	) 2>"$d/err")"
 	RUN_RC=$?
 	RUN_ERR="$(cat "$d/err" 2>/dev/null || true)"
 	# stdout carries ONLY the final result JSON (progress goes to stderr), so the
@@ -202,6 +278,25 @@ still_live() {
 	"" | Z | X | x) return 1 ;; # gone, or zombie/dead — not a live process
 	*) return 0 ;;
 	esac
+}
+
+# make_codex_fake <case-dir> — a fake `codex` that advertises every isolation
+# flag the adapter probes for, records its argv when ARGV_LOG is set, and returns
+# a passing verdict. Shared by the configured-model and review-file cases so each
+# one adds only the fixture it is actually about.
+make_codex_fake() {
+	cat >"$1/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then
+	echo "options: --json --ignore-user-config --ignore-rules --disable <feature> --ask-for-approval <policy>"
+	exit 0
+fi
+[ -n "${ARGV_LOG:-}" ] && printf '%s\n' "$@" >>"$ARGV_LOG"
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'Fixture review body.\nVERDICT: PASS\n' >"$last"
+EOF
+	chmod +x "$1/bin/codex"
 }
 
 # ============================================================================
@@ -707,6 +802,14 @@ d="$(new_case)"
 run "$d" -h
 assert_eq "10f: -h exit 0" "$RUN_RC" 0
 assert_contains "10f: -h prints usage" "$RUN_OUT" "peer-review-run"
+# The usage body is a hand-maintained sed line range over the header comment, so
+# it rots silently the moment that block grows or shrinks. Both edges are derived
+# from the helper rather than restated here: the LAST header comment line must be
+# in the output (a range left short truncates the usage mid-block) and the first
+# line of code must not be (a range left long spills shell into --help).
+help_last="$(awk '/^set -uo pipefail$/ {exit} {prev = $0} END {sub(/^# ?/, "", prev); print prev}' "$HELPER")"
+assert_contains "10f: -h reaches the last header line" "$RUN_OUT" "$help_last"
+assert_not_contains "10f: -h stops before the code" "$RUN_OUT" "set -uo pipefail"
 
 # 10h: an --artifact-root supplied THROUGH a symlink that LIVES in the worktree is
 # rejected, even though the symlink resolves to an EXTERNAL target (which would
@@ -2103,6 +2206,875 @@ d="$(new_case)"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude) --model --oops
 assert_eq "14g: flag-shaped model exits 64" "$RUN_RC" 64
+
+# An EMPTY --model is the shape an adopter produces by forwarding an unset
+# optional variable, and it must be a usage error rather than an omission: both
+# omission paths are ones the contract says an explicit --model bypasses. For
+# codex that path is the configured-model lookup, so the config here carries a
+# perfectly usable model — a helper that treated the empty value as "no model
+# named" would run happily with THAT one, which the exit 64 is what rules out.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-not-chosen"\n' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --model ""
+assert_eq "14g: empty model exits 64 for codex" "$RUN_RC" 64
+assert_contains "14g: the empty-model rejection explains itself" "$RUN_ERR" "non-empty"
+assert_absent "14g: no provider ran on an empty model" "$d/argv"
+assert_eq "14g: no session dir littered by the empty model" "$(find "$d/artifacts" -mindepth 1 | wc -l)" 0
+unset ARGV_LOG
+
+# For claude the bypassed path is the `opus` default, which is silent and would
+# otherwise make an empty value indistinguishable from omitting the flag.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --model ""
+assert_eq "14g: empty model exits 64 for claude" "$RUN_RC" 64
+
+# ============================================================================
+# (15) configured-model passthrough for codex — the root `model` the container's
+#      rolling /model workflow wrote must survive the adapter's own
+#      --ignore-user-config, but ONLY when the root configuration makes that bare
+#      name meaningful on its own. Every case here runs against the harness-owned
+#      $CODEX_HOME from new_case, replacing its empty default with its own
+#      fixture where configuration is what is under test. Model names are
+#      fixture-only, so neither the helper nor these tests acquire a dated
+#      production pin.
+# ============================================================================
+
+# 15a — a usable root model rides as ONE -m argument, is reported in .model, and
+# changes NOTHING else: effort stays independently pinned and every isolation
+# flag is still there.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --effort xhigh
+assert_eq "15a: review still passes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "15a: configured model rides as one -m argument" "$(cat "$d/argv")" "-m
+fixture-model-alpha"
+assert_eq "15a: exactly one -m" "$(grep -cx -- '-m' "$d/argv")" 1
+assert_eq "15a: result reports the applied model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+assert_eq "15a: effort stays independent of model resolution" "$(jqf "$RUN_RESULT" .effort)" xhigh
+assert_contains "15a: matching effort override passed" "$(cat "$d/argv")" "model_reasoning_effort=xhigh"
+assert_not_contains "15a: no degradation warning for a usable config" "$RUN_ERR" "configured-model passthrough degraded"
+# Isolation is unchanged by passthrough: only the resolved model crosses.
+assert_contains "15a: --ignore-user-config retained" "$(cat "$d/argv")" "--ignore-user-config"
+assert_contains "15a: --ignore-rules retained" "$(cat "$d/argv")" "--ignore-rules"
+assert_contains "15a: hooks disabled" "$(cat "$d/argv")" "--disable
+hooks"
+assert_contains "15a: approvals off by flag" "$(cat "$d/argv")" "--ask-for-approval
+never"
+assert_contains "15a: approvals off by override" "$(cat "$d/argv")" "approval_policy=never"
+assert_contains "15a: mcp disabled" "$(cat "$d/argv")" "mcp_servers={}"
+assert_contains "15a: project docs disabled" "$(cat "$d/argv")" "project_doc_max_bytes=0"
+assert_contains "15a: read-only sandbox" "$(cat "$d/argv")" "--sandbox
+read-only"
+assert_contains "15a: ephemeral execution" "$(cat "$d/argv")" "--ephemeral"
+unset ARGV_LOG
+
+# 15b — an explicit --model wins AND bypasses the lookup entirely. "Bypasses"
+# needs its own observable, because an implementation that parses the config and
+# throws the result away satisfies "wins" perfectly: the config here is malformed
+# TOML, which any lookup would degrade LOUDLY over, so the ABSENCE of that
+# warning is the evidence the lookup never ran.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-from-config"\nthis is not = = toml [[[\n' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --model fixture-model-explicit
+assert_eq "15b: explicit model is reported" "$(jqf "$RUN_RESULT" .model)" fixture-model-explicit
+assert_contains "15b: explicit model rides" "$(cat "$d/argv")" "-m
+fixture-model-explicit"
+assert_eq "15b: exactly one -m" "$(grep -cx -- '-m' "$d/argv")" 1
+assert_not_contains "15b: config model never reaches argv" "$(cat "$d/argv")" "fixture-model-from-config"
+assert_not_contains "15b: broken config is not even looked at" "$RUN_ERR" "configured-model passthrough degraded"
+unset ARGV_LOG
+
+# 15c — a config.toml that is a SYMLINK whose final target is an ordinary regular
+# file is ACCEPTED. Without this positive case the classification rule could be
+# implemented as O_NOFOLLOW or an lstat test, which passes every negative fixture
+# below while rejecting the ordinary symlinked user state the contract requires
+# be followed.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-symlinked"\n' >"$d/real-config.toml"
+ln -s "$d/real-config.toml" "$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15c: symlinked regular config is honored" "$(jqf "$RUN_RESULT" .model)" fixture-model-symlinked
+assert_contains "15c: symlinked model rides" "$(cat "$d/argv")" "-m
+fixture-model-symlinked"
+assert_not_contains "15c: no degradation for a symlinked regular file" "$RUN_ERR" "configured-model passthrough degraded"
+unset ARGV_LOG
+
+# 15d — root `profile` / `model_provider` are rejected on PRESENCE, not
+# truthiness. A naive `if config.get("profile")` forwards the model for every one
+# of these, and no fixture carrying only ordinary non-empty strings would catch
+# it.
+for fixture in 'profile = ""' 'profile = false' 'model_provider = 42'; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf 'model = "fixture-model-must-not-ride"\n%s\n' "$fixture" >"$d/codex-home/config.toml"
+	ARGV_LOG="$d/argv"
+	export ARGV_LOG
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	assert_eq "15d [$fixture]: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+	assert_eq "15d [$fixture]: no -m" "$(grep -cx -- '-m' "$d/argv")" 0
+	assert_eq "15d [$fixture]: model null" "$(jqf "$RUN_RESULT" .model)" null
+	assert_not_contains "15d [$fixture]: model never reaches argv" "$(cat "$d/argv")" "fixture-model-must-not-ride"
+	assert_contains "15d [$fixture]: warns about the profile/provider selection" "$RUN_ERR" "root profile or model_provider is selected"
+	unset ARGV_LOG
+done
+
+# 15e — the backward-compatible unconfigured cases: no config file at all, and a
+# valid config with no root model / profile / model_provider. Both keep today's
+# no-`-m`, model:null behavior, and neither warns about anything.
+d="$(new_case)"
+make_codex_fake "$d"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15e: missing config leaves codex unpinned" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15e: missing config reports model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_not_contains "15e: missing config is silent" "$RUN_ERR" "configured-model passthrough degraded"
+unset ARGV_LOG
+
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'approval_policy = "on-request"\n\n[tui]\nnotifications = true\n' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15e: config without a root model leaves codex unpinned" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15e: config without a root model reports null" "$(jqf "$RUN_RESULT" .model)" null
+assert_not_contains "15e: config without a root model is silent" "$RUN_ERR" "configured-model passthrough degraded"
+unset ARGV_LOG
+
+# 15f — every damaged/unusable root model value degrades HONESTLY: the review
+# still runs, no -m rides, .model is null, and stderr says the passthrough
+# degraded. Resolving configuration never launches the provider to discover
+# anything: the fake records its argv, and there is no probe of the model there.
+prr_bad_configs=(
+	'model = ""'
+	'model = 42'
+	'model = "-fixture-flag-shaped"'
+	'model = "fixture-model-x" [[[ not toml'
+)
+for fixture in "${prr_bad_configs[@]}"; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf '%s\n' "$fixture" >"$d/codex-home/config.toml"
+	ARGV_LOG="$d/argv"
+	export ARGV_LOG
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	assert_eq "15f [$fixture]: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+	assert_eq "15f [$fixture]: no -m" "$(grep -cx -- '-m' "$d/argv")" 0
+	assert_eq "15f [$fixture]: model null" "$(jqf "$RUN_RESULT" .model)" null
+	assert_contains "15f [$fixture]: degradation is announced" "$RUN_ERR" "configured-model passthrough degraded"
+	unset ARGV_LOG
+done
+
+# A root model carrying a NEWLINE degrades rather than riding altered. The
+# reader hands its result back through a Bash command substitution, which strips
+# trailing newlines, so forwarding this value would apply a string the config
+# does not name; rejecting it is what keeps "the configured value is passed
+# exactly" true for every value that is passed at all. printf '%s' writes the
+# TOML escape literally, and tomllib decodes it to a real newline.
+d="$(new_case)"
+make_codex_fake "$d"
+printf '%s\n' 'model = "fixture-model-newline\n"' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15f-newline: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15f-newline: no -m" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15f-newline: model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_not_contains "15f-newline: the value never reaches argv" "$(cat "$d/argv")" "fixture-model-newline"
+assert_contains "15f-newline: the warning names the non-printable character" "$RUN_ERR" "non-printable character"
+unset ARGV_LOG
+
+# An UNREADABLE existing config is the same degraded path. Root ignores mode
+# 0000, so the case is skipped rather than silently asserting nothing there.
+if [ "$(id -u)" -eq 0 ]; then
+	echo "test-peer-review-run: SKIP 15f-unreadable (running as root: mode 0000 does not deny root the read)" >&2
+else
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf 'model = "fixture-model-unreadable"\n' >"$d/codex-home/config.toml"
+	chmod 000 "$d/codex-home/config.toml"
+	ARGV_LOG="$d/argv"
+	export ARGV_LOG
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	assert_eq "15f-unreadable: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+	assert_eq "15f-unreadable: model null" "$(jqf "$RUN_RESULT" .model)" null
+	assert_contains "15f-unreadable: degradation is announced" "$RUN_ERR" "configured-model passthrough degraded"
+	unset ARGV_LOG
+	chmod 600 "$d/codex-home/config.toml"
+fi
+
+# 15g — an interpreter without `tomllib` (it arrived in 3.11) degrades rather
+# than failing the review. The shim MUST discriminate on argv: the harness puts
+# its fakes first on PATH, so a blanket python3 stub would also replace the
+# review-file writer and the case would die at exit 70 with no result to assert
+# on — passing nothing and failing for the wrong reason. So it fails ONLY the
+# parse invocation, and does it by re-running the REAL interpreter on the REAL
+# program with `import tomllib` blocked, which puts the shipped program's
+# ImportError path under test instead of a stub standing in for it.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+	if [ "$a" = "--prr-config-model" ]; then
+		prog="$3"
+		shift 3
+		exec /usr/bin/python3 -I -c '
+import sys, builtins
+real = builtins.__import__
+def blocked(name, *rest, **kw):
+    if name == "tomllib":
+        raise ImportError("tomllib blocked by the test shim")
+    return real(name, *rest, **kw)
+builtins.__import__ = blocked
+src = sys.argv[1]
+sys.argv = [sys.argv[0]] + sys.argv[2:]
+exec(compile(src, "<prr-config-model>", "exec"))
+' "$prog" "$@"
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$d/bin/python3"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15g: review still runs without tomllib" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15g: no -m without tomllib" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15g: model null without tomllib" "$(jqf "$RUN_RESULT" .model)" null
+assert_contains "15g: the missing parser is named" "$RUN_ERR" "no tomllib"
+# The writer invocation was NOT shimmed, so a usable review file still lands —
+# proof the shim discriminated rather than replacing the interpreter wholesale.
+assert_file "15g: review file still produced" "$(jqf "$RUN_RESULT" .reviewFile)"
+unset ARGV_LOG
+
+# 15h — ORDERING: the degradation warning must be emitted BEFORE any artifact or
+# session filesystem side effect. Every other degradation case goes on to create
+# those directories anyway, so none of them can tell a resolution that ran late
+# (inside build_cmd_codex) from one that ran in the strength-knob block. Here the
+# artifact root is under a mode-0500 directory, so the helper dies at its
+# `mkdir -p` — and the warning must ALREADY be on stderr at that point.
+if [ "$(id -u)" -eq 0 ]; then
+	echo "test-peer-review-run: SKIP 15h (running as root: a 0500 directory does not deny root the mkdir)" >&2
+else
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf 'model = "fixture-model-x" [[[ not toml\n' >"$d/codex-home/config.toml"
+	mkdir -p "$d/ro"
+	chmod 0500 "$d/ro"
+	run "$d" --provider codex --worktree "$d/wt" --prompt-file "$d/prompt.txt" \
+		--artifact-root "$d/ro/arts" --timeout 10
+	assert_eq "15h: unwritable artifact root still exits 64" "$RUN_RC" 64
+	assert_contains "15h: the helper died at the artifact root" "$RUN_ERR" "cannot create --artifact-root"
+	assert_contains "15h: degradation warning precedes any artifact side effect" "$RUN_ERR" "configured-model passthrough degraded"
+	chmod 0700 "$d/ro"
+fi
+
+# 15i — an explicit root `model_provider` is conservatively provider-dependent
+# even when a full [model_providers.*] definition exists beside it: nothing from
+# that table may reach provider argv. "Nothing reaches argv" is the black-box
+# observable asserted here; that the parser never INSPECTS or DERIVES from those
+# tables is a diff-review item, not a test assertion.
+d="$(new_case)"
+make_codex_fake "$d"
+cat >"$d/codex-home/config.toml" <<'EOF'
+model = "fixture-model-provider-bound"
+model_provider = "fixturecorp"
+
+[model_providers.fixturecorp]
+name = "Fixture Corp"
+base_url = "https://fixture.invalid/v1"
+env_key = "FIXTURE_CORP_KEY"
+wire_api = "chat"
+
+[profiles.fixtureprofile]
+model = "fixture-model-from-profile"
+EOF
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15i: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15i: no -m for a provider-dependent selection" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15i: model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_contains "15i: warns about the provider selection" "$RUN_ERR" "root profile or model_provider is selected"
+assert_not_contains "15i: root model does not reach argv" "$(cat "$d/argv")" "fixture-model-provider-bound"
+assert_not_contains "15i: provider name does not reach argv" "$(cat "$d/argv")" "fixturecorp"
+assert_not_contains "15i: provider base_url does not reach argv" "$(cat "$d/argv")" "fixture.invalid"
+assert_not_contains "15i: provider env_key does not reach argv" "$(cat "$d/argv")" "FIXTURE_CORP_KEY"
+assert_not_contains "15i: profile model does not reach argv" "$(cat "$d/argv")" "fixture-model-from-profile"
+unset ARGV_LOG
+
+# 15j/15k — a config path that is a FIFO, or a symlink to an unbounded character
+# device, must be REJECTED BY TYPE rather than blocking in open() or allocating
+# forever. Both run under an OUTER timeout so a wrong implementation fails the
+# case instead of hanging the suite; the /dev/zero case additionally runs under a
+# ulimit so an uncapped read cannot OOM the runner before that timeout fires —
+# and because the resulting MemoryError would ALSO degrade to model:null, the
+# warning is required to name a TYPE rejection rather than any failure.
+d="$(new_case)"
+make_codex_fake "$d"
+mkfifo "$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+RUN_TIMEOUT=30
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+RUN_TIMEOUT=""
+assert_eq "15j: a FIFO config does not hang the helper" "$RUN_RC" 0
+assert_eq "15j: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15j: no -m for a FIFO config" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15j: model null for a FIFO config" "$(jqf "$RUN_RESULT" .model)" null
+assert_contains "15j: the FIFO is rejected by TYPE" "$RUN_ERR" "is not a regular file (rejected by type)"
+unset ARGV_LOG
+
+d="$(new_case)"
+make_codex_fake "$d"
+ln -s /dev/zero "$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+RUN_TIMEOUT=30
+RUN_ULIMIT_V=1000000
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+RUN_TIMEOUT=""
+RUN_ULIMIT_V=""
+assert_eq "15k: a /dev/zero config does not hang the helper" "$RUN_RC" 0
+assert_eq "15k: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15k: no -m for a /dev/zero config" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15k: model null for a /dev/zero config" "$(jqf "$RUN_RESULT" .model)" null
+assert_contains "15k: /dev/zero is rejected by TYPE, not by running out of memory" "$RUN_ERR" "is not a regular file (rejected by type)"
+unset ARGV_LOG
+
+# 15l — the read cap is asserted from BOTH sides, because `>=` and `>` are
+# equally easy to write and only one matches the rule. Each fixture is VALID TOML
+# defining a usable root model, padded with a comment line, so a capped and an
+# uncapped implementation disagree on the RESULT rather than merely on timing: an
+# over-cap fixture small enough for a hermetic suite is read to EOF in
+# milliseconds, so an outer timeout would discriminate nothing here.
+PRR_CONFIG_CAP=262144
+make_capped_config() { # <file> <total-bytes> <model>
+	local f="$1" total="$2" model="$3" head_len pad
+	printf 'model = "%s"\n' "$model" >"$f"
+	head_len="$(wc -c <"$f")"
+	pad=$((total - head_len))
+	if [ "$pad" -ge 2 ]; then
+		{
+			printf '#'
+			tr '\0' 'x' </dev/zero 2>/dev/null | head -c "$((pad - 2))"
+			printf '\n'
+		} >>"$f"
+	fi
+}
+
+d="$(new_case)"
+make_codex_fake "$d"
+make_capped_config "$d/codex-home/config.toml" "$PRR_CONFIG_CAP" fixture-model-at-cap
+assert_eq "15l: at-cap fixture is exactly the cap" "$(wc -c <"$d/codex-home/config.toml")" "$PRR_CONFIG_CAP"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15l: a config of exactly the cap is accepted" "$(jqf "$RUN_RESULT" .model)" fixture-model-at-cap
+assert_not_contains "15l: at-cap config does not degrade" "$RUN_ERR" "configured-model passthrough degraded"
+unset ARGV_LOG
+
+d="$(new_case)"
+make_codex_fake "$d"
+make_capped_config "$d/codex-home/config.toml" "$((PRR_CONFIG_CAP + 1))" fixture-model-over-cap
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15l: one byte over the cap degrades" "$(jqf "$RUN_RESULT" .model)" null
+assert_eq "15l: no -m over the cap" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_not_contains "15l: the over-cap model never reaches argv" "$(cat "$d/argv")" "fixture-model-over-cap"
+assert_contains "15l: the rejection names the size cap" "$RUN_ERR" "rejected by size"
+unset ARGV_LOG
+
+# 15m — parser isolation, the half that actually detects something. The helper is
+# invoked FROM a directory holding a shadow `tomllib.py`: without `python3 -I`
+# that directory is sys.path[0] and the shadow executes inside the unsandboxed
+# helper. The shadow writes a marker, so non-execution is proved directly rather
+# than inferred from the resolved model.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+mkdir -p "$d/shadow"
+cat >"$d/shadow/tomllib.py" <<EOF
+open("$d/shadow/SHADOW-EXECUTED", "w").close()
+def loads(text):
+    return {"model": "fixture-model-from-shadow"}
+def load(fp):
+    return {"model": "fixture-model-from-shadow"}
+EOF
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+RUN_CWD="$d/shadow"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+RUN_CWD=""
+assert_absent "15m: the shadow tomllib never executes" "$d/shadow/SHADOW-EXECUTED"
+assert_eq "15m: the real stdlib parser resolved the real model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+assert_not_contains "15m: the shadow model never reaches argv" "$(cat "$d/argv")" "fixture-model-from-shadow"
+unset ARGV_LOG
+
+# 15n — the ambient half of the same isolation: a `sitecustomize.py` on
+# PYTHONPATH must not execute either. This one proves ONLY that half and cannot
+# stand in for 15m: a sitecustomize.py sitting in the working directory is inert
+# with or without the isolation flag, so it detects nothing on its own.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+mkdir -p "$d/pypath"
+cat >"$d/pypath/sitecustomize.py" <<EOF
+open("$d/pypath/SITECUSTOMIZE-EXECUTED", "w").close()
+EOF
+PYTHONPATH="$d/pypath"
+export PYTHONPATH
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PYTHONPATH
+assert_absent "15n: sitecustomize.py on PYTHONPATH never executes" "$d/pypath/SITECUSTOMIZE-EXECUTED"
+assert_eq "15n: configured model still resolves" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+
+# 15o — a legal SHORT read on the config descriptor is survived. A single os.read
+# behaves identically to a looped one on an ordinary regular file, so without this
+# injection the read loop is decoration that every other fixture passes anyway.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-alpha"\n\n[tui]\nnotifications = true\n' >"$d/codex-home/config.toml"
+PRR_TEST_CONFIG_SHORT_READ=1
+export PRR_TEST_CONFIG_SHORT_READ
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_CONFIG_SHORT_READ
+assert_eq "15o: a short config read still resolves the model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+assert_eq "15o: and the run completes normally" "$(jqf "$RUN_RESULT" .outcome)" passed
+
+# ============================================================================
+# (16) the provider-neutral review payload — `reviewFile`. Every assertion here
+#      is written the way a real CALLER would consume it: from the result JSON
+#      only. No test below opens provider.stdout, constructs a provider-native
+#      final-message filename, or parses a provider-native envelope.
+# ============================================================================
+
+# 16a/16b — both providers expose the SAME thing at the SAME place: an absolute
+# <artifactDir>/review.txt, 0600, containing the complete final review message.
+#
+# The expected bytes are the POST-command-substitution value. The parsed message
+# reaches the writer through a Bash `$( )`, which strips trailing newlines, so a
+# fixture comparing the review file against the provider's own last-message
+# artifact — which still carries its newline — would fail against a CORRECT
+# implementation. The comparison is byte-exact (`cmp`) for the same reason.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'First line of the codex review.\n\nA third line, after a blank one.\nVERDICT: PASS\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+ad="$(jqf "$RUN_RESULT" .artifactDir)"
+assert_eq "16a: outcome passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "16a: reviewFile is <artifactDir>/review.txt" "$rf" "$ad/review.txt"
+assert_eq "16a: reviewFile is absolute" "${rf:0:1}" "/"
+assert_file "16a: reviewFile exists when the result is emitted" "$rf"
+assert_eq "16a: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+printf 'First line of the codex review.\n\nA third line, after a blank one.\nVERDICT: PASS' >"$d/expected"
+assert_same_bytes "16a: reviewFile holds the full codex review prose" "$d/expected" "$rf"
+
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+cat >/dev/null
+jq -n '{type:"result",is_error:false,result:"First line of the claude review.\n\nA third line, after a blank one.\nVERDICT: ISSUES"}'
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+ad="$(jqf "$RUN_RESULT" .artifactDir)"
+assert_eq "16b: outcome issues" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "16b: reviewFile is <artifactDir>/review.txt" "$rf" "$ad/review.txt"
+assert_file "16b: reviewFile exists for an issues verdict too" "$rf"
+assert_eq "16b: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+# The JSON envelope is DECODED: the caller gets prose, not provider-native JSON.
+printf 'First line of the claude review.\n\nA third line, after a blank one.\nVERDICT: ISSUES' >"$d/expected"
+assert_same_bytes "16b: reviewFile holds the decoded claude review prose" "$d/expected" "$rf"
+assert_not_contains "16b: no JSON envelope leaks into the payload" "$(cat "$rf")" '"is_error"'
+
+# 16c — a writer invocation that fails OUTRIGHT is fail-closed: exit 70 and NO
+# result, so an empty or absent reviewFile can never ship inside a successful
+# one. Driven by an argv-discriminating python3 shim with no production hook,
+# which is enough for this case precisely because the failure is external to the
+# writer program.
+d="$(new_case)"
+make_codex_fake "$d"
+cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		echo "injected writer failure" >&2
+		exit 9
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$d/bin/python3"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16c: a failed writer exits 70" "$RUN_RC" 70
+assert_eq "16c: and emits no result JSON" "$RUN_OUT" ""
+assert_contains "16c: the discarded review is announced" "$RUN_ERR" "could not be produced"
+
+# 16d — a write that reports SUCCESS but silently truncates must fail the same
+# way. This is what proves the content read-back exists at all: a status-only
+# implementation passes 16c and fails here. It cannot be driven by a shim,
+# because the read-back lives INSIDE the very invocation a shim would replace —
+# hence an env-gated injection point inside the writer program itself.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_TRUNCATE=1
+export PRR_TEST_WRITER_TRUNCATE
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_TRUNCATE
+assert_eq "16d: a truncated write exits 70" "$RUN_RC" 70
+assert_eq "16d: and emits no result JSON" "$RUN_OUT" ""
+assert_contains "16d: the diagnostic names unprovable content" "$RUN_ERR" "could not verify the review file contents"
+assert_not_contains "16d: and is NOT a refused creation" "$RUN_ERR" "refused to create the review file"
+
+# 16e/16f — the mode is warn-and-continue, not a fourth fail-closed case. Both
+# viable injections are exercised: one that FAILS the mode set outright, and one
+# that succeeds while applying a DIFFERENT mode (putting the fstat-mismatch
+# branch under test). A merely SKIPPED mode set is not among them: with the umask
+# cleared the create already yields 0600, so nothing would mismatch and only a
+# buggy implementation could satisfy a warning assertion. The mode is set with
+# fchmod on the writer's own descriptor, so a PATH shim cannot reach it — and an
+# external chmod shim would trip ensure_private_dir on the session dir first and
+# exit 64 there, which is that function's behavior and not this path's.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_MODE_FAIL=1
+export PRR_TEST_WRITER_MODE_FAIL
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_MODE_FAIL
+assert_eq "16e: a failed mode set does not abort the review" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "16e: helper still exits 0" "$RUN_RC" 0
+assert_contains "16e: the mode failure is warned about" "$RUN_ERR" "could not set the review file"
+assert_file "16e: the reviewFile is still usable" "$(jqf "$RUN_RESULT" .reviewFile)"
+
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_MODE_WRONG=1
+export PRR_TEST_WRITER_MODE_WRONG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_MODE_WRONG
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+assert_eq "16f: a wrong applied mode does not abort the review" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "16f: the mode mismatch is warned about" "$RUN_ERR" "reads back as mode"
+assert_eq "16f: the mismatch really is the injected mode" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 644
+assert_file "16f: the reviewFile is still usable" "$rf"
+
+# 16g — the created mode must not depend on the ambient umask. The umask is
+# applied as a further injection INSIDE the writer program (its own process, so
+# the helper's artifact writes are untouched) and COMPOSED with the failing mode
+# injection above. The composition is the whole criterion: an unconditional
+# fchmod to 0600 succeeds on a file you own whatever its current mode, so on its
+# own the umask case ends at 0600 under every mask and cannot fail. Composed, a
+# correct writer clears the injected 0200 and lands 0600; one that does not lands
+# 0400 — an unwritable payload behind a successful result — and fails here.
+# An AMBIENT umask on the helper invocation is not a substitute: every owner-bit
+# mask that would change the create mode also kills the run long before the
+# review file exists, and every mask under which the run reaches `passed` leaves
+# the create at 0600 and discriminates nothing.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_UMASK=200
+PRR_TEST_WRITER_MODE_FAIL=1
+export PRR_TEST_WRITER_UMASK PRR_TEST_WRITER_MODE_FAIL
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_UMASK PRR_TEST_WRITER_MODE_FAIL
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+assert_eq "16g: the run still completes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "16g: with the mode warning" "$RUN_ERR" "could not set the review file"
+assert_eq "16g: the create ignored the ambient umask" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+checks=$((checks + 1))
+if [ ! -r "$rf" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [16g: the reviewFile must be readable by its own caller]\n' >&2
+fi
+
+# 16h — a peer that PRE-CREATES the review path is refused rather than written
+# through. Six shapes; what each is worth depends on whether writing through it
+# is OBSERVABLE, so the observable is named per shape rather than resting on a
+# bare exit 70 (which every shape produces anyway — a writer that follows an
+# obstacle then fails its own read-back and exits 70 too). Hence the requirement
+# that the diagnostic name a REFUSED CREATION: it is what stops a fixture passing
+# on an exit 70 that arrived by the wrong route.
+#   regular / directory / symlink-to-a-regular-file-outside — refused by all
+#     three candidate mechanisms, so coverage only (the symlink one still gets a
+#     target assertion, which costs a line and catches a writer that follows it).
+#   symlink-dangling — the discriminator against `test ! -e`, which reports it
+#     ABSENT. Observable: the out-of-tree target would be created.
+#   symlink-fifo, read end deliberately closed — the discriminator against shell
+#     `noclobber`, which stats first and so writes THROUGH it, blocking in open().
+#     Observable: the helper never returns. Attaching a reader would let the small
+#     prose fit the pipe buffer and destroy that discriminator, so nothing is
+#     asserted about the FIFO's contents.
+#   symlink-devnull — coverage, not a discriminator: writing through it leaves
+#     nothing to inspect and still ends at exit 70 via the read-back.
+make_precreate_fake() {
+	cat >"$1/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+target="$(dirname "$last")/review.txt"
+case "$PRECREATE_SHAPE" in
+regular) printf 'squatter contents\n' >"$target" ;;
+directory) mkdir "$target" ;;
+symlink-devnull) ln -s /dev/null "$target" ;;
+*) ln -s "$PRECREATE_TARGET" "$target" ;;
+esac
+printf 'Precreated fixture review.\nVERDICT: PASS\n' >"$last"
+EOF
+	chmod +x "$1/bin/codex"
+}
+
+for shape in regular directory symlink-outside symlink-dangling symlink-fifo symlink-devnull; do
+	d="$(new_case)"
+	make_precreate_fake "$d"
+	PRECREATE_SHAPE="$shape"
+	PRECREATE_TARGET="$d/outside-target"
+	case "$shape" in
+	symlink-outside)
+		printf 'untouched target contents\n' >"$PRECREATE_TARGET"
+		printf 'untouched target contents\n' >"$d/expected-outside"
+		;;
+	symlink-fifo) mkfifo "$PRECREATE_TARGET" ;;
+	esac
+	export PRECREATE_SHAPE PRECREATE_TARGET
+	if [ "$shape" = symlink-fifo ]; then RUN_TIMEOUT=30; fi
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	RUN_TIMEOUT=""
+	assert_eq "16h [$shape]: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16h [$shape]: no result JSON" "$RUN_OUT" ""
+	assert_contains "16h [$shape]: the diagnostic names a refused creation" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16h [$shape]: and not unprovable content" "$RUN_ERR" "could not verify the review file contents"
+	assert_contains "16h [$shape]: the standing obstacle is named" "$RUN_ERR" "the path was already taken"
+	case "$shape" in
+	symlink-outside) assert_same_bytes "16h [$shape]: the link target is untouched" "$d/expected-outside" "$PRECREATE_TARGET" ;;
+	symlink-dangling) assert_absent "16h [$shape]: the dangling target is never created" "$PRECREATE_TARGET" ;;
+	esac
+	unset PRECREATE_SHAPE PRECREATE_TARGET
+done
+
+# 16h2 — a refusal that is NOT a standing obstacle must not CLAIM one. Every 16h
+# shape fails EEXIST, so the suffix asserted there is true for all six and a
+# diagnostic that appends it unconditionally passes every one of them; only a
+# non-EEXIST refusal tells the two apart. An argv-discriminating python3 shim
+# drops the write bit on the attempt directory and then execs the REAL
+# interpreter, so the O_CREAT|O_EXCL open fails EACCES with the path itself
+# genuinely free. The refusal must still be announced and must still read as a
+# refused creation rather than unprovable content — but a reader told the path
+# was taken goes hunting for a file that is not there while the real fault is
+# the directory.
+if [ "$(id -u)" -eq 0 ]; then
+	echo "test-peer-review-run: SKIP 16h2 (running as root: a 0500 directory does not deny root the create)" >&2
+else
+	d="$(new_case)"
+	make_codex_fake "$d"
+	cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# The helper's writer argv is: -I -c <program> --prr-write-review <path>
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		chmod 0500 "$(dirname "$5")" 2>/dev/null
+		break
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+	chmod +x "$d/bin/python3"
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	chmod -R u+rwX "$d/artifacts"
+	assert_eq "16h2: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16h2: no result JSON" "$RUN_OUT" ""
+	assert_contains "16h2: still a refused creation" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16h2: and not unprovable content" "$RUN_ERR" "could not verify the review file contents"
+	assert_not_contains "16h2: no occupant claimed for a non-EEXIST refusal" "$RUN_ERR" "the path was already taken"
+fi
+
+# 16i — the RACE dimension the pre-created shapes cannot reach: they are all
+# planted before the helper looks, so they only catch a mechanism weak against a
+# STANDING obstacle. Here an argv-discriminating python3 shim plants the review
+# path as a symlink and then execs the REAL interpreter with the same argv — after
+# any shell-side precheck, before the real open. A shell-side
+# `[ ! -e "$f" ] && python3 …` writes THROUGH a /dev/null symlink, fails its own
+# read-back, and exits 70 with the CONTENT diagnostic; an O_CREAT|O_EXCL create
+# fails EEXIST. So the refused-creation diagnostic is the assertion that bites,
+# and an implementation that never invokes python3 fails for want of the exit —
+# there is no vacuous pass.
+#
+# What this case does NOT prove: the shim plants before the writer program starts,
+# so a check-then-act INSIDE that program would see the obstacle at its own check
+# and refuse, passing here without ever using O_EXCL. That shape is caught by the
+# pre-created DANGLING symlink above, which os.path.exists() reports as absent
+# exactly as `[ -e ]` does. A genuine in-program window is closed by requiring
+# O_CREAT|O_EXCL and reviewing the diff for it, not by any black-box fixture.
+make_race_shim() {
+	cat >"$1/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# The helper's writer argv is: -I -c <program> --prr-write-review <path>
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		ln -s "$RACE_TARGET" "$5" 2>/dev/null
+		break
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+	chmod +x "$1/bin/python3"
+}
+
+for variant in devnull regular fifo; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	make_race_shim "$d"
+	case "$variant" in
+	devnull) RACE_TARGET=/dev/null ;;
+	regular)
+		RACE_TARGET="$d/race-target"
+		printf 'untouched race target\n' >"$RACE_TARGET"
+		printf 'untouched race target\n' >"$d/expected-race"
+		;;
+	fifo)
+		RACE_TARGET="$d/race-fifo"
+		mkfifo "$RACE_TARGET"
+		;;
+	esac
+	export RACE_TARGET
+	if [ "$variant" = fifo ]; then RUN_TIMEOUT=30; fi
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	RUN_TIMEOUT=""
+	assert_eq "16i [$variant]: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16i [$variant]: no result JSON" "$RUN_OUT" ""
+	assert_contains "16i [$variant]: refused-creation diagnostic" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16i [$variant]: not a content failure" "$RUN_ERR" "could not verify the review file contents"
+	if [ "$variant" = regular ]; then
+		assert_same_bytes "16i [$variant]: the raced target is untouched" "$d/expected-race" "$RACE_TARGET"
+	fi
+	unset RACE_TARGET
+done
+
+# 16j — legal SHORT syscalls inside the writer are survived. A single os.write
+# and a single os.read behave identically to looped ones on ordinary regular
+# files, so without these injections every other fixture here passes and the
+# looping requirements are decoration.
+for injection in PRR_TEST_WRITER_SHORT_WRITE PRR_TEST_WRITER_SHORT_READ; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+	export "$injection=1"
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	unset "$injection"
+	rf="$(jqf "$RUN_RESULT" .reviewFile)"
+	assert_eq "16j [$injection]: the run completes normally" "$(jqf "$RUN_RESULT" .outcome)" passed
+	assert_eq "16j [$injection]: with the expected model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+	assert_file "16j [$injection]: the reviewFile exists" "$rf"
+	printf 'Fixture review body.\nVERDICT: PASS' >"$d/expected"
+	assert_same_bytes "16j [$injection]: content is exact" "$d/expected" "$rf"
+done
+
+# 16k — a missing python3 is the PREFLIGHT case, not a degradation case: nothing
+# is paid for a review whose payload could never be written. It needs a curated
+# PATH, because the standard one always resolves a real interpreter. That PATH
+# still carries jq: the helper preflights jq through die_usage and a stripped-bare
+# PATH would exit 64 — satisfying "no provider ran, no result emitted" for
+# entirely the wrong reason — so the status is asserted as exactly 70.
+d="$(new_case)"
+make_codex_fake "$d"
+mkdir -p "$d/curated"
+for tool in bash sh jq cat sed awk grep env dirname; do
+	tool_path="$(command -v "$tool" 2>/dev/null || true)"
+	[ -n "$tool_path" ] && ln -sf "$tool_path" "$d/curated/$tool"
+done
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+RUN_PATH="$d/bin:$d/curated"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+RUN_PATH=""
+assert_eq "16k: a missing python3 exits 70, not 64" "$RUN_RC" 70
+assert_eq "16k: no result is emitted" "$RUN_OUT" ""
+assert_contains "16k: the missing interpreter is named" "$RUN_ERR" "python3 is required"
+assert_absent "16k: no provider was ever launched" "$d/argv"
+unset ARGV_LOG
+
+# 16l — non-success outcomes follow the documented null rule, and an existing
+# schema-v1 consumer that ignores the additive field is unaffected.
+d="$(new_case)" # empty bin/ → provider not on PATH
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16l: unavailable is still unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "16l: unavailable reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'I looked but will not commit to a verdict.\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16l: a verdict-less message still forfeits" "$(jqf "$RUN_RESULT" .outcome)" forfeited
+assert_eq "16l: forfeited reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+assert_eq "16l: schema is unchanged by the additive field" "$(jqf "$RUN_RESULT" .schema)" "powbox.peer-review-run/v1"
+assert_eq "16l: artifactDir is still the final attempt dir" \
+	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

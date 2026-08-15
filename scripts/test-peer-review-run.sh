@@ -2600,6 +2600,366 @@ unset PRR_TEST_CONFIG_SHORT_READ
 assert_eq "15o: a short config read still resolves the model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
 assert_eq "15o: and the run completes normally" "$(jqf "$RUN_RESULT" .outcome)" passed
 
+# ============================================================================
+# (16) the provider-neutral review payload — `reviewFile`. Every assertion here
+#      is written the way a real CALLER would consume it: from the result JSON
+#      only. No test below opens provider.stdout, constructs a provider-native
+#      final-message filename, or parses a provider-native envelope.
+# ============================================================================
+
+# 16a/16b — both providers expose the SAME thing at the SAME place: an absolute
+# <artifactDir>/review.txt, 0600, containing the complete final review message.
+#
+# The expected bytes are the POST-command-substitution value. The parsed message
+# reaches the writer through a Bash `$( )`, which strips trailing newlines, so a
+# fixture comparing the review file against the provider's own last-message
+# artifact — which still carries its newline — would fail against a CORRECT
+# implementation. The comparison is byte-exact (`cmp`) for the same reason.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'First line of the codex review.\n\nA third line, after a blank one.\nVERDICT: PASS\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+ad="$(jqf "$RUN_RESULT" .artifactDir)"
+assert_eq "16a: outcome passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "16a: reviewFile is <artifactDir>/review.txt" "$rf" "$ad/review.txt"
+assert_eq "16a: reviewFile is absolute" "${rf:0:1}" "/"
+assert_file "16a: reviewFile exists when the result is emitted" "$rf"
+assert_eq "16a: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+printf 'First line of the codex review.\n\nA third line, after a blank one.\nVERDICT: PASS' >"$d/expected"
+assert_same_bytes "16a: reviewFile holds the full codex review prose" "$d/expected" "$rf"
+
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+cat >/dev/null
+jq -n '{type:"result",is_error:false,result:"First line of the claude review.\n\nA third line, after a blank one.\nVERDICT: ISSUES"}'
+EOF
+chmod +x "$d/bin/claude"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+ad="$(jqf "$RUN_RESULT" .artifactDir)"
+assert_eq "16b: outcome issues" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "16b: reviewFile is <artifactDir>/review.txt" "$rf" "$ad/review.txt"
+assert_file "16b: reviewFile exists for an issues verdict too" "$rf"
+assert_eq "16b: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+# The JSON envelope is DECODED: the caller gets prose, not provider-native JSON.
+printf 'First line of the claude review.\n\nA third line, after a blank one.\nVERDICT: ISSUES' >"$d/expected"
+assert_same_bytes "16b: reviewFile holds the decoded claude review prose" "$d/expected" "$rf"
+assert_not_contains "16b: no JSON envelope leaks into the payload" "$(cat "$rf")" '"is_error"'
+
+# 16c — a writer invocation that fails OUTRIGHT is fail-closed: exit 70 and NO
+# result, so an empty or absent reviewFile can never ship inside a successful
+# one. Driven by an argv-discriminating python3 shim with no production hook,
+# which is enough for this case precisely because the failure is external to the
+# writer program.
+d="$(new_case)"
+make_codex_fake "$d"
+cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		echo "injected writer failure" >&2
+		exit 9
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$d/bin/python3"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16c: a failed writer exits 70" "$RUN_RC" 70
+assert_eq "16c: and emits no result JSON" "$RUN_OUT" ""
+assert_contains "16c: the discarded review is announced" "$RUN_ERR" "could not be produced"
+
+# 16d — a write that reports SUCCESS but silently truncates must fail the same
+# way. This is what proves the content read-back exists at all: a status-only
+# implementation passes 16c and fails here. It cannot be driven by a shim,
+# because the read-back lives INSIDE the very invocation a shim would replace —
+# hence an env-gated injection point inside the writer program itself.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_TRUNCATE=1
+export PRR_TEST_WRITER_TRUNCATE
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_TRUNCATE
+assert_eq "16d: a truncated write exits 70" "$RUN_RC" 70
+assert_eq "16d: and emits no result JSON" "$RUN_OUT" ""
+assert_contains "16d: the diagnostic names unprovable content" "$RUN_ERR" "could not verify the review file contents"
+assert_not_contains "16d: and is NOT a refused creation" "$RUN_ERR" "refused to create the review file"
+
+# 16e/16f — the mode is warn-and-continue, not a fourth fail-closed case. Both
+# viable injections are exercised: one that FAILS the mode set outright, and one
+# that succeeds while applying a DIFFERENT mode (putting the fstat-mismatch
+# branch under test). A merely SKIPPED mode set is not among them: with the umask
+# cleared the create already yields 0600, so nothing would mismatch and only a
+# buggy implementation could satisfy a warning assertion. The mode is set with
+# fchmod on the writer's own descriptor, so a PATH shim cannot reach it — and an
+# external chmod shim would trip ensure_private_dir on the session dir first and
+# exit 64 there, which is that function's behavior and not this path's.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_MODE_FAIL=1
+export PRR_TEST_WRITER_MODE_FAIL
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_MODE_FAIL
+assert_eq "16e: a failed mode set does not abort the review" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "16e: helper still exits 0" "$RUN_RC" 0
+assert_contains "16e: the mode failure is warned about" "$RUN_ERR" "could not set the review file"
+assert_file "16e: the reviewFile is still usable" "$(jqf "$RUN_RESULT" .reviewFile)"
+
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_MODE_WRONG=1
+export PRR_TEST_WRITER_MODE_WRONG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_MODE_WRONG
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+assert_eq "16f: a wrong applied mode does not abort the review" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "16f: the mode mismatch is warned about" "$RUN_ERR" "reads back as mode"
+assert_eq "16f: the mismatch really is the injected mode" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 644
+assert_file "16f: the reviewFile is still usable" "$rf"
+
+# 16g — the created mode must not depend on the ambient umask. The umask is
+# applied as a further injection INSIDE the writer program (its own process, so
+# the helper's artifact writes are untouched) and COMPOSED with the failing mode
+# injection above. The composition is the whole criterion: an unconditional
+# fchmod to 0600 succeeds on a file you own whatever its current mode, so on its
+# own the umask case ends at 0600 under every mask and cannot fail. Composed, a
+# correct writer clears the injected 0200 and lands 0600; one that does not lands
+# 0400 — an unwritable payload behind a successful result — and fails here.
+# An AMBIENT umask on the helper invocation is not a substitute: every owner-bit
+# mask that would change the create mode also kills the run long before the
+# review file exists, and every mask under which the run reaches `passed` leaves
+# the create at 0600 and discriminates nothing.
+d="$(new_case)"
+make_codex_fake "$d"
+PRR_TEST_WRITER_UMASK=200
+PRR_TEST_WRITER_MODE_FAIL=1
+export PRR_TEST_WRITER_UMASK PRR_TEST_WRITER_MODE_FAIL
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset PRR_TEST_WRITER_UMASK PRR_TEST_WRITER_MODE_FAIL
+rf="$(jqf "$RUN_RESULT" .reviewFile)"
+assert_eq "16g: the run still completes" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "16g: with the mode warning" "$RUN_ERR" "could not set the review file"
+assert_eq "16g: the create ignored the ambient umask" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
+checks=$((checks + 1))
+if [ ! -r "$rf" ]; then
+	fails=$((fails + 1))
+	printf 'FAIL [16g: the reviewFile must be readable by its own caller]\n' >&2
+fi
+
+# 16h — a peer that PRE-CREATES the review path is refused rather than written
+# through. Six shapes; what each is worth depends on whether writing through it
+# is OBSERVABLE, so the observable is named per shape rather than resting on a
+# bare exit 70 (which every shape produces anyway — a writer that follows an
+# obstacle then fails its own read-back and exits 70 too). Hence the requirement
+# that the diagnostic name a REFUSED CREATION: it is what stops a fixture passing
+# on an exit 70 that arrived by the wrong route.
+#   regular / directory / symlink-to-a-regular-file-outside — refused by all
+#     three candidate mechanisms, so coverage only (the symlink one still gets a
+#     target assertion, which costs a line and catches a writer that follows it).
+#   symlink-dangling — the discriminator against `test ! -e`, which reports it
+#     ABSENT. Observable: the out-of-tree target would be created.
+#   symlink-fifo, read end deliberately closed — the discriminator against shell
+#     `noclobber`, which stats first and so writes THROUGH it, blocking in open().
+#     Observable: the helper never returns. Attaching a reader would let the small
+#     prose fit the pipe buffer and destroy that discriminator, so nothing is
+#     asserted about the FIFO's contents.
+#   symlink-devnull — coverage, not a discriminator: writing through it leaves
+#     nothing to inspect and still ends at exit 70 via the read-back.
+make_precreate_fake() {
+	cat >"$1/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+target="$(dirname "$last")/review.txt"
+case "$PRECREATE_SHAPE" in
+regular) printf 'squatter contents\n' >"$target" ;;
+directory) mkdir "$target" ;;
+symlink-devnull) ln -s /dev/null "$target" ;;
+*) ln -s "$PRECREATE_TARGET" "$target" ;;
+esac
+printf 'Precreated fixture review.\nVERDICT: PASS\n' >"$last"
+EOF
+	chmod +x "$1/bin/codex"
+}
+
+for shape in regular directory symlink-outside symlink-dangling symlink-fifo symlink-devnull; do
+	d="$(new_case)"
+	make_precreate_fake "$d"
+	PRECREATE_SHAPE="$shape"
+	PRECREATE_TARGET="$d/outside-target"
+	case "$shape" in
+	symlink-outside)
+		printf 'untouched target contents\n' >"$PRECREATE_TARGET"
+		printf 'untouched target contents\n' >"$d/expected-outside"
+		;;
+	symlink-fifo) mkfifo "$PRECREATE_TARGET" ;;
+	esac
+	export PRECREATE_SHAPE PRECREATE_TARGET
+	if [ "$shape" = symlink-fifo ]; then RUN_TIMEOUT=30; fi
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	RUN_TIMEOUT=""
+	assert_eq "16h [$shape]: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16h [$shape]: no result JSON" "$RUN_OUT" ""
+	assert_contains "16h [$shape]: the diagnostic names a refused creation" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16h [$shape]: and not unprovable content" "$RUN_ERR" "could not verify the review file contents"
+	case "$shape" in
+	symlink-outside) assert_same_bytes "16h [$shape]: the link target is untouched" "$d/expected-outside" "$PRECREATE_TARGET" ;;
+	symlink-dangling) assert_absent "16h [$shape]: the dangling target is never created" "$PRECREATE_TARGET" ;;
+	esac
+	unset PRECREATE_SHAPE PRECREATE_TARGET
+done
+
+# 16i — the RACE dimension the pre-created shapes cannot reach: they are all
+# planted before the helper looks, so they only catch a mechanism weak against a
+# STANDING obstacle. Here an argv-discriminating python3 shim plants the review
+# path as a symlink and then execs the REAL interpreter with the same argv — after
+# any shell-side precheck, before the real open. A shell-side
+# `[ ! -e "$f" ] && python3 …` writes THROUGH a /dev/null symlink, fails its own
+# read-back, and exits 70 with the CONTENT diagnostic; an O_CREAT|O_EXCL create
+# fails EEXIST. So the refused-creation diagnostic is the assertion that bites,
+# and an implementation that never invokes python3 fails for want of the exit —
+# there is no vacuous pass.
+#
+# What this case does NOT prove: the shim plants before the writer program starts,
+# so a check-then-act INSIDE that program would see the obstacle at its own check
+# and refuse, passing here without ever using O_EXCL. That shape is caught by the
+# pre-created DANGLING symlink above, which os.path.exists() reports as absent
+# exactly as `[ -e ]` does. A genuine in-program window is closed by requiring
+# O_CREAT|O_EXCL and reviewing the diff for it, not by any black-box fixture.
+make_race_shim() {
+	cat >"$1/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# The helper's writer argv is: -I -c <program> --prr-write-review <path>
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		ln -s "$RACE_TARGET" "$5" 2>/dev/null
+		break
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+	chmod +x "$1/bin/python3"
+}
+
+for variant in devnull regular fifo; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	make_race_shim "$d"
+	case "$variant" in
+	devnull) RACE_TARGET=/dev/null ;;
+	regular)
+		RACE_TARGET="$d/race-target"
+		printf 'untouched race target\n' >"$RACE_TARGET"
+		printf 'untouched race target\n' >"$d/expected-race"
+		;;
+	fifo)
+		RACE_TARGET="$d/race-fifo"
+		mkfifo "$RACE_TARGET"
+		;;
+	esac
+	export RACE_TARGET
+	if [ "$variant" = fifo ]; then RUN_TIMEOUT=30; fi
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	RUN_TIMEOUT=""
+	assert_eq "16i [$variant]: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16i [$variant]: no result JSON" "$RUN_OUT" ""
+	assert_contains "16i [$variant]: refused-creation diagnostic" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16i [$variant]: not a content failure" "$RUN_ERR" "could not verify the review file contents"
+	if [ "$variant" = regular ]; then
+		assert_same_bytes "16i [$variant]: the raced target is untouched" "$d/expected-race" "$RACE_TARGET"
+	fi
+	unset RACE_TARGET
+done
+
+# 16j — legal SHORT syscalls inside the writer are survived. A single os.write
+# and a single os.read behave identically to looped ones on ordinary regular
+# files, so without these injections every other fixture here passes and the
+# looping requirements are decoration.
+for injection in PRR_TEST_WRITER_SHORT_WRITE PRR_TEST_WRITER_SHORT_READ; do
+	d="$(new_case)"
+	make_codex_fake "$d"
+	printf 'model = "fixture-model-alpha"\n' >"$d/codex-home/config.toml"
+	export "$injection=1"
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	unset "$injection"
+	rf="$(jqf "$RUN_RESULT" .reviewFile)"
+	assert_eq "16j [$injection]: the run completes normally" "$(jqf "$RUN_RESULT" .outcome)" passed
+	assert_eq "16j [$injection]: with the expected model" "$(jqf "$RUN_RESULT" .model)" fixture-model-alpha
+	assert_file "16j [$injection]: the reviewFile exists" "$rf"
+	printf 'Fixture review body.\nVERDICT: PASS' >"$d/expected"
+	assert_same_bytes "16j [$injection]: content is exact" "$d/expected" "$rf"
+done
+
+# 16k — a missing python3 is the PREFLIGHT case, not a degradation case: nothing
+# is paid for a review whose payload could never be written. It needs a curated
+# PATH, because the standard one always resolves a real interpreter. That PATH
+# still carries jq: the helper preflights jq through die_usage and a stripped-bare
+# PATH would exit 64 — satisfying "no provider ran, no result emitted" for
+# entirely the wrong reason — so the status is asserted as exactly 70.
+d="$(new_case)"
+make_codex_fake "$d"
+mkdir -p "$d/curated"
+for tool in bash sh jq cat sed awk grep env dirname; do
+	tool_path="$(command -v "$tool" 2>/dev/null || true)"
+	[ -n "$tool_path" ] && ln -sf "$tool_path" "$d/curated/$tool"
+done
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+RUN_PATH="$d/bin:$d/curated"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+RUN_PATH=""
+assert_eq "16k: a missing python3 exits 70, not 64" "$RUN_RC" 70
+assert_eq "16k: no result is emitted" "$RUN_OUT" ""
+assert_contains "16k: the missing interpreter is named" "$RUN_ERR" "python3 is required"
+assert_absent "16k: no provider was ever launched" "$d/argv"
+unset ARGV_LOG
+
+# 16l — non-success outcomes follow the documented null rule, and an existing
+# schema-v1 consumer that ignores the additive field is unaffected.
+d="$(new_case)" # empty bin/ → provider not on PATH
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16l: unavailable is still unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "16l: unavailable reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf 'I looked but will not commit to a verdict.\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16l: a verdict-less message still forfeits" "$(jqf "$RUN_RESULT" .outcome)" forfeited
+assert_eq "16l: forfeited reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+assert_eq "16l: schema is unchanged by the additive field" "$(jqf "$RUN_RESULT" .schema)" "powbox.peer-review-run/v1"
+assert_eq "16l: artifactDir is still the final attempt dir" \
+	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
+
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2
 	exit 1

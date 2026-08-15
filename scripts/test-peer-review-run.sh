@@ -106,7 +106,7 @@ set -uo pipefail
 #       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
 #       proved by composing the two injections; short write/read syscalls
 #       survived; and a missing python3 caught by the preflight at exit 70
-#  (17) supervised-timeout retry — a deadline is TRANSIENT and starts the one
+#  (17) retry-route supervision — a deadline is TRANSIENT and starts the one
 #       retry in a fresh attempt dir (timeout-then-pass, timeout-then-issues
 #       through the ordinary final-attempt normalization), two deadlines stay
 #       terminal `timeout` with a cap-exhausted reason and total elapsed time,

@@ -676,8 +676,7 @@ if ($skipped.Count -gt 0) {
   Write-Host "To run the stages above, drop the -Skip* switches; pass"
   Write-Host "-RequireImage to also fail on a missing image. That alone is not"
   Write-Host "a full run: hosted CI has no /dev/net/tun, so Stage 3's nested"
-  Write-Host "half self-skips there, and this umbrella's Stage 6 omits the"
-  Write-Host "mountpoint-ownership checks. See docs/smoke-tests.md."
+  Write-Host "half self-skips there. See docs/smoke-tests.md."
   Write-Host "==========================================================="
 }
 else {

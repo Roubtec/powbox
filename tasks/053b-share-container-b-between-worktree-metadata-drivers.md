@@ -1,18 +1,17 @@
 # Task 053b — Share Container B between the two worktree-metadata smoke drivers
 
-## Prerequisite — task 053a (PR #152) must land first
+## Prerequisite — task 053a (PR #152), already satisfied
 
-Everything below describes the tree as it stands **after** PR #152 merges, and that PR is still open at the time of writing.
-On `main` today `scripts/smoke-test-worktree-metadata-container-a.bash` does not exist, neither driver reads a shared payload, and `.github/workflows/native-linux-build.yml` runs `./commands/smoke-test.sh` only, with no PowerShell Stage 6 step.
-Do not start this task against a tree where 053a's mechanism is absent: there is nothing to mirror, and the parity measurements below were taken on 053a's branch rather than on `main`.
+Everything below describes the tree as it stands **after** PR #152, which has merged to `main`.
+Confirm the three things this task mirrors are present before starting, because without them there is nothing to mirror: on `main` today `scripts/smoke-test-worktree-metadata-container-a.bash` exists, both drivers read that shared payload (`scripts/smoke-test-worktree-metadata.sh` via `cat`, `scripts/smoke-test-worktree-metadata.ps1` via `Get-Content -Raw`), and `.github/workflows/native-linux-build.yml` runs a dedicated PowerShell Stage 6 step beside `./commands/smoke-test.sh`.
 
 ## Why this task exists
 
-Task 053a (PR #152) extracts **Container A**'s inner script into one file both drivers embed (`scripts/smoke-test-worktree-metadata-container-a.bash`), because a ~150-line Bash payload duplicated across `scripts/smoke-test-worktree-metadata.sh` and `scripts/smoke-test-worktree-metadata.ps1` is exactly how the coverage gap that created task 053a opened in the first place.
+Task 053a (PR #152) extracted **Container A**'s inner script into one file both drivers embed (`scripts/smoke-test-worktree-metadata-container-a.bash`), because a ~150-line Bash payload duplicated across `scripts/smoke-test-worktree-metadata.sh` and `scripts/smoke-test-worktree-metadata.ps1` is exactly how the coverage gap that created task 053a opened in the first place.
 
 **Container B** — the recreate half, ~90 lines — was left duplicated. That was correct scoping for 053a, but the same drift has already started.
 
-Measured on the branch that delivered 053a, comparing the `.sh`'s `VERIFY_SCRIPT='…'` body against the `.ps1`'s `$verifyScript = @(…)` array literal, whitespace-insensitively:
+Measured on `main` after 053a merged, comparing the `.sh`'s `VERIFY_SCRIPT='…'` body against the `.ps1`'s `$verifyScript = @(…)` array literal, whitespace-insensitively:
 
 - One comment is **rewrapped and shortened** in the `.ps1`: the `.sh` has `# 1. Metadata survived: git status works in the recycled worktree, and the admin` / `#    dir is visible again through the re-established bind.` where the `.ps1` has the single line `# 1. Metadata survived: git status works, and the admin dir is visible via the bind.`
 - One assertion message differs by **punctuation**: `git status failed in the recycled worktree — per-worktree metadata did not survive recreation` (em dash) versus the same line with a hyphen in the `.ps1`.
@@ -49,7 +48,7 @@ The mechanism is already built and proven by 053a — reuse it rather than inven
 
 ## Validation
 
-Unlike 053a, the positive half is automated once 053a lands: Tier 1 then runs **both** drivers' Stage 6 (`.github/workflows/native-linux-build.yml` gains a dedicated PowerShell step in PR #152), so a payload that *breaks inside the image* turns Tier 1 red rather than needing a maintainer's desktop.
+Unlike 053a, the positive half is already automated: Tier 1 runs **both** drivers' Stage 6 (`.github/workflows/native-linux-build.yml` gained a dedicated PowerShell step in PR #152), so a payload that *breaks inside the image* turns Tier 1 red rather than needing a maintainer's desktop.
 That step also fails on a runtime self-skip and counts the three `ok: mountpoint ownership` lines, so it cannot go green on a driver that started but never reached its assertions.
 
 **Tier 1 is not evidence that the shared payload is the one that ran, and must not be treated as such.**

@@ -12,7 +12,7 @@ So the banner tells a reader that a stage they in fact have coverage from produc
 
 This is not a new defect and it is not caused by any one stage.
 It is already reachable on **every hosted-CI Tier 1 run today**: `Stage 3: rootless Podman nested-run checks (no /dev/net/tun)` is a within-stage skip — the stage's static engine wiring is validated and only its nested half is skipped — and both `docs/smoke-tests.md` and the banner's own body already say so.
-Task 053a (PR #152, not yet merged) adds a second instance — the PowerShell driver's `$IsLinux` gate on the mountpoint-ownership assertions: Stage 6 runs, minus those assertions — and that is what surfaced this, but fixing it inside 053a would have been wrong: the defect predates it, lives in both umbrellas, and is already reachable without 053a via Stage 3.
+Task 053a (PR #152, since merged) added a second instance — the PowerShell driver's `$IsLinux` gate on the mountpoint-ownership assertions: Stage 6 runs, minus those assertions — and that is what surfaced this, but fixing it inside 053a would have been wrong: the defect predates it, lives in both umbrellas, and is already reachable without 053a via Stage 3.
 
 ## Scope
 
@@ -24,7 +24,7 @@ Three parts of that banner over-claim, not one, and a fix confined to the summar
 - the **summary line** — `This was a PARTIAL smoke test — the stages above did not run.` — the original over-claim.
 - the **remediation** — `To run the stages above, unset the POWBOX_SMOKE_SKIP_* vars` (`.sh`) / `To run the stages above, drop the -Skip* switches` (`.ps1`) — which points the reader at a control that does not govern a within-stage skip at all: no skip variable or switch turns Stage 3's nested half back on, and the runtime condition that self-skipped it (`/dev/net/tun` absent) is not something the reader can unset.
 
-The caveat sentences that close each banner are not the defect: they already name the within-stage skips the umbrella knows about (the `.sh` names Stage 3's nested half; the `.ps1` names that plus its own Stage 6 ownership omission), which is exactly what makes the heading, summary, and remediation above them read as wrong rather than merely imprecise — the banner already contradicts itself in place.
+The caveat sentences that close each banner are not the defect: they already name the within-stage skip the umbrella knows about, Stage 3's nested half, in both files alike (the `.ps1`'s caveat also named its own Stage 6 ownership omission until 053a closed that gap and dropped the sentence). That is exactly what makes the heading, summary, and remediation above them read as wrong rather than merely imprecise — the banner already contradicts itself in place.
 
 The suggested summary wording is a one-liner: `did not run, or did not run in full.`
 That is a suggestion, not a decision — for the heading and the remediation as much as for the summary, any phrasing that stops asserting whole-stage non-execution, and stops prescribing a remedy that cannot apply, is acceptable.

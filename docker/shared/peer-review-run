@@ -555,9 +555,13 @@ reap_tree() {
 # reaped_ok <site> <leader_pid> <pgid|""> — reap_tree, plus the one TEST-ONLY way
 # to make a reap CONFIRMATION report a survivor. <site> names which reap this is
 # — `probe`, `timeout`, or `exit` — and PRR_TEST_REAP_FAIL is a space-separated
-# list of the sites whose confirmation must fail. That variable is unset in every
-# non-test path, and an empty list matches no site, so this is exactly reap_tree
-# in normal operation.
+# list of the sites whose confirmation must fail. Nothing in this helper sets that
+# variable, so in normal operation it is unset or empty, matches no site, and
+# leaves this exactly reap_tree. It is read from the environment, not enforced, so
+# a caller CAN set it outside a test — but that direction is fail-closed: the
+# genuine reap still runs and still short-circuits on its own failure, and an
+# overridden verdict only warns and withholds ATT_REAP_CONFIRMED, suppressing a
+# retry rather than permitting one.
 #
 # It exists because the survivor branches are otherwise unreachable from a test:
 # a genuine post-SIGKILL survivor cannot be constructed by an unprivileged
@@ -641,9 +645,10 @@ trap 'exit 143' TERM
 # drawn — no real model ID carries a control character, and it keeps "the
 # configured value is passed exactly" true for everything that is passed at all.
 #
-# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: unset in every non-test
-# path, it exists because a single os.read behaves identically to a looped one on
-# an ordinary regular file, so nothing else would ever exercise the loop.
+# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: nothing here sets it, so it
+# is absent in normal operation. It exists because a single os.read behaves
+# identically to a looped one on an ordinary regular file, so nothing else would
+# ever exercise the loop.
 PRR_CONFIG_MODEL_PY='
 import os, stat, sys
 
@@ -750,7 +755,7 @@ sys.exit(0)
 # fails, so truncation and overrun are caught by one read.
 #
 # Every PRR_TEST_* name below is a TEST-ONLY injection point, inert in normal
-# operation because each is unset in every non-test path. They exist because the
+# operation because nothing here sets any of them. They exist because the
 # behaviors they drive — a short syscall, a failing or wrong-applying mode set, a
 # silently truncated write, an ambient umask — live INSIDE this invocation, so a
 # PATH shim replacing it would prove nothing about the shipped code.

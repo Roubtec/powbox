@@ -3378,6 +3378,36 @@ assert_eq "17h: the key stayed cleared on BOTH attempts" "$(grep -c 'API_KEY=\[<
 assert_not_contains "17h: the key was never used" "$(cat "$d/envlog")" "key-that-must-not-be-used"
 assert_not_contains "17h: no env-credential fallback was announced" "$RUN_ERR" "env-credential fallback"
 
+# 17i: the two attempts are DIFFERENT transient classes. Now that a deadline is
+# transient, a non-timeout transient first attempt can be followed by a
+# timed-out second one — a reset connection then a slow provider, an ordinary
+# flaky run rather than a hand-crafted input. The terminal reason must report
+# the exhausted cap without claiming a first-attempt timeout that never
+# happened.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
+sleep 60   # attempt two exhausts the deadline
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1)
+unset MARK
+assert_eq "17i: transient then timeout stays terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "17i: exitStatus null" "$(jqf "$RUN_RESULT" .exitStatus)" null
+assert_eq "17i: two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17i: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_contains "17i: reason states the exhausted cap" "$(jqf "$RUN_RESULT" .reason)" "two-attempt cap reached"
+assert_contains "17i: reason names the final attempt's deadline" \
+	"$(jqf "$RUN_RESULT" .reason)" "on the final attempt after a transient failure"
+assert_not_contains "17i: reason claims no first-attempt timeout" "$(jqf "$RUN_RESULT" .reason)" "on both attempts"
+assert_not_contains "17i: reason promises no further retry" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2
 	exit 1

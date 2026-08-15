@@ -1711,13 +1711,16 @@ run_attempt() {
 	ATT_VERDICT=none
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
-	# 1 while no reap of THIS attempt's OWN provider tree has reported a survivor.
-	# Attempt-scoped deliberately, and cleared only at the two post-provider reap
-	# sites below: REAP_WARN is run-global, is never reset, and is also raised by
-	# the capability probe — which runs inside attempt one AFTER this reset block —
-	# so gating a retry on it would suppress over a stray `--help` descendant that
+	# 0 until a reap of THIS attempt's OWN provider tree confirms it is gone;
+	# raised ONLY at the two post-provider reap sites below. Fail-closed by
+	# construction: an attempt that never reached a reap at all has confirmed
+	# nothing, so the flag must not read as confirmation there (the preflight
+	# early return below is such a path today). Attempt-scoped deliberately —
+	# REAP_WARN is run-global, is never reset, and is also raised by the
+	# capability probe, which runs inside attempt one AFTER this reset block, so
+	# gating a retry on it would suppress over a stray `--help` descendant that
 	# has nothing to do with the timed-out provider tree.
-	ATT_REAP_CONFIRMED=1
+	ATT_REAP_CONFIRMED=0
 	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
 	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
@@ -1864,11 +1867,12 @@ run_attempt() {
 	if [ "$timed_out" = 1 ]; then
 		# Deadline hit while the tree was still running: TERM it, wait a bounded
 		# grace, escalate to KILL for survivors, and confirm nothing remains.
-		reaped_ok timeout "$child" "$pgid" || {
+		if reaped_ok timeout "$child" "$pgid"; then
+			ATT_REAP_CONFIRMED=1
+		else
 			REAP_WARN=1
-			ATT_REAP_CONFIRMED=0
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after timeout"}\n' "$PROVIDER" >&2
-		}
+		fi
 		wait "$child" 2>/dev/null || true
 	else
 		# The leader exited on its own (that is why the poll loop ended). Collect
@@ -1876,11 +1880,12 @@ run_attempt() {
 		# failed provider left behind in the group — TERM, grace, KILL, confirm —
 		# so no grandchild outlives the run.
 		if wait "$child"; then rc=0; else rc=$?; fi
-		reaped_ok exit "$child" "$pgid" || {
+		if reaped_ok exit "$child" "$pgid"; then
+			ATT_REAP_CONFIRMED=1
+		else
 			REAP_WARN=1
-			ATT_REAP_CONFIRMED=0
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after exit"}\n' "$PROVIDER" >&2
-		}
+		fi
 	fi
 	CURRENT_LEADER=""
 	CURRENT_PGID=""
@@ -2099,6 +2104,12 @@ if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOM
 		fi
 	fi
 elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
+	# Attempt one's class, captured before run_attempt 2 overwrites the ATT_*
+	# state. The two attempts can be DIFFERENT transient classes now that a
+	# deadline is transient too (a reset connection then a slow provider is an
+	# ordinary flaky run), so the terminal reason below must not assert a
+	# first-attempt timeout that never happened.
+	FIRST_ATT_OUTCOME="$ATT_OUTCOME"
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
 	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
 	run_attempt 2
@@ -2112,7 +2123,11 @@ elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
 			# has for that, so it is kept rather than collapsed into `failed`; the
 			# exhaustion itself is carried by attempts/retried and this reason. The
 			# wording claims no reap, so a survivor annotation cannot contradict it.
-			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on both attempts; timeout retry exhausted, two-attempt cap reached"
+			if [ "$FIRST_ATT_OUTCOME" = timeout ]; then
+				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on both attempts; timeout retry exhausted, two-attempt cap reached"
+			else
+				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the final attempt after a transient failure; retry exhausted, two-attempt cap reached"
+			fi
 		else
 			# Both attempts failed transiently → exhausted.
 			ATT_OUTCOME=failed

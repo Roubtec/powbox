@@ -79,20 +79,25 @@ IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 #      while the marker still swore to the old digest — permanently reclassifying
 #      an untouched file as a user customization — and let a peer container read
 #      a half-written marker.
-#   B. NO EXIT STATUS CAN END STARTUP. The whole decision lives in
-#      statusline_seed_step, invoked below as `statusline_seed_step || true`.
-#      That form is load-bearing TWICE: bash suspends `set -e` for every command
-#      inside a function executed as part of an AND-OR list, so no failing
-#      command in here can abort the hook part-way, and the trailing `|| true`
-#      discards the function's own status so nothing can escape either. This
-#      hook runs under `set -euo pipefail` (line 2) and entrypoint-core.sh
-#      invokes it UNGUARDED, so a status escaping this block ends container
-#      startup — no instruction file, no settings.json, no CMD — over a cosmetic
-#      asset. The suspension covers exit STATUSES only: a `set -u` reference to
-#      an unset variable is a fatal shell error that kills the shell through an
-#      AND-OR list all the same. No such reference exists here — every `local`
-#      below is assigned before it is read — but that is a standing constraint
-#      on edits to this block, not something the structure enforces.
+#   B. NO FAILURE CAN END STARTUP. The whole decision lives in
+#      statusline_seed_step, invoked below as `(statusline_seed_step) || true`.
+#      Both halves are load-bearing. The `|| true` discards the step's own exit
+#      status, and bash suspends `set -e` for every command inside a function
+#      run as part of an AND-OR list, so no failing command in here aborts the
+#      hook part-way. The SUBSHELL covers what no status can: a fatal shell
+#      error — a `set -u` read of an unset variable, a `local` outside a
+#      function, an assignment to a readonly name — kills the shell it runs in
+#      outright, straight through an AND-OR list, and the parentheses are what
+#      make that shell a CHILD. So invariant B holds by construction rather than
+#      by every future edit remembering it. This hook runs under
+#      `set -euo pipefail` (line 2) and entrypoint-core.sh invokes it UNGUARDED,
+#      so anything escaping this block ends container startup — no instruction
+#      file, no settings.json, no CMD — over a cosmetic asset. The fork costs
+#      nothing but itself, because the step's entire product is on disk: no
+#      variable it sets is read below (IMAGE_EPOCH is, but it is assigned above,
+#      at line 55, and the step only reads it). Out of reach of both halves: a
+#      PARSE error in this file, which bash rejects before the step ever runs;
+#      the guard for that is `bash -n` and the linter, not this structure.
 #
 # Every failure therefore resolves the same way: keep what is on disk, carry on.
 STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"
@@ -127,9 +132,10 @@ statusline_marker_value() {
 # statusline_publish <src> <dst> — invariant A for a file copy: land <src>'s
 # bytes at <dst> or change nothing. Non-zero means <dst> was not touched.
 # BOUNDED, both deliberate: the rename REPLACES the destination inode, so mode
-# comes from <src> (below) while ownership, ACLs and xattrs are the temp's
-# rather than the old file's preserved ones as `cp` would leave them — sound
-# only because this is a single-uid volume and nothing in the image sets ACLs,
+# comes from <src> when the best-effort chmod below succeeds and stays mktemp's
+# 0600 when it does not, while ownership, ACLs and xattrs are the temp's rather
+# than the old file's preserved ones as `cp` would leave them — sound only
+# because this is a single-uid volume and nothing in the image sets ACLs,
 # xattrs or SELinux labels. And a kill between the mktemp and the rename leaves
 # an unreaped `statusline-command.sh.XXXXXX` sibling; only the failure paths
 # below clean up.
@@ -139,11 +145,14 @@ statusline_publish() {
 	[ -n "$tmp" ] || return 1
 	if cp "$src" "$tmp" 2>/dev/null; then
 		# mktemp creates 0600, so the source's mode has to be copied across or
-		# the publish would quietly drop the statusline's executable bit.
-		# Best-effort: content is worth publishing even where chmod cannot.
+		# the publish would quietly drop the statusline's executable bit — a
+		# cosmetic loss only, since statusline-settings.json runs the file as
+		# `sh <path>`. Best-effort for exactly that reason: content is worth
+		# publishing even where chmod cannot follow.
 		chmod --reference="$src" "$tmp" 2>/dev/null || true
-		# -T: a destination that IS (or points at) a directory must FAIL here,
-		# never absorb the temp.
+		# -T: a destination that IS a directory must FAIL here rather than
+		# absorb the temp. One that merely POINTS at a directory is REPLACED by
+		# the file, the same rename semantics as the symlink case below.
 		mv -T "$tmp" "$dst" 2>/dev/null && rc=0
 	fi
 	[ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null
@@ -247,7 +256,8 @@ seed_statusline() {
 }
 
 # statusline_seed_step — the entire statusline decision. See invariant B: this
-# is called as `statusline_seed_step || true` and MUST stay called that way.
+# is called as `(statusline_seed_step) || true` and MUST stay called that way,
+# parentheses included — they are what contain a fatal shell error.
 statusline_seed_step() {
 	local epoch want have
 	[ -f "$STATUSLINE_SRC" ] || return 0
@@ -286,7 +296,7 @@ statusline_seed_step() {
 	return 0
 }
 
-statusline_seed_step || true
+(statusline_seed_step) || true
 
 AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"
 if [ -f "$AGENT_TMPL" ]; then

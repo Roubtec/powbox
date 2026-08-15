@@ -3,7 +3,7 @@
 #
 #   1. the build-skew shim (tests 1-5),
 #   2. the statusline seed's digest-marker gating (tests 6-15, task 002e), and
-#   3. that same seed's ERROR paths (tests 16-27), which must degrade rather
+#   3. that same seed's ERROR paths (tests 16-28), which must degrade rather
 #      than abort: the hook runs under `set -euo pipefail` and entrypoint-core.sh
 #      invokes it UNGUARDED, so a non-zero exit here ends container startup.
 #
@@ -41,7 +41,10 @@
 # and correctly marked), AND the instruction file and settings.json still refresh.
 # That last one is the point: the independence the decision path promises must hold
 # on the error path too, or a cosmetic asset still decides whether the rest of the
-# volume converges.
+# volume converges. Test 28 closes the group by breaking the CODE rather than the
+# volume — a fatal shell error injected into a copy of the hook, inside the step —
+# so invariant B is pinned as a property of the call site's structure and not only
+# as a list of shapes that happen to survive.
 #
 # Runs against the repo copy of the hook — no image build needed. Requires bash;
 # setsid is optional (the hook falls back to a plain background detach without it).
@@ -255,10 +258,11 @@ SL_PATH="/usr/bin:/bin"
 # detached build-skew block never spawns and only the seeding path runs. stderr lands
 # in <cfg>.stderr, unless <stderr-mode> is `closed`, which runs the hook with fd 2
 # CLOSED so every `echo … >&2` in the block fails with EBADF. <path> is explicit so a
-# group-3 case can hand the hook a PATH with one tool taken away or stubbed; the
-# hook's own exit status is this function's status.
+# group-3 case can hand the hook a PATH with one tool taken away or stubbed, and
+# <hook> so test 28 can drive a deliberately sabotaged COPY of the hook instead of
+# the repo file; the hook's own exit status is this function's status.
 sl_invoke() {
-	local cfg="$1" seed="$2" path="$3" stderr_mode="${4:-file}"
+	local cfg="$1" seed="$2" path="$3" stderr_mode="${4:-file}" hook="${5:-$HOOK}"
 	local -a cmd=(
 		env -i
 		HOME="$WORK_ROOT"
@@ -272,7 +276,7 @@ sl_invoke() {
 		PRIMARY_AGENT=claude
 		POWBOX_PLUGIN_BOOTSTRAP=core
 		POWBOX_CODEX_SYNC_BOOTSTRAP=core
-		bash "$HOOK"
+		bash "$hook"
 	)
 	if [ "$stderr_mode" = closed ]; then
 		"${cmd[@]}" 2>&-
@@ -287,14 +291,14 @@ sl_run() {
 	sl_invoke "$1" "$2" "$SL_PATH"
 }
 
-# sl_rc <cfg> <seed> [path] [stderr-mode] — PRINTS the hook's exit status instead of
-# propagating it. Group 3 asserts that status, so it must survive to be compared: a
-# non-zero one is precisely the entrypoint-killing bug those cases exist to catch,
-# and letting it abort this suite would report the bug as a missing test rather than
-# a failing one.
+# sl_rc <cfg> <seed> [path] [stderr-mode] [hook] — PRINTS the hook's exit status
+# instead of propagating it. Group 3 asserts that status, so it must survive to be
+# compared: a non-zero one is precisely the entrypoint-killing bug those cases exist
+# to catch, and letting it abort this suite would report the bug as a missing test
+# rather than a failing one.
 sl_rc() {
 	local rc=0
-	sl_invoke "$1" "$2" "${3:-$SL_PATH}" "${4:-file}" || rc=$?
+	sl_invoke "$1" "$2" "${3:-$SL_PATH}" "${4:-file}" "${5:-$HOOK}" || rc=$?
 	printf '%s\n' "$rc"
 }
 
@@ -922,6 +926,49 @@ if [ "$RC" = 0 ] &&
 	ok "directory at the marker path: nothing deposited inside it, no temp left behind"
 else
 	no "directory at the marker path: nothing deposited inside it, no temp left behind (rc=$RC, entries=$(find "$CFG" -name '.statusline-command.sh.powbox-seeded*' 2>/dev/null | tr '\n' ' '))"
+fi
+
+# --- Test 28: a FATAL shell error inside the step cannot end startup ------------
+# Invariant B's structural half. Every case above breaks the volume; this one breaks
+# the CODE, injecting a `set -u` read of an unset variable as the step's first
+# statement in a COPY of the hook (the repo file is never touched). That is a fatal
+# shell error, not an exit status, so both halves of the old `statusline_seed_step
+# || true` are blind to it: `set -e` suspension only covers failing commands, and
+# `|| true` only discards a status that was returned. It kills the shell it runs in
+# outright, straight through an AND-OR list — so this case exits 1 with nothing
+# rendered on the direct form, and exits 0 on `(statusline_seed_step) || true`,
+# where the parentheses make that shell a child.
+SL_HOOK_FATAL="$WORK_ROOT/hook-with-fatal.sh"
+SL_FATAL_OK=yes
+# The awk exits non-zero unless the anchor matched EXACTLY once, so a renamed or
+# reshaped step turns into a loud failure below rather than a case that silently
+# runs an unsabotaged hook and passes for the wrong reason.
+awk '
+	{ print }
+	/^statusline_seed_step\(\) \{$/ {
+		print "\t: \"${POWBOX_TEST_NEVER_SET}\""
+		injected++
+	}
+	END { exit(injected == 1 ? 0 : 1) }
+' "$HOOK" >"$SL_HOOK_FATAL" || SL_FATAL_OK=no
+CFG="$(sl_new_cfg)"
+DST="$CFG/statusline-command.sh"
+MK="$CFG/.statusline-command.sh.powbox-seeded"
+sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+if [ "$SL_FATAL_OK" != yes ]; then
+	no "fatal error inside the step: contained by the subshell (could not inject it: the statusline_seed_step anchor moved)"
+else
+	RC="$(sl_rc "$CFG" "$SL_SEED_ERR" "$SL_PATH" file "$SL_HOOK_FATAL")"
+	# The stderr check keeps the case honest: without it an injection that never
+	# executed would pass on rc=0 alone.
+	if [ "$RC" = 0 ] &&
+		grep -q 'POWBOX_TEST_NEVER_SET' "$CFG.stderr" 2>/dev/null &&
+		[ ! -e "$DST" ] && [ ! -e "$MK" ] &&
+		sl_independent "$CFG" v1; then
+		ok "fatal error inside the step: contained by the subshell, hook exits 0, others still refresh"
+	else
+		no "fatal error inside the step: contained by the subshell, hook exits 0, others still refresh (rc=$RC, stderr=$(tr '\n' ' ' <"$CFG.stderr" 2>/dev/null))"
+	fi
 fi
 
 echo

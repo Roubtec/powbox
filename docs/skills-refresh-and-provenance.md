@@ -255,6 +255,7 @@ It also *removes* any marker already sitting there in that case, and whenever a 
 `source=` names **this** repo rather than one of the `Roubtec/agent-skills` roots — the statusline is a powbox-owned asset, which is the "should powbox ever bake an asset it owns itself" case [D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath) reserved.
 
 A start that notes something about the statusline without publishing anything also writes `notified_epoch=<image epoch>`, so the note appears once per new image instead of on every container start.
+The throttle is best-effort, because it is the marker that records it: with no marker to read, or one that cannot be read or rewritten, there is nowhere to record the note and it repeats on every start.
 It covers both such notes — "a newer statusline is available, yours differs" and "the destination could not be written" — because each of their branches stays true on every later start, the marker's `epoch=` never advancing while nothing is published.
 `notified_epoch=` therefore reads as "the newest image this statusline has already spoken about", and a successful refresh rewrites the marker without the key, so the next image is announced again.
 It is a **separate key** on purpose: reusing `epoch=` would have bought the same suppression at the cost of that key's meaning ("the build that placed this file"), which the digest comparison depends on staying true.

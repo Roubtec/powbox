@@ -227,6 +227,37 @@ Every current consumer already satisfies this — `seed_is_marked`/`seed_workflo
 That key now means the upstream path, so the channel moved to its own key, `channel=plugin-clone` (see the task-021 section below).
 Nothing in the codebase branches on either key — they are introspection only — so the transition needs no migration: a marker written by an older image keeps the old spelling until the next sync or refresh rewrites it.
 
+### D9 — The Claude statusline is a `.powbox-seeded` producer too (task 002e)
+
+Skills and workflows are not the only thing powbox seeds onto a config volume.
+`entrypoint-claude-hook.sh` seeds `~/.claude/statusline-command.sh`, and it now stamps the same kind of marker: the sidecar `~/.claude/.statusline-command.sh.powbox-seeded`, whose name follows exactly the shape `seed_workflow_marker_path` produces for a lone file (`<dir>/.<filename>.powbox-seeded`).
+
+Its body adds one key the skill/workflow markers do not carry:
+
+```text
+epoch=<image build-epoch that wrote this copy>
+commit=<powbox commit that built the agent image>
+sha256=<digest of exactly the bytes written>
+source=Roubtec/powbox#docker/claude/agent-container/statusline-command.sh
+```
+
+`sha256=` exists because the statusline's ownership question is *stricter* than a skill's.
+For a skill, marker-present means "powbox owns this, refresh it" — a user who wants to keep their fork deletes the marker.
+The statusline is a single file the maintainer deliberately ships opinionated and expects users to tweak in place, so presence alone would license overwriting an edit nobody asked to lose; the refresh therefore requires the on-disk digest to still equal the recorded one.
+A running container holds no copy of the previous image's file, so a digest recorded at seed time is the only proof available — comparing against the previous bake is not an option.
+An **unmarked** statusline is treated exactly as an unmarked skill is: untouchable.
+That is the upgrade path for every `claude-config` volume that predates this marker, and it self-heals the first time the user deletes the file.
+
+`source=` names **this** repo rather than one of the `Roubtec/agent-skills` roots — the statusline is a powbox-owned asset, which is the "should powbox ever bake an asset it owns itself" case [D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath) reserved.
+
+A declined refresh also writes `notified_epoch=<image epoch>`, so the "a newer statusline is available" stderr note appears once per new image instead of on every container start.
+It is a **separate key** on purpose: reusing `epoch=` would have bought the same suppression at the cost of that key's meaning ("the build that placed this file"), which the digest comparison depends on staying true.
+
+**Written inline, not by sourcing `seed-skills.sh`.** The two calls the library could have supplied are the epoch/commit printf and the sidecar-name join; it cannot supply `sha256=` at all, and `seed_source_ref` cannot supply this `source=` either, since every root it defines points at `Roubtec/agent-skills`.
+Against that, sourcing would give the Claude hook its first library dependency — and the hook runs under `set -euo pipefail` on the startup critical path, where a missing or damaged library would take the instruction file and `settings.json` down with a cosmetic asset.
+So the hook reuses the *format* (which is what consumers depend on) and not the code, and the parse-by-key rule above binds it identically: it reads keys with `sed -n 's/^<key>=//p'`, never by position.
+`scripts/test-claude-hook-skew.sh` pins the marker's contents and all three transitions.
+
 ---
 
 ## Three-anchor image provenance — IMPLEMENTED on the stacked branch

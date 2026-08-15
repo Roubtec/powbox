@@ -1005,7 +1005,12 @@ workflows keep cost proportional to the change:
   run whose image-gated checks self-skip into a false green. That flag reaches
   only the image-dependent skips — the hosted runner still exposes no
   `/dev/net/tun`, so Stage 3's nested half self-skips there and a green Tier 1 is
-  a partial smoke (see "What CI covers vs. what stays VPS-only" below). It
+  a partial smoke (see "What CI covers vs. what stays VPS-only" below). A
+  second, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
+  directly, because the Bash umbrella never invokes the PowerShell mirror and
+  this runner is the only automated configuration where its Stage 6
+  mountpoint-ownership assertions have teeth (see
+  [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). It
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
   `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints and the four

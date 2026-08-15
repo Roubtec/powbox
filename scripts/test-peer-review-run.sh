@@ -81,7 +81,9 @@ set -uo pipefail
 #       reaps a probe-spawned in-group stray (supervised probe, group sweep)
 #  (14) strength knobs — per-invocation model/effort pins, their provider-specific
 #       spellings, honest degradation when the CLI lacks --effort, and the usage
-#       rejections that keep a reviewer from being asked for a weak level
+#       rejections that keep a reviewer from being asked for a weak level — or
+#       from being handed an EMPTY --model, which is a usage error rather than
+#       the omission it is otherwise indistinguishable from
 #  (15) configured-model passthrough for codex — a usable root `model` from a
 #       harness-owned $CODEX_HOME survives --ignore-user-config as one -m with
 #       isolation and effort untouched; an explicit --model wins AND provably
@@ -2192,6 +2194,32 @@ d="$(new_case)"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude) --model --oops
 assert_eq "14g: flag-shaped model exits 64" "$RUN_RC" 64
+
+# An EMPTY --model is the shape an adopter produces by forwarding an unset
+# optional variable, and it must be a usage error rather than an omission: both
+# omission paths are ones the contract says an explicit --model bypasses. For
+# codex that path is the configured-model lookup, so the config here carries a
+# perfectly usable model — a helper that treated the empty value as "no model
+# named" would run happily with THAT one, which the exit 64 is what rules out.
+d="$(new_case)"
+make_codex_fake "$d"
+printf 'model = "fixture-model-not-chosen"\n' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --model ""
+assert_eq "14g: empty model exits 64 for codex" "$RUN_RC" 64
+assert_contains "14g: the empty-model rejection explains itself" "$RUN_ERR" "non-empty"
+assert_absent "14g: no provider ran on an empty model" "$d/argv"
+assert_eq "14g: no session dir littered by the empty model" "$(find "$d/artifacts" -mindepth 1 | wc -l)" 0
+unset ARGV_LOG
+
+# For claude the bypassed path is the `opus` default, which is silent and would
+# otherwise make an empty value indistinguishable from omitting the flag.
+d="$(new_case)"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --model ""
+assert_eq "14g: empty model exits 64 for claude" "$RUN_RC" 64
 
 # ============================================================================
 # (15) configured-model passthrough for codex — the root `model` the container's

@@ -1901,8 +1901,11 @@ run_attempt() {
 
 	if [ "$timed_out" = 1 ]; then
 		ATT_OUTCOME=timeout
-		# ATT_EXIT stays null: the provider was terminated by the helper's own
-		# deadline, so a synthetic process exit code would be less accurate.
+		# Pinned null — already null from the per-attempt reset, restated here
+		# because THIS branch owns that contract: the provider was terminated by
+		# the helper's own deadline, so reporting no exit status is more accurate
+		# than a synthetic one. The redundancy is deliberate; keep it so a future
+		# exit assignment added above this check cannot leak into a timeout.
 		ATT_EXIT=null
 		# An exhausted supervised deadline IS transient, and it is classified here
 		# — at the point the outcome is set — rather than left for looks_transient

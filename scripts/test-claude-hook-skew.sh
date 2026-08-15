@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Unit tests for docker/shared/entrypoint-claude-hook.sh, in three groups:
+# Unit tests for docker/shared/entrypoint-claude-hook.sh, in four groups:
 #
 #   1. the build-skew shim (tests 1-5),
-#   2. the statusline seed's digest-marker gating (tests 6-15, task 002e), and
+#   2. the statusline seed's digest-marker gating (tests 6-15, task 002e),
 #   3. that same seed's ERROR paths (tests 16-28), which must degrade rather
 #      than abort: the hook runs under `set -euo pipefail` and entrypoint-core.sh
-#      invokes it UNGUARDED, so a non-zero exit here ends container startup.
+#      invokes it UNGUARDED, so a non-zero exit here ends container startup, and
+#   4. the two SYMLINK shapes at the destination (tests 29-30), each decided by a
+#      guard no other case reaches.
 #
 # Test numbers are assertion numbers: every numbered block makes exactly one
 # ok/no/sk call, so passed+failed+skipped in the summary line equals the highest
@@ -45,6 +47,14 @@
 # volume — a fatal shell error injected into a copy of the hook, inside the step —
 # so invariant B is pinned as a property of the call site's structure and not only
 # as a list of shapes that happen to survive.
+#
+# Group 4 covers the two shapes the shape cases in group 3 cannot reach, because a
+# DIFFERENT guard decides each: a dangling symlink is kept out of the fresh-seed
+# branch by the `[ ! -L ]` conjunct alone (`-e` is false for one, so the `[ ! -f ]`
+# test this grew out of wrote straight THROUGH it and created the missing target),
+# and a symlink to a marked, digest-matching file is RESOLVED by `-f` and then
+# replaced by a regular file rather than written through — the caveat the README
+# states for anyone linking this path into a dotfiles checkout.
 #
 # Runs against the repo copy of the hook — no image build needed. Requires bash;
 # setsid is optional (the hook falls back to a plain background detach without it).
@@ -509,12 +519,14 @@ fi
 # (exit 2, 1, 127, 127 and 1 in order), as does test 24, and entrypoint-core.sh
 # invokes this hook UNGUARDED under `set -euo pipefail`, so each was a dead
 # container: no instruction file, no settings.json, no CMD, because a cosmetic asset
-# could not be digested, written or even complained about. Tests 21-23 and 25 are the
-# odd ones out — they exited 0 but LIED, silently and permanently — which is why
-# every case here asserts the hook exited 0 AND that the other two seeded assets
-# landed anyway AND what it left on disk and said on stderr. A status-only check
-# would pass a hook that survives by skipping the rest of its work, and would miss
-# the four lying cases entirely.
+# could not be digested, written or even complained about. Tests 21-23, 25 and 27 are
+# the odd ones out — they exited 0 but LIED, silently and permanently (27's `mv`
+# reported a marker published having published nowhere) — and test 26 is neither: it
+# exited 0 and told the truth, once per start forever. That is why every case here
+# asserts the hook exited 0 AND that the other two seeded assets landed anyway AND
+# what it left on disk and said on stderr. A status-only check would pass a hook that
+# survives by skipping the rest of its work, and would miss the five lying cases
+# entirely.
 # ================================================================================
 
 SL_SEED_ERR="$WORK_ROOT/slseed-err"
@@ -969,6 +981,70 @@ else
 	else
 		no "fatal error inside the step: contained by the subshell, hook exits 0, others still refresh (rc=$RC, stderr=$(tr '\n' ' ' <"$CFG.stderr" 2>/dev/null))"
 	fi
+fi
+
+# ================================================================================
+# Statusline seeding, SYMLINK shapes at the destination. Both are load-bearing and
+# neither is reachable from the group-3 shapes: see the group 4 note at the top.
+# ================================================================================
+
+# --- Test 29: a DANGLING symlink at the statusline path -> left untouched -------
+# The `[ ! -L ]` conjunct is the SOLE guard keeping this out of the fresh-seed
+# branch: `-e` is false for a dangling link, so a `[ ! -f ]`- or `[ ! -e ]`-only
+# test publishes over it. Both the link and its target are asserted, because the
+# two ways in differ — the atomic publish's rename DESTROYS the link, while the
+# `cp` this grew out of followed it and CREATED the target the user pointed at.
+# The target's parent therefore exists, or that second assertion would be holding
+# on this setup rather than on the hook.
+CFG="$(sl_new_cfg)"
+DST="$CFG/statusline-command.sh"
+MK="$CFG/.statusline-command.sh.powbox-seeded"
+SL_DANGLING_TARGET="$CFG/dotfiles-statusline.sh"
+ln -s "$SL_DANGLING_TARGET" "$DST"
+sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+RC="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+if [ "$RC" = 0 ] &&
+	[ -L "$DST" ] &&
+	[ "$(readlink "$DST")" = "$SL_DANGLING_TARGET" ] &&
+	[ ! -e "$SL_DANGLING_TARGET" ] &&
+	[ ! -e "$MK" ] &&
+	[ -z "$(find "$CFG" -maxdepth 1 -name 'statusline-command.sh.*' -print -quit 2>/dev/null)" ] &&
+	[ ! -s "$CFG.stderr" ] &&
+	sl_independent "$CFG" v1; then
+	ok "dangling symlink at the statusline path: link kept, target not created, unmarked, others still refresh"
+else
+	no "dangling symlink at the statusline path: link kept, target not created, unmarked, others still refresh (rc=$RC, link=$(readlink "$DST" 2>/dev/null), target=$([ -e "$SL_DANGLING_TARGET" ] && echo created || echo absent))"
+fi
+
+# --- Test 30: a symlink to a MARKED, matching file -> REPLACED by a real file ---
+# The README promises exactly this to anyone keeping the path as a link into a
+# dotfiles checkout: `-f` resolves the link, so the refresh is decided against the
+# TARGET's digest, and the rename then replaces the LINK — the target keeps its old
+# contents rather than being written through. Nothing else in the suite reaches the
+# publish with a symlink at the destination.
+CFG="$(sl_new_cfg)"
+DST="$CFG/statusline-command.sh"
+MK="$CFG/.statusline-command.sh.powbox-seeded"
+SL_LINK_TARGET="$CFG/dotfiles-statusline.sh"
+sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+sl_run "$CFG" "$SL_SEED_ERR"
+# Move powbox's own seeded copy aside and point the path at it, so the marker's
+# `sha256=` still names exactly the bytes the link now resolves to.
+mv "$DST" "$SL_LINK_TARGET"
+ln -s "$SL_LINK_TARGET" "$DST"
+sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+RC="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+if [ "$RC" = 0 ] &&
+	[ ! -L "$DST" ] && [ -f "$DST" ] &&
+	[ "$(cat "$DST" 2>/dev/null)" = "v2" ] &&
+	[ "$(cat "$SL_LINK_TARGET" 2>/dev/null)" = "v1" ] &&
+	[ "$(sl_key "$MK" epoch)" = "200" ] &&
+	[ "$(sl_key "$MK" sha256)" = "$(sl_sha "$DST")" ] &&
+	[ ! -s "$CFG.stderr" ] &&
+	sl_independent "$CFG" v2; then
+	ok "symlink to a marked, matching file: link replaced by a regular file, target untouched, re-marked"
+else
+	no "symlink to a marked, matching file: link replaced by a regular file, target untouched, re-marked (rc=$RC, dst=$(cat "$DST" 2>/dev/null), target=$(cat "$SL_LINK_TARGET" 2>/dev/null))"
 fi
 
 echo

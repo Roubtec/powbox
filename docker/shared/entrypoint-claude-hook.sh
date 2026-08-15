@@ -151,8 +151,11 @@ statusline_publish() {
 		# publishing even where chmod cannot follow.
 		chmod --reference="$src" "$tmp" 2>/dev/null || true
 		# -T: a destination that IS a directory must FAIL here rather than
-		# absorb the temp. One that merely POINTS at a directory is REPLACED by
-		# the file, the same rename semantics as the symlink case below.
+		# absorb the temp. Defense in depth for THIS caller — both branches of
+		# statusline_seed_step exclude a directory, and a symlink to one, before
+		# reaching the publish — but the contract above is the function's, not
+		# the step's. The symlink shape that DOES arrive is a link to a regular
+		# file, which the rename replaces rather than writing through.
 		mv -T "$tmp" "$dst" 2>/dev/null && rc=0
 	fi
 	[ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null

@@ -484,13 +484,14 @@ else
 fi
 
 # ================================================================================
-# Statusline seeding, ERROR paths. Each case below aborted the pre-fix hook — with
-# exit 2, 1, 127 and 1 respectively — and entrypoint-core.sh invokes this hook
-# UNGUARDED, so each was a dead container: no instruction file, no settings.json,
-# no CMD, because a cosmetic asset could not be digested or written. Every case
-# therefore asserts the hook exited 0 AND that the other two seeded assets landed
-# anyway; asserting only the status would let a hook that "survives" by skipping
-# the rest of its work pass.
+# Statusline seeding, ERROR paths. Tests 16-20 each ABORTED the pre-fix hook (exit
+# 2, 1, 127, 127 and 1 in order), and entrypoint-core.sh invokes this hook UNGUARDED
+# under `set -euo pipefail`, so each was a dead container: no instruction file, no
+# settings.json, no CMD, because a cosmetic asset could not be digested or written.
+# Test 21 is the odd one out — pre-fix it exited 0 but LIED, which is why every case
+# here asserts the hook exited 0 AND that the other two seeded assets landed anyway
+# AND what it said on stderr. A status-only check would pass a hook that survives by
+# skipping the rest of its work, and would miss test 21 entirely.
 # ================================================================================
 
 SL_SEED_ERR="$WORK_ROOT/slseed-err"

@@ -79,7 +79,7 @@
 # process known to be live is the single way this budget could put two peer
 # reviews on the machine at once, and a fresh attempt directory isolates
 # artifacts, not processes. A suppressed run keeps the outcome its one attempt
-# earned (`timeout`, `failed`, `unavailable`) at attempts:1 / retried:false, and
+# earned (`failed`, `timeout`, `unavailable`) at attempts:1 / retried:false, and
 # its `reason` states the suppression instead of claiming a retry or a reap that
 # did not happen. The Claude fallback is the costly one — a run that might have
 # authenticated on the env credential ends `unavailable` — so its reason states

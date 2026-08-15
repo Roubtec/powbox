@@ -294,6 +294,19 @@ statusline_seed_step() {
 		# established, and offer a deletion that could destroy an untouched file.
 		return 0
 	fi
+	# BOUNDED, and the sharpest residual in this block: the proof above and the
+	# rename that acts on it are two steps, so a writer that changes the file in
+	# between has its bytes replaced, and seed_statusline then records the SOURCE
+	# digest — the marker certifies the overwrite as powbox's own, so nothing is
+	# said and nothing is recoverable. Every other residual here is cosmetic and
+	# self-announcing; this one destroys the user's work. Task 002h does not close
+	# it: that lock binds powbox's publishers, and the writer here is an arbitrary
+	# one (an editor in a peer container on this SHARED volume) that takes no lock.
+	# Left standing rather than half-guarded because rename(2) has no conditional
+	# form, so a re-check narrows the gap while reading as though it closed it;
+	# task 002i settles which of narrowing, recovery or acceptance this should be.
+	# The same gap sits between the fresh-seed branch's existence test above and
+	# its publish, where `ln`'s EEXIST could close it outright.
 	if [ "$have" = "$want" ]; then
 		seed_statusline
 		return 0

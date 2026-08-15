@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Unit tests for docker/shared/entrypoint-claude-hook.sh, in two groups:
+# Unit tests for docker/shared/entrypoint-claude-hook.sh, in three groups:
 #
-#   1. the build-skew shim (tests 1-5), and
-#   2. the statusline seed's digest-marker gating (tests 6+, task 002e).
+#   1. the build-skew shim (tests 1-5),
+#   2. the statusline seed's digest-marker gating (tests 6-15, task 002e), and
+#   3. that same seed's ERROR paths (tests 16-20), which must degrade rather
+#      than abort: the hook runs under `set -euo pipefail` and entrypoint-core.sh
+#      invokes it UNGUARDED, so a non-zero exit here ends container startup.
+#
+# Test numbers are assertion numbers: every numbered block makes exactly one
+# ok/no call, so the count in the summary line matches the highest label.
 #
 # Group 1 covers the two INDEPENDENT handshake markers (task 021 fix-up) that decide
 # which detached convergence duties the hook must cover for primary Claude:
@@ -37,6 +43,7 @@ fi
 
 pass=0
 fail=0
+skip=0
 ok() {
 	pass=$((pass + 1))
 	printf 'ok   - %s\n' "$1"
@@ -45,6 +52,21 @@ no() {
 	fail=$((fail + 1))
 	printf 'FAIL - %s\n' "$1"
 }
+# sk <reason> — a case that cannot be MEANINGFULLY run here. Loud on purpose: a
+# permission-denial case is vacuous under root/CAP_DAC_OVERRIDE, and silently
+# counting it as a pass would report coverage the run does not have.
+sk() {
+	skip=$((skip + 1))
+	printf 'SKIP - %s\n' "$1"
+}
+
+# chmod 000/444 deny nothing to root. The pure-shell suite runs as uid 1000 in
+# the container and on CI, so the denial cases below normally execute.
+if [ "$(id -u)" -eq 0 ]; then
+	RUNNING_AS_ROOT=yes
+else
+	RUNNING_AS_ROOT=no
+fi
 
 WORK_ROOT="$(mktemp -d)"
 trap 'rm -rf "$WORK_ROOT"' EXIT
@@ -232,12 +254,25 @@ sl_run() {
 
 # sl_key <marker> <key> — read one key from a key=value marker (by key, never by
 # line position: the .powbox-seeded parsing contract).
+#
+# The trailing `|| true` on both readers is not decoration: this suite also runs
+# under `set -euo pipefail`, and these are called in bare command substitutions
+# (`X="$(sl_key …)"`). Without it, a missing or unreadable marker takes the whole
+# suite down mid-run — no summary line, no idea which cases never ran.
 sl_key() {
-	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1 || true
 }
 
 sl_sha() {
-	sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+	sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true
+}
+
+# sl_flip_byte <file> <offset> <char> — overwrite exactly one byte in place,
+# leaving the length and every other byte untouched. The acceptance criterion
+# words the customization case as "verified by editing one byte", so it is
+# tested with a real one-byte edit rather than a rewritten line.
+sl_flip_byte() {
+	printf '%s' "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc status=none 2>/dev/null
 }
 
 # sl_tmpl <seed-dir> <version> — write the instruction template. Its ${AGENT_NAME}
@@ -290,26 +325,31 @@ else
 	no "marked statusline, epoch not newer: left alone (got: $(cat "$DST" 2>/dev/null))"
 fi
 
-# --- Test 9: customized -> PRESERVED, with a note exactly once per image --------
+# --- Test 9: customized by ONE BYTE -> PRESERVED, with a note -------------------
+# The acceptance criterion says "verified by editing one byte", so the edit is
+# literally one byte: same length, same every-other-byte, different digest.
 CFG="$(sl_new_cfg)"
 DST="$CFG/statusline-command.sh"
 MK="$CFG/.statusline-command.sh.powbox-seeded"
-sl_seed "$SL_SEED" 100 'v1'
+sl_seed "$SL_SEED" 100 'v1 baseline statusline'
 sl_run "$CFG" "$SL_SEED"
 SEEDED_SHA="$(sl_key "$MK" sha256)"
-printf 'v1 with my own tweak\n' >"$DST" # one byte is enough; this is a whole line
+SEEDED_SIZE="$(wc -c <"$DST")"
+sl_flip_byte "$DST" 3 B # 'v1 baseline …' -> 'v1 Baseline …'
 sl_seed "$SL_SEED" 200 'v2'
 sl_run "$CFG" "$SL_SEED"
-if [ "$(cat "$DST" 2>/dev/null)" = "v1 with my own tweak" ] &&
+if [ "$(cat "$DST" 2>/dev/null)" = "v1 Baseline statusline" ] &&
+	[ "$(wc -c <"$DST")" = "$SEEDED_SIZE" ] &&
+	[ "$(sl_sha "$DST")" != "$SEEDED_SHA" ] &&
 	[ "$(sl_key "$MK" epoch)" = "100" ] &&
 	[ "$(sl_key "$MK" sha256)" = "$SEEDED_SHA" ] &&
 	grep -q 'differs from the copy powbox seeded' "$CFG.stderr"; then
-	ok "customized statusline, newer epoch: preserved, marker untouched, one note"
+	ok "one-byte-edited statusline, newer epoch: preserved, marker untouched, one note"
 else
-	no "customized statusline, newer epoch: preserved, marker untouched, one note (got: $(cat "$DST" 2>/dev/null))"
+	no "one-byte-edited statusline, newer epoch: preserved, marker untouched, one note (got: $(cat "$DST" 2>/dev/null))"
 fi
 
-# Restarting on the SAME image must not nag again...
+# --- Test 10: restarting on the SAME image must not nag again -------------------
 sl_run "$CFG" "$SL_SEED"
 if [ ! -s "$CFG.stderr" ] && [ "$(sl_key "$MK" notified_epoch)" = "200" ]; then
 	ok "customized statusline, same image again: silent (no nag per start)"
@@ -317,10 +357,12 @@ else
 	no "customized statusline, same image again: silent (got: $(cat "$CFG.stderr" 2>/dev/null))"
 fi
 
-# ...but a NEWER image is a new offer, so it says so once more.
+# --- Test 11: ...but a NEWER image is a new offer, so it says so once more ------
+# The rewrite that records the new notified_epoch must PRESERVE the other keys:
+# a marker reduced to notified_epoch= alone would unmark the file for good.
 sl_seed "$SL_SEED" 300 'v3'
 sl_run "$CFG" "$SL_SEED"
-if [ "$(cat "$DST" 2>/dev/null)" = "v1 with my own tweak" ] &&
+if [ "$(cat "$DST" 2>/dev/null)" = "v1 Baseline statusline" ] &&
 	[ "$(sl_key "$MK" notified_epoch)" = "300" ] &&
 	grep -q 'differs from the copy powbox seeded' "$CFG.stderr"; then
 	ok "customized statusline, next image: preserved and noted once more"
@@ -328,7 +370,7 @@ else
 	no "customized statusline, next image: preserved and noted once more"
 fi
 
-# --- Test 10: UNMARKED pre-existing file -> preserved (today's upgrade path) ----
+# --- Test 12: UNMARKED pre-existing file -> preserved (today's upgrade path) ----
 # Every claude-config volume in existence right now is in this state: powbox
 # cannot prove the file is unmodified, so it must never be overwritten.
 CFG="$(sl_new_cfg)"
@@ -344,7 +386,7 @@ else
 	no "unmarked pre-existing statusline: preserved, still unmarked, silent (got: $(cat "$DST" 2>/dev/null))"
 fi
 
-# --- Test 11: deleting the file re-seeds it AND adopts the marker ---------------
+# --- Test 13: deleting the file re-seeds it AND adopts the marker ---------------
 # The documented escape hatch, now self-healing: the next rebuild refreshes it.
 rm -f "$DST"
 sl_run "$CFG" "$SL_SEED"
@@ -356,7 +398,7 @@ else
 	no "deleted statusline: re-seeded and now marked (got: $(cat "$DST" 2>/dev/null))"
 fi
 
-# --- Test 12: a held-back statusline does not hold back the instruction file ----
+# --- Test 14: a held-back statusline does not hold back the instruction file ----
 CFG="$(sl_new_cfg)"
 DST="$CFG/statusline-command.sh"
 MK="$CFG/.statusline-command.sh.powbox-seeded"
@@ -378,7 +420,7 @@ else
 	no "customized statusline does not block the instruction file or settings.json"
 fi
 
-# --- Test 13: ...and a skipped instruction render does not block the statusline -
+# --- Test 15: ...and a skipped instruction render does not block the statusline -
 # A volume stamped by a NEWER image than the one now running skips the instruction
 # block entirely (VOLUME_EPOCH > IMAGE_EPOCH); the statusline still refreshes on
 # its own marker's epoch.

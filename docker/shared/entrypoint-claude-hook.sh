@@ -46,7 +46,12 @@ chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 # runs first. The two steps stay INDEPENDENT: each compares this value against
 # its OWN recorded epoch (the statusline's sidecar marker vs. .instruction-epoch)
 # and stamps only its own, so a statusline held back for being customized cannot
-# hold back the instruction file, nor the reverse.
+# hold back the instruction file, nor the reverse. They also compare it
+# DIFFERENTLY on purpose: the statusline demands a strictly newer image (-gt)
+# because it is a byte copy of a baked file, so the same epoch can only produce
+# the same bytes; the instruction file accepts an equal epoch (-ge) because its
+# render is an envsubst of launch-time variables that can differ between two
+# starts on one image.
 IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 [[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
 
@@ -58,7 +63,9 @@ IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 # of exactly what was written. A file that no longer matches is the user's, and a
 # file with no marker at all — every volume predating this mechanism — cannot be
 # proven either way and is likewise left alone; it adopts the mechanism the first
-# time the file is deleted and re-seeded.
+# time the file is deleted and re-seeded. Every failure to read, digest or write
+# resolves the same way — keep what is on disk and carry on — because this block
+# runs on the container's startup path and must never be able to end it.
 STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"
 STATUSLINE_DST="$AGENT_CONFIG_DIR/statusline-command.sh"
 # Sidecar name mirrors seed_workflow_marker_path() in seed-skills.sh: a lone file
@@ -69,22 +76,37 @@ STATUSLINE_MARKER="$AGENT_CONFIG_DIR/.statusline-command.sh.powbox-seeded"
 # docs/skills-refresh-and-provenance.md D8 on per-call-site source roots).
 STATUSLINE_SOURCE="Roubtec/powbox#docker/claude/agent-container/statusline-command.sh"
 
-# Prints the file's sha256, or nothing when it cannot be computed.
+# Prints the file's sha256, or nothing when it cannot be computed (unreadable
+# file, or an image without coreutils' sha256sum).
+#
+# NEVER FAILS, and that is load-bearing: every call site is a bare command
+# substitution in an assignment, and this hook runs under `set -e` with
+# `pipefail` (line 2) and is invoked UNGUARDED by entrypoint-core.sh, so a
+# status escaping here would abort container startup — killing the instruction
+# file, settings.json and the CMD over a cosmetic asset. The `|| true` therefore
+# sits on the PIPELINE rather than on sha256sum, because `pipefail` is exactly
+# what would otherwise carry the left-hand failure out.
 statusline_digest() {
-	sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+	sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true
 }
 
-# Prints one key's value from a key=value marker. Marker readers MUST parse by
-# key, never by line number or count — the `.powbox-seeded` contract in
-# docs/skills-refresh-and-provenance.md D8, which this marker joins.
+# Prints one key's value from a key=value marker, or nothing when the marker
+# cannot be read. Marker readers MUST parse by key, never by line number or
+# count — the `.powbox-seeded` contract in docs/skills-refresh-and-provenance.md
+# D8, which this marker joins. Cannot fail, for the reason given above.
 statusline_marker_value() {
-	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1 || true
 }
 
-# Copy the baked statusline over the destination and stamp the marker.
 seed_statusline() {
 	local digest commit
-	cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
+	# A destination that cannot be written keeps whatever it holds and startup
+	# continues; one non-fatal line says so, because silence on a volume this
+	# broken would be indistinguishable from a successful refresh.
+	if ! cp "$STATUSLINE_SRC" "$STATUSLINE_DST" 2>/dev/null; then
+		echo "Note: could not write $STATUSLINE_DST; left as found." >&2
+		return 0
+	fi
 	digest="$(statusline_digest "$STATUSLINE_DST")"
 	# Without a digest there is no provable identity, so write no marker at all:
 	# an unmarked file is never refreshed, which is the safe direction. Only
@@ -98,15 +120,22 @@ seed_statusline() {
 }
 
 if [ -f "$STATUSLINE_SRC" ]; then
-	if [ ! -f "$STATUSLINE_DST" ]; then
+	if [ ! -e "$STATUSLINE_DST" ] && [ ! -L "$STATUSLINE_DST" ]; then
 		seed_statusline
-	elif [ -f "$STATUSLINE_MARKER" ]; then
+	elif [ -f "$STATUSLINE_DST" ] && [ -f "$STATUSLINE_MARKER" ]; then
 		_sl_epoch="$(statusline_marker_value "$STATUSLINE_MARKER" epoch)"
 		[[ "$_sl_epoch" =~ ^[0-9]+$ ]] || _sl_epoch=0
 		if [ "$IMAGE_EPOCH" -gt "$_sl_epoch" ]; then
 			_sl_want="$(statusline_marker_value "$STATUSLINE_MARKER" sha256)"
 			_sl_have="$(statusline_digest "$STATUSLINE_DST")"
-			if [ -n "$_sl_want" ] && [ "$_sl_have" = "$_sl_want" ]; then
+			if [ -z "$_sl_want" ] || [ -z "$_sl_have" ]; then
+				# No proof either way: a marker carrying no `sha256=` key, or a
+				# digest that could not be computed. Answer as for an unmarked
+				# file — keep it, say nothing. The note below would otherwise
+				# assert a difference powbox has not established, and offer a
+				# deletion that could destroy an untouched file.
+				:
+			elif [ "$_sl_have" = "$_sl_want" ]; then
 				seed_statusline
 			else
 				# The user made it theirs. Say so ONCE PER IMAGE, not once per
@@ -117,13 +146,33 @@ if [ -f "$STATUSLINE_SRC" ]; then
 				[[ "$_sl_told" =~ ^[0-9]+$ ]] || _sl_told=0
 				if [ "$IMAGE_EPOCH" -gt "$_sl_told" ]; then
 					echo "Note: this image ships a newer statusline, but $STATUSLINE_DST differs from the copy powbox seeded, so it was kept. Delete it to take the new one." >&2
-					if {
-						grep -v '^notified_epoch=' "$STATUSLINE_MARKER" || true
-						printf 'notified_epoch=%s\n' "$IMAGE_EPOCH"
-					} >"$STATUSLINE_MARKER.tmp" 2>/dev/null; then
-						mv "$STATUSLINE_MARKER.tmp" "$STATUSLINE_MARKER" 2>/dev/null || true
+					# Rewrite through a UNIQUE temp name in the same directory:
+					# the claude-config volume is shared by every powbox
+					# container (see the append-only bootstrap log below), so a
+					# fixed `.tmp` lets two containers declining the same image
+					# interleave — one truncating the file the other is about to
+					# rename over the real marker. mktemp keeps the rename
+					# atomic and removes the window.
+					_sl_tmp="$(mktemp "$STATUSLINE_MARKER.XXXXXX" 2>/dev/null || true)"
+					if [ -n "$_sl_tmp" ]; then
+						# grep's status is checked, never masked: 0 = lines kept,
+						# 1 = none to keep (nothing can be lost), >=2 = the
+						# marker could not be READ, and publishing then would
+						# leave a marker holding only `notified_epoch=` —
+						# erasing `epoch=`/`sha256=` and permanently unmarking
+						# the file. Abandon the rewrite instead; the worst case
+						# is one more note on the next start.
+						_sl_rc=0
+						grep -v '^notified_epoch=' "$STATUSLINE_MARKER" >"$_sl_tmp" 2>/dev/null || _sl_rc=$?
+						if [ "$_sl_rc" -le 1 ] &&
+							printf 'notified_epoch=%s\n' "$IMAGE_EPOCH" >>"$_sl_tmp" 2>/dev/null; then
+							mv "$_sl_tmp" "$STATUSLINE_MARKER" 2>/dev/null || rm -f "$_sl_tmp"
+						else
+							rm -f "$_sl_tmp"
+						fi
+						unset _sl_rc
 					fi
-					rm -f "$STATUSLINE_MARKER.tmp" 2>/dev/null || true
+					unset _sl_tmp
 				fi
 				unset _sl_told
 			fi
@@ -131,6 +180,10 @@ if [ -f "$STATUSLINE_SRC" ]; then
 		fi
 		unset _sl_epoch
 	fi
+	# Every other shape falls through untouched: a marked-but-not-regular
+	# destination, an unmarked file (the pre-marker upgrade path), a directory,
+	# or a dangling symlink. `-e || -L` rather than `-f` on the seed branch so
+	# the last two are never copied INTO or resolved through.
 fi
 
 AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"

@@ -250,6 +250,7 @@ That is the upgrade path for every `claude-config` volume that predates this mar
 
 "Unmarked" extends to every way the proof can come up missing, because a digest powbox cannot read is worth no more than one it never wrote: a marker with no `sha256=` key, a marker that cannot be read at all, and a file that cannot be digested (an image without `sha256sum`) all keep the file and say nothing.
 The producing side matches — `seed_statusline` writes a copy whose digest it could not compute with **no marker at all**, rather than a marker it could not fill in, so the unprovable case can only ever err toward keeping what is on disk.
+It also *removes* any marker already sitting there in that case, and whenever a marker cannot be published: once the file has been replaced, an old `sha256=` names bytes that are gone, and a stale proof is worse than none — it reads as "the user edited this" and nags about a file powbox itself just wrote.
 
 `source=` names **this** repo rather than one of the `Roubtec/agent-skills` roots — the statusline is a powbox-owned asset, which is the "should powbox ever bake an asset it owns itself" case [D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath) reserved.
 
@@ -259,7 +260,9 @@ It is a **separate key** on purpose: reusing `epoch=` would have bought the same
 **Written inline, not by sourcing `seed-skills.sh`.** The two calls the library could have supplied are the epoch/commit printf and the sidecar-name join; it cannot supply `sha256=` at all, and `seed_source_ref` cannot supply this `source=` either, since every root it defines points at `Roubtec/agent-skills`.
 Against that, sourcing would give the Claude hook its first library dependency — and the hook runs under `set -euo pipefail` on the startup critical path, where a missing or damaged library would take the instruction file and `settings.json` down with a cosmetic asset.
 So the hook reuses the *format* (which is what consumers depend on) and not the code, and the parse-by-key rule above binds it identically: it reads keys with `sed -n 's/^<key>=//p'`, never by position.
-`scripts/test-claude-hook-skew.sh` pins the marker's contents and all three transitions.
+**Published atomically, like the file it describes.** Every write of this marker goes to a `mktemp` sibling and is renamed over the real name, never written in place, because the `claude-config` volume is shared by every powbox container: a truncating write is visible to a peer mid-flight, and the peer reading a marker stripped back to `notified_epoch=` alone would treat the statusline as unmarked from then on — never refreshed, never mentioned again.
+Any consumer that learns to *write* a `.powbox-seeded` marker on a shared volume should do the same.
+`scripts/test-claude-hook-skew.sh` pins the marker's contents and all three transitions, plus the two concurrency shapes: a peer truncating the marker under the rewrite, and a marker that cannot be written in place while the file it describes is re-seeded.
 
 ---
 

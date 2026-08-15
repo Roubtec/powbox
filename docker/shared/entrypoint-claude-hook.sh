@@ -28,7 +28,7 @@ merge_json_files() {
 		echo "Warning: invalid JSON in $overlay; leaving $dst untouched." >&2
 		return
 	fi
-	if jq -s '.[0] * .[1]' "$base" "$overlay" > "$tmp"; then
+	if jq -s '.[0] * .[1]' "$base" "$overlay" >"$tmp"; then
 		mv "$tmp" "$dst"
 	else
 		echo "Warning: failed to merge $overlay into $dst; leaving existing settings untouched." >&2
@@ -41,24 +41,107 @@ merge_json_files() {
 # statusline and instruction file below are applied.
 chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
-# Seed the statusline script (no-clobber: preserves user customizations on the
-# volume; delete the file to pick up the latest version on next container start).
+# Read once, above BOTH epoch-gated steps below (the statusline refresh and the
+# instruction/settings render), because the statusline block now needs it and
+# runs first. The two steps stay INDEPENDENT: each compares this value against
+# its OWN recorded epoch (the statusline's sidecar marker vs. .instruction-epoch)
+# and stamps only its own, so a statusline held back for being customized cannot
+# hold back the instruction file, nor the reverse.
+IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
+[[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
+
+# --- Statusline seeding -------------------------------------------------------
+# The baked statusline is deliberately opinionated and users are expected to edit
+# it, so a newer image may replace only a copy powbox can PROVE is still its own.
+# A running container holds no copy of the previous image's file, so that proof
+# has to be a digest recorded at seed time: the sidecar marker carries the sha256
+# of exactly what was written. A file that no longer matches is the user's, and a
+# file with no marker at all — every volume predating this mechanism — cannot be
+# proven either way and is likewise left alone; it adopts the mechanism the first
+# time the file is deleted and re-seeded.
 STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"
-if [ -f "$STATUSLINE_SRC" ] && [ ! -f "$AGENT_CONFIG_DIR/statusline-command.sh" ]; then
-	cp "$STATUSLINE_SRC" "$AGENT_CONFIG_DIR/statusline-command.sh"
+STATUSLINE_DST="$AGENT_CONFIG_DIR/statusline-command.sh"
+# Sidecar name mirrors seed_workflow_marker_path() in seed-skills.sh: a lone file
+# has no "inside" to hold its marker, so it gets a hidden sibling.
+STATUSLINE_MARKER="$AGENT_CONFIG_DIR/.statusline-command.sh.powbox-seeded"
+# The statusline is powbox's OWN asset, so its `source=` names this repo rather
+# than one of seed-skills.sh's Roubtec/agent-skills roots (see
+# docs/skills-refresh-and-provenance.md D8 on per-call-site source roots).
+STATUSLINE_SOURCE="Roubtec/powbox#docker/claude/agent-container/statusline-command.sh"
+
+# Prints the file's sha256, or nothing when it cannot be computed.
+statusline_digest() {
+	sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Prints one key's value from a key=value marker. Marker readers MUST parse by
+# key, never by line number or count — the `.powbox-seeded` contract in
+# docs/skills-refresh-and-provenance.md D8, which this marker joins.
+statusline_marker_value() {
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1
+}
+
+# Copy the baked statusline over the destination and stamp the marker.
+seed_statusline() {
+	local digest commit
+	cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
+	digest="$(statusline_digest "$STATUSLINE_DST")"
+	# Without a digest there is no provable identity, so write no marker at all:
+	# an unmarked file is never refreshed, which is the safe direction. Only
+	# reachable on an image missing coreutils' sha256sum.
+	[ -n "$digest" ] || return 0
+	commit="$(cat "$AGENT_SEED_DIR/build-commit" 2>/dev/null || echo unknown)"
+	[ -n "$commit" ] || commit=unknown
+	printf 'epoch=%s\ncommit=%s\nsha256=%s\nsource=%s\n' \
+		"$IMAGE_EPOCH" "$commit" "$digest" "$STATUSLINE_SOURCE" \
+		>"$STATUSLINE_MARKER" || true
+}
+
+if [ -f "$STATUSLINE_SRC" ]; then
+	if [ ! -f "$STATUSLINE_DST" ]; then
+		seed_statusline
+	elif [ -f "$STATUSLINE_MARKER" ]; then
+		_sl_epoch="$(statusline_marker_value "$STATUSLINE_MARKER" epoch)"
+		[[ "$_sl_epoch" =~ ^[0-9]+$ ]] || _sl_epoch=0
+		if [ "$IMAGE_EPOCH" -gt "$_sl_epoch" ]; then
+			_sl_want="$(statusline_marker_value "$STATUSLINE_MARKER" sha256)"
+			_sl_have="$(statusline_digest "$STATUSLINE_DST")"
+			if [ -n "$_sl_want" ] && [ "$_sl_have" = "$_sl_want" ]; then
+				seed_statusline
+			else
+				# The user made it theirs. Say so ONCE PER IMAGE, not once per
+				# start: `notified_epoch=` records the newest image whose offer
+				# was already declined. It is a separate key precisely so
+				# `epoch=` keeps meaning "the build that placed this file".
+				_sl_told="$(statusline_marker_value "$STATUSLINE_MARKER" notified_epoch)"
+				[[ "$_sl_told" =~ ^[0-9]+$ ]] || _sl_told=0
+				if [ "$IMAGE_EPOCH" -gt "$_sl_told" ]; then
+					echo "Note: this image ships a newer statusline, but $STATUSLINE_DST differs from the copy powbox seeded, so it was kept. Delete it to take the new one." >&2
+					if {
+						grep -v '^notified_epoch=' "$STATUSLINE_MARKER" || true
+						printf 'notified_epoch=%s\n' "$IMAGE_EPOCH"
+					} >"$STATUSLINE_MARKER.tmp" 2>/dev/null; then
+						mv "$STATUSLINE_MARKER.tmp" "$STATUSLINE_MARKER" 2>/dev/null || true
+					fi
+					rm -f "$STATUSLINE_MARKER.tmp" 2>/dev/null || true
+				fi
+				unset _sl_told
+			fi
+			unset _sl_want _sl_have
+		fi
+		unset _sl_epoch
+	fi
 fi
 
 AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"
 if [ -f "$AGENT_TMPL" ]; then
-	IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
-	[[ "$IMAGE_EPOCH" =~ ^[0-9]+$ ]] || IMAGE_EPOCH=0
 	VOLUME_EPOCH=$(cat "$AGENT_CONFIG_DIR/.instruction-epoch" 2>/dev/null || echo 0)
 	[[ "$VOLUME_EPOCH" =~ ^[0-9]+$ ]] || VOLUME_EPOCH=0
 	if [ "$IMAGE_EPOCH" -ge "$VOLUME_EPOCH" ]; then
 		# envsubst needs literal ${VAR} names, not shell-expanded values
 		# shellcheck disable=SC2016
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' \
-			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+			<"$AGENT_TMPL" >"$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 
 		# Merge the statusLine key into settings.json (preserves all other keys).
 		STATUSLINE_JSON="$AGENT_SEED_DIR/statusline-settings.json"
@@ -95,7 +178,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		# (marked .powbox-seeded, in-folder for skills / sidecar for workflows) are
 		# classified as orphans and retired by `agent-update-skills --prune` — the
 		# updater's orphan sweep runs even though the baked source dirs are gone.
-		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
+		echo "$IMAGE_EPOCH" >"$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
 

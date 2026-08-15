@@ -32,8 +32,10 @@ set -uo pipefail
 #       in-worktree target, an in-worktree SYMLINK that resolves out (10h), and a
 #       `..`-escaping spelling through such a symlink (10h2)), bad flags exit 64,
 #       0700 attempt dirs, prompt copied into the attempt
-#       dir, an invalid --timeout exits 64 BEFORE the session dir is created (a
-#       usage error never litters the artifact root), the Codex capability probe
+#       dir, `--help` proved to cover the whole header comment and no code (its
+#       line range is hand-maintained, so both edges are derived from the helper
+#       rather than restated), an invalid --timeout exits 64 BEFORE the session
+#       dir is created (a usage error never litters the artifact root), the Codex capability probe
 #       is bounded by --timeout so a hung `codex exec --help` cannot stall past
 #       the deadline (10i), and the Claude peer's login-PRIMARY/key-FALLBACK auth
 #       precedence is driven by the runner: the login wins in one attempt when it
@@ -800,6 +802,14 @@ d="$(new_case)"
 run "$d" -h
 assert_eq "10f: -h exit 0" "$RUN_RC" 0
 assert_contains "10f: -h prints usage" "$RUN_OUT" "peer-review-run"
+# The usage body is a hand-maintained sed line range over the header comment, so
+# it rots silently the moment that block grows or shrinks. Both edges are derived
+# from the helper rather than restated here: the LAST header comment line must be
+# in the output (a range left short truncates the usage mid-block) and the first
+# line of code must not be (a range left long spills shell into --help).
+help_last="$(awk '/^set -uo pipefail$/ {exit} {prev = $0} END {sub(/^# ?/, "", prev); print prev}' "$HELPER")"
+assert_contains "10f: -h reaches the last header line" "$RUN_OUT" "$help_last"
+assert_not_contains "10f: -h stops before the code" "$RUN_OUT" "set -uo pipefail"
 
 # 10h: an --artifact-root supplied THROUGH a symlink that LIVES in the worktree is
 # rejected, even though the symlink resolves to an EXTERNAL target (which would

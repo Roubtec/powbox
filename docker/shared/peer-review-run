@@ -39,11 +39,14 @@
 #                    since either makes that bare name meaningless without the
 #                    configuration this helper deliberately does not forward
 #                    ([profiles.*] and [model_providers.*] are never consulted).
-#                    A missing config, a profile/provider-dependent selection, or
-#                    an unreadable/unparseable/unusable value degrades to the
-#                    bare CLI default with a stderr warning and `model:null` —
-#                    never a failed review. An explicit --model wins and skips
-#                    the lookup entirely. Passed as `--model` (claude) or `-m`
+#                    A missing config, or one carrying no root `model`, is the
+#                    unconfigured case and stays SILENT: no `-m`, `model:null`,
+#                    no warning, exactly as before this passthrough existed.
+#                    A profile/provider-dependent selection, or an
+#                    unreadable/unparseable/unusable value, degrades to the bare
+#                    CLI default with a stderr warning and `model:null` — never
+#                    a failed review. An explicit --model wins and skips the
+#                    lookup entirely. Passed as `--model` (claude) or `-m`
 #                    (codex).
 #   --effort         reasoning effort: low | medium | high | xhigh | max
 #                    (`max` is claude-only). Default: high, for BOTH providers.
@@ -134,7 +137,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,124p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,127p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -584,6 +587,13 @@ trap 'exit 143' TERM
 # it, so reaching that byte is how over-cap is detected rather than a larger cap.
 # A few hundred KiB is generous for a file whose whole job is a handful of keys.
 #
+# A value this program cannot hand back verbatim is rejected rather than
+# silently altered: the caller reads stdout through a Bash command substitution,
+# which strips trailing newlines, so a model ending in one would ride as a
+# DIFFERENT string than the file names. Non-printable is where that line is
+# drawn — no real model ID carries a control character, and it keeps "the
+# configured value is passed exactly" true for everything that is passed at all.
+#
 # PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: unset in every non-test
 # path, it exists because a single os.read behaves identically to a looped one on
 # an ordinary regular file, so nothing else would ever exercise the loop.
@@ -650,6 +660,8 @@ if chosen.strip() == "":
     degrade("the root model in " + path + " is empty")
 if chosen.startswith("-"):
     degrade("the root model in " + path + " is flag-shaped (" + chosen + ")")
+if not chosen.isprintable():
+    degrade("the root model in " + path + " contains a newline or other non-printable character")
 sys.stdout.write(chosen)
 sys.exit(0)
 '

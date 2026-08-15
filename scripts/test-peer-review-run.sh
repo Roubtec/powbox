@@ -2347,6 +2347,26 @@ for fixture in "${prr_bad_configs[@]}"; do
 	unset ARGV_LOG
 done
 
+# A root model carrying a NEWLINE degrades rather than riding altered. The
+# reader hands its result back through a Bash command substitution, which strips
+# trailing newlines, so forwarding this value would apply a string the config
+# does not name; rejecting it is what keeps "the configured value is passed
+# exactly" true for every value that is passed at all. printf '%s' writes the
+# TOML escape literally, and tomllib decodes it to a real newline.
+d="$(new_case)"
+make_codex_fake "$d"
+printf '%s\n' 'model = "fixture-model-newline\n"' >"$d/codex-home/config.toml"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "15f-newline: review still runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "15f-newline: no -m" "$(grep -cx -- '-m' "$d/argv")" 0
+assert_eq "15f-newline: model null" "$(jqf "$RUN_RESULT" .model)" null
+assert_not_contains "15f-newline: the value never reaches argv" "$(cat "$d/argv")" "fixture-model-newline"
+assert_contains "15f-newline: the warning names the non-printable character" "$RUN_ERR" "non-printable character"
+unset ARGV_LOG
+
 # An UNREADABLE existing config is the same degraded path. Root ignores mode
 # 0000, so the case is skipped rather than silently asserting nothing there.
 if [ "$(id -u)" -eq 0 ]; then

@@ -26,7 +26,7 @@ The concern was accepted rather than fixed in #151 and is documented in place as
 **In scope:**
 
 - Serialize the whole read/decide/publish/mark transaction of `statusline_seed_step` against peer containers on the shared `claude-config` volume.
-- Pick and justify a bound for the wait that is defensible on the synchronous startup path, and state what happens when it expires (proceeding unlocked reproduces today's race; skipping the refresh defers it one start — either is acceptable if stated).
+- Pick and justify a bound for the wait that is defensible on the synchronous startup path, and state what happens when it expires (proceeding unlocked reproduces today's race; skipping the refresh defers it one start — either is acceptable if stated). This choice is deliberately left open; the acceptance criteria below bind to whichever fallback is chosen rather than presuming one.
 - Preserve both invariants of the block: every publish stays atomic, and no failure of the locking path — a missing `flock` binary, an unopenable lockfile, an expired wait — may abort container startup or leave the statusline in a state worse than "left as found".
 - Extend `scripts/test-claude-hook-skew.sh` with the new shapes: no `flock` on `PATH`, a lockfile that cannot be created, and a contended lock (a peer holding it) — each asserting the hook exits 0 and the instruction file and `settings.json` still refresh, as every other error path in that suite does.
 
@@ -45,7 +45,8 @@ The concern was accepted rather than fixed in #151 and is documented in place as
 ## Acceptance criteria
 
 - Two containers from different newer image epochs starting concurrently against one `claude-config` volume can no longer leave the statusline paired with the wrong marker, for as long as both run the locked hook.
-- The hook still exits 0, still leaves the statusline as found, and still refreshes the instruction file and `settings.json`, with `flock` absent from `PATH`, with the lockfile path unwritable, and with the lock held by a peer past the wait.
+- The hook still exits 0 and still refreshes the instruction file and `settings.json` with `flock` absent from `PATH`, with the lockfile path unwritable, and with the lock held by a peer past the wait — the same pair every other error path in `scripts/test-claude-hook-skew.sh` already asserts.
+- In each of those three shapes the statusline itself ends in the outcome the fallback chosen in [Scope](#scope) documents, and the suite asserts *that* outcome rather than a presumed one: skipping the refresh leaves the file and its marker exactly as found; proceeding unlocked performs the ordinary digest-gated refresh and leaves the file paired with its own marker. Neither fallback may leave the file under a marker that does not describe it, and neither may end worse than "left as found".
 - The bounded-residual notes in `seed_statusline`, `docs/entrypoint-and-runtime.md` and `docs/skills-refresh-and-provenance.md` D9 are updated to describe what remains rather than removed.
 - `shellcheck` (default and `--severity=error`), `shfmt -d` and `./scripts/run-pure-shell-tests.sh` pass.
 

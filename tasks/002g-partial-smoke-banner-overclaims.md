@@ -5,7 +5,7 @@
 Both smoke umbrellas close a partial run with a banner that reads:
 
 - `commands/smoke-test.sh` — `This was a PARTIAL smoke test — the stages above did not run.`
-- `commands/smoke-test.ps1` — `This was a PARTIAL smoke test - the stages above did not run.` (hyphen, not em dash: that file is pure ASCII today, and keeping it that way is what spares it the UTF-8-with-BOM save `AGENTS.md` → "File Conventions" requires of a `.ps1` that *does* contain non-ASCII — the rule is conditional, not a ban on non-ASCII)
+- `commands/smoke-test.ps1` — `This was a PARTIAL smoke test - the stages above did not run.` (hyphen, not em dash — see Implementation notes)
 
 The list entries above that line are precise, but the summary line is not: the same list also collects **within-stage** partials, where the stage ran and only a portion of it self-skipped.
 So the banner tells a reader that a stage they in fact have coverage from produced none — which is the mirror image of a false green, and misleads in the direction of distrusting real coverage.

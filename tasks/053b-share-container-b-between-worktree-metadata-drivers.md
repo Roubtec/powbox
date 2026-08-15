@@ -29,7 +29,7 @@ The mechanism is already built and proven by 053a — reuse it rather than inven
 
 - a sibling `.bash` file beside the drivers, LF-pinned via `.gitattributes`
 - picked up by Tier 0's shellcheck shebang matcher automatically
-- the CRLF strip and the missing-file guard already exist on both sides for the Container A file; mirror them
+- the missing-file guard already exists on both sides for the Container A file, and the `.ps1` adds a CRLF strip after `Get-Content -Raw` that the `.sh`'s bare `cat` does not need; mirror both
 - non-executable (mode 644) by design — running it on a host would aim `shadow-mounts.sh` at host paths
 
 ## Target files or areas
@@ -37,7 +37,7 @@ The mechanism is already built and proven by 053a — reuse it rather than inven
 - `scripts/smoke-test-worktree-metadata.sh` — the `VERIFY_SCRIPT='…'` literal (the `--- Container B: recreate, re-bind, assert the worktree survived intact ----------` block)
 - `scripts/smoke-test-worktree-metadata.ps1` — the `$verifyScript = @(…)` array literal (the `The in-container verify script (Container B)` block)
 - wherever the shared Container B Bash lands (a new sibling file, named consistently with `scripts/smoke-test-worktree-metadata-container-a.bash`)
-- `.gitattributes` — LF pin for the new file, matching the Container A entry
+- `.gitattributes` — no change needed: the catch-all `* text=auto eol=lf` already pins the new `.bash`, as it does the Container A file (053a added no per-file entry)
 - `docs/smoke-tests.md` → Stage 6 and "The PowerShell mirror" — both mention that Container A's inner script is shared; extend to Container B
 
 ## Implementation notes

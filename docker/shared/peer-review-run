@@ -711,7 +711,7 @@ sys.exit(0)
 # silently truncated write, an ambient umask — live INSIDE this invocation, so a
 # PATH shim replacing it would prove nothing about the shipped code.
 PRR_WRITE_REVIEW_PY='
-import os, stat, sys
+import errno, os, stat, sys
 
 path = sys.argv[2]
 data = sys.stdin.buffer.read()
@@ -736,7 +736,12 @@ previous_umask = os.umask(0)
 try:
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
 except OSError as exc:
-    fail_create(str(exc.strerror) + " (the path was already taken)")
+    # The suffix is a CAUSE claim, so it is spoken only for the errno that
+    # supports it: EACCES, EROFS or ENOENT says nothing about the path being
+    # occupied, and naming a standing obstacle that is not there sends the reader
+    # hunting for a file while the real fault is the directory.
+    taken = " (the path was already taken)" if exc.errno == errno.EEXIST else ""
+    fail_create(str(exc.strerror) + taken)
 finally:
     os.umask(previous_umask)
 

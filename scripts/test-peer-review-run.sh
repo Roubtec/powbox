@@ -98,7 +98,9 @@ set -uo pipefail
 #       byte-identical to the parsed message for both providers and consumed only
 #       through the result JSON; fail-closed (exit 70, no result) for a failed
 #       writer, a silently truncated write, six pre-created path shapes, and a
-#       path raced into place, each demanding a refused-creation diagnostic;
+#       path raced into place, each demanding a refused-creation diagnostic that
+#       names the standing obstacle — and a non-EEXIST refusal (an unwritable
+#       attempt dir) proving that claim is dropped where no obstacle stands;
 #       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
 #       proved by composing the two injections; short write/read syscalls
 #       survived; and a missing python3 caught by the preflight at exit 70
@@ -2886,12 +2888,50 @@ for shape in regular directory symlink-outside symlink-dangling symlink-fifo sym
 	assert_eq "16h [$shape]: no result JSON" "$RUN_OUT" ""
 	assert_contains "16h [$shape]: the diagnostic names a refused creation" "$RUN_ERR" "refused to create the review file"
 	assert_not_contains "16h [$shape]: and not unprovable content" "$RUN_ERR" "could not verify the review file contents"
+	assert_contains "16h [$shape]: the standing obstacle is named" "$RUN_ERR" "the path was already taken"
 	case "$shape" in
 	symlink-outside) assert_same_bytes "16h [$shape]: the link target is untouched" "$d/expected-outside" "$PRECREATE_TARGET" ;;
 	symlink-dangling) assert_absent "16h [$shape]: the dangling target is never created" "$PRECREATE_TARGET" ;;
 	esac
 	unset PRECREATE_SHAPE PRECREATE_TARGET
 done
+
+# 16h2 — a refusal that is NOT a standing obstacle must not CLAIM one. Every 16h
+# shape fails EEXIST, so the suffix asserted there is true for all six and a
+# diagnostic that appends it unconditionally passes every one of them; only a
+# non-EEXIST refusal tells the two apart. An argv-discriminating python3 shim
+# drops the write bit on the attempt directory and then execs the REAL
+# interpreter, so the O_CREAT|O_EXCL open fails EACCES with the path itself
+# genuinely free. The refusal must still be announced and must still read as a
+# refused creation rather than unprovable content — but a reader told the path
+# was taken goes hunting for a file that is not there while the real fault is
+# the directory.
+if [ "$(id -u)" -eq 0 ]; then
+	echo "test-peer-review-run: SKIP 16h2 (running as root: a 0500 directory does not deny root the create)" >&2
+else
+	d="$(new_case)"
+	make_codex_fake "$d"
+	cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# The helper's writer argv is: -I -c <program> --prr-write-review <path>
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		chmod 0500 "$(dirname "$5")" 2>/dev/null
+		break
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+	chmod +x "$d/bin/python3"
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex)
+	chmod -R u+rwX "$d/artifacts"
+	assert_eq "16h2: fail-closed exit 70" "$RUN_RC" 70
+	assert_eq "16h2: no result JSON" "$RUN_OUT" ""
+	assert_contains "16h2: still a refused creation" "$RUN_ERR" "refused to create the review file"
+	assert_not_contains "16h2: and not unprovable content" "$RUN_ERR" "could not verify the review file contents"
+	assert_not_contains "16h2: no occupant claimed for a non-EEXIST refusal" "$RUN_ERR" "the path was already taken"
+fi
 
 # 16i — the RACE dimension the pre-created shapes cannot reach: they are all
 # planted before the helper looks, so they only catch a mechanism weak against a

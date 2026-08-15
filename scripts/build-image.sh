@@ -180,15 +180,19 @@ No image was built."
 		echo "refusing to build an empty Codex skill bake." >&2
 		exit 1
 	fi
-	# The agent image also bakes gh-review-threads straight from this clone (the
-	# single source of truth — powbox no longer keeps an in-tree copy). The
-	# Dockerfile COPYs exactly this path; a missing file would otherwise fail the
-	# build with a cryptic BuildKit cache-key error, so check it here loudly.
-	if [ ! -f "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/gh-review-threads" ] || [ ! -x "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/gh-review-threads" ]; then
-		echo "agent-skills at ${AGENT_SKILLS_COMMIT} is missing an executable" >&2
-		echo "plugins/dev-skills/bin/gh-review-threads; refusing to build without the baked helper." >&2
-		exit 1
-	fi
+	# The agent image also bakes these helpers straight from this clone (their
+	# single source of truth — powbox keeps no in-tree copy). The Dockerfile COPYs
+	# exactly these paths; a missing file would otherwise fail the build with a
+	# cryptic BuildKit cache-key error, so check each here loudly. A tip predating
+	# the commit that added one is the realistic case, and it must name the file.
+	local helper
+	for helper in gh-review-threads dc-enter dc-remove; do
+		if [ ! -f "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/$helper" ] || [ ! -x "$AGENT_SKILLS_STAGING/plugins/dev-skills/bin/$helper" ]; then
+			echo "agent-skills at ${AGENT_SKILLS_COMMIT} is missing an executable" >&2
+			echo "plugins/dev-skills/bin/${helper}; refusing to build without the baked helper." >&2
+			exit 1
+		fi
+	done
 	echo "agent-skills at ${AGENT_SKILLS_COMMIT}"
 }
 

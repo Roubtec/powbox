@@ -14,21 +14,21 @@ The smoke tier needs a real built image and, in places, a relaunchable container
 
 ## Layering
 
-The run has two tiers: a **Stage 0 tier** of seven hermetic unit-suite entries (Stages 0a, 0b, 0d and 0f–0i, over seven distinct `scripts/test-*.sh` files), then **six image/host stages** that exercise the built image and the host.
+The run has two tiers: a **Stage 0 tier** of eight hermetic unit-suite entries (Stages 0a, 0b, 0d and 0f–0j, over eight distinct `scripts/test-*.sh` files), then **six image/host stages** that exercise the built image and the host.
 
 "Hermetic" is a narrow claim: a Stage 0 entry needs no root, no host database, no nested container engine, no relaunch cycle, and no network.
-It does **not** mean container-free. All seven entries `docker run --rm … "$IMAGE"` so the suite executes inside the image.
+It does **not** mean container-free. All eight entries `docker run --rm … "$IMAGE"` so the suite executes inside the image.
 
 ## Host source vs. baked artifact
 
 Tier 0 is the primary home for hermetic `/repo` source suites, so Stage 0 no longer repeats any of those exact targets.
 
-Six entries point the suite at a **baked** artifact under `/usr/local/bin/`, so a stale or behaviorally broken installed copy is caught by a real suite instead of being waved through by Stage 1's `command -v` presence probe.
+Seven entries point the suite at a **baked** artifact under `/usr/local/bin/`, so a stale or behaviorally broken installed copy is caught by a real suite instead of being waved through by Stage 1's `command -v` presence probe.
 Stage 0i is the exception: `test-pnpm-shadow-wrapper.sh` validates the `/repo` source and is explicitly routed out of Tier 0 because it requires the image's writable `/workspace` production root.
 The suite still self-skips when invoked directly on a generic host without that root, but both smoke umbrellas set `POWBOX_TEST_REQUIRE_WORKSPACE=1`, so an image-present Stage 0i fails if the promised production root cannot accept its fixture.
 
 The source-versus-baked detect-shadows split shipped by task 053 is therefore deliberate: Tier 0 validates the checkout immediately, while Stage 0g validates what the image installed.
-The same two-target shape now applies to sensitive-host-path, worktree orphan safety, peer-review-run and shadow-mounts; the source-only Podman Compose invariant suite stays solely in Tier 0, and the build-staged gh-review-threads helper stays solely in Tier 1.
+The same two-target shape now applies to sensitive-host-path, worktree orphan safety, peer-review-run and shadow-mounts; the source-only Podman Compose invariant suite stays solely in Tier 0, and the build-staged helpers vendored from agent-skills stay solely in Tier 1 — `gh-review-threads` (Stage 0b) and the `dc-enter`/`dc-remove` pair (Stage 0j).
 Which suite each entry runs and which environment override selects the baked path are documented per stage in `commands/smoke-test.sh`.
 
 ## What each stage is for
@@ -58,7 +58,7 @@ What an unreachable registry or remote costs is not uniform:
 Stages self-skip rather than fail when the host cannot provide what they need, and skips are collected into an end-of-run banner.
 
 Five of the six image/host stages are gated by independent environment variables — `POWBOX_SMOKE_SKIP_DB` (Stage 2), `POWBOX_SMOKE_SKIP_PODMAN` (Stage 3), `POWBOX_SMOKE_SKIP_SELFHOSTED` (Stage 4), `POWBOX_SMOKE_SKIP_DIRMOUNT` (Stage 5), and `POWBOX_SMOKE_SKIP_WORKTREE_META` (Stage 6).
-Setting all five leaves the Stage 0 tier plus Stage 1 — no host database, no nested engine, no relaunch cycle — though the seven Stage 0 entries and Stage 1 itself still start throwaway containers from the image.
+Setting all five leaves the Stage 0 tier plus Stage 1 — no host database, no nested engine, no relaunch cycle — though the eight Stage 0 entries and Stage 1 itself still start throwaway containers from the image.
 Stage 1 has no skip variable of its own: it is the residue that remains when all five are set, and a missing image makes it fail and abort the run before any later stage executes, so there is nothing to gain from skipping it.
 
 On a host that cannot expose `/dev/net/tun` (for example the Docker Desktop VM under the default `auto`), Stage 3 still validates the static engine wiring but skips its whole nested half — the nested run, the published-port check **and** the Compose exec-form health check.
@@ -87,5 +87,5 @@ See README "Continuous Integration" for the trigger paths and caching.
 
 `commands/smoke-test.ps1` runs the same inventory wherever `pwsh` runs, including a native-Linux host, and takes `-SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta` plus `-RequireImage` in place of the environment variables.
 
-Its seven Stage 0 entries match the Bash targets.
+Its eight Stage 0 entries match the Bash targets.
 Stage 6 is the remaining difference because it does not yet mirror the mountpoint-ownership assertions; the divergence is recorded in `scripts/smoke-test-worktree-metadata.ps1`'s header and tracked as `tasks/053a-mirror-mountpoint-ownership-smoke-in-powershell-driver.md`, so run `commands/smoke-test.sh` on Linux for that ownership coverage.

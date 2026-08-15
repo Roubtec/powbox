@@ -187,6 +187,27 @@ else
 	skipped+=("Stage 0i: pnpm shadow-wrapper unit test (image absent; needs a writable /workspace root)")
 fi
 
+# Stage 0j — disposable-clone helper unit test (dc-enter/dc-remove). Hermetic: every
+# fixture is a throwaway git repo under one mktemp -d root and no helper is ever run
+# against the mounted /repo, so it needs no network, daemon or privileged operation.
+# Like Stage 0b it guards helpers vendored in agent-skills rather than kept here, so
+# it is one of the pure-shell runner's explicit Tier 1 routes — and like Stage 0b it
+# runs in-image with DC_ENTER_HELPER/DC_REMOVE_HELPER pointed at the BAKED
+# /usr/local/bin artifacts, which is the whole point: Stage 1's `command -v` probes
+# only prove the two files resolve, while this proves the isolation guarantee they
+# exist for (refs, commits and `gc --prune=now` in the clone cannot touch the source)
+# and dc-remove's inverse guarantee that it deletes only what dc-enter marked.
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running disposable-clone helper unit test (baked helpers in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e DC_ENTER_HELPER=/usr/local/bin/dc-enter \
+		-e DC_REMOVE_HELPER=/usr/local/bin/dc-remove \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-dc-helpers.sh
+else
+	echo "WARNING: skipping disposable-clone helper unit test (Stage 0j) — image '$IMAGE' absent."
+	skipped+=("Stage 0j: disposable-clone helper unit test (image absent)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. The GOBIN probe
@@ -337,6 +358,8 @@ fi
 	"command -v powbox-provenance >/dev/null" \
 	"command -v gitcat >/dev/null" \
 	"command -v gh-review-threads >/dev/null" \
+	"command -v dc-enter >/dev/null" \
+	"command -v dc-remove >/dev/null" \
 	"command -v peer-review-run >/dev/null" \
 	'wf_check_file="$(mktemp --suffix=.js)" && printf "%s\n" "export const meta = { name: \"smoke\", description: \"parser\" };" "return null;" > "$wf_check_file" && wf-check "$wf_check_file" >/dev/null && rm -- "$wf_check_file" && test "$(jq -r .version /usr/local/lib/wf-check/node_modules/acorn/package.json)" = 8.15.0 && test "$(jq -r .version /usr/local/lib/wf-check/node_modules/acorn-walk/package.json)" = 8.3.4' \
 	"wf-status --help >/dev/null" \

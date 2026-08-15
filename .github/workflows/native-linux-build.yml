@@ -21,6 +21,11 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # stage runs here only once the umbrella is edited to call it. Task 005's
 # scripts/smoke-test-dirmount.* took both steps before it ran here as Stage 5.
 #
+# The Bash umbrella is not the whole smoke run here: a second step runs the
+# PowerShell Stage 6 driver directly, because commands/smoke-test.sh never
+# invokes the .ps1 mirror and this runner is the only automated place where its
+# mountpoint-ownership assertions are not vacuous. See that step's own comment.
+#
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
 # and label-skippable (the `non-code` job `if:` below). main IS protected by
@@ -173,3 +178,52 @@ jobs:
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
         run: ./commands/smoke-test.sh
+
+      # The step above runs the BASH umbrella, which never invokes the PowerShell
+      # driver — so before this step nothing in CI executed
+      # scripts/smoke-test-worktree-metadata.ps1 at all. That is the same false
+      # green one level up from the one task 053a closed inside the driver: the
+      # .ps1 is not a Windows-only file (commands/smoke-test.ps1 runs anywhere
+      # pwsh runs, native Linux included), yet its Stage 6 mirror shipped with no
+      # automated execution anywhere.
+      #
+      # This runner is exactly the configuration where the mountpoint-ownership
+      # assertions have TEETH — native Linux, a rootful Docker daemon, and an
+      # unprivileged invoker (`runner`, uid 1001) — which is otherwise reachable
+      # only on a maintainer's Linux desktop. `pwsh` is preinstalled on
+      # ubuntu-latest (Tier 0 relies on the same fact).
+      #
+      # Only the Stage 6 driver runs, not the whole PowerShell umbrella: the other
+      # stages are engine/host checks the Bash umbrella just ran, and re-running
+      # them would roughly double the job for no new coverage. Stage 6 is the one
+      # stage whose PowerShell half contains logic the Bash half cannot vouch for.
+      #
+      # Both extra assertions here are deliberate. A self-skip is a FAILURE rather
+      # than a note, because on this runner every skip reason is impossible (image
+      # present via REQUIRE_IMAGE, host is Linux, GNU stat, engine can bind-mount —
+      # the Bash Stage 6 above proves the last one every run), so a skip means the
+      # coverage silently stopped running. And the ok-line count is checked because
+      # 053a's own round-1 defect was an artifact that was correct but never
+      # REACHED — a green proving the driver ran is not the same as a green proving
+      # the assertions ran.
+      - name: Smoke test - PowerShell Stage 6 driver (mountpoint-ownership mirror)
+        shell: bash
+        env:
+          POWBOX_SMOKE_REQUIRE_IMAGE: '1'
+        run: |
+          set -euo pipefail
+          marker="$(mktemp)"
+          log="$(mktemp)"
+          POWBOX_SMOKE_SKIP_MARKER="$marker" \
+            pwsh -NoProfile -File ./scripts/smoke-test-worktree-metadata.ps1 \
+            -Image powbox-agent:latest 2>&1 | tee "$log"
+          if [ -s "$marker" ]; then
+            echo "FAIL: the PowerShell Stage 6 driver self-skipped on a runner where no skip reason is legitimate: $(cat "$marker")" >&2
+            exit 1
+          fi
+          owners="$(grep -c 'ok: mountpoint ownership (' "$log" || true)"
+          if [ "$owners" -ne 3 ]; then
+            echo "FAIL: expected the 3 mountpoint-ownership assertions (tmpfs / multi-component / durable-bind) to run, saw $owners." >&2
+            exit 1
+          fi
+          echo "PowerShell Stage 6 driver: all 3 mountpoint-ownership assertions ran with real teeth."

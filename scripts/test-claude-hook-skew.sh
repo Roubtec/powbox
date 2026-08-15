@@ -3,7 +3,7 @@
 #
 #   1. the build-skew shim (tests 1-5),
 #   2. the statusline seed's digest-marker gating (tests 6-15, task 002e), and
-#   3. that same seed's ERROR paths (tests 16-21), which must degrade rather
+#   3. that same seed's ERROR paths (tests 16-25), which must degrade rather
 #      than abort: the hook runs under `set -euo pipefail` and entrypoint-core.sh
 #      invokes it UNGUARDED, so a non-zero exit here ends container startup.
 #
@@ -28,13 +28,17 @@
 # customized -> preserved, and unmarked-pre-existing -> preserved (the upgrade path
 # for every claude-config volume that predates the marker).
 #
-# Group 3 breaks the volume in the four ways that each used to abort the hook — an
-# unreadable marker, a read-only statusline, no sha256sum on PATH, a directory where
-# the file belongs — plus a marker carrying no `sha256=` key. Each case asserts the
-# same three things: the hook exits 0, the on-disk statusline is left as it was, AND
-# the instruction file and settings.json still refresh. That last one is the point:
-# the independence the decision path promises must hold on the error path too, or a
-# cosmetic asset still decides whether the rest of the volume converges.
+# Group 3 breaks the volume in every way that has ever made this block misbehave:
+# the four that used to abort the hook outright (an unreadable marker, a read-only
+# statusline, no sha256sum on PATH, a directory where the file belongs), a marker
+# carrying no `sha256=` key, a copy that fails after truncating its destination, a
+# peer container truncating the marker mid-rewrite, a closed fd 2, and a marker that
+# cannot be written in place. Each case asserts the same three things: the hook exits
+# 0, the on-disk statusline is left as it was (or, where a refresh was due, is whole
+# and correctly marked), AND the instruction file and settings.json still refresh.
+# That last one is the point: the independence the decision path promises must hold
+# on the error path too, or a cosmetic asset still decides whether the rest of the
+# volume converges.
 #
 # Runs against the repo copy of the hook — no image build needed. Requires bash;
 # setsid is optional (the hook falls back to a plain background detach without it).
@@ -243,26 +247,35 @@ sl_new_cfg() {
 
 SL_PATH="/usr/bin:/bin"
 
-# sl_invoke <cfg> <seed> <path> — drive the REAL hook against an explicit config/seed
-# pair with BOTH convergence handshakes claimed by core, so the detached build-skew
-# block never spawns and only the seeding path runs. stderr lands in <cfg>.stderr.
-# <path> is explicit so a group-3 case can hand the hook a PATH with one tool taken
-# away; the hook's own exit status is this function's status.
+# sl_invoke <cfg> <seed> <path> [stderr-mode] — drive the REAL hook against an
+# explicit config/seed pair with BOTH convergence handshakes claimed by core, so the
+# detached build-skew block never spawns and only the seeding path runs. stderr lands
+# in <cfg>.stderr, unless <stderr-mode> is `closed`, which runs the hook with fd 2
+# CLOSED so every `echo … >&2` in the block fails with EBADF. <path> is explicit so a
+# group-3 case can hand the hook a PATH with one tool taken away or stubbed; the
+# hook's own exit status is this function's status.
 sl_invoke() {
-	local cfg="$1" seed="$2" path="$3"
-	env -i \
-		HOME="$WORK_ROOT" \
-		PATH="$path" \
-		AGENT_CONFIG_DIR="$cfg" \
-		AGENT_SEED_DIR="$seed" \
-		AGENT_INSTRUCTION_FILE="CLAUDE.md" \
-		AGENT_NAME="Claude" \
-		AGENT_AUTONOMY_FLAG="--yolo" \
-		AGENT_PEERS="none" \
-		PRIMARY_AGENT=claude \
-		POWBOX_PLUGIN_BOOTSTRAP=core \
-		POWBOX_CODEX_SYNC_BOOTSTRAP=core \
-		bash "$HOOK" 2>"$cfg.stderr"
+	local cfg="$1" seed="$2" path="$3" stderr_mode="${4:-file}"
+	local -a cmd=(
+		env -i
+		HOME="$WORK_ROOT"
+		PATH="$path"
+		AGENT_CONFIG_DIR="$cfg"
+		AGENT_SEED_DIR="$seed"
+		AGENT_INSTRUCTION_FILE="CLAUDE.md"
+		AGENT_NAME="Claude"
+		AGENT_AUTONOMY_FLAG="--yolo"
+		AGENT_PEERS="none"
+		PRIMARY_AGENT=claude
+		POWBOX_PLUGIN_BOOTSTRAP=core
+		POWBOX_CODEX_SYNC_BOOTSTRAP=core
+		bash "$HOOK"
+	)
+	if [ "$stderr_mode" = closed ]; then
+		"${cmd[@]}" 2>&-
+	else
+		"${cmd[@]}" 2>"$cfg.stderr"
+	fi
 }
 
 # sl_run <cfg> <seed> — the happy-path form: a hook failure propagates and this
@@ -271,13 +284,14 @@ sl_run() {
 	sl_invoke "$1" "$2" "$SL_PATH"
 }
 
-# sl_rc <cfg> <seed> [path] — PRINTS the hook's exit status instead of propagating
-# it. Group 3 asserts that status, so it must survive to be compared: a non-zero one
-# is precisely the entrypoint-killing bug those cases exist to catch, and letting it
-# abort this suite would report the bug as a missing test rather than a failing one.
+# sl_rc <cfg> <seed> [path] [stderr-mode] — PRINTS the hook's exit status instead of
+# propagating it. Group 3 asserts that status, so it must survive to be compared: a
+# non-zero one is precisely the entrypoint-killing bug those cases exist to catch,
+# and letting it abort this suite would report the bug as a missing test rather than
+# a failing one.
 sl_rc() {
 	local rc=0
-	sl_invoke "$1" "$2" "${3:-$SL_PATH}" || rc=$?
+	sl_invoke "$1" "$2" "${3:-$SL_PATH}" "${4:-file}" || rc=$?
 	printf '%s\n' "$rc"
 }
 
@@ -484,33 +498,60 @@ else
 fi
 
 # ================================================================================
-# Statusline seeding, ERROR paths. Tests 16-20 each ABORTED the pre-fix hook (exit
-# 2, 1, 127, 127 and 1 in order), and entrypoint-core.sh invokes this hook UNGUARDED
-# under `set -euo pipefail`, so each was a dead container: no instruction file, no
-# settings.json, no CMD, because a cosmetic asset could not be digested or written.
-# Test 21 is the odd one out — pre-fix it exited 0 but LIED, which is why every case
-# here asserts the hook exited 0 AND that the other two seeded assets landed anyway
-# AND what it said on stderr. A status-only check would pass a hook that survives by
-# skipping the rest of its work, and would miss test 21 entirely.
+# Statusline seeding, ERROR paths. Tests 16-20 each ABORTED the hook of their day
+# (exit 2, 1, 127, 127 and 1 in order), as does test 24, and entrypoint-core.sh
+# invokes this hook UNGUARDED under `set -euo pipefail`, so each was a dead
+# container: no instruction file, no settings.json, no CMD, because a cosmetic asset
+# could not be digested, written or even complained about. Tests 21-23 and 25 are the
+# odd ones out — they exited 0 but LIED, silently and permanently — which is why
+# every case here asserts the hook exited 0 AND that the other two seeded assets
+# landed anyway AND what it left on disk and said on stderr. A status-only check
+# would pass a hook that survives by skipping the rest of its work, and would miss
+# the four lying cases entirely.
 # ================================================================================
 
 SL_SEED_ERR="$WORK_ROOT/slseed-err"
 
-# sl_bin_without_sha256 <dir> — mirror the real PATH into <dir> as symlinks, then
-# drop exactly one tool. An honest stand-in for an image built without coreutils'
-# sha256sum: the hook's own PATH search fails there just as it does here, which a
-# stub exiting 127 would only imitate. Returns nonzero (and the cases skip) if the
+# sl_bin_mirror <dir> — mirror the real PATH into <dir> as symlinks, so a case can
+# then drop one tool or shadow it with a stub while the hook's own PATH search
+# behaves exactly as it does here. Returns nonzero (and the case skips) if the
 # mirror did not come out usable.
-sl_bin_without_sha256() {
+sl_bin_mirror() {
 	local dir="$1" t
 	mkdir -p "$dir"
 	ln -s /usr/bin/* "$dir/" 2>/dev/null || true
 	ln -s /bin/* "$dir/" 2>/dev/null || true
-	rm -f "$dir/sha256sum"
-	for t in bash cat cp sed head cut mktemp grep mv rm envsubst jq; do
+	for t in bash cat cp sed head cut mktemp grep mv rm chmod envsubst jq sha256sum; do
 		[ -x "$dir/$t" ] || return 1
 	done
+}
+
+# sl_bin_without_sha256 <dir> — a mirror with exactly one tool dropped. An honest
+# stand-in for an image built without coreutils' sha256sum: the hook's PATH search
+# fails there just as it does here, which a stub exiting 127 would only imitate.
+sl_bin_without_sha256() {
+	local dir="$1"
+	sl_bin_mirror "$dir" || return 1
+	rm -f "$dir/sha256sum"
 	[ ! -e "$dir/sha256sum" ]
+}
+
+# sl_bin_with_stub <dir> <tool> <body> — a mirror in which <tool> is shadowed by a
+# bash stub. The stub reaches the genuine tool through $REAL, resolved here, so it
+# can sabotage the ONE call a case is about and pass every other one through: the
+# hook runs cp and grep for more than the statusline, and a blanket break would
+# make the independence assertions pass (or fail) for the wrong reason.
+sl_bin_with_stub() {
+	local dir="$1" tool="$2" body="$3" real
+	sl_bin_mirror "$dir" || return 1
+	real="$(command -v "$tool")" || return 1
+	rm -f "$dir/$tool"
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'REAL=%q\n' "$real"
+		printf '%s\n' "$body"
+	} >"$dir/$tool" || return 1
+	chmod +x "$dir/$tool"
 }
 
 SL_NOSHA_BIN="$WORK_ROOT/bin-nosha"
@@ -657,6 +698,167 @@ if [ "$RC" = 0 ] &&
 	ok "marker without sha256=: kept silently, marker intact, others still refresh"
 else
 	no "marker without sha256=: kept silently, marker intact, others still refresh (rc=$RC, stderr=$(cat "$CFG.stderr" 2>/dev/null))"
+fi
+
+# --- Test 22: a copy that fails MID-WRITE leaves the destination intact ---------
+# `cp SRC DST` opens DST with O_TRUNC, so a failure after that open (a full or
+# failing volume) used to leave a truncated statusline behind — while the marker
+# still named the OLD digest, so every later start read the wreckage as a user
+# customization and never repaired it. Invariant A: the copy lands in a temp
+# sibling and a failure renames nothing, which is what makes "left as found" true.
+SL_CP_FAIL_STUB="$(
+	cat <<'STUB'
+# Reproduce what a copy failing AFTER it opened the destination does (ENOSPC,
+# EIO): the destination is left truncated and cp exits nonzero. ONLY the
+# statusline copy is sabotaged — settings.json is copied with the same cp, and
+# breaking that too would make the independence assertion meaningless.
+case "$1" in
+*/statusline-command.sh)
+	: >"$2" 2>/dev/null || true
+	exit 1
+	;;
+esac
+exec "$REAL" "$@"
+STUB
+)"
+SL_CP_FAIL_BIN="$WORK_ROOT/bin-cp-fails"
+if ! sl_bin_with_stub "$SL_CP_FAIL_BIN" cp "$SL_CP_FAIL_STUB"; then
+	sk "copy fails mid-write: statusline intact (no usable stub PATH here)"
+else
+	CFG="$(sl_new_cfg)"
+	DST="$CFG/statusline-command.sh"
+	MK="$CFG/.statusline-command.sh.powbox-seeded"
+	sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+	sl_run "$CFG" "$SL_SEED_ERR"
+	MK_BEFORE="$(cat "$MK")"
+	sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+	RC="$(sl_rc "$CFG" "$SL_SEED_ERR" "$SL_CP_FAIL_BIN")"
+	if [ "$RC" = 0 ] &&
+		[ "$(cat "$DST" 2>/dev/null)" = "v1" ] &&
+		[ "$(cat "$MK")" = "$MK_BEFORE" ] &&
+		grep -q 'could not write' "$CFG.stderr" &&
+		[ -z "$(find "$CFG" -name 'statusline-command.sh.*' -print -quit 2>/dev/null)" ] &&
+		sl_independent "$CFG" v2; then
+		ok "copy fails mid-write: statusline and marker intact, temp cleaned up, others still refresh"
+	else
+		no "copy fails mid-write: statusline and marker intact, temp cleaned up, others still refresh (rc=$RC, statusline=$(cat "$DST" 2>/dev/null))"
+	fi
+fi
+
+# --- Test 23: a marker that changes UNDER the rewrite is not published over -----
+# The claude-config volume is shared by every powbox container, so a peer can
+# truncate the marker between this hook reading `sha256=` out of it and the grep
+# that filters it. grep then reports "no lines" (status 1), and treating that as
+# "nothing to keep" published a marker holding `notified_epoch=` alone — no
+# `epoch=`, no `sha256=` — which unmarks the file for good: never refreshed and
+# never noted again, in perfect silence. Reaching this branch PROVES the marker
+# carried a `sha256=` line moments ago, so status 1 can only mean it changed.
+SL_GREP_RACE_STUB="$(
+	cat <<'STUB'
+# Simulate that peer's truncating write landing in exactly that window: empty the
+# marker, let the real grep read it (no output, status 1), then let the peer's
+# write complete so the marker is whole again. Any non-marker grep passes through.
+mk=""
+for a in "$@"; do
+	case "$a" in
+	*.powbox-seeded) mk="$a" ;;
+	esac
+done
+if [ -n "$mk" ] && [ -f "$mk" ]; then
+	saved="$(cat "$mk")"
+	: >"$mk"
+	rc=0
+	"$REAL" "$@" || rc=$?
+	printf '%s\n' "$saved" >"$mk"
+	exit "$rc"
+fi
+exec "$REAL" "$@"
+STUB
+)"
+SL_GREP_RACE_BIN="$WORK_ROOT/bin-grep-race"
+if ! sl_bin_with_stub "$SL_GREP_RACE_BIN" grep "$SL_GREP_RACE_STUB"; then
+	sk "marker truncated under the rewrite: epoch=/sha256= survive (no usable stub PATH here)"
+else
+	CFG="$(sl_new_cfg)"
+	DST="$CFG/statusline-command.sh"
+	MK="$CFG/.statusline-command.sh.powbox-seeded"
+	sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+	sl_run "$CFG" "$SL_SEED_ERR"
+	MK_BEFORE="$(cat "$MK")"
+	printf 'my own statusline\n' >"$DST"
+	sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+	RC="$(sl_rc "$CFG" "$SL_SEED_ERR" "$SL_GREP_RACE_BIN")"
+	if [ "$RC" = 0 ] &&
+		[ "$(cat "$MK")" = "$MK_BEFORE" ] &&
+		[ "$(sl_key "$MK" epoch)" = "100" ] &&
+		[ -n "$(sl_key "$MK" sha256)" ] &&
+		[ -z "$(sl_key "$MK" notified_epoch)" ] &&
+		[ "$(cat "$DST" 2>/dev/null)" = "my own statusline" ] &&
+		[ -z "$(find "$CFG" -name '.statusline-command.sh.powbox-seeded.*' -print -quit 2>/dev/null)" ] &&
+		sl_independent "$CFG" v2; then
+		ok "marker truncated under the rewrite: abandoned, epoch=/sha256= survive, others still refresh"
+	else
+		no "marker truncated under the rewrite: abandoned, epoch=/sha256= survive, others still refresh (rc=$RC, marker=$(tr '\n' ' ' <"$MK" 2>/dev/null))"
+	fi
+fi
+
+# --- Test 24: fd 2 CLOSED -> the block still cannot end startup -----------------
+# Both notes in the block are bare `echo … >&2`, which return 1 with stderr closed
+# and, as the last command of their branch under `set -e`, used to abort the hook.
+# Not a realistic container runtime, but the block's contract is absolute — see
+# invariant B — and the customized branch is the one that always reaches an echo.
+CFG="$(sl_new_cfg)"
+DST="$CFG/statusline-command.sh"
+MK="$CFG/.statusline-command.sh.powbox-seeded"
+sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+sl_run "$CFG" "$SL_SEED_ERR"
+printf 'my own statusline\n' >"$DST"
+sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+RC="$(sl_rc "$CFG" "$SL_SEED_ERR" "$SL_PATH" closed)"
+if [ "$RC" = 0 ] &&
+	[ "$(cat "$DST" 2>/dev/null)" = "my own statusline" ] &&
+	[ "$(sl_key "$MK" notified_epoch)" = "200" ] &&
+	[ "$(sl_key "$MK" epoch)" = "100" ] &&
+	[ -n "$(sl_key "$MK" sha256)" ] &&
+	sl_independent "$CFG" v2; then
+	ok "stderr closed, note undeliverable: hook still exits 0, others still refresh"
+else
+	no "stderr closed, note undeliverable: hook still exits 0, others still refresh (rc=$RC)"
+fi
+
+# --- Test 25: no stale proof outlives a refreshed file --------------------------
+# The user deleted the statusline (the documented escape hatch) but the marker
+# stayed, and that marker cannot be written in place. Re-seeding the file while
+# leaving the old marker behind strands a `sha256=` naming bytes that are gone, so
+# every later start reads powbox's OWN fresh copy as a user edit and nags about it
+# forever. Invariant A fixes this by construction — a rename needs the DIRECTORY's
+# permission, not the file's, so the marker is replaced anyway — and if even that
+# fails the marker is removed, leaving the honest unmarked state instead of a lie.
+if [ "$RUNNING_AS_ROOT" = yes ]; then
+	sk "unwritable marker on re-seed: no stale proof survives (root ignores chmod 444)"
+else
+	CFG="$(sl_new_cfg)"
+	DST="$CFG/statusline-command.sh"
+	MK="$CFG/.statusline-command.sh.powbox-seeded"
+	sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+	sl_run "$CFG" "$SL_SEED_ERR"
+	rm -f "$DST"
+	chmod 444 "$MK"
+	sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+	RC="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+	chmod 644 "$MK" 2>/dev/null || true
+	# Second start on the SAME image: the proof must agree with the file, so this
+	# one has nothing to say. A stale marker nags here.
+	RC2="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+	if [ "$RC" = 0 ] && [ "$RC2" = 0 ] &&
+		[ "$(cat "$DST" 2>/dev/null)" = "v2" ] &&
+		{ [ ! -e "$MK" ] || [ "$(sl_key "$MK" sha256)" = "$(sl_sha "$DST")" ]; } &&
+		[ ! -s "$CFG.stderr" ] &&
+		sl_independent "$CFG" v2; then
+		ok "unwritable marker on re-seed: proof matches the new file (or is gone), no false nag"
+	else
+		no "unwritable marker on re-seed: proof matches the new file (or is gone), no false nag (rc=$RC/$RC2, marker=$(tr '\n' ' ' <"$MK" 2>/dev/null))"
+	fi
 fi
 
 echo

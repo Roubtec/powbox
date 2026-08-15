@@ -71,13 +71,21 @@
 # never additive — and a final attempt that also exhausts its deadline stays
 # `timeout`: that is the most specific terminal class the vocabulary has for
 # deadline exhaustion, and retry exhaustion is carried by `attempts`, `retried`
-# and `reason` rather than by collapsing it into the generic `failed`. ONE
-# exception suppresses the retry entirely: a timed-out attempt whose own reap
-# could not CONFIRM its process tree was gone returns terminal `timeout` at
-# attempts:1, because launching attempt two beside a provider process known to
-# be live is the single way this retry could put two peer reviews on the machine
-# at once — and the retry's fresh attempt directory isolates artifacts, not
-# processes. The other retry routes are not gated on that confirmation.
+# and `reason` rather than by collapsing it into the generic `failed`. EVERY
+# route into attempt two — the non-timeout transient retry, the timeout retry
+# and the Claude login-to-env-credential fallback — shares ONE precondition: the
+# finished attempt's OWN reap must CONFIRM its process tree is gone. Where it
+# could not, no second attempt runs, because starting one beside a provider
+# process known to be live is the single way this budget could put two peer
+# reviews on the machine at once, and a fresh attempt directory isolates
+# artifacts, not processes. A suppressed run keeps the outcome its one attempt
+# earned (`failed`, `timeout`, `unavailable`) at attempts:1 / retried:false, and
+# its `reason` states the suppression instead of claiming a retry or a reap that
+# did not happen. The Claude fallback is the costly one — a run that might have
+# authenticated on the env credential ends `unavailable` — so its reason states
+# that the env credential was never tried, which is a different result from an
+# `unavailable` both credentials produced. The capability help probe's reap is
+# not an attempt's reap and suppresses nothing.
 #
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
@@ -155,7 +163,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,145p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,153p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -568,7 +576,7 @@ reap_tree() {
 # fixture, and group_alive deliberately classifies zombie/dying states as dead.
 # Selectable PER SITE rather than per run because the two behaviors that must be
 # told apart differ only in WHICH reap failed — the attempt's own reap suppresses
-# the timeout retry, the capability probe's reap does not.
+# every retry route, the capability probe's reap suppresses nothing.
 #
 # The genuine reap always RUNS first and only its verdict is overridden, so a
 # fixture's descendants are still really signalled and killed under injection and
@@ -1739,7 +1747,7 @@ run_attempt() {
 	# REAP_WARN is run-global, is never reset, and is also raised by the
 	# capability probe, which runs inside attempt one AFTER this reset block, so
 	# gating a retry on it would suppress over a stray `--help` descendant that
-	# has nothing to do with the timed-out provider tree.
+	# has nothing to do with the finished attempt's provider tree.
 	ATT_REAP_CONFIRMED=0
 	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
@@ -2048,10 +2056,12 @@ write_meta() {
 # orchestrator drives the precedence: attempt the login first (ALL env
 # credentials cleared — see build_cmd_claude), and if that attempt comes back
 # `unavailable` (an auth/usage failure that yields no verdict) while an env
-# credential IS available, retry ONCE in key mode (env credentials left intact).
-# EITHER credential may be expired; if neither authenticates, the peer stays
-# `unavailable`. Codex is unaffected (CODEX_API_KEY is a first-class auth path,
-# not a login override).
+# credential IS available, retry ONCE in key mode (env credentials left intact)
+# — subject, like every route into attempt two, to the shared reap precondition
+# below: a login attempt whose own process tree could not be confirmed gone
+# starts no fallback. EITHER credential may be expired; if neither authenticates,
+# the peer stays `unavailable`. Codex is unaffected (CODEX_API_KEY is a
+# first-class auth path, not a login override).
 CLAUDE_HAS_LOGIN=0
 if [ "$PROVIDER" = claude ]; then
 	claude_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -2087,29 +2097,74 @@ run_attempt 1
 ATTEMPTS=1
 TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 
-# A supervised timeout whose OWN reap could not confirm the tree was gone
-# suppresses the timeout retry: attempt two would run beside a provider process
-# known to be live, and the retry's fresh attempt directory isolates artifacts,
-# not processes. Decided HERE, ahead of the branch that announces the retry on
-# stderr, so a retry that never happens is never claimed on the streamed channel
-# either. Scoped to the timeout route and to the timed-out attempt's own reap:
-# the pre-existing non-timeout transient retry and the Claude env-credential
-# fallback keep their current behavior, which task 029e revisits.
-TIMEOUT_RETRY_SUPPRESSED=0
-if [ "$ATT_OUTCOME" = timeout ] && [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_REAP_CONFIRMED" = 0 ]; then
-	TIMEOUT_RETRY_SUPPRESSED=1
+# WHICH route would spend attempt two — resolved BEFORE anything acts on it, and
+# separately from taking it, because that is what makes the reap precondition
+# below ONE decision rather than a copy per route. A route added here cannot
+# reach `run_attempt 2` without inheriting the gate.
+#
+# The routes are mutually exclusive by construction (an `unavailable` attempt is
+# never `timeout` and never transient), so the order only fixes which predicate
+# is read first, not which of two applicable routes wins.
+RETRY_ROUTE=""
+if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
+	RETRY_ROUTE=claude-fallback
+elif [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_OUTCOME" = timeout ]; then
+	RETRY_ROUTE=timeout
+elif [ "$ATT_TRANSIENT" = 1 ]; then
+	RETRY_ROUTE=transient
 fi
 
-if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
+# THE GATE, shared by every route above: an attempt whose OWN reap could not
+# confirm its process tree was gone starts no second attempt, because attempt two
+# would run beside a provider process known to be live and a fresh attempt
+# directory isolates artifacts, not processes. Decided HERE, ahead of every
+# route's stderr announcement and ahead of the branch that increments ATTEMPTS,
+# so a suppressed run neither claims a retry on the streamed channel nor needs
+# its attempt count corrected afterwards.
+#
+# ATT_REAP_CONFIRMED is ATTEMPT-scoped and fail-closed; the run-global REAP_WARN
+# is deliberately NOT read, because the capability help probe raises it from
+# inside attempt one before any provider is launched, which has nothing to do
+# with the finished attempt's tree.
+RETRY_SUPPRESSED=0
+if [ -n "$RETRY_ROUTE" ] && [ "$ATT_REAP_CONFIRMED" = 0 ]; then
+	RETRY_SUPPRESSED=1
+fi
+
+if [ "$RETRY_SUPPRESSED" = 1 ]; then
+	# Per-route normalization: run_attempt() leaves a transient reason optimistic
+	# ("...; retrying") and each route promised a different second attempt, so the
+	# correction lands here, where that route's retry used to be.
+	case "$RETRY_ROUTE" in
+	timeout)
+		printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+		ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
+		;;
+	transient)
+		printf '{"event":"note","provider":"%s","message":"transient retry suppressed; the failed attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+		ATT_REASON="provider hit a transient failure (exit ${ATT_EXIT}); the retry was suppressed because reaping could not confirm that attempt's process tree was gone"
+		;;
+	claude-fallback)
+		# The one suppression that costs a recoverable path: the env credential
+		# might have authenticated. The reason must therefore not read like the
+		# ordinary both-credentials-tried `unavailable` a caller already knows.
+		# It says which credential the outcome belongs to rather than calling that
+		# credential failed: an `unavailable` login covers a VALID session that hit
+		# a usage/quota limit, so "one failed credential" would mislabel it.
+		printf '{"event":"note","provider":"claude","message":"env-credential fallback suppressed; the unavailable attempt process tree could not be confirmed reaped"}\n' >&2
+		ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this outcome is the login credential's alone, not both credentials)"
+		;;
+	esac
+elif [ "$RETRY_ROUTE" = claude-fallback ]; then
 	# The login attempt could not AUTHENTICATE the peer (expired session, or a
 	# session limit) — fall back to the documented env-credential path ONCE, in a
 	# brand-new attempt dir. Gated on ATT_BINARY_MISSING=0: a missing `claude`
 	# binary is also `unavailable`, but switching auth mode cannot fix it, so it
 	# must not trigger a pointless second attempt or a misleading retry note. This
 	# is a DISTINCT retry from the transient allowlist below (an auth failure is
-	# not transient), and it is mutually exclusive with it — total attempts stay
-	# capped at 2. The key-mode result then stands as-is; if it too is
-	# `unavailable`, neither credential authenticated and we give up.
+	# not transient), and the route resolution above makes them mutually exclusive
+	# — total attempts stay capped at 2. The key-mode result then stands as-is; if
+	# it too is `unavailable`, neither credential authenticated and we give up.
 	printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the env-credential fallback (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"}\n' >&2
 	CLAUDE_AUTH_MODE=key
 	run_attempt 2
@@ -2126,7 +2181,7 @@ if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOM
 			ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
 		fi
 	fi
-elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
+elif [ -n "$RETRY_ROUTE" ]; then
 	# Attempt one's class, captured before run_attempt 2 overwrites the ATT_*
 	# state. The two attempts can be DIFFERENT transient classes now that a
 	# deadline is transient too (a reset connection then a slow provider is an
@@ -2157,9 +2212,6 @@ elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
 			ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
 		fi
 	fi
-elif [ "$TIMEOUT_RETRY_SUPPRESSED" = 1 ]; then
-	printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
-	ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
 fi
 
 # --- emit the versioned result ----------------------------------------------

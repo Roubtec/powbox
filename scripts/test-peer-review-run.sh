@@ -106,7 +106,7 @@ set -uo pipefail
 #       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
 #       proved by composing the two injections; short write/read syscalls
 #       survived; and a missing python3 caught by the preflight at exit 70
-#  (17) supervised-timeout retry — a deadline is TRANSIENT and starts the one
+#  (17) retry-route supervision — a deadline is TRANSIENT and starts the one
 #       retry in a fresh attempt dir (timeout-then-pass, timeout-then-issues
 #       through the ordinary final-attempt normalization), two deadlines stay
 #       terminal `timeout` with a cap-exhausted reason and total elapsed time,
@@ -115,12 +115,16 @@ set -uo pipefail
 #       (asserted by the second attempt, over a TERM-ignoring descendant), the
 #       auth fallback and the timeout retry share ONE two-attempt budget, and a
 #       login-mode timeout does not also switch to the env-credential fallback.
-#       The retry is SUPPRESSED when that attempt's own reap could not confirm
-#       the tree was gone — driven by PRR_TEST_REAP_FAIL, the helper's test-only
-#       per-reap-site confirmation override (a real post-SIGKILL survivor is not
-#       constructible unprivileged), which also pins the two NEGATIVE boundaries
-#       the suppression must not cross: a non-timeout transient survivor still
-#       retries, and a capability-probe survivor suppresses nothing
+#       EVERY route into attempt two is SUPPRESSED when that attempt's own reap
+#       could not confirm the tree was gone — the timeout retry, the non-timeout
+#       transient retry, and the Claude env-credential fallback, each keeping the
+#       outcome its one attempt earned and saying so in `reason` (the fallback
+#       additionally saying the env credential was never tried) — driven by
+#       PRR_TEST_REAP_FAIL, the helper's test-only per-reap-site confirmation
+#       override (a real post-SIGKILL survivor is not constructible
+#       unprivileged), which also pins the NEGATIVE boundary the suppression must
+#       not cross on either the timeout or the transient route: a
+#       capability-probe survivor suppresses nothing
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -3092,8 +3096,9 @@ assert_eq "16l: artifactDir is still the final attempt dir" \
 	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
 
 # ============================================================================
-# (17) supervised-timeout retry — a deadline is transient, retried once, and
-#      suppressed when that attempt's own reap could not confirm the tree
+# (17) retry-route supervision — a deadline is transient and retried once, and
+#      EVERY route into attempt two is suppressed when that attempt's own reap
+#      could not confirm the tree
 # ============================================================================
 
 # retained_attempts <artifact-root> — the attempt numbers recorded by every
@@ -3264,10 +3269,12 @@ assert_not_contains "17d: reason does not claim the group was reaped" "$(jqf "$R
 assert_contains "17d: stderr announces the suppression" "$RUN_ERR" "timeout retry suppressed"
 assert_not_contains "17d: stderr never announces a retry that will not happen" "$RUN_ERR" "retrying once"
 
-# 17e: NEGATIVE boundary — the suppression is scoped to the timeout route. A
-# pre-existing NON-timeout transient failure whose post-exit reap reports a
-# survivor still retries exactly as it does today. An implementer who gated the
-# shared retry branch wholesale would deliver task 029e's behavior here and fail.
+# 17e: the NON-TIMEOUT transient route obeys the same gate. A provider that
+# exited on its own and whose post-exit sweep reports a survivor starts no retry,
+# even though the attempt would otherwise have recovered on attempt two: the
+# retry's fresh attempt directory isolates artifacts, not processes. The outcome
+# stays the `failed` the attempt earned, and the optimistic "; retrying" reason
+# run_attempt() left behind is replaced rather than shipped.
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -3283,10 +3290,17 @@ export MARK PRR_TEST_REAP_FAIL=exit
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex)
 unset MARK PRR_TEST_REAP_FAIL
-assert_eq "17e: non-timeout transient with a survivor still retries" "$(jqf "$RUN_RESULT" .attempts)" 2
-assert_eq "17e: retried true" "$(jqf "$RUN_RESULT" .retried)" true
-assert_eq "17e: and still recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
-assert_eq "17e: a second attempt directory was created" "$(attempt_dir_count "$d/artifacts")" 2
+assert_eq "17e: a non-timeout transient survivor starts no retry" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "17e: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+assert_eq "17e: the attempt keeps the outcome it earned" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "17e: the real exit status is still reported" "$(jqf "$RUN_RESULT" .exitStatus)" 1
+assert_eq "17e: no second attempt directory was created" "$(attempt_dir_count "$d/artifacts")" 1
+assert_contains "17e: reason states the suppression" "$(jqf "$RUN_RESULT" .reason)" "the retry was suppressed"
+assert_contains "17e: reason keeps the survivor warning" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
+assert_not_contains "17e: reason is not left optimistic" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+assert_not_contains "17e: reason does not claim the tree was reaped" "$(jqf "$RUN_RESULT" .reason)" "was reaped"
+assert_contains "17e: stderr announces the suppression" "$RUN_ERR" "transient retry suppressed"
+assert_not_contains "17e: stderr never announces a retry that will not happen" "$RUN_ERR" "retrying once"
 
 # 17f: NEGATIVE boundary — a CAPABILITY-PROBE survivor suppresses nothing. The
 # probe's reap runs inside attempt one, before the provider is launched at all,
@@ -3407,6 +3421,84 @@ assert_contains "17i: reason names the final attempt's deadline" \
 	"$(jqf "$RUN_RESULT" .reason)" "on the final attempt after a transient failure"
 assert_not_contains "17i: reason claims no first-attempt timeout" "$(jqf "$RUN_RESULT" .reason)" "on both attempts"
 assert_not_contains "17i: reason promises no further retry" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+
+# 17j: the Claude login-to-env-credential fallback obeys the same gate, and it is
+# the route that costs something real — the env credential might have
+# authenticated, so suppressing it turns a recoverable run terminal. The result
+# must therefore not read like the ordinary `unavailable` that both credentials
+# produced: the reason has to say the fallback was never attempted. The fake
+# provider logs every invocation, so "no second attempt" is proved from the
+# provider side too, not only from the attempt count. It reports a USAGE LIMIT —
+# the login itself is valid — which is why the wording assertions below also pin
+# that the reason never brands the tried credential as a failed one.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+printf 'INVOKED API_KEY=[%s]\n' "${ANTHROPIC_API_KEY-<unset>}" >>"$ENV_LOG"
+cat >/dev/null
+echo "Error: usage limit reached. Please try again later." >&2   # login mode → unavailable
+exit 1
+EOF
+chmod +x "$d/bin/claude"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+ENV_LOG="$d/envlog"
+export ENV_LOG PRR_TEST_REAP_FAIL=exit
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="key-the-fallback-never-gets-to-try"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude)
+unset ENV_LOG PRR_TEST_REAP_FAIL CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+assert_eq "17j: the suppressed fallback keeps the outcome the attempt earned" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "17j: no fallback attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "17j: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+assert_eq "17j: no second attempt directory was created" "$(attempt_dir_count "$d/artifacts")" 1
+assert_eq "17j: the provider ran exactly once" "$(grep -c '^INVOKED' "$d/envlog")" 1
+assert_not_contains "17j: the env credential was never handed to a provider" "$(cat "$d/envlog")" "key-the-fallback-never-gets-to-try"
+assert_contains "17j: reason states the suppressed fallback" "$(jqf "$RUN_RESULT" .reason)" "the env-credential fallback was suppressed"
+# The whole point of this route's wording: a caller must be able to tell "the
+# fallback was never attempted" from "both credentials were tried and neither
+# authenticated". Both halves are pinned — the untried credential, and the
+# explicit denial of the both-credentials reading.
+assert_contains "17j: reason says the env credential was never tried" "$(jqf "$RUN_RESULT" .reason)" "the env credential was never tried"
+assert_contains "17j: reason denies a both-credentials verdict" "$(jqf "$RUN_RESULT" .reason)" "not both credentials"
+# ...while staying accurate about the credential that WAS tried: this login is a
+# valid session that hit a usage limit, so calling it a failed credential would
+# mislabel the very case the fixture reproduces.
+assert_not_contains "17j: reason does not brand the tried credential as failed" "$(jqf "$RUN_RESULT" .reason)" "failed credential"
+assert_contains "17j: reason keeps the survivor warning" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
+assert_not_contains "17j: reason is not left optimistic" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+assert_not_contains "17j: reason does not claim the tree was reaped" "$(jqf "$RUN_RESULT" .reason)" "was reaped"
+assert_contains "17j: stderr announces the suppression" "$RUN_ERR" "env-credential fallback suppressed"
+assert_not_contains "17j: stderr never announces a fallback that will not happen" \
+	"$RUN_ERR" "retrying with the env-credential fallback"
+
+# 17k: the probe-survivor boundary holds on the NEWLY gated transient route too —
+# 17f pins it for the timeout route. A stray `--help` descendant is not the
+# finished attempt's tree, so a transient failure whose OWN post-exit reap
+# succeeded still retries and still recovers, while the terminal reason carries
+# the run-global warning.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+if [ ! -f "$MARK" ]; then : >"$MARK"; echo "error sending request: connection reset by peer" >&2; exit 1; fi
+printf 'VERDICT: PASS\n' >"$last"; exit 0
+EOF
+chmod +x "$d/bin/codex"
+MARK="$d/mark"
+export MARK PRR_TEST_REAP_FAIL=probe
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+unset MARK PRR_TEST_REAP_FAIL
+assert_eq "17k: a probe survivor does not suppress the transient retry" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "17k: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "17k: the retry still recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "17k: the run-global survivor warning is still reported" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
+assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)" "suppressed"
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

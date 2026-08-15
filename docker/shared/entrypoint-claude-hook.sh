@@ -250,6 +250,14 @@ seed_statusline() {
 	# FIRST would make that window leave the honest unmarked state, but would
 	# also unmark the file on every ORDINARY publish failure (read-only file,
 	# ENOSPC), losing the refresh path and the throttle for good. The order stays.
+	# The same misclassification is reachable WITHOUT a crash, between CONTAINERS:
+	# each publish is atomic on its own, but the file and the marker are two
+	# renames, so peers starting from different newer images can interleave them
+	# and leave one peer's bytes under the other's marker. Deliberately not
+	# serialized: an flock like the DETACHED plugin bootstrap's (run_locked in
+	# seed-claude-plugins.sh, which can wait patiently) would sit on the
+	# SYNCHRONOUS startup path here, and would still not bind a peer running an
+	# older hook. Same self-announcing, delete-to-recover outcome as above.
 	if ! statusline_write_marker "$body"; then
 		rm -f "$STATUSLINE_MARKER" 2>/dev/null
 	fi

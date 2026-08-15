@@ -88,9 +88,10 @@ IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 #      `set -euo pipefail` (line 2) and entrypoint-core.sh invokes it UNGUARDED,
 #      so a status escaping this block ends container startup — no instruction
 #      file, no settings.json, no CMD — over a cosmetic asset. Enforcing that
-#      structurally is deliberate: the per-command audit it replaces was
-#      re-broken by later edits three times (a bare `echo` onto a closed fd 2, a
-#      trailing `rm -f`, each the last command of its branch).
+#      structurally is deliberate: the per-command audit it replaces was run
+#      twice over this same block and still left escapes standing both times —
+#      a bare `echo` onto a closed fd 2, and a trailing `rm -f`, each the last
+#      command of its branch.
 #
 # Every failure therefore resolves the same way: keep what is on disk, carry on.
 STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"

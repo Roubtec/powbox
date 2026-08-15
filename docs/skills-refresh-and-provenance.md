@@ -248,6 +248,9 @@ A running container holds no copy of the previous image's file, so a digest reco
 An **unmarked** statusline is treated exactly as an unmarked skill is: untouchable.
 That is the upgrade path for every `claude-config` volume that predates this marker, and it self-heals the first time the user deletes the file.
 
+"Unmarked" extends to every way the proof can come up missing, because a digest powbox cannot read is worth no more than one it never wrote: a marker with no `sha256=` key, a marker that cannot be read at all, and a file that cannot be digested (an image without `sha256sum`) all keep the file and say nothing.
+The producing side matches — `seed_statusline` writes a copy whose digest it could not compute with **no marker at all**, rather than a marker it could not fill in, so the unprovable case can only ever err toward keeping what is on disk.
+
 `source=` names **this** repo rather than one of the `Roubtec/agent-skills` roots — the statusline is a powbox-owned asset, which is the "should powbox ever bake an asset it owns itself" case [D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath) reserved.
 
 A declined refresh also writes `notified_epoch=<image epoch>`, so the "a newer statusline is available" stderr note appears once per new image instead of on every container start.

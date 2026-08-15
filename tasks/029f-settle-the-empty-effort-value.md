@@ -6,7 +6,7 @@ PR #148 made an explicit empty `--model` a usage error, because both omission pa
 
 `--effort ""` was left as it was: it silently becomes `high` at `docker/shared/peer-review-run:897` (`[ -n "$EFFORT" ] || EFFORT=high`), with no emptiness check in its parse arm.
 
-That asymmetry is **not** the same defect, and this task exists only because of a narrower point. An empty `--effort` lands on a documented *constant* — "Default: high, for BOTH providers", stated identically in the helper header, the README and `docs/architecture.md`, which further guarantee that a configured `model_reasoning_effort` never overrides the requested level. So the empty value can never resolve to shared mutable state, and the outcome is byte-identical to omitting the flag: the deliberate safe floor. The harm that justified the `--model` rejection provably does not exist here.
+That asymmetry is **not** the same defect, and this task exists only because of a narrower point. An empty `--effort` lands on a documented *constant*: the helper header's `--effort` entry says "Default: high, for BOTH providers", and `README.md` and `docs/architecture.md` state that same default in their own words and further guarantee — the header does not — that a configured `model_reasoning_effort` never overrides the requested level. So the empty value can never resolve to shared mutable state, and the outcome is byte-identical to omitting the flag: the deliberate safe floor. The harm that justified the `--model` rejection provably does not exist here.
 
 What is left is a divergence between the documented accepted set and the behavior. The header says `--effort` takes `low | medium | high | xhigh | max`; `docs/architecture.md` says it "accepts `low|medium|high|xhigh|max`". The empty string is not in that set, and `--effort bogus` exits 64 quoting exactly that set (test 14g), while `--effort ""` exits 0 and reviews at `high`. A caller reading the documented set predicts the 64.
 
@@ -16,7 +16,7 @@ The flag surface makes it the odd one out. Enumerated against the helper as of P
 
 Pick **one** of two resolutions — both are complete answers, and choosing (b) is not a failure of this task:
 
-**(a) Reject it.** A parse-site emptiness check mirroring the `--model` one at `:855`, a sentence in the helper header beside the `--effort` documentation, the matching clause in the README and `docs/architecture.md` where the accepted set is stated, and test cases beside 14g's empty-model pair in `scripts/test-peer-review-run.sh`.
+**(a) Reject it.** A parse-site emptiness check mirroring the `--model` one at `:855` (`[ -n "$MODEL" ] || die_usage "--model needs a non-empty value …"`, in the `--model)` parse arm), a sentence in the helper header beside the `--effort` documentation, the matching clause in the README and `docs/architecture.md` where the accepted set is stated, and test cases beside 14g's empty-model pair in `scripts/test-peer-review-run.sh`.
 
 **(b) Document it.** One clause where the accepted set is stated, saying an empty value is treated as omission and resolves to the default. Cheaper, non-breaking, and defensible: the resolved value is the safe floor, so rejecting it buys strictness rather than safety.
 

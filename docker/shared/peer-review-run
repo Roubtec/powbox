@@ -83,9 +83,9 @@
 # its `reason` states the suppression instead of claiming a retry or a reap that
 # did not happen. The Claude fallback is the costly one — a run that might have
 # authenticated on the env credential ends `unavailable` — so its reason states
-# that the env credential was never tried, which is a different result from both
-# credentials failing. The capability help probe's reap is not an attempt's reap
-# and suppresses nothing.
+# that the env credential was never tried, which is a different result from an
+# `unavailable` both credentials produced. The capability help probe's reap is
+# not an attempt's reap and suppresses nothing.
 #
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
@@ -576,7 +576,7 @@ reap_tree() {
 # fixture, and group_alive deliberately classifies zombie/dying states as dead.
 # Selectable PER SITE rather than per run because the two behaviors that must be
 # told apart differ only in WHICH reap failed — the attempt's own reap suppresses
-# the timeout retry, the capability probe's reap does not.
+# every retry route, the capability probe's reap suppresses nothing.
 #
 # The genuine reap always RUNS first and only its verdict is overridden, so a
 # fixture's descendants are still really signalled and killed under injection and
@@ -1747,7 +1747,7 @@ run_attempt() {
 	# REAP_WARN is run-global, is never reset, and is also raised by the
 	# capability probe, which runs inside attempt one AFTER this reset block, so
 	# gating a retry on it would suppress over a stray `--help` descendant that
-	# has nothing to do with the timed-out provider tree.
+	# has nothing to do with the finished attempt's provider tree.
 	ATT_REAP_CONFIRMED=0
 	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
@@ -2056,10 +2056,12 @@ write_meta() {
 # orchestrator drives the precedence: attempt the login first (ALL env
 # credentials cleared — see build_cmd_claude), and if that attempt comes back
 # `unavailable` (an auth/usage failure that yields no verdict) while an env
-# credential IS available, retry ONCE in key mode (env credentials left intact).
-# EITHER credential may be expired; if neither authenticates, the peer stays
-# `unavailable`. Codex is unaffected (CODEX_API_KEY is a first-class auth path,
-# not a login override).
+# credential IS available, retry ONCE in key mode (env credentials left intact)
+# — subject, like every route into attempt two, to the shared reap precondition
+# below: a login attempt whose own process tree could not be confirmed gone
+# starts no fallback. EITHER credential may be expired; if neither authenticates,
+# the peer stays `unavailable`. Codex is unaffected (CODEX_API_KEY is a
+# first-class auth path, not a login override).
 CLAUDE_HAS_LOGIN=0
 if [ "$PROVIDER" = claude ]; then
 	claude_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -2145,9 +2147,12 @@ if [ "$RETRY_SUPPRESSED" = 1 ]; then
 	claude-fallback)
 		# The one suppression that costs a recoverable path: the env credential
 		# might have authenticated. The reason must therefore not read like the
-		# ordinary both-credentials-failed `unavailable` a caller already knows.
+		# ordinary both-credentials-tried `unavailable` a caller already knows.
+		# It says which credential the outcome belongs to rather than calling that
+		# credential failed: an `unavailable` login covers a VALID session that hit
+		# a usage/quota limit, so "one failed credential" would mislabel it.
 		printf '{"event":"note","provider":"claude","message":"env-credential fallback suppressed; the unavailable attempt process tree could not be confirmed reaped"}\n' >&2
-		ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this reports ONE failed credential, not both)"
+		ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this outcome is the login credential's alone, not both credentials)"
 		;;
 	esac
 elif [ "$RETRY_ROUTE" = claude-fallback ]; then

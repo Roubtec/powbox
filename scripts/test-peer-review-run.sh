@@ -3096,8 +3096,9 @@ assert_eq "16l: artifactDir is still the final attempt dir" \
 	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
 
 # ============================================================================
-# (17) supervised-timeout retry — a deadline is transient, retried once, and
-#      suppressed when that attempt's own reap could not confirm the tree
+# (17) retry-route supervision — a deadline is transient and retried once, and
+#      EVERY route into attempt two is suppressed when that attempt's own reap
+#      could not confirm the tree
 # ============================================================================
 
 # retained_attempts <artifact-root> — the attempt numbers recorded by every
@@ -3424,10 +3425,12 @@ assert_not_contains "17i: reason promises no further retry" "$(jqf "$RUN_RESULT"
 # 17j: the Claude login-to-env-credential fallback obeys the same gate, and it is
 # the route that costs something real — the env credential might have
 # authenticated, so suppressing it turns a recoverable run terminal. The result
-# must therefore not read like the ordinary both-credentials-failed
-# `unavailable`: the reason has to say the fallback was never attempted. The fake
+# must therefore not read like the ordinary `unavailable` that both credentials
+# produced: the reason has to say the fallback was never attempted. The fake
 # provider logs every invocation, so "no second attempt" is proved from the
-# provider side too, not only from the attempt count.
+# provider side too, not only from the attempt count. It reports a USAGE LIMIT —
+# the login itself is valid — which is why the wording assertions below also pin
+# that the reason never brands the tried credential as a failed one.
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -3455,9 +3458,15 @@ assert_eq "17j: the provider ran exactly once" "$(grep -c '^INVOKED' "$d/envlog"
 assert_not_contains "17j: the env credential was never handed to a provider" "$(cat "$d/envlog")" "key-the-fallback-never-gets-to-try"
 assert_contains "17j: reason states the suppressed fallback" "$(jqf "$RUN_RESULT" .reason)" "the env-credential fallback was suppressed"
 # The whole point of this route's wording: a caller must be able to tell "the
-# fallback was never attempted" from "both credentials failed".
+# fallback was never attempted" from "both credentials were tried and neither
+# authenticated". Both halves are pinned — the untried credential, and the
+# explicit denial of the both-credentials reading.
 assert_contains "17j: reason says the env credential was never tried" "$(jqf "$RUN_RESULT" .reason)" "the env credential was never tried"
-assert_contains "17j: reason denies a both-credentials verdict" "$(jqf "$RUN_RESULT" .reason)" "not both"
+assert_contains "17j: reason denies a both-credentials verdict" "$(jqf "$RUN_RESULT" .reason)" "not both credentials"
+# ...while staying accurate about the credential that WAS tried: this login is a
+# valid session that hit a usage limit, so calling it a failed credential would
+# mislabel the very case the fixture reproduces.
+assert_not_contains "17j: reason does not brand the tried credential as failed" "$(jqf "$RUN_RESULT" .reason)" "failed credential"
 assert_contains "17j: reason keeps the survivor warning" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
 assert_not_contains "17j: reason is not left optimistic" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
 assert_not_contains "17j: reason does not claim the tree was reaped" "$(jqf "$RUN_RESULT" .reason)" "was reaped"

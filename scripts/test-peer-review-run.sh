@@ -82,6 +82,24 @@ set -uo pipefail
 #  (14) strength knobs — per-invocation model/effort pins, their provider-specific
 #       spellings, honest degradation when the CLI lacks --effort, and the usage
 #       rejections that keep a reviewer from being asked for a weak level
+#  (15) configured-model passthrough for codex — a usable root `model` from a
+#       harness-owned $CODEX_HOME survives --ignore-user-config as one -m with
+#       isolation and effort untouched; an explicit --model wins AND provably
+#       bypasses the lookup; a symlinked regular config is accepted while a root
+#       profile/model_provider (rejected on PRESENCE, not truthiness), a damaged
+#       or unusable value, an absent tomllib, a FIFO or /dev/zero config path, and
+#       an over-cap file all degrade with a warning to model:null; the warning is
+#       proved to precede any artifact side effect; parser isolation is proved
+#       against BOTH a shadow tomllib.py in the working directory and a
+#       sitecustomize.py on PYTHONPATH; and the read cap is asserted from both sides
+#  (16) the provider-neutral reviewFile payload — <artifactDir>/review.txt, 0600,
+#       byte-identical to the parsed message for both providers and consumed only
+#       through the result JSON; fail-closed (exit 70, no result) for a failed
+#       writer, a silently truncated write, six pre-created path shapes, and a
+#       path raced into place, each demanding a refused-creation diagnostic;
+#       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
+#       proved by composing the two injections; short write/read syscalls
+#       survived; and a missing python3 caught by the preflight at exit 70
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the

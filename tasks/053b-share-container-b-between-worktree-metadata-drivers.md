@@ -28,7 +28,7 @@ The mechanism is already built and proven by 053a — reuse it rather than inven
 
 - a sibling `.bash` file beside the drivers, LF-pinned via `.gitattributes`
 - picked up by Tier 0's shellcheck shebang matcher automatically
-- the missing-file guard already exists on both sides for the Container A file, and the `.ps1` adds a CRLF strip after `Get-Content -Raw` that the `.sh`'s bare `cat` does not need; mirror both
+- the missing-file guard already exists on both sides for the Container A file, and the `.ps1` adds a CRLF strip after `Get-Content -Raw` that the `.sh`'s bare `cat` does not need; mirror both constructs — the guard on both drivers, the strip in the `.ps1` only
 - non-executable (mode 644) by design — running it on a host would aim `shadow-mounts.sh` at host paths
 
 ## Target files or areas

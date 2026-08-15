@@ -64,6 +64,21 @@
 # these defaults a codex peer ran at `reasoning effort: none`. Both knobs are
 # per-invocation and never write back to the shared configuration.
 #
+# Timeout and retry: an exhausted supervised deadline is a TRANSIENT attempt
+# result, so a first timeout starts the helper's one retry in a fresh attempt
+# directory. Two attempts is the whole budget — the transient retry and the
+# Claude login-to-env-credential fallback are alternative routes through it,
+# never additive — and a final attempt that also exhausts its deadline stays
+# `timeout`: that is the most specific terminal class the vocabulary has for
+# deadline exhaustion, and retry exhaustion is carried by `attempts`, `retried`
+# and `reason` rather than by collapsing it into the generic `failed`. ONE
+# exception suppresses the retry entirely: a timed-out attempt whose own reap
+# could not CONFIRM its process tree was gone returns terminal `timeout` at
+# attempts:1, because launching attempt two beside a provider process known to
+# be live is the single way this retry could put two peer reviews on the machine
+# at once — and the retry's fresh attempt directory isolates artifacts, not
+# processes. The other retry routes are not gated on that confirmation.
+#
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
 #   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
@@ -140,7 +155,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,130p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,145p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -535,6 +550,35 @@ reap_tree() {
 		sleep 0.1
 	done
 	return 1
+}
+
+# reaped_ok <site> <leader_pid> <pgid|""> — reap_tree, plus the one TEST-ONLY way
+# to make a reap CONFIRMATION report a survivor. <site> names which reap this is
+# — `probe`, `timeout`, or `exit` — and PRR_TEST_REAP_FAIL is a space-separated
+# list of the sites whose confirmation must fail. That variable is unset in every
+# non-test path, and an empty list matches no site, so this is exactly reap_tree
+# in normal operation.
+#
+# It exists because the survivor branches are otherwise unreachable from a test:
+# a genuine post-SIGKILL survivor cannot be constructed by an unprivileged
+# fixture, and group_alive deliberately classifies zombie/dying states as dead.
+# Selectable PER SITE rather than per run because the two behaviors that must be
+# told apart differ only in WHICH reap failed — the attempt's own reap suppresses
+# the timeout retry, the capability probe's reap does not.
+#
+# The genuine reap always RUNS first and only its verdict is overridden, so a
+# fixture's descendants are still really signalled and killed under injection and
+# the suite's existing "the descendant is gone" assertions keep their meaning.
+reaped_ok() {
+	local site="$1" rc
+	shift
+	reap_tree "$@"
+	rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	case " ${PRR_TEST_REAP_FAIL:-} " in
+	*" $site "*) return 1 ;;
+	esac
+	return 0
 }
 
 on_exit() {
@@ -1199,7 +1243,7 @@ provider_supports() {
 			fi
 			sleep 0.1
 		done
-		reap_tree "$probe_child" "$probe_pgid" || {
+		reaped_ok probe "$probe_child" "$probe_pgid" || {
 			REAP_WARN=1
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after the help probe"}\n' "$PROVIDER" >&2
 		}
@@ -1667,6 +1711,13 @@ run_attempt() {
 	ATT_VERDICT=none
 	ATT_EXIT=null
 	ATT_TRANSIENT=0
+	# 1 while no reap of THIS attempt's OWN provider tree has reported a survivor.
+	# Attempt-scoped deliberately, and cleared only at the two post-provider reap
+	# sites below: REAP_WARN is run-global, is never reset, and is also raised by
+	# the capability probe — which runs inside attempt one AFTER this reset block —
+	# so gating a retry on it would suppress over a stray `--help` descendant that
+	# has nothing to do with the timed-out provider tree.
+	ATT_REAP_CONFIRMED=1
 	REVIEW_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
 	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
@@ -1813,8 +1864,9 @@ run_attempt() {
 	if [ "$timed_out" = 1 ]; then
 		# Deadline hit while the tree was still running: TERM it, wait a bounded
 		# grace, escalate to KILL for survivors, and confirm nothing remains.
-		reap_tree "$child" "$pgid" || {
+		reaped_ok timeout "$child" "$pgid" || {
 			REAP_WARN=1
+			ATT_REAP_CONFIRMED=0
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after timeout"}\n' "$PROVIDER" >&2
 		}
 		wait "$child" 2>/dev/null || true
@@ -1824,8 +1876,9 @@ run_attempt() {
 		# failed provider left behind in the group — TERM, grace, KILL, confirm —
 		# so no grandchild outlives the run.
 		if wait "$child"; then rc=0; else rc=$?; fi
-		reap_tree "$child" "$pgid" || {
+		reaped_ok exit "$child" "$pgid" || {
 			REAP_WARN=1
+			ATT_REAP_CONFIRMED=0
 			printf '{"event":"warn","provider":"%s","message":"a descendant survived KILL after exit"}\n' "$PROVIDER" >&2
 		}
 	fi
@@ -1843,8 +1896,21 @@ run_attempt() {
 
 	if [ "$timed_out" = 1 ]; then
 		ATT_OUTCOME=timeout
+		# ATT_EXIT stays null: the provider was terminated by the helper's own
+		# deadline, so a synthetic process exit code would be less accurate.
 		ATT_EXIT=null
-		ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group was reaped"
+		# An exhausted supervised deadline IS transient, and it is classified here
+		# — at the point the outcome is set — rather than left for looks_transient
+		# to recognize in a human-readable reason after the fact.
+		ATT_TRANSIENT=1
+		if [ "$ATT_REAP_CONFIRMED" = 1 ]; then
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group was reaped"
+		else
+			# A survivor and a clean reap cannot both be true. State the un-reaped
+			# group instead of asserting the reap and letting the REAP_WARN
+			# annotation contradict it in the same sentence.
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout and its process group could not be confirmed reaped"
+		fi
 		write_meta "$dir" "$attempt_no" "timeout"
 		return 0
 	fi
@@ -1993,6 +2059,19 @@ run_attempt 1
 ATTEMPTS=1
 TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 
+# A supervised timeout whose OWN reap could not confirm the tree was gone
+# suppresses the timeout retry: attempt two would run beside a provider process
+# known to be live, and the retry's fresh attempt directory isolates artifacts,
+# not processes. Decided HERE, ahead of the branch that announces the retry on
+# stderr, so a retry that never happens is never claimed on the streamed channel
+# either. Scoped to the timeout route and to the timed-out attempt's own reap:
+# the pre-existing non-timeout transient retry and the Claude env-credential
+# fallback keep their current behavior, which task 029e revisits.
+TIMEOUT_RETRY_SUPPRESSED=0
+if [ "$ATT_OUTCOME" = timeout ] && [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_REAP_CONFIRMED" = 0 ]; then
+	TIMEOUT_RETRY_SUPPRESSED=1
+fi
+
 if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
 	# The login attempt could not AUTHENTICATE the peer (expired session, or a
 	# session limit) — fall back to the documented env-credential path ONCE, in a
@@ -2011,12 +2090,15 @@ if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOM
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
 		# The env-credential fallback attempt ITSELF failed transiently. The
-		# 2-attempt cap means no further retry, so correct the per-attempt
-		# "…; retrying" reason (run_attempt leaves it optimistic) to reflect that
-		# this was the last try.
-		ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		# 2-attempt cap means no further retry, so correct the per-attempt reason
+		# (run_attempt leaves it optimistic) to reflect that this was the last try.
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the env-credential fallback attempt; attempt cap reached, not retried further"
+		else
+			ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		fi
 	fi
-elif [ "$ATT_TRANSIENT" = 1 ]; then
+elif [ "$ATT_TRANSIENT" = 1 ] && [ "$TIMEOUT_RETRY_SUPPRESSED" = 0 ]; then
 	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
 	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
 	run_attempt 2
@@ -2024,10 +2106,22 @@ elif [ "$ATT_TRANSIENT" = 1 ]; then
 	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
 	RETRIED=true
 	if [ "$ATT_TRANSIENT" = 1 ]; then
-		# Both attempts failed transiently → exhausted.
-		ATT_OUTCOME=failed
-		ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			# The last allowed attempt also exhausted its supervised deadline.
+			# `timeout` is the most specific terminal class the outcome vocabulary
+			# has for that, so it is kept rather than collapsed into `failed`; the
+			# exhaustion itself is carried by attempts/retried and this reason. The
+			# wording claims no reap, so a survivor annotation cannot contradict it.
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on both attempts; timeout retry exhausted, two-attempt cap reached"
+		else
+			# Both attempts failed transiently → exhausted.
+			ATT_OUTCOME=failed
+			ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
+		fi
 	fi
+elif [ "$TIMEOUT_RETRY_SUPPRESSED" = 1 ]; then
+	printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+	ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
 fi
 
 # --- emit the versioned result ----------------------------------------------

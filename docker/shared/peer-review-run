@@ -645,10 +645,12 @@ trap 'exit 143' TERM
 # drawn — no real model ID carries a control character, and it keeps "the
 # configured value is passed exactly" true for everything that is passed at all.
 #
-# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: nothing here sets it, so it
-# is absent in normal operation. It exists because a single os.read behaves
-# identically to a looped one on an ordinary regular file, so nothing else would
-# ever exercise the loop.
+# PRR_TEST_CONFIG_SHORT_READ is a TEST-ONLY injection: nothing here sets it, so an
+# ordinary run leaves it unset, and it is read from the environment, not enforced,
+# so a caller CAN export it — which costs nothing, because all it does is shorten
+# the first read and the loop below reassembles the same bytes. It exists because
+# a single os.read behaves identically to a looped one on an ordinary regular
+# file, so nothing else would ever exercise the loop.
 PRR_CONFIG_MODEL_PY='
 import os, stat, sys
 
@@ -754,11 +756,24 @@ sys.exit(0)
 # assertion — exactly the expected bytes passes, anything shorter or a byte more
 # fails, so truncation and overrun are caught by one read.
 #
-# Every PRR_TEST_* name below is a TEST-ONLY injection point, inert in normal
-# operation because nothing here sets any of them. They exist because the
-# behaviors they drive — a short syscall, a failing or wrong-applying mode set, a
-# silently truncated write, an ambient umask — live INSIDE this invocation, so a
-# PATH shim replacing it would prove nothing about the shipped code.
+# Every PRR_TEST_* name below is a TEST-ONLY injection point. Nothing here sets
+# any of them, so an ordinary run leaves them unset — but they are read from the
+# environment, not enforced, so a caller CAN export one, and unlike the reap hook
+# above they do not share one safety story. SHORT_WRITE and SHORT_READ only split
+# a syscall their own loops reassemble, so those two are inert. UMASK is set and
+# restored inside this `python3 -I` child, around a create the umask(0) below
+# already neutralises, so a well-formed value changes nothing and a non-octal one
+# aborts the writer; TRUNCATE is caught by the read-back and exits 4. Both of
+# those failures reach the caller as exit 70 — a discarded review, never a false
+# `passed`. MODE_FAIL only skips the fchmod, which that same umask(0) create has
+# already satisfied at 0600. MODE_WRONG is the one that costs something: the file
+# really does end up 0644, warned about below, its privacy then resting on the
+# 0700 attempt directory alone.
+#
+# They exist because the behaviors they drive — a short syscall, a failing or
+# wrong-applying mode set, a silently truncated write, an ambient umask — live
+# INSIDE this invocation, so a PATH shim replacing it would prove nothing about
+# the shipped code.
 PRR_WRITE_REVIEW_PY='
 import errno, os, stat, sys
 

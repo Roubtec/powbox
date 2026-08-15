@@ -29,13 +29,24 @@ The reviewer asked for "a conditional/version check that ensures the destination
 A re-check therefore narrows the gap; it cannot close it, and a fix that reads as though it had would be worse than the stated residual.
 What to do instead is a design decision rather than a line of code — narrow it, make the loss recoverable, or accept it and say so — and #151 took the third while stating the residual in place, so the branch does not ship an unstated silent-loss window.
 
+### The counter-argument to deferring it
+
+Recorded here rather than left in a review thread, because it is an argument for overruling this deferral and it should reach whoever decides that.
+
+The refresh branch's window is **introduced by #151**, not inherited.
+Base `87c9487` seeded with `if [ -f "$STATUSLINE_SRC" ] && [ ! -f "$AGENT_CONFIG_DIR/statusline-command.sh" ]; then cp …`: it never replaced an existing statusline at all, so before #151 there was no gate to reach through and no user bytes a refresh could discard.
+The fresh-seed branch is the half that *is* pre-existing — and it is also the half that admits a genuinely atomic answer for a few lines (`ln`'s `EEXIST`, per the Scope bullet below), so the cheapest fix belongs to the older defect while the new one keeps the residual.
+
+Against that: splitting publish mechanics across the two branches — one atomic, one merely narrowed — is itself a design decision with its own cost, and it is precisely the decision this task exists to take deliberately rather than as a side effect of #151.
+Both the reviewer that raised this counter-argument and the codex peer still judged the deferral sound. It is offered as the strongest ground for the opposite call, not as a recommendation.
+
 ## Scope
 
 **In scope:**
 
 - Settle what `statusline_seed_step` and `seed_statusline` owe a destination that changes under them, and implement it. The three candidates, to be chosen between and justified rather than combined by default:
   1. **Narrow the gap.** Give `statusline_publish` the expected digest and re-verify the destination immediately before the `mv -T`, which cuts the exposure from a digest plus three process spawns (`mktemp`, `cp`, `chmod`) down to a digest plus the rename. It needs its own outcome, since "the destination changed under us" is not the "could not write" the read-only branch reports, and it must be described as narrowing rather than closing.
-  2. **Make the loss recoverable instead of rarer.** Rename the destination aside (a `.powbox-replaced` sibling, say) before installing the new copy, so bytes lost to the gap can be retrieved. It closes nothing either, but it downgrades the consequence from unrecoverable to recoverable, and it costs a user-visible file on the volume.
+  2. **Make the loss recoverable instead of rarer.** Rename the destination aside (a `.powbox-replaced` sibling, say) before installing the new copy, so bytes lost to the gap can be retrieved. It closes nothing either, and on its own it does not even downgrade the whole consequence: the aside-rename leaves the path **absent**, so a writer that recreates it in the window before the install has *those* bytes discarded by the `mv -T`, with no backup taken of them — the first loss made recoverable and a second, narrower one left exactly as silent as it is today. The option therefore only delivers what it promises paired with a **no-clobber install** — `link(2)`/`ln` failing `EEXIST` on a path that reappeared, the same primitive the fresh-seed branch below can use — and that failure needs its own outcome rather than a retry: keep what the writer put there, keep the backup, say so. It costs a user-visible file on the volume either way.
   3. **Accept it**, leaving the residual notes #151 committed as the whole answer. Legitimate only if argued, given that the consequence is destruction of user work rather than the cosmetic class the block's other residuals sit in.
 - Cover the **fresh-seed branch** under whichever answer is chosen. `[ ! -e ] && [ ! -L ]` followed by a rename is the same gap with the same consequence, and it is the branch every new volume takes. Note that this branch alone admits a genuinely atomic answer that the refresh branch does not: `ln` fails with `EEXIST` rather than replacing, so a create-if-absent publish can be made to lose nothing at all.
 - Preserve both invariants of the block: every publish stays atomic, and no failure of the new path may abort container startup or leave the statusline worse than "left as found".

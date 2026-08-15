@@ -79,19 +79,20 @@ IMAGE_EPOCH=$(cat "$AGENT_SEED_DIR/build-epoch" 2>/dev/null || echo 0)
 #      while the marker still swore to the old digest — permanently reclassifying
 #      an untouched file as a user customization — and let a peer container read
 #      a half-written marker.
-#   B. THE BLOCK CANNOT END STARTUP. The whole decision lives in
+#   B. NO EXIT STATUS CAN END STARTUP. The whole decision lives in
 #      statusline_seed_step, invoked below as `statusline_seed_step || true`.
 #      That form is load-bearing TWICE: bash suspends `set -e` for every command
-#      inside a function executed as part of an AND-OR list, so nothing in here
-#      can abort the hook part-way, and the trailing `|| true` discards the
-#      function's own status so nothing can escape either. This hook runs under
-#      `set -euo pipefail` (line 2) and entrypoint-core.sh invokes it UNGUARDED,
-#      so a status escaping this block ends container startup — no instruction
-#      file, no settings.json, no CMD — over a cosmetic asset. Enforcing that
-#      structurally is deliberate: the per-command audit it replaces was run
-#      twice over this same block and still left escapes standing both times —
-#      a bare `echo` onto a closed fd 2, and a trailing `rm -f`, each the last
-#      command of its branch.
+#      inside a function executed as part of an AND-OR list, so no failing
+#      command in here can abort the hook part-way, and the trailing `|| true`
+#      discards the function's own status so nothing can escape either. This
+#      hook runs under `set -euo pipefail` (line 2) and entrypoint-core.sh
+#      invokes it UNGUARDED, so a status escaping this block ends container
+#      startup — no instruction file, no settings.json, no CMD — over a cosmetic
+#      asset. The suspension covers exit STATUSES only: a `set -u` reference to
+#      an unset variable is a fatal shell error that kills the shell through an
+#      AND-OR list all the same. No such reference exists here — every `local`
+#      below is assigned before it is read — but that is a standing constraint
+#      on edits to this block, not something the structure enforces.
 #
 # Every failure therefore resolves the same way: keep what is on disk, carry on.
 STATUSLINE_SRC="$AGENT_SEED_DIR/statusline-command.sh"
@@ -125,6 +126,17 @@ statusline_marker_value() {
 
 # statusline_publish <src> <dst> — invariant A for a file copy: land <src>'s
 # bytes at <dst> or change nothing. Non-zero means <dst> was not touched.
+#
+# BOUNDED: a rename REPLACES the destination inode, which is a deliberate
+# divergence from the `cp SRC existing-DST` this grew out of. Mode is carried
+# over from <src> below; ownership, ACLs and xattrs are the freshly created
+# temp's rather than the old file's preserved ones. That is sound HERE and not
+# worth mechanism — the temp is made by the same uid on a single-uid volume, and
+# nothing in this image sets ACLs, xattrs or SELinux labels — but it is not
+# `cp` semantics, so a volume that grew any of those would lose them.
+# Also bounded: a kill between the mktemp and the rename leaves a
+# `statusline-command.sh.XXXXXX` sibling that nothing later reaps. Inherent to
+# publishing atomically; the failure paths here do clean their temp up.
 statusline_publish() {
 	local src="$1" dst="$2" tmp rc=1
 	tmp="$(mktemp "$dst.XXXXXX" 2>/dev/null || true)"
@@ -135,7 +147,9 @@ statusline_publish() {
 		# quietly drop the statusline's executable bit. Best-effort: content
 		# is worth publishing even on an image whose chmod cannot do this.
 		chmod --reference="$src" "$tmp" 2>/dev/null || true
-		mv "$tmp" "$dst" 2>/dev/null && rc=0
+		# -T: a destination that IS (or points at) a directory must be a
+		# failure, never a move INTO it.
+		mv -T "$tmp" "$dst" 2>/dev/null && rc=0
 	fi
 	[ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null
 	return "$rc"
@@ -144,16 +158,53 @@ statusline_publish() {
 # statusline_write_marker <body> — invariant A for the sidecar. <body> must
 # already carry its trailing newline; the marker is published whole or not at
 # all, so a peer container reading it mid-rewrite can never see a marker that
-# has lost `epoch=`/`sha256=`.
+# has lost `epoch=`/`sha256=`. `-T` is load-bearing for the STATUS, not just the
+# outcome: a plain `mv` onto a marker path that is a DIRECTORY moves the temp
+# INSIDE it and exits 0, so this would report a published marker having
+# published nowhere, and leave a stray file behind.
 statusline_write_marker() {
 	local tmp rc=1
 	tmp="$(mktemp "$STATUSLINE_MARKER.XXXXXX" 2>/dev/null || true)"
 	[ -n "$tmp" ] || return 1
 	if printf '%s' "$1" >"$tmp" 2>/dev/null; then
-		mv "$tmp" "$STATUSLINE_MARKER" 2>/dev/null && rc=0
+		mv -T "$tmp" "$STATUSLINE_MARKER" 2>/dev/null && rc=0
 	fi
 	[ "$rc" -eq 0 ] || rm -f "$tmp" 2>/dev/null
 	return "$rc"
+}
+
+# statusline_note_once <message> — one non-fatal line on stderr, at most once
+# per image. `notified_epoch=` records the newest image this statusline has
+# already spoken about, for ANY reason (a customized file, or a destination that
+# could not be written), because BOTH of those branches stay true on every later
+# start — nothing is published, so `epoch=` never advances — and the entrypoint
+# must not nag once per start. It is a separate key precisely so `epoch=` keeps
+# meaning "the build that placed this file"; a successful refresh rewrites the
+# marker without it, so the next image is announced again. With no marker to
+# record into there is nowhere to remember the note and it simply repeats.
+statusline_note_once() {
+	local told kept body rc=0
+	if [ -f "$STATUSLINE_MARKER" ]; then
+		told="$(statusline_marker_value "$STATUSLINE_MARKER" notified_epoch)"
+		[[ "$told" =~ ^[0-9]+$ ]] || told=0
+		[ "$IMAGE_EPOCH" -gt "$told" ] || return 0
+	fi
+	echo "$1" >&2
+	kept="$(grep -v '^notified_epoch=' "$STATUSLINE_MARKER" 2>/dev/null)" || rc=$?
+	# grep's status is checked, never masked, and ONLY 0 may publish. 0 = at
+	# least one line survives. 1 = nothing survived, which cannot be honest for
+	# a marker that carried `epoch=`/`sha256=` moments ago: it changed underneath
+	# us, a peer container mid-write on the shared volume. >=2 = it could not be
+	# read at all (including: there is none). Publishing on 1 or 2 would leave a
+	# marker holding only `notified_epoch=`, erasing `epoch=`/`sha256=` and
+	# unmarking the file for good, which is precisely the outcome this rewrite
+	# exists to avoid. Abandon instead; the worst case is one more note on the
+	# next start.
+	if [ "$rc" -eq 0 ]; then
+		printf -v body '%s\nnotified_epoch=%s\n' "$kept" "$IMAGE_EPOCH"
+		statusline_write_marker "$body"
+	fi
+	return 0
 }
 
 seed_statusline() {
@@ -165,13 +216,19 @@ seed_statusline() {
 	# rather than left to the copy's own failure. Either way the destination
 	# keeps whatever it holds and startup continues; one non-fatal line says
 	# so, because silence on a volume this broken would be indistinguishable
-	# from a successful refresh.
+	# from a successful refresh — throttled per image, since this branch stays
+	# true on every later start and would otherwise nag on each one.
 	if { [ -e "$STATUSLINE_DST" ] && [ ! -w "$STATUSLINE_DST" ]; } ||
 		! statusline_publish "$STATUSLINE_SRC" "$STATUSLINE_DST"; then
-		echo "Note: could not write $STATUSLINE_DST; left as found." >&2
+		statusline_note_once "Note: could not write $STATUSLINE_DST; left as found."
 		return 0
 	fi
-	digest="$(statusline_digest "$STATUSLINE_DST")"
+	# Digest the SOURCE, not the destination just written: statusline_publish
+	# lands <src>'s bytes verbatim, so the two are equal by construction, while
+	# re-reading the live destination would let a concurrent write in that
+	# window be recorded as powbox's own — marking a user's bytes as ours and
+	# licensing a later overwrite of them.
+	digest="$(statusline_digest "$STATUSLINE_SRC")"
 	# Without a digest there is no provable identity, so publish no marker —
 	# and drop any marker already there, because the file it describes has
 	# just been replaced and its `sha256=` now names bytes that are gone. A
@@ -189,6 +246,16 @@ seed_statusline() {
 		"$IMAGE_EPOCH" "$commit" "$digest" "$STATUSLINE_SOURCE"
 	# Same reasoning as above for the marker that could not be published at
 	# all: leave no proof rather than a false one.
+	#
+	# BOUNDED: an interruption BETWEEN the publish above and this rewrite leaves
+	# the refreshed file under the old marker. The next start then reads powbox's
+	# own copy as customized — one note per image, never refreshed — which
+	# deleting the file clears. Dropping the marker BEFORE publishing would make
+	# an interruption leave the honest unmarked state instead, but it would also
+	# unmark the file on every ORDINARY publish failure (read-only file, ENOSPC),
+	# losing both the refresh path and the note throttle for good. A recoverable
+	# stale marker after a kill beats a certain loss after a failure, so the
+	# order stays.
 	if ! statusline_write_marker "$body"; then
 		rm -f "$STATUSLINE_MARKER" 2>/dev/null
 	fi
@@ -197,16 +264,22 @@ seed_statusline() {
 # statusline_seed_step — the entire statusline decision. See invariant B: this
 # is called as `statusline_seed_step || true` and MUST stay called that way.
 statusline_seed_step() {
-	local epoch want have told kept body rc
+	local epoch want have
 	[ -f "$STATUSLINE_SRC" ] || return 0
 	if [ ! -e "$STATUSLINE_DST" ] && [ ! -L "$STATUSLINE_DST" ]; then
 		seed_statusline
 		return 0
 	fi
-	# Every other shape falls through untouched: a marked-but-not-regular
-	# destination, an unmarked file (the pre-marker upgrade path), a directory,
-	# or a dangling symlink. `-e || -L` rather than `-f` on the seed branch
-	# above so the last two are never copied INTO or resolved through.
+	# `-f` RESOLVES symlinks, so a marked symlink pointing at a regular file is
+	# regular HERE and a refresh REPLACES the link with a real file rather than
+	# writing through it — invariant A renames over the path, where the `cp` this
+	# grew out of followed the link and rewrote its target. Deliberate (a rename
+	# cannot be redirected into an arbitrary path) and stated in the README, so a
+	# user linking this into a dotfiles checkout is not surprised.
+	# The shapes that genuinely fall through untouched: a directory, a FIFO or
+	# socket, a dangling symlink, and any unmarked file (the pre-marker upgrade
+	# path). `-e || -L` rather than `-f` on the seed branch above so a dangling
+	# symlink is never resolved through and a directory is never copied INTO.
 	[ -f "$STATUSLINE_DST" ] && [ -f "$STATUSLINE_MARKER" ] || return 0
 	epoch="$(statusline_marker_value "$STATUSLINE_MARKER" epoch)"
 	[[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
@@ -224,30 +297,9 @@ statusline_seed_step() {
 		seed_statusline
 		return 0
 	fi
-	# The user made it theirs. Say so ONCE PER IMAGE, not once per start:
-	# `notified_epoch=` records the newest image whose offer was already
-	# declined. It is a separate key precisely so `epoch=` keeps meaning "the
-	# build that placed this file".
-	told="$(statusline_marker_value "$STATUSLINE_MARKER" notified_epoch)"
-	[[ "$told" =~ ^[0-9]+$ ]] || told=0
-	[ "$IMAGE_EPOCH" -gt "$told" ] || return 0
-	echo "Note: this image ships a newer statusline, but $STATUSLINE_DST differs from the copy powbox seeded, so it was kept. Delete it to take the new one." >&2
-	rc=0
-	kept="$(grep -v '^notified_epoch=' "$STATUSLINE_MARKER" 2>/dev/null)" || rc=$?
-	# grep's status is checked, never masked, and ONLY 0 may publish. 0 = at
-	# least one line survives. 1 = the grep produced nothing, which cannot be
-	# honest here: reaching this branch required the marker to carry a
-	# `sha256=` line when it was read moments ago, so an empty result means the
-	# marker changed underneath us — a peer container mid-write on the shared
-	# volume. >=2 = it could not be read at all. Publishing on 1 or 2 would
-	# leave a marker holding only `notified_epoch=`, erasing `epoch=`/`sha256=`
-	# and unmarking the file for good, which is precisely the outcome this
-	# rewrite exists to avoid. Abandon instead; the worst case is one more note
-	# on the next start.
-	if [ "$rc" -eq 0 ]; then
-		printf -v body '%s\nnotified_epoch=%s\n' "$kept" "$IMAGE_EPOCH"
-		statusline_write_marker "$body"
-	fi
+	# The user made it theirs. Say so once per image, not once per start; the
+	# throttle and its `notified_epoch=` bookkeeping live in statusline_note_once.
+	statusline_note_once "Note: this image ships a newer statusline, but $STATUSLINE_DST differs from the copy powbox seeded, so it was kept. Delete it to take the new one."
 	return 0
 }
 

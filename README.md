@@ -255,6 +255,8 @@ Claude's statusline resolves the account by asking `claude --safe-mode auth stat
 That behavior — and every later statusline fix — reaches an existing container on the next start after a rebuild, provided you have not edited `~/.claude/statusline-command.sh` yourself.
 The seed is opinionated and yours to change, so a newer image replaces it only when the file is still byte-identical to the copy powbox wrote, proven against the `sha256=` in the sidecar marker `~/.claude/.statusline-command.sh.powbox-seeded`; an edited file is kept (with a one-line note per new image saying a newer version exists), and so is a file with no marker at all — which is every `claude-config` volume created before the marker existed.
 Delete `~/.claude/statusline-command.sh` to take the baked copy in either case; the re-seed writes the marker, so subsequent rebuilds refresh it on their own.
+One caveat if you keep that path as a **symlink** (say, into a dotfiles checkout): a refresh publishes by renaming the new copy over the path, so it replaces the *link* with a regular file rather than writing through it to your target, which keeps its old contents.
+That only happens when the link resolves to a file powbox can still prove is its own — an edited or unmarked target is left alone as above — but if you want the indirection preserved, re-create the symlink after a rebuild.
 
 Either agent can be started first in a clean Docker environment.
 

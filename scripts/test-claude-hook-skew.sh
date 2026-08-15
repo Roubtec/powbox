@@ -3,7 +3,7 @@
 #
 #   1. the build-skew shim (tests 1-5),
 #   2. the statusline seed's digest-marker gating (tests 6-15, task 002e), and
-#   3. that same seed's ERROR paths (tests 16-25), which must degrade rather
+#   3. that same seed's ERROR paths (tests 16-27), which must degrade rather
 #      than abort: the hook runs under `set -euo pipefail` and entrypoint-core.sh
 #      invokes it UNGUARDED, so a non-zero exit here ends container startup.
 #
@@ -32,8 +32,11 @@
 # the four that used to abort the hook outright (an unreadable marker, a read-only
 # statusline, no sha256sum on PATH, a directory where the file belongs), a marker
 # carrying no `sha256=` key, a copy that fails after truncating its destination, a
-# peer container truncating the marker mid-rewrite, a closed fd 2, and a marker that
-# cannot be written in place. Each case asserts the same three things: the hook exits
+# peer container truncating the marker mid-rewrite, a closed fd 2, a marker that
+# cannot be written in place, a read-only statusline restarted on the SAME image
+# (the note must be throttled per image, not repeated per start), and a directory
+# where the MARKER belongs (a plain `mv` moves the temp inside it and reports
+# success). Each case asserts the same three things: the hook exits
 # 0, the on-disk statusline is left as it was (or, where a refresh was due, is whole
 # and correctly marked), AND the instruction file and settings.json still refresh.
 # That last one is the point: the independence the decision path promises must hold
@@ -733,9 +736,12 @@ else
 	MK_BEFORE="$(cat "$MK")"
 	sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
 	RC="$(sl_rc "$CFG" "$SL_SEED_ERR" "$SL_CP_FAIL_BIN")"
+	# The proof of the OLD file must survive verbatim; the only permitted change
+	# is the `notified_epoch=` the note's own throttle stamps (see test 26).
 	if [ "$RC" = 0 ] &&
 		[ "$(cat "$DST" 2>/dev/null)" = "v1" ] &&
-		[ "$(cat "$MK")" = "$MK_BEFORE" ] &&
+		[ "$(grep -v '^notified_epoch=' "$MK")" = "$MK_BEFORE" ] &&
+		[ "$(sl_key "$MK" notified_epoch)" = "200" ] &&
 		grep -q 'could not write' "$CFG.stderr" &&
 		[ -z "$(find "$CFG" -name 'statusline-command.sh.*' -print -quit 2>/dev/null)" ] &&
 		sl_independent "$CFG" v2; then
@@ -859,6 +865,63 @@ else
 	else
 		no "unwritable marker on re-seed: proof matches the new file (or is gone), no false nag (rc=$RC/$RC2, marker=$(tr '\n' ' ' <"$MK" 2>/dev/null))"
 	fi
+fi
+
+# --- Test 26: the read-only note is throttled per IMAGE, not fired per start ----
+# This branch stays true forever once the image is newer: nothing is published, so
+# the marker's `epoch=` never advances and the refresh is re-decided (and re-denied)
+# on every single start. An unthrottled note therefore printed on each one, which is
+# exactly the per-start nagging the design forbids. `notified_epoch=` throttles it —
+# writable in this shape because only the FILE is read-only, not the marker.
+if [ "$RUNNING_AS_ROOT" = yes ]; then
+	sk "read-only statusline, same image again: noted once, not once per start (root ignores chmod 444)"
+else
+	CFG="$(sl_new_cfg)"
+	DST="$CFG/statusline-command.sh"
+	MK="$CFG/.statusline-command.sh.powbox-seeded"
+	sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+	sl_run "$CFG" "$SL_SEED_ERR"
+	sl_seed_full "$SL_SEED_ERR" 200 'v2' v2
+	chmod 444 "$DST"
+	RC="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+	SL_NOTE_FIRST="$(cat "$CFG.stderr" 2>/dev/null || true)"
+	RC2="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+	SL_NOTE_SECOND="$(cat "$CFG.stderr" 2>/dev/null || true)"
+	chmod 644 "$DST"
+	if [ "$RC" = 0 ] && [ "$RC2" = 0 ] &&
+		[ "$(cat "$DST" 2>/dev/null)" = "v1" ] &&
+		printf '%s' "$SL_NOTE_FIRST" | grep -q 'could not write' &&
+		[ -z "$SL_NOTE_SECOND" ] &&
+		[ "$(sl_key "$MK" notified_epoch)" = "200" ] &&
+		[ "$(sl_key "$MK" epoch)" = "100" ] &&
+		[ -n "$(sl_key "$MK" sha256)" ] &&
+		sl_independent "$CFG" v2; then
+		ok "read-only statusline, same image again: noted once, marker keeps epoch/sha256"
+	else
+		no "read-only statusline, same image again: noted once, marker keeps epoch/sha256 (rc=$RC/$RC2, second start said: $SL_NOTE_SECOND)"
+	fi
+fi
+
+# --- Test 27: a DIRECTORY where the MARKER belongs -> failure, not a stray file -
+# `mv tmp DIR` moves the temp INSIDE the directory and exits 0, so the writer
+# reported "published" having published nowhere — and deposited a stray file in a
+# directory the user owns. `mv -T` makes it the failure it is, and the caller then
+# answers as it does for any unpublishable marker: leave no proof at all.
+CFG="$(sl_new_cfg)"
+DST="$CFG/statusline-command.sh"
+MK="$CFG/.statusline-command.sh.powbox-seeded"
+mkdir -p "$MK"
+sl_seed_full "$SL_SEED_ERR" 100 'v1' v1
+RC="$(sl_rc "$CFG" "$SL_SEED_ERR")"
+if [ "$RC" = 0 ] &&
+	[ "$(cat "$DST" 2>/dev/null)" = "v1" ] &&
+	[ -d "$MK" ] &&
+	[ -z "$(find "$MK" -mindepth 1 -print -quit 2>/dev/null)" ] &&
+	[ -z "$(find "$CFG" -maxdepth 1 -name '.statusline-command.sh.powbox-seeded.*' -print -quit 2>/dev/null)" ] &&
+	sl_independent "$CFG" v1; then
+	ok "directory at the marker path: nothing deposited inside it, no temp left behind"
+else
+	no "directory at the marker path: nothing deposited inside it, no temp left behind (rc=$RC, entries=$(find "$CFG" -name '.statusline-command.sh.powbox-seeded*' 2>/dev/null | tr '\n' ' '))"
 fi
 
 echo

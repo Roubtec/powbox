@@ -678,9 +678,9 @@ else {
 # that a listed stage produced no coverage, or prescribe a switch as the remedy for
 # a host-decided partial that no switch governs (task 002g).
 # commands/smoke-test.sh mirrors this banner and must be kept in step, EXCEPT for
-# the punctuation: it uses an em dash where this file uses a hyphen, because this
-# file is ASCII-only and a non-ASCII byte would force it to carry a UTF-8 BOM
-# (AGENTS.md -> "File Conventions").
+# the punctuation and the platform's control vocabulary. It uses an em dash where
+# this file uses a hyphen, because this file is ASCII-only and a non-ASCII byte
+# would force it to carry a UTF-8 BOM (AGENTS.md -> "File Conventions").
 if ($skipped.Count -gt 0) {
   Write-Host ""
   Write-Host "============== SMOKE TEST: SKIPPED OR PARTIAL =============="

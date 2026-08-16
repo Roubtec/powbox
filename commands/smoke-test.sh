@@ -629,9 +629,9 @@ fi
 # that a listed stage produced no coverage, or prescribe a variable as the remedy for
 # a host-decided partial that no variable governs (task 002g).
 # commands/smoke-test.ps1 mirrors this banner and must be kept in step, EXCEPT for
-# the punctuation: it uses a hyphen where this file uses an em dash, because that
-# file is ASCII-only and a non-ASCII byte would force it to carry a UTF-8 BOM
-# (AGENTS.md → "File Conventions").
+# the punctuation and the platform's control vocabulary. It uses a hyphen where this
+# file uses an em dash, because that file is ASCII-only and a non-ASCII byte would
+# force it to carry a UTF-8 BOM (AGENTS.md → "File Conventions").
 if [ "${#skipped[@]}" -gt 0 ]; then
 	echo
 	echo "============== SMOKE TEST: SKIPPED OR PARTIAL =============="

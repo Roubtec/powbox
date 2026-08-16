@@ -490,19 +490,41 @@ fi
 # only the nested-run checks; a genuinely broken image fails on any host. Skip the
 # whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1; see
 # scripts/smoke-test-podman.sh for what it covers.
+# smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
+# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
+# under auto (the default) on a host without /dev/net/tun it runs the static
+# engine checks but exits 0 after self-skipping the nested-run + published-port
+# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+# gates so the banner records the partial run instead of claiming all stages ran
+# — the child evaluates the same host /dev/net/tun condition before its docker
+# run, so the two agree. Where the child runs at all it still prints its own skip
+# message; we track it here.
+podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
+# Record WHICH variables hold the stage off, because the banner's remedy is
+# "unset the variable this entry names": with only the deprecated alias set, an
+# entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
+# set, leaving POWBOX_FUSE=off skipping the stage exactly as before. With BOTH
+# set to off the same remedy is incomplete for the opposite reason — unsetting
+# the governing POWBOX_PODMAN exposes the alias, also off — so name both there.
+# Derived ABOVE the whole-stage gate below, not inside its else branch, because
+# that gate is an OUTER one: POWBOX_SMOKE_SKIP_PODMAN and an off env gate can
+# both be set, and an entry naming only the former sends the reader to unset it
+# and hit the env gate underneath, with the stage still skipped.
+if [ -z "${POWBOX_PODMAN:-}" ]; then
+	podman_gate_off=POWBOX_FUSE=off
+elif [ "${POWBOX_FUSE:-}" = "off" ]; then
+	podman_gate_off="POWBOX_PODMAN=off and POWBOX_FUSE=off"
+else
+	podman_gate_off=POWBOX_PODMAN=off
+fi
 if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
-	skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
+	if [ "$podman_gate" = "off" ]; then
+		skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN and ${podman_gate_off})")
+	else
+		skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)")
+	fi
 else
-	# smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
-	# POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
-	# under auto (the default) on a host without /dev/net/tun it runs the static
-	# engine checks but exits 0 after self-skipping the nested-run + published-port
-	# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
-	# gates so the banner records the partial run instead of claiming all stages ran
-	# — the child evaluates the same host /dev/net/tun condition before its docker
-	# run, so the two agree. The child still prints the skip message; we track it here.
-	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
 	# The child self-skips one nested scenario at RUNTIME — the distroless (shell-less)
 	# Compose XFAIL reproduction, when its image cannot be pulled — which the parent
 	# cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
@@ -515,7 +537,7 @@ else
 	trap 'rm -f "$podman_marker"' EXIT
 	POWBOX_SMOKE_SKIP_MARKER="$podman_marker" "${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 	if [ "$podman_gate" = "off" ]; then
-		skipped+=("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+		skipped+=("Stage 3: rootless Podman engine (${podman_gate_off})")
 	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
 		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
 	elif [ -s "$podman_marker" ]; then
@@ -615,17 +637,28 @@ else
 	rm -f "$wtmeta_marker"
 fi
 
+# Entries reach this banner from two different places — whole stages that never ran,
+# and stages that ran with only a portion self-skipped — so nothing here may assert
+# that a listed stage produced no coverage, or prescribe a variable as the remedy for
+# a host-decided partial that no variable governs (task 002g).
+# commands/smoke-test.ps1 mirrors this banner and must be kept in step, EXCEPT for
+# the punctuation and the platform's control vocabulary. It uses a hyphen where this
+# file uses an em dash, because that file is ASCII-only and a non-ASCII byte would
+# force it to carry a UTF-8 BOM (AGENTS.md → "File Conventions").
 if [ "${#skipped[@]}" -gt 0 ]; then
 	echo
-	echo "================ SMOKE TEST: STAGES SKIPPED ================"
+	echo "============== SMOKE TEST: SKIPPED OR PARTIAL =============="
 	for s in "${skipped[@]}"; do
 		echo "  - $s"
 	done
-	echo "This was a PARTIAL smoke test — the stages above did not run."
-	echo "To run the stages above, unset the POWBOX_SMOKE_SKIP_* vars; set"
-	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image. That"
-	echo "alone is not a full run everywhere: hosted CI has no /dev/net/tun,"
-	echo "so Stage 3's nested half self-skips there. See docs/smoke-tests.md."
+	echo "This was a PARTIAL smoke test — each entry above either did not"
+	echo "run at all, or ran only in part."
+	echo "Entries naming an environment variable were skipped on request:"
+	echo "unset it to run them, and set POWBOX_SMOKE_REQUIRE_IMAGE=1 to also"
+	echo "fail on a missing image. The rest were decided by the host at"
+	echo "runtime — nothing was set to skip them, and unsetting a variable"
+	echo "will not recover them: hosted CI has no /dev/net/tun, so Stage 3's"
+	echo "nested half self-skips there. See docs/smoke-tests.md."
 	echo "==========================================================="
 else
 	echo "Smoke test complete (all stages ran)."

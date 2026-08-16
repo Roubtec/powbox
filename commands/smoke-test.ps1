@@ -519,20 +519,39 @@ if ($LASTEXITCODE -ne 0) {
 # whole stage explicitly with -SkipPodman; see scripts/smoke-test-podman.ps1 for
 # what it covers. The helper throws on failure, so $ErrorActionPreference = "Stop"
 # propagates that up.
+# smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
+# POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice; and
+# under auto (the default) on a host without /dev/net/tun it runs the static
+# engine checks but returns after self-skipping the nested-run + published-port
+# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+# gates so the banner records the partial run instead of claiming all stages ran -
+# the child evaluates the same host /dev/net/tun condition before its docker run,
+# so the two agree. Where the child runs at all it still prints its own skip
+# message; we track it here.
+$podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
+# Record WHICH variables hold the stage off, because the banner's remedy is
+# "unset the variable this entry names": with only the deprecated alias set, an
+# entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
+# set, leaving POWBOX_FUSE=off skipping the stage exactly as before. With BOTH
+# set to off the same remedy is incomplete for the opposite reason - unsetting
+# the governing POWBOX_PODMAN exposes the alias, also off - so name both there.
+# Derived ABOVE the whole-stage gate below, not inside its else branch, because
+# that gate is an OUTER one: -SkipPodman and an off env gate can both be set, and
+# an entry naming only the switch sends the reader to drop it and hit the env gate
+# underneath, with the stage still skipped.
+$podmanGateOff = if (-not $env:POWBOX_PODMAN) { "POWBOX_FUSE=off" }
+elseif ($env:POWBOX_FUSE -eq "off") { "POWBOX_PODMAN=off and POWBOX_FUSE=off" }
+else { "POWBOX_PODMAN=off" }
 if ($SkipPodman) {
   Write-Host "Skipping Podman smoke test (-SkipPodman)."
-  $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
+  if ($podmanRequest -eq "off") {
+    $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman and $podmanGateOff)")
+  }
+  else {
+    $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
+  }
 }
 else {
-  # smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
-  # POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice; and
-  # under auto (the default) on a host without /dev/net/tun it runs the static
-  # engine checks but returns after self-skipping the nested-run + published-port
-  # checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
-  # gates so the banner records the partial run instead of claiming all stages ran -
-  # the child evaluates the same host /dev/net/tun condition before its docker run,
-  # so the two agree. The child still prints the skip message; we track it here.
-  $podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
   # The child self-skips one nested scenario at RUNTIME - the distroless (shell-less)
   # Compose XFAIL reproduction, when its image cannot be pulled - which the parent
   # cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
@@ -552,7 +571,7 @@ else {
     Remove-Item -LiteralPath $podmanMarker.FullName -ErrorAction SilentlyContinue
   }
   if ($podmanRequest -eq "off") {
-    $skipped.Add("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+    $skipped.Add("Stage 3: rootless Podman engine ($podmanGateOff)")
   }
   elseif ($podmanRequest -ne "on" -and -not (Test-Path "/dev/net/tun")) {
     $skipped.Add("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
@@ -668,15 +687,27 @@ else {
   Remove-Item -LiteralPath $wtmetaMarker.FullName -ErrorAction SilentlyContinue
 }
 
+# Entries reach this banner from two different places - whole stages that never ran,
+# and stages that ran with only a portion self-skipped - so nothing here may assert
+# that a listed stage produced no coverage, or prescribe a switch as the remedy for
+# a host-decided partial that no switch governs (task 002g).
+# commands/smoke-test.sh mirrors this banner and must be kept in step, EXCEPT for
+# the punctuation and the platform's control vocabulary. It uses an em dash where
+# this file uses a hyphen, because this file is ASCII-only and a non-ASCII byte
+# would force it to carry a UTF-8 BOM (AGENTS.md -> "File Conventions").
 if ($skipped.Count -gt 0) {
   Write-Host ""
-  Write-Host "================ SMOKE TEST: STAGES SKIPPED ================"
+  Write-Host "============== SMOKE TEST: SKIPPED OR PARTIAL =============="
   foreach ($s in $skipped) { Write-Host "  - $s" }
-  Write-Host "This was a PARTIAL smoke test - the stages above did not run."
-  Write-Host "To run the stages above, drop the -Skip* switches; pass"
-  Write-Host "-RequireImage to also fail on a missing image. That alone is not"
-  Write-Host "a full run: hosted CI has no /dev/net/tun, so Stage 3's nested"
-  Write-Host "half self-skips there. See docs/smoke-tests.md."
+  Write-Host "This was a PARTIAL smoke test - each entry above either did not"
+  Write-Host "run at all, or ran only in part."
+  Write-Host "Entries naming a -Skip* switch or an environment variable were"
+  Write-Host "skipped on request: drop or unset it to run them, and pass"
+  Write-Host "-RequireImage to also fail on a missing image. The rest were"
+  Write-Host "decided by the host at runtime - nothing was set to skip them,"
+  Write-Host "and dropping a switch or unsetting a variable will not recover"
+  Write-Host "them: hosted CI has no /dev/net/tun, so Stage 3's nested half"
+  Write-Host "self-skips there. See docs/smoke-tests.md."
   Write-Host "==========================================================="
 }
 else {

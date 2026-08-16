@@ -53,6 +53,14 @@
 #                    Passed as `--model` (claude) or `-m` (codex).
 #   --effort         reasoning effort: low | medium | high | xhigh | max
 #                    (`max` is claude-only). Default: high, for BOTH providers.
+#                    An EMPTY value (`--effort ""`, what forwarding an unset
+#                    variable produces) is an OMISSION, not a level outside that
+#                    set: it resolves to the same `high` default, byte-identically.
+#                    That is deliberately unlike --model above — an omitted
+#                    --model resolves out of shared mutable state, whereas this
+#                    default is a fixed safe floor no other container can move,
+#                    so accepting the empty value cannot review with a strength
+#                    the caller did not choose.
 #
 # Why the strength knobs default rather than inherit: without them the peer runs
 # at whatever model and effort a container most recently selected, because
@@ -163,7 +171,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,153p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,161p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -966,6 +974,15 @@ esac
 # preference: the caller that omits --effort is the caller that has not thought
 # about review strength, and the failure mode of guessing low is a peer that
 # passes work it should have caught.
+#
+# This also absorbs an explicit `--effort ""` as an omission, and does so
+# deliberately — do NOT mirror --model's parse-site emptiness check here. That
+# check exists because --model's omission paths read shared mutable state an
+# explicit flag is documented to bypass; this default is a fixed constant, so the
+# empty value can only resolve to the safe floor. Rejecting it would buy
+# strictness, not safety, at the cost of breaking a baked-helper caller that
+# forwards an unset optional variable. The documented contract says so (see the
+# --effort header entry), and case 14h pins it.
 [ -n "$EFFORT" ] || EFFORT=high
 case "$EFFORT" in
 low | medium | high | xhigh) ;;

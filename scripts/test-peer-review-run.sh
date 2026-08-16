@@ -85,7 +85,8 @@ set -uo pipefail
 #       spellings, honest degradation when the CLI lacks --effort, and the usage
 #       rejections that keep a reviewer from being asked for a weak level — or
 #       from being handed an EMPTY --model, which is a usage error rather than
-#       the omission it is otherwise indistinguishable from
+#       the omission it is otherwise indistinguishable from, while an EMPTY
+#       --effort is the documented opposite and resolves to the `high` default
 #  (15) configured-model passthrough for codex — a usable root `model` from a
 #       harness-owned $CODEX_HOME survives --ignore-user-config as one -m with
 #       isolation and effort untouched; an explicit --model wins AND provably
@@ -2251,6 +2252,46 @@ d="$(new_case)"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude) --model ""
 assert_eq "14g: empty model exits 64 for claude" "$RUN_RC" 64
+
+# 14h — an EMPTY --effort is the documented exception to 14g's pattern: it is an
+# OMISSION, not a level outside the accepted set, so it resolves to the `high`
+# default instead of exiting 64. The asymmetry with the empty --model above is
+# deliberate — --model's omission paths read shared mutable state, while this
+# default is a fixed floor — and it is pinned here because the accepted-set
+# documentation now promises it, and because the obvious "consistency" fix would
+# be to mirror --model's parse-site check and silently break the callers that
+# forward an unset optional variable.
+d="$(new_case)"
+cat >"$d/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = --help ]; then echo "options: --model <model>  --effort <level>"; exit 0; fi
+printf '%s\n' "$@" >>"$ARGV_LOG"
+cat >/dev/null
+jq -n '{type:"result",subtype:"success",is_error:false,result:"VERDICT: PASS"}'
+EOF
+chmod +x "$d/bin/claude"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --effort ""
+assert_eq "14h: empty effort is accepted" "$RUN_RC" 0
+assert_contains "14h: empty effort resolves to the high default on argv" "$(cat "$d/argv")" "--effort
+high"
+assert_eq "14h: empty effort reported as high" "$(jqf "$RUN_RESULT" .effort)" high
+unset ARGV_LOG
+
+# The same for codex, whose accepted set is the same minus `max`: the empty value
+# must not be mistaken for one of the levels the helper refuses.
+d="$(new_case)"
+make_codex_fake "$d"
+ARGV_LOG="$d/argv"
+export ARGV_LOG
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --effort ""
+assert_eq "14h: empty effort is accepted for codex" "$RUN_RC" 0
+assert_contains "14h: codex empty effort rides as the high override" "$(cat "$d/argv")" "model_reasoning_effort=high"
+assert_eq "14h: codex empty effort reported as high" "$(jqf "$RUN_RESULT" .effort)" high
+unset ARGV_LOG
 
 # ============================================================================
 # (15) configured-model passthrough for codex — the root `model` the container's

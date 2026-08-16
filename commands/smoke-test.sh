@@ -624,11 +624,10 @@ else
 	rm -f "$wtmeta_marker"
 fi
 
-# The banner collects TWO kinds of entry — whole stages that never ran, and stages
-# that ran with only a portion self-skipped (Stage 3's nested half is the standing
-# example, reachable on every hosted-CI run) — so nothing here may assert that a
-# listed stage produced no coverage, or prescribe a variable as the remedy for a
-# host-decided partial that no variable governs (task 002g).
+# Entries reach this banner from two different places — whole stages that never ran,
+# and stages that ran with only a portion self-skipped — so nothing here may assert
+# that a listed stage produced no coverage, or prescribe a variable as the remedy for
+# a host-decided partial that no variable governs (task 002g).
 # commands/smoke-test.ps1 mirrors this banner and must be kept in step, EXCEPT for
 # the punctuation: it uses a hyphen where this file uses an em dash, because that
 # file is ASCII-only and a non-ASCII byte would force it to carry a UTF-8 BOM

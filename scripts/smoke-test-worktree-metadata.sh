@@ -115,10 +115,12 @@ RUN_ARGS=(
 # ownership coverage. scripts/smoke-test-worktree-metadata.ps1 reads the same files via
 # $PSScriptRoot. See each file's header for its arg/exit-code contract. The emptiness
 # checks stop a truncated file from handing the container a no-op payload that exits 0
-# and reports the stage as passed; the PowerShell driver checks the same thing.
+# and reports the stage as passed; the PowerShell driver checks the same thing. `-f`
+# rides beside `-r` because `-r` alone accepts a directory, whose failing `cat` would
+# then surface as the emptiness check's misleading "is empty" instead.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-a.bash"
-[ -r "$SETUP_SCRIPT_FILE" ] || fail "the shared Container A script is missing or unreadable: $SETUP_SCRIPT_FILE"
+{ [ -f "$SETUP_SCRIPT_FILE" ] && [ -r "$SETUP_SCRIPT_FILE" ]; } || fail "the shared Container A script is missing, not a regular file, or unreadable: $SETUP_SCRIPT_FILE"
 SETUP_SCRIPT="$(cat "$SETUP_SCRIPT_FILE")"
 [ -n "$SETUP_SCRIPT" ] || fail "the shared Container A script is empty: $SETUP_SCRIPT_FILE"
 
@@ -126,7 +128,7 @@ SETUP_SCRIPT="$(cat "$SETUP_SCRIPT_FILE")"
 # Shared with the PowerShell driver in ONE file, exactly as Container A above (task
 # 053b). See that file's header for the arg/exit-code contract.
 VERIFY_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-b.bash"
-[ -r "$VERIFY_SCRIPT_FILE" ] || fail "the shared Container B script is missing or unreadable: $VERIFY_SCRIPT_FILE"
+{ [ -f "$VERIFY_SCRIPT_FILE" ] && [ -r "$VERIFY_SCRIPT_FILE" ]; } || fail "the shared Container B script is missing, not a regular file, or unreadable: $VERIFY_SCRIPT_FILE"
 VERIFY_SCRIPT="$(cat "$VERIFY_SCRIPT_FILE")"
 [ -n "$VERIFY_SCRIPT" ] || fail "the shared Container B script is empty: $VERIFY_SCRIPT_FILE"
 

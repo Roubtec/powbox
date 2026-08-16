@@ -157,8 +157,10 @@ $runArgs = @(
 # .gitattributes pins that file to LF, but a checkout that mangled it would feed
 # /bin/bash -c a payload with stray ^M. The emptiness check stops a truncated file from
 # handing the container a no-op payload that exits 0 and reports the stage as passed.
+# -PathType Leaf is load-bearing too: a bare Test-Path answers yes for a directory, whose
+# Get-Content would then throw past this stage's own Fail messaging.
 $setupScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-a.bash'
-if (-not (Test-Path -LiteralPath $setupScriptPath)) { Fail "the shared Container A script is missing: $setupScriptPath" }
+if (-not (Test-Path -LiteralPath $setupScriptPath -PathType Leaf)) { Fail "the shared Container A script is missing or not a file: $setupScriptPath" }
 $setupScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $setupScriptPath) -replace "`r`n", "`n"
 if ([string]::IsNullOrWhiteSpace($setupScript)) { Fail "the shared Container A script is empty: $setupScriptPath" }
 
@@ -170,10 +172,10 @@ if ([string]::IsNullOrWhiteSpace($setupScript)) { Fail "the shared Container A s
 # this read deliver the same characters as the .sh driver's - the em dash included, on
 # 5.1 as well as on 7. The two captures still differ by a single trailing LF, because
 # Bash command substitution strips trailing newlines and Get-Content -Raw does not; that
-# byte is immaterial to what /bin/bash -c executes. Same CRLF strip and same emptiness
-# check, for the same reasons.
+# byte is immaterial to what /bin/bash -c executes. Same CRLF strip, same Leaf test and
+# same emptiness check, for the same reasons.
 $verifyScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-b.bash'
-if (-not (Test-Path -LiteralPath $verifyScriptPath)) { Fail "the shared Container B script is missing: $verifyScriptPath" }
+if (-not (Test-Path -LiteralPath $verifyScriptPath -PathType Leaf)) { Fail "the shared Container B script is missing or not a file: $verifyScriptPath" }
 $verifyScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $verifyScriptPath) -replace "`r`n", "`n"
 if ([string]::IsNullOrWhiteSpace($verifyScript)) { Fail "the shared Container B script is empty: $verifyScriptPath" }
 

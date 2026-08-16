@@ -615,17 +615,29 @@ else
 	rm -f "$wtmeta_marker"
 fi
 
+# The banner collects TWO kinds of entry — whole stages that never ran, and stages
+# that ran with only a portion self-skipped (Stage 3's nested half is the standing
+# example, reachable on every hosted-CI run) — so nothing here may assert that a
+# listed stage produced no coverage, or prescribe a variable as the remedy for a
+# host-decided partial that no variable governs (task 002g).
+# commands/smoke-test.ps1 mirrors this banner and must be kept in step, EXCEPT for
+# the punctuation: it uses a hyphen where this file uses an em dash, because that
+# file is ASCII-only and a non-ASCII byte would force it to carry a UTF-8 BOM
+# (AGENTS.md → "File Conventions").
 if [ "${#skipped[@]}" -gt 0 ]; then
 	echo
-	echo "================ SMOKE TEST: STAGES SKIPPED ================"
+	echo "============== SMOKE TEST: SKIPPED OR PARTIAL =============="
 	for s in "${skipped[@]}"; do
 		echo "  - $s"
 	done
-	echo "This was a PARTIAL smoke test — the stages above did not run."
-	echo "To run the stages above, unset the POWBOX_SMOKE_SKIP_* vars; set"
-	echo "POWBOX_SMOKE_REQUIRE_IMAGE=1 to also fail on a missing image. That"
-	echo "alone is not a full run everywhere: hosted CI has no /dev/net/tun,"
-	echo "so Stage 3's nested half self-skips there. See docs/smoke-tests.md."
+	echo "This was a PARTIAL smoke test — each entry above either did not"
+	echo "run at all, or ran only in part."
+	echo "Entries naming an environment variable were skipped on request:"
+	echo "unset it to run them, and set POWBOX_SMOKE_REQUIRE_IMAGE=1 to also"
+	echo "fail on a missing image. The rest were decided by the host at"
+	echo "runtime — nothing was set to skip them, and unsetting a variable"
+	echo "will not recover them: hosted CI has no /dev/net/tun, so Stage 3's"
+	echo "nested half self-skips there. See docs/smoke-tests.md."
 	echo "==========================================================="
 else
 	echo "Smoke test complete (all stages ran)."

@@ -668,15 +668,28 @@ else {
   Remove-Item -LiteralPath $wtmetaMarker.FullName -ErrorAction SilentlyContinue
 }
 
+# The banner collects TWO kinds of entry - whole stages that never ran, and stages
+# that ran with only a portion self-skipped (Stage 3's nested half is the standing
+# example, reachable on every hosted-CI run) - so nothing here may assert that a
+# listed stage produced no coverage, or prescribe a switch as the remedy for a
+# host-decided partial that no switch governs (task 002g).
+# commands/smoke-test.sh mirrors this banner and must be kept in step, EXCEPT for
+# the punctuation: it uses an em dash where this file uses a hyphen, because this
+# file is ASCII-only and a non-ASCII byte would force it to carry a UTF-8 BOM
+# (AGENTS.md -> "File Conventions").
 if ($skipped.Count -gt 0) {
   Write-Host ""
-  Write-Host "================ SMOKE TEST: STAGES SKIPPED ================"
+  Write-Host "============== SMOKE TEST: SKIPPED OR PARTIAL =============="
   foreach ($s in $skipped) { Write-Host "  - $s" }
-  Write-Host "This was a PARTIAL smoke test - the stages above did not run."
-  Write-Host "To run the stages above, drop the -Skip* switches; pass"
-  Write-Host "-RequireImage to also fail on a missing image. That alone is not"
-  Write-Host "a full run: hosted CI has no /dev/net/tun, so Stage 3's nested"
-  Write-Host "half self-skips there. See docs/smoke-tests.md."
+  Write-Host "This was a PARTIAL smoke test - each entry above either did not"
+  Write-Host "run at all, or ran only in part."
+  Write-Host "Entries naming a -Skip* switch or an environment variable were"
+  Write-Host "skipped on request: drop or unset it to run them, and pass"
+  Write-Host "-RequireImage to also fail on a missing image. The rest were"
+  Write-Host "decided by the host at runtime - nothing was set to skip them,"
+  Write-Host "and dropping a switch or unsetting a variable will not recover"
+  Write-Host "them: hosted CI has no /dev/net/tun, so Stage 3's nested half"
+  Write-Host "self-skips there. See docs/smoke-tests.md."
   Write-Host "==========================================================="
 }
 else {

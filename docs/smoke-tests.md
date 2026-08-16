@@ -56,6 +56,8 @@ What an unreachable registry or remote costs is not uniform:
 ## Partial runs, host gates, and skipping
 
 Stages self-skip rather than fail when the host cannot provide what they need, and skips are collected into an end-of-run banner.
+That banner mixes two kinds of entry, so read it as "did not run, or did not run in full" rather than as a list of stages you have no coverage from: some entries are whole stages that never ran, others are stages that ran with only a portion self-skipped — Stage 3's nested half is the standing example, and it is listed on every hosted-CI run.
+The distinction also decides the remedy: an entry naming a skip variable (or, on the PowerShell mirror, a `-Skip*` switch) was skipped on request and comes back when you unset or drop it, while a within-stage partial was decided by the host at runtime: there is nothing set to unset, and it comes back only when the host can provide what the stage needs.
 
 Five of the six image/host stages are gated by independent environment variables — `POWBOX_SMOKE_SKIP_DB` (Stage 2), `POWBOX_SMOKE_SKIP_PODMAN` (Stage 3), `POWBOX_SMOKE_SKIP_SELFHOSTED` (Stage 4), `POWBOX_SMOKE_SKIP_DIRMOUNT` (Stage 5), and `POWBOX_SMOKE_SKIP_WORKTREE_META` (Stage 6).
 Setting all five leaves the Stage 0 tier plus Stage 1 — no host database, no nested engine, no relaunch cycle — though the eight Stage 0 entries and Stage 1 itself still start throwaway containers from the image.

@@ -167,8 +167,11 @@ if ([string]::IsNullOrWhiteSpace($setupScript)) { Fail "the shared Container A s
 # (task 053b): ONE file, so a change to it cannot land in one driver only. Its header
 # carries the arg/exit-code contract. It also holds the only non-ASCII character in
 # either shared file (an em dash), so the -Encoding UTF8 explained above is what makes
-# this read agree byte for byte with the .sh driver's, on 5.1 as well as on 7. Same
-# CRLF strip and same emptiness check, for the same reasons.
+# this read deliver the same characters as the .sh driver's - the em dash included, on
+# 5.1 as well as on 7. The two captures still differ by a single trailing LF, because
+# Bash command substitution strips trailing newlines and Get-Content -Raw does not; that
+# byte is immaterial to what /bin/bash -c executes. Same CRLF strip and same emptiness
+# check, for the same reasons.
 $verifyScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-b.bash'
 if (-not (Test-Path -LiteralPath $verifyScriptPath)) { Fail "the shared Container B script is missing: $verifyScriptPath" }
 $verifyScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $verifyScriptPath) -replace "`r`n", "`n"

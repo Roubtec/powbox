@@ -519,29 +519,39 @@ if ($LASTEXITCODE -ne 0) {
 # whole stage explicitly with -SkipPodman; see scripts/smoke-test-podman.ps1 for
 # what it covers. The helper throws on failure, so $ErrorActionPreference = "Stop"
 # propagates that up.
+# smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
+# POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice; and
+# under auto (the default) on a host without /dev/net/tun it runs the static
+# engine checks but returns after self-skipping the nested-run + published-port
+# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+# gates so the banner records the partial run instead of claiming all stages ran -
+# the child evaluates the same host /dev/net/tun condition before its docker run,
+# so the two agree. Where the child runs at all it still prints its own skip
+# message; we track it here.
+$podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
+# Record WHICH variables hold the stage off, because the banner's remedy is
+# "unset the variable this entry names": with only the deprecated alias set, an
+# entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
+# set, leaving POWBOX_FUSE=off skipping the stage exactly as before. With BOTH
+# set to off the same remedy is incomplete for the opposite reason - unsetting
+# the governing POWBOX_PODMAN exposes the alias, also off - so name both there.
+# Derived ABOVE the whole-stage gate below, not inside its else branch, because
+# that gate is an OUTER one: -SkipPodman and an off env gate can both be set, and
+# an entry naming only the switch sends the reader to drop it and hit the env gate
+# underneath, with the stage still skipped.
+$podmanGateOff = if (-not $env:POWBOX_PODMAN) { "POWBOX_FUSE=off" }
+elseif ($env:POWBOX_FUSE -eq "off") { "POWBOX_PODMAN=off and POWBOX_FUSE=off" }
+else { "POWBOX_PODMAN=off" }
 if ($SkipPodman) {
   Write-Host "Skipping Podman smoke test (-SkipPodman)."
-  $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
+  if ($podmanRequest -eq "off") {
+    $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman and $podmanGateOff)")
+  }
+  else {
+    $skipped.Add("Stage 3: rootless Podman engine (-SkipPodman)")
+  }
 }
 else {
-  # smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
-  # POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice; and
-  # under auto (the default) on a host without /dev/net/tun it runs the static
-  # engine checks but returns after self-skipping the nested-run + published-port
-  # checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
-  # gates so the banner records the partial run instead of claiming all stages ran -
-  # the child evaluates the same host /dev/net/tun condition before its docker run,
-  # so the two agree. The child still prints the skip message; we track it here.
-  $podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
-  # Record WHICH variables hold the stage off, because the banner's remedy is
-  # "unset the variable this entry names": with only the deprecated alias set, an
-  # entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
-  # set, leaving POWBOX_FUSE=off skipping the stage exactly as before. With BOTH
-  # set to off the same remedy is incomplete for the opposite reason - unsetting
-  # the governing POWBOX_PODMAN exposes the alias, also off - so name both there.
-  $podmanGateOff = if (-not $env:POWBOX_PODMAN) { "POWBOX_FUSE=off" }
-  elseif ($env:POWBOX_FUSE -eq "off") { "POWBOX_PODMAN=off and POWBOX_FUSE=off" }
-  else { "POWBOX_PODMAN=off" }
   # The child self-skips one nested scenario at RUNTIME - the distroless (shell-less)
   # Compose XFAIL reproduction, when its image cannot be pulled - which the parent
   # cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason

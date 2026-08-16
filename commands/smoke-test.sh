@@ -503,14 +503,18 @@ else
 	# — the child evaluates the same host /dev/net/tun condition before its docker
 	# run, so the two agree. The child still prints the skip message; we track it here.
 	podman_gate="${POWBOX_PODMAN:-${POWBOX_FUSE:-auto}}"
-	# Record WHICH variable supplied that value, because the banner's remedy is
+	# Record WHICH variables hold the stage off, because the banner's remedy is
 	# "unset the variable this entry names": with only the deprecated alias set, an
 	# entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
-	# set, leaving POWBOX_FUSE=off skipping the stage exactly as before.
-	if [ -n "${POWBOX_PODMAN:-}" ]; then
-		podman_gate_var=POWBOX_PODMAN
+	# set, leaving POWBOX_FUSE=off skipping the stage exactly as before. With BOTH
+	# set to off the same remedy is incomplete for the opposite reason — unsetting
+	# the governing POWBOX_PODMAN exposes the alias, also off — so name both there.
+	if [ -z "${POWBOX_PODMAN:-}" ]; then
+		podman_gate_off=POWBOX_FUSE=off
+	elif [ "${POWBOX_FUSE:-}" = "off" ]; then
+		podman_gate_off="POWBOX_PODMAN=off and POWBOX_FUSE=off"
 	else
-		podman_gate_var=POWBOX_FUSE
+		podman_gate_off=POWBOX_PODMAN=off
 	fi
 	# The child self-skips one nested scenario at RUNTIME — the distroless (shell-less)
 	# Compose XFAIL reproduction, when its image cannot be pulled — which the parent
@@ -524,7 +528,7 @@ else
 	trap 'rm -f "$podman_marker"' EXIT
 	POWBOX_SMOKE_SKIP_MARKER="$podman_marker" "${ROOT_DIR}/scripts/smoke-test-podman.sh" "$IMAGE"
 	if [ "$podman_gate" = "off" ]; then
-		skipped+=("Stage 3: rootless Podman engine (${podman_gate_var}=off)")
+		skipped+=("Stage 3: rootless Podman engine (${podman_gate_off})")
 	elif [ "$podman_gate" != "on" ] && [ ! -e /dev/net/tun ]; then
 		skipped+=("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")
 	elif [ -s "$podman_marker" ]; then

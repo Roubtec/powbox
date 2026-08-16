@@ -110,115 +110,27 @@ RUN_ARGS=(
 )
 
 # --- Container A: establish the durable bind, create a dirty linked worktree ------
-# The inner script lives in ONE file that BOTH drivers embed (task 053a): a copy per
-# driver is what let the PowerShell mirror ship without the task 053 ownership
-# coverage. scripts/smoke-test-worktree-metadata.ps1 reads the same file via
-# $PSScriptRoot. See its header for the arg/exit-code contract.
+# Each container's inner script lives in ONE file that BOTH drivers embed (tasks 053a,
+# 053b): a copy per driver is what let the PowerShell mirror ship without the task 053
+# ownership coverage. scripts/smoke-test-worktree-metadata.ps1 reads the same files via
+# $PSScriptRoot. See each file's header for its arg/exit-code contract. The emptiness
+# checks stop a truncated file from handing the container a no-op payload that exits 0
+# and reports the stage as passed; the PowerShell driver checks the same thing. `-f`
+# rides beside `-r` because `-r` alone accepts a directory, whose failing `cat` would
+# then surface as the emptiness check's misleading "is empty" instead.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-a.bash"
-[ -r "$SETUP_SCRIPT_FILE" ] || fail "the shared Container A script is missing or unreadable: $SETUP_SCRIPT_FILE"
+{ [ -f "$SETUP_SCRIPT_FILE" ] && [ -r "$SETUP_SCRIPT_FILE" ]; } || fail "the shared Container A script is missing, not a regular file, or unreadable: $SETUP_SCRIPT_FILE"
 SETUP_SCRIPT="$(cat "$SETUP_SCRIPT_FILE")"
+[ -n "$SETUP_SCRIPT" ] || fail "the shared Container A script is empty: $SETUP_SCRIPT_FILE"
 
 # --- Container B: recreate, re-bind, assert the worktree survived intact ----------
-# shellcheck disable=SC2016  # the inner shell expands these, NOT the host
-VERIFY_SCRIPT='
-set -u
-WS="$1"
-SLUG="$2"
-CONT="$3"
-export HOME=/root
-git config --global --add safe.directory "*" >/dev/null 2>&1 || true
-
-# Independent mount-capability PREFLIGHT (see Container A): only its failure is a
-# legitimate skip. Once it passes, a bind that does not re-materialize on recreate is
-# a durable-bind REGRESSION and a HARD FAILURE, never a skip.
-pfsrc="$(mktemp -d)"
-pfdst="$(mktemp -d)"
-if ! mount --bind "$pfsrc" "$pfdst" 2>/dev/null; then
-	echo "  skip: runtime cannot perform mount --bind (no CAP_SYS_ADMIN / EPERM) - the recreate lifecycle cannot be exercised here"
-	rmdir "$pfdst" "$pfsrc" 2>/dev/null || true
-	exit 42
-fi
-umount "$pfdst" 2>/dev/null || umount -l "$pfdst" 2>/dev/null || true
-rmdir "$pfdst" "$pfsrc" 2>/dev/null || true
-if ! mountpoint -q "$WS/.worktrees"; then
-	echo "  skip: the persistent .worktrees volume is not mounted at $WS/.worktrees - nothing durable to exercise"
-	exit 42
-fi
-
-# Re-establish the durable bind, as the entrypoint would on the recreated container.
-# Capability is proven, so any failure here is a REGRESSION (hard failure, NOT skip).
-smerr="$(mktemp)"
-if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then
-	echo "FAIL: shadow-mounts.sh failed to re-establish the durable bind on recreate despite mount capability - durable-bind REGRESSION" >&2
-	sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true
-	exit 1
-fi
-if ! mountpoint -q "$WS/.git/worktrees"; then
-	echo "FAIL: durable bind not re-established on recreate (.git/worktrees is not a mountpoint) - REGRESSION" >&2
-	exit 1
-fi
-fstype="$(findmnt -nro FSTYPE -T "$WS/.git/worktrees" 2>/dev/null || true)"
-if [ "$fstype" = tmpfs ]; then
-	echo "FAIL: durable bind fell back to tmpfs on recreate despite the persistent .worktrees volume being present - REGRESSION" >&2
-	exit 1
-fi
-# Symmetrical with Container A (defense in depth): prove the RE-established bind maps
-# .git/worktrees onto the volume .gitworktrees dir (not merely onto some non-tmpfs
-# fs). A fresh sentinel written on the volume side must be visible through
-# .git/worktrees; a mismatch means the recreate bind points at the wrong source, so
-# the recreate side also fails closed on bind-source, never a skip.
-probe=".bindprobe.$$"
-if ! : >"$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null; then
-	echo "FAIL: cannot write into the volume .gitworktrees dir to verify the recreate bind (REGRESSION)" >&2
-	exit 1
-fi
-if [ ! -e "$WS/.git/worktrees/$probe" ]; then
-	rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true
-	echo "FAIL: .git/worktrees does not reflect the volume .gitworktrees dir on recreate - bind maps the wrong source (REGRESSION)" >&2
-	exit 1
-fi
-rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true
-echo "  ok: recreate .git/worktrees bind maps the persistent .worktrees volume (verified maps .gitworktrees)"
-
-WTDIR="$WS/.worktrees/$CONT/$SLUG"
-[ -d "$WTDIR" ] || { echo "FAIL: the linked worktree dir did not survive recreation ($WTDIR missing)" >&2; exit 1; }
-
-# 1. Metadata survived: git status works in the recycled worktree, and the admin
-#    dir is visible again through the re-established bind.
-if ! git -C "$WTDIR" status >/dev/null 2>&1; then
-	echo "FAIL: git status failed in the recycled worktree — per-worktree metadata did not survive recreation" >&2
-	git -C "$WTDIR" status >&2 2>&1 || true
-	exit 1
-fi
-[ -e "$WS/.git/worktrees/$SLUG/gitdir" ] || { echo "FAIL: .git/worktrees/$SLUG metadata not visible after recreate (bind broken?)" >&2; exit 1; }
-echo "  ok: git status works in the recycled worktree; per-worktree metadata survived recreate"
-
-# 2. HEAD is still on the worktree branch.
-br="$(git -C "$WTDIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
-[ "$br" = "$SLUG" ] || { echo "FAIL: recycled worktree HEAD is $br, expected $SLUG" >&2; exit 1; }
-
-# 3. The tracked modification survived (working-tree file lives in the volume).
-status="$(git -C "$WTDIR" status --porcelain 2>/dev/null || true)"
-printf "%s\n" "$status" | grep -qE "^.M[[:space:]]+tracked\.txt$" || {
-	echo "FAIL: the tracked modification to tracked.txt did not survive recreation. git status --porcelain:" >&2
-	printf "%s\n" "$status" >&2
-	exit 1
-}
-grep -q "durable-change-A" "$WTDIR/tracked.txt" || { echo "FAIL: tracked.txt content lost after recreation" >&2; exit 1; }
-
-# 4. The untracked file survived.
-printf "%s\n" "$status" | grep -qE "^\?\?[[:space:]]+UNTRACKED_NEW\.txt$" || {
-	echo "FAIL: the untracked file UNTRACKED_NEW.txt did not survive recreation. git status --porcelain:" >&2
-	printf "%s\n" "$status" >&2
-	exit 1
-}
-[ -f "$WTDIR/UNTRACKED_NEW.txt" ] || { echo "FAIL: UNTRACKED_NEW.txt is gone after recreation" >&2; exit 1; }
-grep -q "untracked-content-A" "$WTDIR/UNTRACKED_NEW.txt" || { echo "FAIL: UNTRACKED_NEW.txt content lost after recreation" >&2; exit 1; }
-
-echo "  ok: HEAD on $SLUG; tracked modification + untracked file both survived the container recreate"
-exit 0
-'
+# Shared with the PowerShell driver in ONE file, exactly as Container A above (task
+# 053b). See that file's header for the arg/exit-code contract.
+VERIFY_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-b.bash"
+{ [ -f "$VERIFY_SCRIPT_FILE" ] && [ -r "$VERIFY_SCRIPT_FILE" ]; } || fail "the shared Container B script is missing, not a regular file, or unreadable: $VERIFY_SCRIPT_FILE"
+VERIFY_SCRIPT="$(cat "$VERIFY_SCRIPT_FILE")"
+[ -n "$VERIFY_SCRIPT" ] || fail "the shared Container B script is empty: $VERIFY_SCRIPT_FILE"
 
 echo "Worktree durable-metadata smoke test (image: $IMAGE)"
 

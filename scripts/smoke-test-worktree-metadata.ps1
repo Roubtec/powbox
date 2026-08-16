@@ -48,9 +48,10 @@ param(
 # is the very disease this coverage exists to cure, so the ownership assertions are
 # gated on $IsLinux and a counted Note-Skip is recorded (and surfaced in the umbrella
 # banner) on any other host. The rest of the stage stays OS-agnostic: the durable bind
-# itself happens inside the Linux VM. Container A's inner script is SHARED with the Bash
-# driver (scripts/smoke-test-worktree-metadata-container-a.bash) so the two cannot drift
-# apart again; the host-side assertions are written natively in each.
+# itself happens inside the Linux VM. Both containers' inner scripts are SHARED with the
+# Bash driver (scripts/smoke-test-worktree-metadata-container-a.bash and
+# -container-b.bash) so they cannot drift apart again; the host-side assertions are
+# written natively in each.
 #
 # Privileges: the durable bind is a `mount --bind`, so the container needs
 # CAP_SYS_ADMIN + an unconfined seccomp/apparmor profile - the launch-time wiring the
@@ -148,111 +149,35 @@ $runArgs = @(
 
 # The in-container setup script (Container A) is SHARED with
 # scripts/smoke-test-worktree-metadata.sh (task 053a): ONE file, so a change to it
-# cannot land in one driver only. Its header carries the arg/exit-code contract. The
-# CRLF strip is defensive - .gitattributes pins that file to LF, but a checkout that
-# mangled it would feed /bin/bash -c a payload with stray ^M.
+# cannot land in one driver only. Its header carries the arg/exit-code contract.
+# -Encoding UTF8 is load-bearing, not decorative: Windows PowerShell 5.1 decodes a
+# BOM-less file with the system ANSI codepage, so a non-ASCII byte in a shared file
+# would reach `bash -c` mangled from here and intact from the .sh driver - exactly the
+# per-driver drift these shared files exist to prevent. The CRLF strip is defensive -
+# .gitattributes pins that file to LF, but a checkout that mangled it would feed
+# /bin/bash -c a payload with stray ^M. The emptiness check stops a truncated file from
+# handing the container a no-op payload that exits 0 and reports the stage as passed.
+# -PathType Leaf is load-bearing too: a bare Test-Path answers yes for a directory, whose
+# Get-Content would then throw past this stage's own Fail messaging.
 $setupScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-a.bash'
-if (-not (Test-Path -LiteralPath $setupScriptPath)) { Fail "the shared Container A script is missing: $setupScriptPath" }
-$setupScript = (Get-Content -Raw -LiteralPath $setupScriptPath) -replace "`r`n", "`n"
+if (-not (Test-Path -LiteralPath $setupScriptPath -PathType Leaf)) { Fail "the shared Container A script is missing or not a file: $setupScriptPath" }
+$setupScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $setupScriptPath) -replace "`r`n", "`n"
+if ([string]::IsNullOrWhiteSpace($setupScript)) { Fail "the shared Container A script is empty: $setupScriptPath" }
 
-# The in-container verify script (Container B). Built with explicit LF joins
-# (single-quoted lines so PowerShell leaves the shell $vars alone); a here-string
-# would inherit this file's CRLF endings (*.ps1 is pinned to eol=crlf) and the stray
-# ^M would break /bin/bash -c on a Windows checkout. Positional args:
-# $1 = the dir-mounted repo, $2 = the per-worktree branch/slug, $3 = the container
-# subdir under .worktrees. Exit codes: 0 = ok; 42 = self-skip, emitted ONLY by the
-# independent capability preflight (no bind-mount capability / no persistent
-# .worktrees volume); any OTHER non-zero = genuine failure, INCLUDING a durable-bind
-# regression detected after the preflight proved the runtime can mount.
-$verifyScript = @(
-  'set -u'
-  'WS="$1"'
-  'SLUG="$2"'
-  'CONT="$3"'
-  'export HOME=/root'
-  'git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
-  '# Independent mount-capability PREFLIGHT (see Container A): only its failure is a'
-  '# legitimate skip. Once it passes, a bind that does not re-materialize on recreate is'
-  '# a durable-bind REGRESSION and a HARD FAILURE, never a skip.'
-  'pfsrc="$(mktemp -d)"'
-  'pfdst="$(mktemp -d)"'
-  'if ! mount --bind "$pfsrc" "$pfdst" 2>/dev/null; then'
-  '  echo "  skip: runtime cannot perform mount --bind (no CAP_SYS_ADMIN / EPERM) - the recreate lifecycle cannot be exercised here"'
-  '  rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
-  '  exit 42'
-  'fi'
-  'umount "$pfdst" 2>/dev/null || umount -l "$pfdst" 2>/dev/null || true'
-  'rmdir "$pfdst" "$pfsrc" 2>/dev/null || true'
-  'if ! mountpoint -q "$WS/.worktrees"; then'
-  '  echo "  skip: the persistent .worktrees volume is not mounted at $WS/.worktrees - nothing durable to exercise"'
-  '  exit 42'
-  'fi'
-  '# Re-establish the durable bind, as the entrypoint would on the recreated container.'
-  '# Capability is proven, so any failure here is a REGRESSION (hard failure, NOT skip).'
-  'smerr="$(mktemp)"'
-  'if ! /usr/local/bin/shadow-mounts.sh "$WS/.git/worktrees" 2>"$smerr"; then'
-  '  echo "FAIL: shadow-mounts.sh failed to re-establish the durable bind on recreate despite mount capability - durable-bind REGRESSION" >&2'
-  '  sed "s/^/    shadow-mounts: /" "$smerr" >&2 || true'
-  '  exit 1'
-  'fi'
-  'if ! mountpoint -q "$WS/.git/worktrees"; then'
-  '  echo "FAIL: durable bind not re-established on recreate (.git/worktrees is not a mountpoint) - REGRESSION" >&2'
-  '  exit 1'
-  'fi'
-  'fstype="$(findmnt -nro FSTYPE -T "$WS/.git/worktrees" 2>/dev/null || true)"'
-  'if [ "$fstype" = tmpfs ]; then'
-  '  echo "FAIL: durable bind fell back to tmpfs on recreate despite the persistent .worktrees volume being present - REGRESSION" >&2'
-  '  exit 1'
-  'fi'
-  '# Symmetrical with Container A (defense in depth): prove the RE-established bind maps'
-  '# .git/worktrees onto the volume .gitworktrees dir (not merely onto some non-tmpfs'
-  '# fs). A fresh sentinel written on the volume side must be visible through'
-  '# .git/worktrees; a mismatch means the recreate bind points at the wrong source, so'
-  '# the recreate side also fails closed on bind-source, never a skip.'
-  'probe=".bindprobe.$$"'
-  'if ! : >"$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null; then'
-  '  echo "FAIL: cannot write into the volume .gitworktrees dir to verify the recreate bind (REGRESSION)" >&2'
-  '  exit 1'
-  'fi'
-  'if [ ! -e "$WS/.git/worktrees/$probe" ]; then'
-  '  rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true'
-  '  echo "FAIL: .git/worktrees does not reflect the volume .gitworktrees dir on recreate - bind maps the wrong source (REGRESSION)" >&2'
-  '  exit 1'
-  'fi'
-  'rm -f "$WS/.worktrees/.gitworktrees/$probe" 2>/dev/null || true'
-  'echo "  ok: recreate .git/worktrees bind maps the persistent .worktrees volume (verified maps .gitworktrees)"'
-  'WTDIR="$WS/.worktrees/$CONT/$SLUG"'
-  '[ -d "$WTDIR" ] || { echo "FAIL: the linked worktree dir did not survive recreation ($WTDIR missing)" >&2; exit 1; }'
-  '# 1. Metadata survived: git status works, and the admin dir is visible via the bind.'
-  'if ! git -C "$WTDIR" status >/dev/null 2>&1; then'
-  '  echo "FAIL: git status failed in the recycled worktree - per-worktree metadata did not survive recreation" >&2'
-  '  git -C "$WTDIR" status >&2 2>&1 || true'
-  '  exit 1'
-  'fi'
-  '[ -e "$WS/.git/worktrees/$SLUG/gitdir" ] || { echo "FAIL: .git/worktrees/$SLUG metadata not visible after recreate (bind broken?)" >&2; exit 1; }'
-  'echo "  ok: git status works in the recycled worktree; per-worktree metadata survived recreate"'
-  '# 2. HEAD is still on the worktree branch.'
-  'br="$(git -C "$WTDIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"'
-  '[ "$br" = "$SLUG" ] || { echo "FAIL: recycled worktree HEAD is $br, expected $SLUG" >&2; exit 1; }'
-  '# 3. The tracked modification survived (working-tree file lives in the volume).'
-  'status="$(git -C "$WTDIR" status --porcelain 2>/dev/null || true)"'
-  'printf "%s\n" "$status" | grep -qE "^.M[[:space:]]+tracked\.txt$" || {'
-  '  echo "FAIL: the tracked modification to tracked.txt did not survive recreation. git status --porcelain:" >&2'
-  '  printf "%s\n" "$status" >&2'
-  '  exit 1'
-  '}'
-  'grep -q "durable-change-A" "$WTDIR/tracked.txt" || { echo "FAIL: tracked.txt content lost after recreation" >&2; exit 1; }'
-  '# 4. The untracked file survived.'
-  'printf "%s\n" "$status" | grep -qE "^\?\?[[:space:]]+UNTRACKED_NEW\.txt$" || {'
-  '  echo "FAIL: the untracked file UNTRACKED_NEW.txt did not survive recreation. git status --porcelain:" >&2'
-  '  printf "%s\n" "$status" >&2'
-  '  exit 1'
-  '}'
-  '[ -f "$WTDIR/UNTRACKED_NEW.txt" ] || { echo "FAIL: UNTRACKED_NEW.txt is gone after recreation" >&2; exit 1; }'
-  'grep -q "untracked-content-A" "$WTDIR/UNTRACKED_NEW.txt" || { echo "FAIL: UNTRACKED_NEW.txt content lost after recreation" >&2; exit 1; }'
-  'echo "  ok: HEAD on $SLUG; tracked modification + untracked file both survived the container recreate"'
-  'exit 0'
-) -join "`n"
+# The in-container verify script (Container B) is SHARED with
+# scripts/smoke-test-worktree-metadata.sh in exactly the way Container A above is
+# (task 053b): ONE file, so a change to it cannot land in one driver only. Its header
+# carries the arg/exit-code contract. It also holds the only non-ASCII character in
+# either shared file (an em dash), so the -Encoding UTF8 explained above is what makes
+# this read deliver the same characters as the .sh driver's - the em dash included, on
+# 5.1 as well as on 7. The two captures still differ by a single trailing LF, because
+# Bash command substitution strips trailing newlines and Get-Content -Raw does not; that
+# byte is immaterial to what /bin/bash -c executes. Same CRLF strip, same Leaf test and
+# same emptiness check, for the same reasons.
+$verifyScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-b.bash'
+if (-not (Test-Path -LiteralPath $verifyScriptPath -PathType Leaf)) { Fail "the shared Container B script is missing or not a file: $verifyScriptPath" }
+$verifyScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $verifyScriptPath) -replace "`r`n", "`n"
+if ([string]::IsNullOrWhiteSpace($verifyScript)) { Fail "the shared Container B script is empty: $verifyScriptPath" }
 
 Write-Host "Worktree durable-metadata smoke test (image: $Image)"
 

@@ -227,6 +227,52 @@ Every current consumer already satisfies this — `seed_is_marked`/`seed_workflo
 That key now means the upstream path, so the channel moved to its own key, `channel=plugin-clone` (see the task-021 section below).
 Nothing in the codebase branches on either key — they are introspection only — so the transition needs no migration: a marker written by an older image keeps the old spelling until the next sync or refresh rewrites it.
 
+### D9 — The Claude statusline is a `.powbox-seeded` producer too (task 002e)
+
+Skills and workflows are not the only thing powbox seeds onto a config volume.
+`entrypoint-claude-hook.sh` seeds `~/.claude/statusline-command.sh`, and it now stamps the same kind of marker: the sidecar `~/.claude/.statusline-command.sh.powbox-seeded`, whose name follows exactly the shape `seed_workflow_marker_path` produces for a lone file (`<dir>/.<filename>.powbox-seeded`).
+
+Its body adds one key the skill/workflow markers do not carry:
+
+```text
+epoch=<image build-epoch that wrote this copy>
+commit=<powbox commit that built the agent image>
+sha256=<digest of exactly the bytes written>
+source=Roubtec/powbox#docker/claude/agent-container/statusline-command.sh
+```
+
+`sha256=` exists because the statusline's ownership question is *stricter* than a skill's.
+For a skill, marker-present means "powbox owns this, refresh it" — a user who wants to keep their fork deletes the marker.
+The statusline is a single file the maintainer deliberately ships opinionated and expects users to tweak in place, so presence alone would license overwriting an edit nobody asked to lose; the refresh therefore requires the on-disk digest to still equal the recorded one.
+A running container holds no copy of the previous image's file, so a digest recorded at seed time is the only proof available — comparing against the previous bake is not an option.
+An **unmarked** statusline is treated exactly as an unmarked skill is: untouchable.
+That is the upgrade path for every `claude-config` volume that predates this marker, and it self-heals the first time the user deletes the file.
+
+"Unmarked" extends to every way the proof can come up missing, because a digest powbox cannot read is worth no more than one it never wrote: a marker with no `sha256=` key, a marker that cannot be read at all, and a file that cannot be digested (an image without `sha256sum`) all keep the file and say nothing.
+The producing side matches — `seed_statusline` writes a copy whose digest it could not compute with **no marker at all**, rather than a marker it could not fill in, so the unprovable case can only ever err toward keeping what is on disk.
+It also *removes* any marker already sitting there in that case, and whenever a marker cannot be published: once the file has been replaced, an old `sha256=` names bytes that are gone, and a stale proof is worse than none — it reads as "the user edited this" and nags about a file powbox itself just wrote.
+
+`source=` names **this** repo rather than one of the `Roubtec/agent-skills` roots — the statusline is a powbox-owned asset, which is the "should powbox ever bake an asset it owns itself" case [D8](#d8--the-marker-records-its-upstream-source-sourceownerrepopath) reserved.
+
+A start that notes something about the statusline without publishing anything also writes `notified_epoch=<image epoch>`, so the note appears once per new image instead of on every container start.
+The throttle is best-effort, because it is the marker that records it: with no marker to read, or one that cannot be read or rewritten, there is nowhere to record the note and it repeats on every start.
+It covers both such notes — "a newer statusline is available, yours differs" and "the destination could not be written" — because each of their branches stays true on every later start, the marker's `epoch=` never advancing while nothing is published.
+`notified_epoch=` therefore reads as "the newest image this statusline has already spoken about", and a successful refresh rewrites the marker without the key, so the next image is announced again.
+It is a **separate key** on purpose: reusing `epoch=` would have bought the same suppression at the cost of that key's meaning ("the build that placed this file"), which the digest comparison depends on staying true.
+
+**Written inline, not by sourcing `seed-skills.sh`.** The two calls the library could have supplied are the epoch/commit printf and the sidecar-name join; it cannot supply `sha256=` at all, and `seed_source_ref` cannot supply this `source=` either, since every root it defines points at `Roubtec/agent-skills`.
+Against that, sourcing would give the Claude hook its first library dependency — and the hook runs under `set -euo pipefail` on the startup critical path, where a missing or damaged library would take the instruction file and `settings.json` down with a cosmetic asset.
+So the hook reuses the *format* (which is what consumers depend on) and not the code, and the parse-by-key rule above binds it identically: it reads keys with `sed -n 's/^<key>=//p'`, never by position.
+**Published atomically, like the file it describes.** Every write of this marker goes to a `mktemp` sibling and is renamed over the real name, never written in place, because the `claude-config` volume is shared by every powbox container: a truncating write is visible to a peer mid-flight, and the peer reading a marker stripped back to `notified_epoch=` alone would treat the statusline as unmarked from then on — never refreshed, never mentioned again.
+Any consumer that learns to *write* a `.powbox-seeded` marker on a shared volume should do the same, and should rename with `mv -T`: a plain `mv` onto a marker path that happens to be a *directory* moves the temp inside it and still exits 0, reporting a marker published nowhere.
+Per-write atomicity is not atomicity across the **pair**, though — where there is a pair at all. Where the marker can live *inside* the asset it describes, there is none to lose: `seed_skill` stamps `<skill>/.powbox-seeded` into the staged directory and publishes the marker and the skill with the **same** `mv -T`, so no interleaving can separate them. That is the strongest form available, and the first one to reach for.
+A *sidecar* marker is two independent renames, and a digest-carrying sidecar is where that bites: two containers publishing concurrently can interleave them and leave one's asset under the other's `sha256=`, after which the digest never matches again and the asset reads as customized until it is deleted. A sidecar carrying no digest survives the same interleaving, because a refresh turns on the marker's *presence* and never on what it says: `seed_workflows … refresh` and the updater's `item_is_refreshable` both ask only whether the destination is a marked plain file, and neither reads `epoch=` — so a workflow left under a peer's marker is still refreshable, which is exactly the property a digest destroys and the reason the statusline is the only consumer here for which the pair has to be serialized at all. Refreshability is the claim, not that anything on this tree currently exercises it: no Claude workflows are baked any more, so a marked on-volume copy's only disposition today is `orphan`/`--prune` ([Forfeit update](#forfeit-update-2026-07-30-no-baked-claude-items-prune-covers-whole-kind-removal)).
+The statusline cannot take the in-asset form, being a single file, and accepts the race for the reason [entrypoint-and-runtime.md](entrypoint-and-runtime.md) gives (an flock there would sit on the synchronous startup path); serializing the transaction is task 002h, and a consumer that needs a digest-carrying sidecar and is not on that path should reach for the cross-container lock `seed-claude-plugins.sh` already uses.
+A digest gate carries one limit that no lock repairs, and every future `sha256=` producer inherits it: the proof is established at one moment and acted on at another, so it binds only writers that are absent from the gap between them. A lock closes that gap against the *other* powbox containers, which is what task 002h is for; it does nothing about the arbitrary writer the gate was actually built to protect against — the user, editing the asset the marker calls theirs to edit. Worse, the publish that wins such a race then stamps the source digest, so the marker certifies the overwrite as powbox's own and the loss is silent as well as unrecoverable. A conditional replace is not available to close it — `rename(2)` has no such form — so a producer choosing a digest-carrying sidecar is choosing this residual too, and should state it where the statusline's is stated rather than let the `sha256=` imply a guarantee it does not carry. Task 002i settles what the statusline itself does about it.
+`scripts/test-claude-hook-skew.sh` pins the marker's contents and all three transitions, that directory case, and exactly one concurrency shape: a peer truncating the marker under the rewrite.
+The case beside it — a marker that cannot be written in place while the file it describes is re-seeded — is a *permission* shape rather than a concurrency one; it belongs here because what it pins is the stale-proof outcome above (the marker is replaced by rename anyway, and removed when even that fails), not because anything raced.
+No test drives two real publishers at once: the cross-container interleaving stated above needs two containers against one volume, which per [AGENTS.md](../AGENTS.md) "Validating Changes" cannot run inside an agent container, and task 002h holds the fix it would be pinning.
+
 ---
 
 ## Three-anchor image provenance — IMPLEMENTED on the stacked branch

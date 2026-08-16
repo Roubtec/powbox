@@ -149,22 +149,30 @@ $runArgs = @(
 
 # The in-container setup script (Container A) is SHARED with
 # scripts/smoke-test-worktree-metadata.sh (task 053a): ONE file, so a change to it
-# cannot land in one driver only. Its header carries the arg/exit-code contract. The
-# CRLF strip is defensive - .gitattributes pins that file to LF, but a checkout that
-# mangled it would feed /bin/bash -c a payload with stray ^M.
+# cannot land in one driver only. Its header carries the arg/exit-code contract.
+# -Encoding UTF8 is load-bearing, not decorative: Windows PowerShell 5.1 decodes a
+# BOM-less file with the system ANSI codepage, so a non-ASCII byte in a shared file
+# would reach `bash -c` mangled from here and intact from the .sh driver - exactly the
+# per-driver drift these shared files exist to prevent. The CRLF strip is defensive -
+# .gitattributes pins that file to LF, but a checkout that mangled it would feed
+# /bin/bash -c a payload with stray ^M. The emptiness check stops a truncated file from
+# handing the container a no-op payload that exits 0 and reports the stage as passed.
 $setupScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-a.bash'
 if (-not (Test-Path -LiteralPath $setupScriptPath)) { Fail "the shared Container A script is missing: $setupScriptPath" }
-$setupScript = (Get-Content -Raw -LiteralPath $setupScriptPath) -replace "`r`n", "`n"
+$setupScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $setupScriptPath) -replace "`r`n", "`n"
+if ([string]::IsNullOrWhiteSpace($setupScript)) { Fail "the shared Container A script is empty: $setupScriptPath" }
 
 # The in-container verify script (Container B) is SHARED with
 # scripts/smoke-test-worktree-metadata.sh in exactly the way Container A above is
 # (task 053b): ONE file, so a change to it cannot land in one driver only. Its header
-# carries the arg/exit-code contract. The CRLF strip is defensive - .gitattributes
-# pins that file to LF, but a checkout that mangled it would feed /bin/bash -c a
-# payload with stray ^M.
+# carries the arg/exit-code contract. It also holds the only non-ASCII character in
+# either shared file (an em dash), so the -Encoding UTF8 explained above is what makes
+# this read agree byte for byte with the .sh driver's, on 5.1 as well as on 7. Same
+# CRLF strip and same emptiness check, for the same reasons.
 $verifyScriptPath = Join-Path $PSScriptRoot 'smoke-test-worktree-metadata-container-b.bash'
 if (-not (Test-Path -LiteralPath $verifyScriptPath)) { Fail "the shared Container B script is missing: $verifyScriptPath" }
-$verifyScript = (Get-Content -Raw -LiteralPath $verifyScriptPath) -replace "`r`n", "`n"
+$verifyScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $verifyScriptPath) -replace "`r`n", "`n"
+if ([string]::IsNullOrWhiteSpace($verifyScript)) { Fail "the shared Container B script is empty: $verifyScriptPath" }
 
 Write-Host "Worktree durable-metadata smoke test (image: $Image)"
 

@@ -113,11 +113,14 @@ RUN_ARGS=(
 # Each container's inner script lives in ONE file that BOTH drivers embed (tasks 053a,
 # 053b): a copy per driver is what let the PowerShell mirror ship without the task 053
 # ownership coverage. scripts/smoke-test-worktree-metadata.ps1 reads the same files via
-# $PSScriptRoot. See each file's header for its arg/exit-code contract.
+# $PSScriptRoot. See each file's header for its arg/exit-code contract. The emptiness
+# checks stop a truncated file from handing the container a no-op payload that exits 0
+# and reports the stage as passed; the PowerShell driver checks the same thing.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-a.bash"
 [ -r "$SETUP_SCRIPT_FILE" ] || fail "the shared Container A script is missing or unreadable: $SETUP_SCRIPT_FILE"
 SETUP_SCRIPT="$(cat "$SETUP_SCRIPT_FILE")"
+[ -n "$SETUP_SCRIPT" ] || fail "the shared Container A script is empty: $SETUP_SCRIPT_FILE"
 
 # --- Container B: recreate, re-bind, assert the worktree survived intact ----------
 # Shared with the PowerShell driver in ONE file, exactly as Container A above (task
@@ -125,6 +128,7 @@ SETUP_SCRIPT="$(cat "$SETUP_SCRIPT_FILE")"
 VERIFY_SCRIPT_FILE="$SCRIPT_DIR/smoke-test-worktree-metadata-container-b.bash"
 [ -r "$VERIFY_SCRIPT_FILE" ] || fail "the shared Container B script is missing or unreadable: $VERIFY_SCRIPT_FILE"
 VERIFY_SCRIPT="$(cat "$VERIFY_SCRIPT_FILE")"
+[ -n "$VERIFY_SCRIPT" ] || fail "the shared Container B script is empty: $VERIFY_SCRIPT_FILE"
 
 echo "Worktree durable-metadata smoke test (image: $IMAGE)"
 

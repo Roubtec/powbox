@@ -93,6 +93,8 @@ See README "Continuous Integration" for the trigger paths and caching.
 
 Its eight Stage 0 entries match the Bash targets.
 Stage 6 mirrors the mountpoint-ownership assertions too (task 053a): both drivers hand each container the same shared inner script — `scripts/smoke-test-worktree-metadata-container-a.bash` (task 053a) and `scripts/smoke-test-worktree-metadata-container-b.bash` (task 053b) — so neither half can drift, while each driver implements the ~40 host-side lines natively.
+The PowerShell driver reads both files with an explicit `-Encoding UTF8`, which is required rather than tidy: Windows PowerShell 5.1 decodes a BOM-less file with the system ANSI codepage, so a non-ASCII byte in a shared file (Container B's script has one, an em dash) would otherwise reach `bash -c` mangled from the PowerShell driver and intact from the Bash one — drift reintroduced through the loader rather than through a second copy.
+Both drivers also fail closed on an empty shared file, so a truncated checkout cannot hand the container a no-op payload that exits 0 and reads as a pass.
 One deliberate, narrower divergence remains: the PowerShell driver runs those ownership assertions only on a native-Linux host and records a counted `Note-Skip` otherwise, because a Windows/macOS bind mount squashes `uid:gid` and every comparison would then pass vacuously — a green that proves nothing is worse than an announced skip.
 The gate is documented in `scripts/smoke-test-worktree-metadata.ps1`'s header.
 

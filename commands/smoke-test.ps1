@@ -533,6 +533,11 @@ else {
   # the child evaluates the same host /dev/net/tun condition before its docker run,
   # so the two agree. The child still prints the skip message; we track it here.
   $podmanRequest = if ($env:POWBOX_PODMAN) { $env:POWBOX_PODMAN } elseif ($env:POWBOX_FUSE) { $env:POWBOX_FUSE } else { "auto" }
+  # Record WHICH variable supplied that value, because the banner's remedy is
+  # "unset the variable this entry names": with only the deprecated alias set, an
+  # entry naming POWBOX_PODMAN sends the reader to unset a variable that was never
+  # set, leaving POWBOX_FUSE=off skipping the stage exactly as before.
+  $podmanGateVar = if ($env:POWBOX_PODMAN) { "POWBOX_PODMAN" } else { "POWBOX_FUSE" }
   # The child self-skips one nested scenario at RUNTIME - the distroless (shell-less)
   # Compose XFAIL reproduction, when its image cannot be pulled - which the parent
   # cannot predict. Hand it a marker (like Stages 5/6): the child writes the reason
@@ -552,7 +557,7 @@ else {
     Remove-Item -LiteralPath $podmanMarker.FullName -ErrorAction SilentlyContinue
   }
   if ($podmanRequest -eq "off") {
-    $skipped.Add("Stage 3: rootless Podman engine (POWBOX_PODMAN=off)")
+    $skipped.Add("Stage 3: rootless Podman engine ($podmanGateVar=off)")
   }
   elseif ($podmanRequest -ne "on" -and -not (Test-Path "/dev/net/tun")) {
     $skipped.Add("Stage 3: rootless Podman nested-run checks (no /dev/net/tun)")

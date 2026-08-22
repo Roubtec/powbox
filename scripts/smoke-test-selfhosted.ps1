@@ -98,7 +98,8 @@ Ok "dir-mounted hash matches SHA256(path)[:12], has nm/wt and no ws volume"
 # committed .powbox.yml / local shadow: -> MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
 # go.mod or bounded .NET markers (solution/project files at the root or one level
-# below). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES, so a
+# below). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES/
+# PLAYWRIGHT_BROWSERS_PATH, so a
 # pure Go or .NET repo gets persistent caches + worktrees WITHOUT an empty
 # node_modules/ mountpoint littering the host folder. The local ctx:-only case
 # must not opt a non-dev folder into project volumes.
@@ -166,6 +167,8 @@ try {
     if ($gid["PNPM_STORE_DIR"] -ne $wantPnpm) { Fail "gate matrix $($case[0]): PNPM_STORE_DIR is '$($gid["PNPM_STORE_DIR"])', want '$wantPnpm'" }
     $wantNuget = if ($case[2] -eq "true") { "$($gid["WORKSPACE_MOUNT"])/.worktrees/.nuget" } else { "" }
     if ($gid["NUGET_PACKAGES"] -ne $wantNuget) { Fail "gate matrix $($case[0]): NUGET_PACKAGES is '$($gid["NUGET_PACKAGES"])', want '$wantNuget'" }
+    $wantPlaywright = if ($case[2] -eq "true") { "$($gid["WORKSPACE_MOUNT"])/.worktrees/.ms-playwright" } else { "" }
+    if ($gid["PLAYWRIGHT_BROWSERS_PATH"] -ne $wantPlaywright) { Fail "gate matrix $($case[0]): PLAYWRIGHT_BROWSERS_PATH is '$($gid["PLAYWRIGHT_BROWSERS_PATH"])', want '$wantPlaywright'" }
   }
   if ($null -ne $inaccessibleExpected -and $inaccessibleExpected -eq "true") {
     Write-Host "  note: permissions are not enforced for this user; inaccessible-child skip case could not be exercised"
@@ -177,9 +180,12 @@ finally {
 }
 Ok "volume-gate matrix: bounded .NET handles one-level solutions without following links; nm stays narrow"
 
-# --- frozen NUGET_PACKAGES migration (no Docker daemon needed) ---------------
+# --- frozen NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH migration ---------------
+# (no Docker daemon needed)
 # A pre-task container can already have exactly the expected nm/wt mounts, so the
-# mount migration alone cannot detect that Config.Env lacks NUGET_PACKAGES. Drive
+# mount migration alone cannot detect that Config.Env lacks one of the persistent
+# cache variables. Both share one migration loop in the launcher, so both are
+# driven here -- including a case where only the SECOND one is stale. Drive
 # the real reuse path through a tiny Docker shim: stopped containers must recreate;
 # running containers must be left alone with an actionable warning.
 $migrationRoot = Join-Path ([System.IO.Path]::GetTempPath()) "powbox-smoke-nuget-migration-$PID"
@@ -190,6 +196,7 @@ New-Item -ItemType File -Force -Path (Join-Path $migrationProject "package.json"
 $migrationId = Get-Identity @("-Agent", "claude", "-ProjectPath", $migrationProject)
 $migrationContainer = $migrationId["CONTAINER_NAME"]
 $migrationNuget = $migrationId["NUGET_PACKAGES"]
+$migrationPlaywright = $migrationId["PLAYWRIGHT_BROWSERS_PATH"]
 $fakeDocker = @'
 $dockerArgs = @($args)
 Add-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ($dockerArgs -join " ")
@@ -205,6 +212,7 @@ if ($dockerArgs[0] -eq "inspect" -and $dockerArgs.Count -gt 2 -and $dockerArgs[1
   elseif ($format.Contains("Config.Env")) {
     Write-Output "PATH=/usr/local/bin:/usr/bin"
     if ($env:POWBOX_FAKE_NUGET_SET -eq "true") { Write-Output "NUGET_PACKAGES=$env:POWBOX_FAKE_NUGET" }
+    if ($env:POWBOX_FAKE_PLAYWRIGHT_SET -eq "true") { Write-Output "PLAYWRIGHT_BROWSERS_PATH=$env:POWBOX_FAKE_PLAYWRIGHT" }
   }
   elseif ($format.Contains("/node_modules")) { Write-Output $env:POWBOX_FAKE_NM }
   elseif ($format.Contains("/.worktrees")) { Write-Output $env:POWBOX_FAKE_WT }
@@ -227,6 +235,7 @@ try {
   $env:POWBOX_FAKE_NM = $migrationId["NM_VOLUME"]
   $env:POWBOX_FAKE_WT = $migrationId["WT_VOLUME"]
   $env:POWBOX_FAKE_NUGET_SET = "false"
+  $env:POWBOX_FAKE_PLAYWRIGHT_SET = "false"
   $env:GIT_CONFIG_PATH = Join-Path $migrationRoot "missing-gitconfig"
 
   Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
@@ -253,12 +262,45 @@ try {
 
   Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
   $env:POWBOX_FAKE_NUGET = "$migrationNuget/"
+  $env:POWBOX_FAKE_PLAYWRIGHT_SET = "true"
+  $env:POWBOX_FAKE_PLAYWRIGHT = "$migrationPlaywright/"
   $migrationTrailingSlashOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
   $migrationTrailingSlashExit = $LASTEXITCODE
   if ($migrationTrailingSlashExit -ne 0) { Fail "trailing-slash NuGet migration fixture failed: $($migrationTrailingSlashOutput -join ' ')" }
   if ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer") {
-    Fail "stopped container with an equivalent trailing-slash NUGET_PACKAGES value was recreated"
+    Fail "stopped container with equivalent trailing-slash NUGET_PACKAGES/PLAYWRIGHT_BROWSERS_PATH values was recreated"
   }
+
+  # The migration loop checks more than one variable, so a container whose NuGet
+  # path is already correct must still be recreated for a missing Playwright path.
+  # Without this case a regression that only ever checked the first entry would
+  # still pass every assertion above.
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_NUGET = $migrationNuget
+  $env:POWBOX_FAKE_PLAYWRIGHT_SET = "false"
+  $migrationPlaywrightOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationPlaywrightExit = $LASTEXITCODE
+  if ($migrationPlaywrightExit -ne 0) { Fail "stopped stale-Playwright migration fixture failed: $($migrationPlaywrightOutput -join ' ')" }
+  if (-not ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer")) {
+    Fail "stopped container with a correct NUGET_PACKAGES and missing PLAYWRIGHT_BROWSERS_PATH was not recreated"
+  }
+  if (($migrationPlaywrightOutput -join "`n") -notlike "*recreating it with '$migrationPlaywright'*") {
+    Fail "stopped stale-Playwright migration did not explain the expected path"
+  }
+
+  # Same shape for a RUNNING container: warn about the Playwright path, disrupt nothing.
+  Set-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG -Value ""
+  $env:POWBOX_FAKE_RUNNING = "true"
+  $migrationPlaywrightRunningOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Detach 2>&1)
+  $migrationPlaywrightRunningExit = $LASTEXITCODE
+  if ($migrationPlaywrightRunningExit -ne 0) { Fail "running stale-Playwright migration fixture failed: $($migrationPlaywrightRunningOutput -join ' ')" }
+  if ((Get-Content -LiteralPath $env:POWBOX_FAKE_DOCKER_LOG) -contains "rm $migrationContainer") {
+    Fail "running container with stale PLAYWRIGHT_BROWSERS_PATH was disrupted"
+  }
+  if (($migrationPlaywrightRunningOutput -join "`n") -notlike "*persistent Playwright browsers*") {
+    Fail "running stale-Playwright migration did not emit the lifecycle warning"
+  }
+  $env:POWBOX_FAKE_RUNNING = "false"
 
   $migrationIsolatedId = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/app", "-Name", "nuget-migration")
   $migrationIsolatedContainer = $migrationIsolatedId["CONTAINER_NAME"]
@@ -289,20 +331,20 @@ try {
   $migrationResumeOutput = @(& $psExe -NoProfile -File $launcher -Agent claude -ProjectPath $migrationProject -Resume -Detach 2>&1)
   $migrationResumeExit = $LASTEXITCODE
   if ($migrationResumeExit -ne 0) { Fail "resume frozen-environment warning fixture failed: $($migrationResumeOutput -join ' ')" }
-  if (($migrationResumeOutput -join "`n") -notlike "*persistent NUGET_PACKAGES wiring, are skipped*") {
-    Fail "resume did not explain that frozen NUGET_PACKAGES migration is skipped"
+  if (($migrationResumeOutput -join "`n") -notlike "*persistent NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH wiring, are skipped*") {
+    Fail "resume did not explain that the frozen cache-env migration is skipped"
   }
 }
 finally {
   $env:PATH = $oldPath
-  foreach ($name in @("POWBOX_FAKE_DOCKER_LOG", "POWBOX_FAKE_RUNNING", "POWBOX_FAKE_NM", "POWBOX_FAKE_WT", "POWBOX_FAKE_NUGET_SET", "POWBOX_FAKE_NUGET")) {
+  foreach ($name in @("POWBOX_FAKE_DOCKER_LOG", "POWBOX_FAKE_RUNNING", "POWBOX_FAKE_NM", "POWBOX_FAKE_WT", "POWBOX_FAKE_NUGET_SET", "POWBOX_FAKE_NUGET", "POWBOX_FAKE_PLAYWRIGHT_SET", "POWBOX_FAKE_PLAYWRIGHT")) {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
   }
   if ($null -eq $oldGitConfigPath) { Remove-Item Env:GIT_CONFIG_PATH -ErrorAction SilentlyContinue }
   else { $env:GIT_CONFIG_PATH = $oldGitConfigPath }
   Remove-Item -Recurse -Force $migrationRoot -ErrorAction SilentlyContinue
 }
-Ok "frozen NuGet env migration: missing/mixed-case paths recreate; trailing-slash paths reuse; running ones warn; resume explains its skip"
+Ok "frozen NuGet/Playwright env migration: missing/mixed-case paths recreate (either variable); trailing-slash paths reuse; running ones warn; resume explains its skip"
 
 # --- named -> deterministic ---------------------------------------------------
 $n1 = Get-Identity @("-Agent", "claude", "-Isolated", "-Repo", "owner/Repo.git", "-Name", "foo")
@@ -311,6 +353,7 @@ if ($n1["mode"] -ne "isolated") { Fail "-Isolated did not select isolated mode" 
 if ($n1["CONTAINER_NAME"] -ne $n2["CONTAINER_NAME"]) { Fail "named instance is not deterministic across launches" }
 if ($n1["WORKSPACE_MOUNT"] -ne $n2["WORKSPACE_MOUNT"]) { Fail "named instance workspace path (-> Claude session slug) is not stable" }
 if ($n1["NUGET_PACKAGES"] -ne "$($n1["WORKSPACE_MOUNT"])/.worktrees/.nuget") { Fail "self-hosted identity does not place NUGET_PACKAGES inside its workspace volume" }
+if ($n1["PLAYWRIGHT_BROWSERS_PATH"] -ne "$($n1["WORKSPACE_MOUNT"])/.worktrees/.ms-playwright") { Fail "self-hosted identity does not place PLAYWRIGHT_BROWSERS_PATH inside its workspace volume" }
 if ($n1["PNPM_STORE_DIR"] -ne "$($n1["WORKSPACE_MOUNT"])/.worktrees/.pnpm-store") { Fail "self-hosted identity does not place PNPM_STORE_DIR inside its workspace volume" }
 Ok "named instance is deterministic (same workspace path / session slug on relaunch)"
 

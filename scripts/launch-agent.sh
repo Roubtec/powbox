@@ -1200,6 +1200,17 @@ WT_CCACHE_DIR="${WORKSPACE_MOUNT}/.worktrees/.ccache"
 # access with filesystem locks. Sharing it across this repo's worktrees avoids
 # duplicate restores while each outer agent container keeps its own volume.
 WT_NUGET_PACKAGES_DIR="${WORKSPACE_MOUNT}/.worktrees/.nuget"
+# Playwright's browser downloads beside the other shared, persistent caches.
+# PLAYWRIGHT_BROWSERS_PATH is the documented override and the directory is
+# designed to be shared by many projects — entries are keyed by browser and
+# revision (chromium-1234/, chromium_headless_shell-1234/), so several
+# Playwright versions coexist without clobbering each other and each is fetched
+# at most once per container. Its in-container default (~/.cache/ms-playwright)
+# sits outside every volume, so recreation would otherwise re-download ~656 MB
+# per chromium install. Baking a revision into the image was rejected instead:
+# Playwright bumps the browser revision nearly every minor release, so a baked
+# copy serves only repos pinned to that one minor.
+WT_PLAYWRIGHT_BROWSERS_DIR="${WORKSPACE_MOUNT}/.worktrees/.ms-playwright"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
 # container (agent + project), NOT just the project: a project's Claude and Codex
@@ -1239,8 +1250,10 @@ if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
 	fi
 	if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 		printf 'NUGET_PACKAGES=%s\n' "$WT_NUGET_PACKAGES_DIR"
+		printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$WT_PLAYWRIGHT_BROWSERS_DIR"
 	else
 		printf 'NUGET_PACKAGES=\n'
+		printf 'PLAYWRIGHT_BROWSERS_PATH=\n'
 	fi
 	printf 'REPO_SPEC=%s\n' "$REPO_SPEC"
 	printf 'CLONE_REF=%s\n' "$CLONE_REF"
@@ -1354,7 +1367,7 @@ if [ "$RESUME" = true ]; then
 		echo "Note: --ref is ignored on resume; the existing checkout is left untouched." >&2
 	fi
 	if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
-		echo "Note: --resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES wiring, are skipped. Omit --resume to apply them." >&2
+		echo "Note: --resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH wiring, are skipped. Omit --resume to apply them." >&2
 	fi
 	# A running container (e.g. launched --detach, or its terminal was lost)
 	# can't be `docker start`ed — that errors — so reattach instead. Mirrors the
@@ -1565,56 +1578,67 @@ if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" =
 	fi
 fi
 
-# NUGET_PACKAGES is frozen in Config.Env when a container is created. A container
-# from before persistent NuGet caching can already have the correct .worktrees
-# mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
-# to compare at all; either shape would otherwise exit through reuse above the new
-# EXTRA_ENV assembly and keep restoring into ephemeral ~/.nuget/packages forever.
-# Compare the case-sensitive expected path for every worktrees-backed launch,
-# ignoring only redundant trailing slashes. Follow the mount-mismatch lifecycle:
-# warn without disrupting a running process, and recreate a stopped mismatch so
-# the new environment takes effect.
+# NUGET_PACKAGES and PLAYWRIGHT_BROWSERS_PATH are frozen in Config.Env when a
+# container is created. A container from before persistent NuGet/Playwright
+# caching can already have the correct .worktrees mount (JS/Go dir-mounted
+# projects), while self-hosted mode has no separate mount to compare at all;
+# either shape would otherwise exit through reuse above the new EXTRA_ENV
+# assembly and keep restoring into ephemeral ~/.nuget/packages (or re-downloading
+# into ephemeral ~/.cache/ms-playwright) forever. Compare the case-sensitive
+# expected path for every worktrees-backed launch, ignoring only redundant
+# trailing slashes. Follow the mount-mismatch lifecycle: warn without disrupting
+# a running process, and recreate a stopped mismatch so the new environment takes
+# effect. One recreation re-freezes EVERY var, so the first stopped mismatch
+# breaks the loop rather than trying to remove an already-removed container.
 if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 	[ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CONTAINER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-	EXISTING_NUGET_PACKAGES=""
-	EXISTING_NUGET_PACKAGES_SET=false
-	while IFS= read -r env_entry; do
-		case "$env_entry" in
-		NUGET_PACKAGES=*)
-			EXISTING_NUGET_PACKAGES="${env_entry#NUGET_PACKAGES=}"
-			EXISTING_NUGET_PACKAGES_SET=true
-			break
-			;;
-		esac
-	done <<<"$EXISTING_CONTAINER_ENV"
-	NORMALIZED_EXISTING_NUGET_PACKAGES="$EXISTING_NUGET_PACKAGES"
-	while [ "$NORMALIZED_EXISTING_NUGET_PACKAGES" != "/" ] &&
-		[ "${NORMALIZED_EXISTING_NUGET_PACKAGES%/}" != "$NORMALIZED_EXISTING_NUGET_PACKAGES" ]; do
-		NORMALIZED_EXISTING_NUGET_PACKAGES="${NORMALIZED_EXISTING_NUGET_PACKAGES%/}"
-	done
-	if [ "$NORMALIZED_EXISTING_NUGET_PACKAGES" != "$WT_NUGET_PACKAGES_DIR" ]; then
-		if [ "$EXISTING_NUGET_PACKAGES_SET" != true ]; then
-			EXISTING_NUGET_DISPLAY="<unset>"
-		elif [ -z "$EXISTING_NUGET_PACKAGES" ]; then
-			EXISTING_NUGET_DISPLAY="<empty>"
+	# var|expected path|human label for the recreate/warn message
+	for _cache_spec in \
+		"NUGET_PACKAGES|${WT_NUGET_PACKAGES_DIR}|NuGet packages" \
+		"PLAYWRIGHT_BROWSERS_PATH|${WT_PLAYWRIGHT_BROWSERS_DIR}|Playwright browsers"; do
+		_cache_name="${_cache_spec%%|*}"
+		_cache_rest="${_cache_spec#*|}"
+		_cache_expected="${_cache_rest%%|*}"
+		_cache_label="${_cache_rest#*|}"
+		_existing_value=""
+		_existing_set=false
+		while IFS= read -r env_entry; do
+			if [ "${env_entry%%=*}" = "$_cache_name" ]; then
+				_existing_value="${env_entry#*=}"
+				_existing_set=true
+				break
+			fi
+		done <<<"$EXISTING_CONTAINER_ENV"
+		_normalized_existing="$_existing_value"
+		while [ "$_normalized_existing" != "/" ] &&
+			[ "${_normalized_existing%/}" != "$_normalized_existing" ]; do
+			_normalized_existing="${_normalized_existing%/}"
+		done
+		[ "$_normalized_existing" != "$_cache_expected" ] || continue
+		if [ "$_existing_set" != true ]; then
+			_existing_display="<unset>"
+		elif [ -z "$_existing_value" ]; then
+			_existing_display="<empty>"
 		else
-			EXISTING_NUGET_DISPLAY="$EXISTING_NUGET_PACKAGES"
+			_existing_display="$_existing_value"
 		fi
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} was created with NUGET_PACKAGES='${EXISTING_NUGET_DISPLAY}', but this launch expects '${WT_NUGET_PACKAGES_DIR}'. Container environment is fixed at creation; stop it and relaunch (or use --volatile) to enable persistent NuGet packages." >&2
-		else
-			echo "Container ${CONTAINER_NAME} was created with NUGET_PACKAGES='${EXISTING_NUGET_DISPLAY}'; recreating it with '${WT_NUGET_PACKAGES_DIR}' so NuGet packages persist."
-			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
-				if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-					echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
-					exit 1
-				fi
-			fi
-			CONTAINER_EXISTS=false
+			echo "Note: container ${CONTAINER_NAME} was created with ${_cache_name}='${_existing_display}', but this launch expects '${_cache_expected}'. Container environment is fixed at creation; stop it and relaunch (or use --volatile) to enable persistent ${_cache_label}." >&2
+			continue
 		fi
-	fi
-	unset EXISTING_CONTAINER_ENV EXISTING_NUGET_PACKAGES EXISTING_NUGET_PACKAGES_SET NORMALIZED_EXISTING_NUGET_PACKAGES EXISTING_NUGET_DISPLAY env_entry
+		echo "Container ${CONTAINER_NAME} was created with ${_cache_name}='${_existing_display}'; recreating it with '${_cache_expected}' so ${_cache_label} persist."
+		if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+			if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+				echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+				exit 1
+			fi
+		fi
+		CONTAINER_EXISTS=false
+		break
+	done
+	unset EXISTING_CONTAINER_ENV _cache_spec _cache_name _cache_rest _cache_expected _cache_label \
+		_existing_value _existing_set _normalized_existing _existing_display env_entry
 fi
 
 # Detect whether the existing container predates the per-container Podman storage
@@ -1888,14 +1912,15 @@ EXTRA_ENV=(-e "CONTAINER_NAME=$CONTAINER_NAME" -e "PRIMARY_AGENT=$AGENT")
 if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 	EXTRA_ENV+=(-e "PNPM_STORE_DIR=$WT_STORE_DIR")
 fi
-# Point the Go module + build caches, ccache, and NuGet global packages into the
-# same persistent mount — keyed on the WIDER worktrees gate (or self-hosted mode,
-# where .worktrees is a subdir of the one workspace volume), NOT the JS gate
-# above: a Go/.NET-only repo mounts only the worktrees volume. Omitting them for a
-# non-dev dir-mounted folder stops the entrypoint from mkdir-ing cache dirs onto
-# the host bind mount — go/ccache/NuGet keep their image-default (container-
-# ephemeral) cache paths there instead. Plain env is all these tools need (no
-# `go env -w`, ccache, or NuGet config), matching the PNPM_STORE_DIR precedent; the
+# Point the Go module + build caches, ccache, NuGet global packages, and the
+# Playwright browsers cache into the same persistent mount — keyed on the WIDER
+# worktrees gate (or self-hosted mode, where .worktrees is a subdir of the one
+# workspace volume), NOT the JS gate above: a Go/.NET-only repo mounts only the
+# worktrees volume. Omitting them for a non-dev dir-mounted folder stops the
+# entrypoint from mkdir-ing cache dirs onto the host bind mount — go/ccache/
+# NuGet/Playwright keep their image-default (container-ephemeral) cache paths
+# there instead. Plain env is all these tools need (no `go env -w`, ccache,
+# NuGet, or Playwright config), matching the PNPM_STORE_DIR precedent; the
 # entrypoint pre-creates the dirs (guarded, warn-don't-abort).
 if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 	EXTRA_ENV+=(
@@ -1903,6 +1928,7 @@ if [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 		-e "GOCACHE=$WT_GOCACHE_DIR"
 		-e "CCACHE_DIR=$WT_CCACHE_DIR"
 		-e "NUGET_PACKAGES=$WT_NUGET_PACKAGES_DIR"
+		-e "PLAYWRIGHT_BROWSERS_PATH=$WT_PLAYWRIGHT_BROWSERS_DIR"
 	)
 fi
 

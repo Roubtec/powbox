@@ -430,18 +430,19 @@ if [ -n "${PNPM_STORE_DIR:-}" ]; then
 	fi
 fi
 
-# Pre-create the Go caches, ccache, and NuGet global packages folder when the
-# launcher points them into the persistent worktrees mount (GOMODCACHE/GOCACHE/
-# CCACHE_DIR/NUGET_PACKAGES env — the PNPM_STORE_DIR precedent above; set for
+# Pre-create the Go caches, ccache, the NuGet global packages folder, and the
+# Playwright browsers cache when the launcher points them into the persistent
+# worktrees mount (GOMODCACHE/GOCACHE/CCACHE_DIR/NUGET_PACKAGES/
+# PLAYWRIGHT_BROWSERS_PATH env — the PNPM_STORE_DIR precedent above; set for
 # dir-mounted JS/powbox/Go/.NET projects and in self-hosted mode, omitted for
 # non-dev folders so nothing is mkdir-ed onto a host bind mount). Plain env is
-# all these tools need — no `go env -w`, ccache, or NuGet config — so this mkdir
+# all these tools need — no `go env -w`, ccache, NuGet, or Playwright config — so this mkdir
 # only surfaces a bad value LOUDLY at startup instead of as a confusing
 # mid-session build failure. Guarded so a bad value never aborts the container
 # start: on failure the var is unset (the exec'd agent inherits the cleared env),
 # so the tool falls back to its image-default, container-ephemeral cache path and
 # keeps working.
-for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR NUGET_PACKAGES; do
+for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR NUGET_PACKAGES PLAYWRIGHT_BROWSERS_PATH; do
 	_cache_dir="${!_cache_var:-}"
 	[ -n "$_cache_dir" ] || continue
 	if ! mkdir -p "$_cache_dir" 2>/dev/null; then

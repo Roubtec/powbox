@@ -139,8 +139,13 @@ RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
     @marp-team/marp-cli \
     @mermaid-js/mermaid-cli
 
-# Install Playwright (browser automation) globally so an agent can drive a
-# browser ad hoc without an install step. Only the ~19 MB npm package is baked:
+# Install Playwright (browser automation) globally so an agent has the
+# `playwright` CLI (screenshot / pdf / codegen / install) without an install
+# step. This is CLI-only on purpose: global npm packages are not on Node's
+# module path and no NODE_PATH is set (it would make every global package
+# resolvable from any repo and mask undeclared dependencies), so programmatic
+# `require('playwright')` still needs a local install, which then finds the
+# shared browsers. Only the ~19 MB npm package is baked:
 # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops the postinstall from pulling ~656 MB of
 # browser builds, which would go stale almost immediately -- Playwright keys its
 # browsers by revision and bumps that revision nearly every minor release (1.52

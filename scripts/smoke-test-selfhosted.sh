@@ -105,7 +105,8 @@ ok "dir-mounted has nm/wt volumes and no ws volume"
 # committed .powbox.yml / local shadow: → MOUNT_WORKSPACE_VOLUMES, which also gates PNPM_STORE_DIR);
 # agent-wt-* keys on the WIDER worktrees gate that additionally triggers on
 # go.mod or bounded .NET markers (solution/project files at the root or one level
-# below). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES, so a
+# below). MOUNT_WORKTREES_VOLUME gates GOMODCACHE/GOCACHE/NUGET_PACKAGES/
+# PLAYWRIGHT_BROWSERS_PATH, so a
 # pure Go or .NET repo gets persistent caches + worktrees WITHOUT an empty
 # node_modules/ mountpoint littering the host folder. The local ctx:-only case
 # must not opt a non-dev folder into project volumes.
@@ -138,9 +139,13 @@ gate_case() { # $1 = fixture subdir, $2/$3 = expected MOUNT_WORKSPACE_VOLUMES / 
 	if [ "$3" = true ]; then
 		[ "$(id_field "$out" NUGET_PACKAGES)" = "$(id_field "$out" WORKSPACE_MOUNT)/.worktrees/.nuget" ] ||
 			fail "gate matrix $1: NUGET_PACKAGES does not point into the worktrees volume"
+		[ "$(id_field "$out" PLAYWRIGHT_BROWSERS_PATH)" = "$(id_field "$out" WORKSPACE_MOUNT)/.worktrees/.ms-playwright" ] ||
+			fail "gate matrix $1: PLAYWRIGHT_BROWSERS_PATH does not point into the worktrees volume"
 	else
 		[ -z "$(id_field "$out" NUGET_PACKAGES)" ] ||
 			fail "gate matrix $1: NUGET_PACKAGES must be omitted when the worktrees gate is false"
+		[ -z "$(id_field "$out" PLAYWRIGHT_BROWSERS_PATH)" ] ||
+			fail "gate matrix $1: PLAYWRIGHT_BROWSERS_PATH must be omitted when the worktrees gate is false"
 	fi
 }
 mkdir -p \
@@ -234,9 +239,12 @@ cleanup_matrix
 trap - EXIT
 ok "volume-gate matrix: bounded .NET handles one-level solutions without following links; nm stays narrow"
 
-# --- frozen NUGET_PACKAGES migration (no Docker daemon needed) ----------------
+# --- frozen NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH migration ---------------
+# (no Docker daemon needed)
 # A pre-task container can already have exactly the expected nm/wt mounts, so the
-# mount migration alone cannot detect that Config.Env lacks NUGET_PACKAGES. Drive
+# mount migration alone cannot detect that Config.Env lacks one of the persistent
+# cache variables. Both share one migration loop in the launcher, so both are
+# driven here — including a case where only the SECOND one is stale. Drive
 # the real reuse path through a tiny Docker shim: stopped containers must recreate;
 # running containers must be left alone with an actionable warning.
 MIGRATION_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/powbox-smoke-nuget-migration-XXXXXX")"
@@ -248,6 +256,7 @@ MIGRATION_CONTAINER="$(id_field "$MIGRATION_ID" CONTAINER_NAME)"
 MIGRATION_NM="$(id_field "$MIGRATION_ID" NM_VOLUME)"
 MIGRATION_WT="$(id_field "$MIGRATION_ID" WT_VOLUME)"
 MIGRATION_NUGET="$(id_field "$MIGRATION_ID" NUGET_PACKAGES)"
+MIGRATION_PLAYWRIGHT="$(id_field "$MIGRATION_ID" PLAYWRIGHT_BROWSERS_PATH)"
 cat >"$MIGRATION_ROOT/bin/docker" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >>"$POWBOX_FAKE_DOCKER_LOG"
@@ -264,6 +273,9 @@ if [ "$1" = inspect ] && [ "${2:-}" = --format ]; then
 		printf 'PATH=/usr/local/bin:/usr/bin\n'
 		if [ "${POWBOX_FAKE_NUGET_SET:-false}" = true ]; then
 			printf 'NUGET_PACKAGES=%s\n' "$POWBOX_FAKE_NUGET"
+		fi
+		if [ "${POWBOX_FAKE_PLAYWRIGHT_SET:-false}" = true ]; then
+			printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$POWBOX_FAKE_PLAYWRIGHT"
 		fi
 		;;
 	*'/node_modules'*) printf '%s\n' "$POWBOX_FAKE_NM" ;;
@@ -322,12 +334,56 @@ MIGRATION_TRAILING_SLASH_OUTPUT="$({
 		POWBOX_FAKE_WT="$MIGRATION_WT" \
 		POWBOX_FAKE_NUGET_SET=true \
 		POWBOX_FAKE_NUGET="${MIGRATION_NUGET}/" \
+		POWBOX_FAKE_PLAYWRIGHT_SET=true \
+		POWBOX_FAKE_PLAYWRIGHT="${MIGRATION_PLAYWRIGHT}/" \
 		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
 		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
 } 2>&1)" || fail "trailing-slash NuGet migration fixture failed: $MIGRATION_TRAILING_SLASH_OUTPUT"
 if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
-	fail "stopped container with an equivalent trailing-slash NUGET_PACKAGES value was recreated"
+	fail "stopped container with equivalent trailing-slash NUGET_PACKAGES/PLAYWRIGHT_BROWSERS_PATH values was recreated"
 fi
+
+# The migration loop checks more than one variable, so a container whose NuGet
+# path is already correct must still be recreated for a missing Playwright path.
+# Without this case a regression that only ever checked the first entry would
+# still pass every assertion above.
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_PLAYWRIGHT_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=false \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=true \
+		POWBOX_FAKE_NUGET="$MIGRATION_NUGET" \
+		POWBOX_FAKE_PLAYWRIGHT_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "stopped stale-Playwright migration fixture failed: $MIGRATION_PLAYWRIGHT_OUTPUT"
+grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log" ||
+	fail "stopped container with a correct NUGET_PACKAGES and missing PLAYWRIGHT_BROWSERS_PATH was not recreated"
+printf '%s\n' "$MIGRATION_PLAYWRIGHT_OUTPUT" | grep -Fq "recreating it with '$MIGRATION_PLAYWRIGHT'" ||
+	fail "stopped stale-Playwright migration did not explain the expected path"
+
+# Same shape for a RUNNING container: warn about the Playwright path, disrupt nothing.
+: >"$MIGRATION_ROOT/docker.log"
+MIGRATION_PLAYWRIGHT_RUNNING_OUTPUT="$({
+	PATH="$MIGRATION_ROOT/bin:$PATH" \
+		POWBOX_FAKE_DOCKER_LOG="$MIGRATION_ROOT/docker.log" \
+		POWBOX_FAKE_RUNNING=true \
+		POWBOX_FAKE_NM="$MIGRATION_NM" \
+		POWBOX_FAKE_WT="$MIGRATION_WT" \
+		POWBOX_FAKE_NUGET_SET=true \
+		POWBOX_FAKE_NUGET="$MIGRATION_NUGET" \
+		POWBOX_FAKE_PLAYWRIGHT_SET=false \
+		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
+		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --detach
+} 2>&1)" || fail "running stale-Playwright migration fixture failed: $MIGRATION_PLAYWRIGHT_RUNNING_OUTPUT"
+if grep -Fqx "rm $MIGRATION_CONTAINER" "$MIGRATION_ROOT/docker.log"; then
+	fail "running container with stale PLAYWRIGHT_BROWSERS_PATH was disrupted"
+fi
+printf '%s\n' "$MIGRATION_PLAYWRIGHT_RUNNING_OUTPUT" | grep -Fq "persistent Playwright browsers" ||
+	fail "running stale-Playwright migration did not emit the lifecycle warning"
 
 MIGRATION_ISOLATED_ID="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/app --name nuget-migration 2>/dev/null)"
 MIGRATION_ISOLATED_CONTAINER="$(id_field "$MIGRATION_ISOLATED_ID" CONTAINER_NAME)"
@@ -373,11 +429,11 @@ MIGRATION_RESUME_OUTPUT="$({
 		GIT_CONFIG_PATH="$MIGRATION_ROOT/missing-gitconfig" \
 		"$LAUNCHER" claude "$MIGRATION_ROOT/project" --resume --detach
 } 2>&1)" || fail "resume frozen-environment warning fixture failed: $MIGRATION_RESUME_OUTPUT"
-printf '%s\n' "$MIGRATION_RESUME_OUTPUT" | grep -Fq "persistent NUGET_PACKAGES wiring, are skipped" ||
-	fail "resume did not explain that frozen NUGET_PACKAGES migration is skipped"
+printf '%s\n' "$MIGRATION_RESUME_OUTPUT" | grep -Fq "persistent NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH wiring, are skipped" ||
+	fail "resume did not explain that the frozen cache-env migration is skipped"
 rm -rf "$MIGRATION_ROOT"
 trap - EXIT
-ok "frozen NuGet env migration: missing/mixed-case paths recreate; trailing-slash paths reuse; running ones warn; resume explains its skip"
+ok "frozen NuGet/Playwright env migration: missing/mixed-case paths recreate (either variable); trailing-slash paths reuse; running ones warn; resume explains its skip"
 
 # --- named → deterministic (same identity twice) ------------------------------
 N1="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.git --name foo 2>/dev/null)"
@@ -389,6 +445,8 @@ N2="$(POWBOX_PRINT_IDENTITY=1 "$LAUNCHER" claude --isolated --repo owner/Repo.gi
 	fail "named instance workspace path (→ Claude session slug) is not stable"
 [ "$(id_field "$N1" NUGET_PACKAGES)" = "$(id_field "$N1" WORKSPACE_MOUNT)/.worktrees/.nuget" ] ||
 	fail "self-hosted identity does not place NUGET_PACKAGES inside its workspace volume"
+[ "$(id_field "$N1" PLAYWRIGHT_BROWSERS_PATH)" = "$(id_field "$N1" WORKSPACE_MOUNT)/.worktrees/.ms-playwright" ] ||
+	fail "self-hosted identity does not place PLAYWRIGHT_BROWSERS_PATH inside its workspace volume"
 [ "$(id_field "$N1" PNPM_STORE_DIR)" = "$(id_field "$N1" WORKSPACE_MOUNT)/.worktrees/.pnpm-store" ] ||
 	fail "self-hosted identity does not place PNPM_STORE_DIR inside its workspace volume"
 ok "named instance is deterministic (same workspace path / session slug on relaunch)"

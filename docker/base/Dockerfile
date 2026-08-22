@@ -139,6 +139,26 @@ RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
     @marp-team/marp-cli \
     @mermaid-js/mermaid-cli
 
+# Install Playwright (browser automation) globally so an agent can drive a
+# browser ad hoc without an install step. Only the ~19 MB npm package is baked:
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops the postinstall from pulling ~656 MB of
+# browser builds, which would go stale almost immediately -- Playwright keys its
+# browsers by revision and bumps that revision nearly every minor release (1.52
+# -> 1169, 1.55 -> 1187, 1.58 -> 1208, 1.60 -> 1223, 1.62 -> 1234), so a baked
+# revision only ever serves repos pinned to that one minor. Browsers are instead
+# downloaded on demand into the PERSISTENT PLAYWRIGHT_BROWSERS_PATH the launcher
+# points at .worktrees, so each version is fetched once per container and then
+# survives recreation. A repo with its own pinned playwright/@playwright/test
+# dependency still resolves its local copy first; this global one is the
+# no-repo fallback.
+#
+# Note the system chromium below CANNOT stand in for Playwright's browsers:
+# Playwright exposes no browser-executable env override (there is no
+# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH), and a headless launch resolves to a
+# chrome-headless-shell binary the distro package does not ship at all. Only an
+# explicit executablePath in launch() reuses it, which is a per-repo code change.
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright
+
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq
 
@@ -515,6 +535,12 @@ ENV CHROME_PATH=/usr/bin/chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV CHROME_NO_SANDBOX=true
+
+# Playwright deliberately gets NO baked PLAYWRIGHT_BROWSERS_PATH: unset means
+# its own default (~/.cache/ms-playwright), which is the right container-
+# ephemeral fallback for a non-dev folder that mounts no .worktrees volume. The
+# launcher supplies the persistent path per project, exactly as it does for
+# NUGET_PACKAGES / GOMODCACHE / CCACHE_DIR.
 
 # Keep `dotnet` output clean and its side effects predictable. Each of these was
 # observed on a real first build in a fresh container, not copied from a

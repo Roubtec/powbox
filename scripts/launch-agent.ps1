@@ -836,6 +836,17 @@ $worktreesCcacheDir = "/workspace/$projectSlug/.worktrees/.ccache"
 # access with filesystem locks. Sharing it across this repo's worktrees avoids
 # duplicate restores while each outer agent container keeps its own volume.
 $worktreesNugetPackagesDir = "/workspace/$projectSlug/.worktrees/.nuget"
+# Playwright's browser downloads beside the other shared, persistent caches.
+# PLAYWRIGHT_BROWSERS_PATH is the documented override and the directory is
+# designed to be shared by many projects — entries are keyed by browser and
+# revision (chromium-1234/, chromium_headless_shell-1234/), so several
+# Playwright versions coexist without clobbering each other and each is fetched
+# at most once per container. Its in-container default (~/.cache/ms-playwright)
+# sits outside every volume, so recreation would otherwise re-download ~656 MB
+# per chromium install. Baking a revision into the image was rejected instead:
+# Playwright bumps the browser revision nearly every minor release, so a baked
+# copy serves only repos pinned to that one minor.
+$worktreesPlaywrightBrowsersDir = "/workspace/$projectSlug/.worktrees/.ms-playwright"
 # Per-container rootless Podman storage (images + named volumes) so an in-sandbox
 # agent's containers and their data persist across restarts. Keyed by the OUTER
 # container (agent + project), NOT just the project: a project's Claude and Codex
@@ -871,6 +882,8 @@ if ($env:POWBOX_PRINT_IDENTITY -eq "1") {
   else { Write-Output "PNPM_STORE_DIR=" }
   if ($Isolated -or $mountWorktreesVolume) { Write-Output "NUGET_PACKAGES=$worktreesNugetPackagesDir" }
   else { Write-Output "NUGET_PACKAGES=" }
+  if ($Isolated -or $mountWorktreesVolume) { Write-Output "PLAYWRIGHT_BROWSERS_PATH=$worktreesPlaywrightBrowsersDir" }
+  else { Write-Output "PLAYWRIGHT_BROWSERS_PATH=" }
   Write-Output "REPO_SPEC=$repoSpec"
   Write-Output "CLONE_REF=$Ref"
   exit 0
@@ -994,7 +1007,7 @@ if ($Resume) {
     Write-Host "Note: -Ref is ignored on resume; the existing checkout is left untouched." -ForegroundColor Yellow
   }
   if ($Isolated -or $mountWorktreesVolume) {
-    Write-Host "Note: -Resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES wiring, are skipped. Omit -Resume to apply them." -ForegroundColor Yellow
+    Write-Host "Note: -Resume starts the container with its frozen mounts and environment; launcher migrations, including persistent NUGET_PACKAGES / PLAYWRIGHT_BROWSERS_PATH wiring, are skipped. Omit -Resume to apply them." -ForegroundColor Yellow
   }
 
   # A running container (e.g. launched -Detach, or its terminal was lost) can't be
@@ -1236,45 +1249,54 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
   }
 }
 
-# NUGET_PACKAGES is frozen in Config.Env when a container is created. A container
-# from before persistent NuGet caching can already have the correct .worktrees
-# mount (JS/Go dir-mounted projects), while self-hosted mode has no separate mount
-# to compare at all; either shape would otherwise exit through reuse above the new
-# run-argument assembly and keep restoring into ephemeral ~/.nuget/packages forever.
-# Compare the case-sensitive expected path for every worktrees-backed launch,
-# ignoring only redundant trailing slashes. Follow the mount-mismatch lifecycle:
-# warn without disrupting a running process, and recreate a stopped mismatch so
-# the new environment takes effect.
+# NUGET_PACKAGES and PLAYWRIGHT_BROWSERS_PATH are frozen in Config.Env when a
+# container is created. A container from before persistent NuGet/Playwright
+# caching can already have the correct .worktrees mount (JS/Go dir-mounted
+# projects), while self-hosted mode has no separate mount to compare at all;
+# either shape would otherwise exit through reuse above the new run-argument
+# assembly and keep restoring into ephemeral ~/.nuget/packages (or re-downloading
+# into ephemeral ~/.cache/ms-playwright) forever. Compare the case-sensitive
+# expected path for every worktrees-backed launch, ignoring only redundant
+# trailing slashes. Follow the mount-mismatch lifecycle: warn without disrupting
+# a running process, and recreate a stopped mismatch so the new environment takes
+# effect. One recreation re-freezes EVERY var, so the first stopped mismatch
+# breaks the loop rather than trying to remove an already-removed container.
 if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExists) {
   $existingContainerEnv = @(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $existingContainerEnv = @() }
-  $existingNugetPackages = $null
-  $existingNugetPackagesFound = $false
-  foreach ($envEntry in $existingContainerEnv) {
-    if ($envEntry.StartsWith("NUGET_PACKAGES=", [System.StringComparison]::Ordinal)) {
-      $existingNugetPackages = $envEntry.Substring("NUGET_PACKAGES=".Length)
-      $existingNugetPackagesFound = $true
-      break
-    }
-  }
-  $normalizedExistingNugetPackages = if ($null -eq $existingNugetPackages) { $null } else { $existingNugetPackages.TrimEnd('/') }
-  if ($normalizedExistingNugetPackages -cne $worktreesNugetPackagesDir) {
-    $existingNugetDisplay = if (-not $existingNugetPackagesFound) { "<unset>" } elseif ($existingNugetPackages -ceq "") { "<empty>" } else { $existingNugetPackages }
-    if ($containerRunning) {
-      Write-Host "Note: container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay', but this launch expects '$worktreesNugetPackagesDir'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent NuGet packages." -ForegroundColor Yellow
-    }
-    else {
-      Write-Host "Container $containerName was created with NUGET_PACKAGES='$existingNugetDisplay'; recreating it with '$worktreesNugetPackagesDir' so NuGet packages persist."
-      docker rm $containerName *> $null
-      if ($LASTEXITCODE -ne 0) {
-        docker container inspect $containerName *> $null
-        if ($LASTEXITCODE -eq 0) {
-          Write-Error "Failed to remove container $containerName after detecting an outdated NUGET_PACKAGES environment."
-          exit 1
-        }
+  $cacheEnvChecks = @(
+    @{ Name = "NUGET_PACKAGES"; Expected = $worktreesNugetPackagesDir; Label = "NuGet packages" },
+    @{ Name = "PLAYWRIGHT_BROWSERS_PATH"; Expected = $worktreesPlaywrightBrowsersDir; Label = "Playwright browsers" }
+  )
+  foreach ($check in $cacheEnvChecks) {
+    $prefix = "$($check.Name)="
+    $existingValue = $null
+    $existingFound = $false
+    foreach ($envEntry in $existingContainerEnv) {
+      if ($envEntry.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+        $existingValue = $envEntry.Substring($prefix.Length)
+        $existingFound = $true
+        break
       }
-      $containerExists = $false
     }
+    $normalizedExisting = if ($null -eq $existingValue) { $null } else { $existingValue.TrimEnd('/') }
+    if ($normalizedExisting -ceq $check.Expected) { continue }
+    $existingDisplay = if (-not $existingFound) { "<unset>" } elseif ($existingValue -ceq "") { "<empty>" } else { $existingValue }
+    if ($containerRunning) {
+      Write-Host "Note: container $containerName was created with $($check.Name)='$existingDisplay', but this launch expects '$($check.Expected)'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent $($check.Label)." -ForegroundColor Yellow
+      continue
+    }
+    Write-Host "Container $containerName was created with $($check.Name)='$existingDisplay'; recreating it with '$($check.Expected)' so $($check.Label) persist."
+    docker rm $containerName *> $null
+    if ($LASTEXITCODE -ne 0) {
+      docker container inspect $containerName *> $null
+      if ($LASTEXITCODE -eq 0) {
+        Write-Error "Failed to remove container $containerName after detecting an outdated $($check.Name) environment."
+        exit 1
+      }
+    }
+    $containerExists = $false
+    break
   }
 }
 
@@ -1605,21 +1627,23 @@ if ($ctxDesiredPresent) {
 if ($Isolated -or $mountWorkspaceVolumes) {
   $envArgs += @("-e", "PNPM_STORE_DIR=$worktreesStoreDir")
 }
-# Point the Go module + build caches, ccache, and NuGet global packages into the same
+# Point the Go module + build caches, ccache, NuGet global packages, and the Playwright
+# browsers cache into the same
 # persistent mount — keyed on the WIDER worktrees gate (or self-hosted mode, where
 # .worktrees is a subdir of the one workspace volume), NOT the JS gate above: a
 # Go/.NET-only repo mounts only the worktrees volume. Omitting them for a non-dev
 # dir-mounted folder stops the entrypoint from mkdir-ing cache dirs onto the host
-# bind mount — go/ccache/NuGet keep their image-default (container-ephemeral) cache
-# paths there instead. Plain env is all these tools need (no `go env -w`, ccache, or NuGet
-# config), matching the PNPM_STORE_DIR precedent; the entrypoint pre-creates the
+# bind mount — go/ccache/NuGet/Playwright keep their image-default (container-ephemeral) cache
+# paths there instead. Plain env is all these tools need (no `go env -w`, ccache, NuGet, or
+# Playwright config), matching the PNPM_STORE_DIR precedent; the entrypoint pre-creates the
 # dirs (guarded, warn-don't-abort).
 if ($Isolated -or $mountWorktreesVolume) {
   $envArgs += @(
     "-e", "GOMODCACHE=$worktreesGoModCacheDir",
     "-e", "GOCACHE=$worktreesGoCacheDir",
     "-e", "CCACHE_DIR=$worktreesCcacheDir",
-    "-e", "NUGET_PACKAGES=$worktreesNugetPackagesDir"
+    "-e", "NUGET_PACKAGES=$worktreesNugetPackagesDir",
+    "-e", "PLAYWRIGHT_BROWSERS_PATH=$worktreesPlaywrightBrowsersDir"
   )
 }
 

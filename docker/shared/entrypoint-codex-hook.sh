@@ -8,52 +8,6 @@ AGENT_CONFIG_DIR="${AGENT_CONFIG_DIR:?AGENT_CONFIG_DIR must be set}"
 # subdirectory /home/node/.agent-container/<agent>.
 AGENT_SEED_DIR="${AGENT_SEED_DIR:-/home/node/.agent-container}"
 
-ensure_top_level_array_setting() {
-	local file="$1" key="$2" values="$3"
-
-	if [ ! -f "$file" ]; then
-		: >"$file"
-	fi
-
-	if awk -v key="$key" '
-		/^[[:space:]]*\[/ { exit }
-		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found = 1; exit }
-		END { exit (!found) }
-	' "$file"; then
-		return
-	fi
-
-	local block tmp
-	block="${key} = [
-${values}
-]"
-	tmp="$(mktemp)"
-
-	awk -v block="$block" '
-		BEGIN {
-			inserted = 0
-		}
-		/^\[/ && !inserted {
-			print block
-			print ""
-			inserted = 1
-		}
-		{
-			print
-		}
-		END {
-			if (!inserted) {
-				if (NR > 0) {
-					print ""
-				}
-				print block
-			}
-		}
-	' "$file" >"$tmp"
-
-	mv "$tmp" "$file"
-}
-
 ensure_table_array_setting() {
 	local file="$1" table="$2" key="$3" values="$4"
 
@@ -143,7 +97,7 @@ replace_config_string() {
 
 # Host config is intentionally not seeded; the container grows its own Codex ecosystem
 # (config.toml, sessions, history) independent of the host. The ensure_* helpers below
-# write the image-baked statusline/terminal-title defaults straight into config.toml
+# write the image-baked statusline defaults straight into config.toml
 # when the keys are missing, which covers the only state we care to seed.
 chmod 700 "$AGENT_CONFIG_DIR" 2>/dev/null || true
 
@@ -159,13 +113,14 @@ if [ ! -e "$AGENTS_LINK" ] || [ -L "$AGENTS_LINK" ]; then
 	ln -sfn "$AGENTS_TARGET" "$AGENTS_LINK"
 fi
 
-# Seed a richer native Codex status line/title, but only when the user has not
+# Seed a richer native Codex status line, but only when the user has not
 # already chosen their own values.
 CONFIG_FILE="$AGENT_CONFIG_DIR/config.toml"
 # Codex 0.135 removed context-remaining-percent; keep older persisted volumes
 # warning-free while preserving the user's status line ordering.
 replace_config_string "$CONFIG_FILE" '"context-remaining-percent"' '"context-remaining"'
-STATUS_LINE_DEFAULTS=$(cat <<'EOF'
+STATUS_LINE_DEFAULTS=$(
+	cat <<'EOF'
   "model-with-reasoning",
   "current-dir",
   "context-remaining",
@@ -174,17 +129,8 @@ STATUS_LINE_DEFAULTS=$(cat <<'EOF'
   "used-tokens"
 EOF
 )
-TERMINAL_TITLE_DEFAULTS=$(cat <<'EOF'
-  "current-dir",
-  "git-branch",
-  "model-name",
-  "thread-title"
-EOF
-)
 # Codex persists the bottom status line picker under [tui].status_line.
 ensure_table_array_setting "$CONFIG_FILE" "tui" "status_line" "$STATUS_LINE_DEFAULTS"
-# terminal_title is a separate top-level setting for the terminal/tab title.
-ensure_top_level_array_setting "$CONFIG_FILE" "terminal_title" "$TERMINAL_TITLE_DEFAULTS"
 chmod 600 "$CONFIG_FILE" || true
 
 AGENT_TMPL="$AGENT_SEED_DIR/agent.md.tmpl"
@@ -197,7 +143,7 @@ if [ -f "$AGENT_TMPL" ]; then
 		# shellcheck disable=SC2016
 		# envsubst needs literal ${VAR} names.
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' \
-			< "$AGENT_TMPL" > "$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
+			<"$AGENT_TMPL" >"$AGENT_CONFIG_DIR/${AGENT_INSTRUCTION_FILE:?}"
 
 		# Seed image-baked skills (no-clobber: preserves user-modified versions;
 		# delete the skill directory to pick up the latest image version on next
@@ -214,7 +160,7 @@ if [ -f "$AGENT_TMPL" ]; then
 			"$AGENT_SEED_DIR" "$POWBOX_SEED_SOURCE_CODEX_SKILLS" ||
 			echo "Warning: one or more Codex skills failed to seed; continuing." >&2
 
-		echo "$IMAGE_EPOCH" > "$AGENT_CONFIG_DIR/.instruction-epoch"
+		echo "$IMAGE_EPOCH" >"$AGENT_CONFIG_DIR/.instruction-epoch"
 	fi
 fi
 

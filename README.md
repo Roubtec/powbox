@@ -937,11 +937,11 @@ Expected results:
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 
-Codex preserves any existing `config.toml` settings in the `codex-config` volume, but the container now auto-seeds a missing `[tui].status_line` plus a missing top-level `terminal_title` default.
+Codex preserves any existing `config.toml` settings in the `codex-config` volume, but the container now auto-seeds a missing `[tui].status_line` default.
 The seeded status line uses Codex-native items for model, current directory, remaining context, 5-hour usage, weekly usage, and used tokens.
-`terminal_title` is a separate Codex setting for the terminal window or tab title, not the bottom status line.
-The seeded title surfaces current directory, git branch, model, and thread title when the terminal supports title updates.
-That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
+Terminal window/tab titles use Codex's own defaults unless you configure `[tui].terminal_title`; powbox no longer seeds the unrecognized top-level `terminal_title` key.
+If an older container already seeded that top-level key, remove it from `~/.codex/config.toml` to clear the startup warning.
+That means a fresh or reset Codex config starts with a richer native status line, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
 
 Claude likewise preserves existing `settings.json` values in the `claude-config` volume, and the container seeds one no-clobber default: a missing `respondToBashCommands` is set to `false`.
 That keeps a fresh Claude config's `!` bash commands context-only — their output feeds your next prompt instead of triggering a reply after each one (Claude Code's pre-2.1.186 behavior).

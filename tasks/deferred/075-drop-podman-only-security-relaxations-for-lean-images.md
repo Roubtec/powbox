@@ -33,6 +33,16 @@ The lean image is aimed at unattended agent runs with web access, which is exact
 - Task 073's "Decisions" section records why the devices were left alone at that time: they add no capability while seccomp is unconfined and `SYS_ADMIN` is granted. That reasoning changes if this task restores the default seccomp profile.
 - `docs/rootless-podman.md`.
 
+## Target files or areas
+
+The investigation itself changes no file. Which of these change depends on its outcome:
+
+- `compose.shared.yml` — the `security_opt` block and the comment above it (the entries leave, or the comment records why they stay).
+- A new compose overlay file next to `compose.fuse.yml` and `compose.netdev.yml`, holding whichever entries turn out to be Podman-only.
+- `scripts/launch-agent.sh`, `scripts/launch-agent.ps1` — add the overlay for images carrying `powbox.podman`, with label-and-recreate handling like `PODMAN_DEVICE_MODE` has.
+- `scripts/smoke-test-worktree-metadata.{sh,ps1}` and `scripts/smoke-test-podman.{sh,ps1}` — they replicate the compose security options on their own `docker run` command lines (grep for `seccomp=unconfined`) and must keep matching what the launcher gives each kind of image.
+- `docs/rootless-podman.md`, and `AGENTS.md` ("Security") and `README.md` ("Workspace Shadow Mounts → Security") where they describe the container's security posture.
+
 ## Open questions the investigation must answer
 
 - **AppArmor and shadow mounts.** Docker's default AppArmor profile denies `mount` even with `CAP_SYS_ADMIN`. `shadow-mounts.sh` mounts tmpfs over workspace subdirectories, so `apparmor=unconfined` may be required regardless of Podman on AppArmor-enforcing hosts. Test on one.

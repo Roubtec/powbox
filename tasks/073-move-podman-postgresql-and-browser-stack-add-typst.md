@@ -36,8 +36,9 @@ Together with task 071 this takes about 2.7 GB out of a 5.5 GB root filesystem.
 
 - Depends on task 071 (the `full` set already holds real content, notes and probes).
 - `docker/shared/entrypoint-core.sh` already guards its whole Podman preparation with `command -v podman`, so the entrypoint needs no change for a Podman-less image. Verify rather than assume.
-- `scripts/launch-agent.sh`: the block introduced by the comment "Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED writer" runs a `docker compose … run` with `POWBOX_IMAGE_STORE_ROLE=writer` and `seed-image-store.sh seed` whenever the resolved device set includes fuse. `scripts/launch-agent.ps1` mirrors it.
-- `commands/smoke-test.sh`: Stage 2 (pg-dev-up functional) and Stage 3 (rootless Podman), both capability-gated by task 069.
+- `scripts/launch-agent.sh`: the block introduced by the comment "Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED writer" runs a `docker compose … run --rm -d` with `POWBOX_IMAGE_STORE_ROLE=writer` and `seed-image-store.sh seed` whenever the resolved device set includes fuse. `scripts/launch-agent.ps1` mirrors it. Because of `--rm`, the writer container removes itself when it exits.
+- The same launcher already reads an image label as a capability gate: under `--isolated` it inspects `powbox-agent:latest` for `powbox.base.selfhosted`. That `docker image inspect --format '{{ index .Config.Labels "…" }}'` read, including its handling of an empty value and `<no value>`, is the precedent for the `powbox.podman` gate in both languages.
+- `commands/smoke-test.sh`: Stage 2 (pg-dev-up functional) and Stage 3 (rootless Podman), both capability-gated by task 069. The core Stage 1 list holds `psql --version`, `pg-dev-up check`, three Playwright probes and the `command -v podman` probe task 069 added; it has no probe for `chromium`, `marp` or `mmdc`.
 - `docs/rootless-podman.md`, `docs/podman-shared-image-store.md`, and `docs/architecture.md` ("Bundled PostgreSQL", "Bundled Playwright").
 
 ## Decisions
@@ -63,8 +64,9 @@ Measured in a current container with `pandoc` 3.1.11.1 and the static `typst` 0.
 - `docker/layers/full/agent-notes.md`, `docker/layers/full/smoke-probes.txt`.
 - `docker/shared/container-agent.md.tmpl` — move the Databases (`psql`, `pg-dev-up`; `sqlite3` stays), Headless browser, Playwright and Containers rows, the Marp and Mermaid parts of Document processing, the whole "Local PostgreSQL" section, the Podman storage row of "Filesystem layout" and the Podman paragraph of "Network"; add the PDF guidance below.
 - `scripts/launch-agent.sh`, `scripts/launch-agent.ps1` — the seeder gate.
+- A pure-shell suite for the gate decision, where it can be isolated (see "Validation").
 - `commands/smoke-test.sh`, `commands/smoke-test.ps1`, and `scripts/smoke-test-podman.{sh,ps1}` if the label check lives there.
-- `scripts/test-pg-dev-up-scoped.sh` and any other suite or doc that names `docker/shared/pg-dev-up`, `containers.conf` or `seed-image-store.sh` (grep; at the time of writing: `docs/architecture.md`, `docs/entrypoint-and-runtime.md`, `docs/podman-shared-image-store.md`, `docs/rootless-podman.md`, `scripts/base-source-files.txt`, `scripts/test-pg-dev-up-scoped.sh`).
+- `scripts/test-pg-dev-up-scoped.sh` and any other suite or doc that names `docker/shared/pg-dev-up`, `containers.conf` or `seed-image-store.sh` (grep; at the time of writing, besides `docker/base/Dockerfile` itself: `docs/architecture.md`, `docs/podman-shared-image-store.md`, `docs/rootless-podman.md`, `scripts/base-source-files.txt`, `scripts/test-pg-dev-up-scoped.sh`).
 - `AGENTS.md` — the "Shell formatting convention" sentence lists the extensionless `docker/shared/` helpers including `pg-dev-up`; update the path.
 - `README.md` ("Nested Containers (rootless Podman)", "Layout"), the docs above, `.github/workflows/native-linux-build.yml` (cache keys, the `scripts/test-pg-dev-up-scoped.sh` path filter stays valid).
 
@@ -72,7 +74,7 @@ Measured in a current container with `pandoc` 3.1.11.1 and the static `typst` 0.
 
 - **Core template PDF guidance.** Add to the Document processing row, in wording that stays true when a layer set adds more tools: `pandoc` converts Markdown to Word, PowerPoint, HTML and EPUB, and to PDF through the baked Typst engine (`pandoc in.md -o out.pdf --pdf-engine=typst`, `-V papersize=a4` for A4, `--extract-media=<dir>` for `.docx` input with images). State that no headless browser or LaTeX is part of this base image, that HTML or slide decks to PDF therefore need a browser, and that the agent should use one documented in the layer-set section at the end of the file when present, or otherwise install what it needs for the session.
 - **Core probe.** Add a functional Stage 1 probe that builds a one-line Markdown file into a PDF with the Typst engine and checks the result with `pdfinfo`. A bare `typst --version` would not catch the template incompatibility that motivated the pin.
-- **Layer probes.** Move the Playwright probes; add presence probes for `podman`, `psql`, `pg-dev-up check`, `chromium`, `marp` and `mmdc`, since those are what make a missing tool fail the `full` run (task 069).
+- **Layer probes.** Move these out of the core Stage 1 list in both drivers into `docker/layers/full/smoke-probes.txt`: `psql --version`, `pg-dev-up check`, `command -v podman` and the three Playwright probes (including the `ms-playwright` cache-directory one). Left in the core list, they would fail the lean Stage 1. Then add presence probes for `chromium`, `marp` and `mmdc`, which have none today, and for anything else the moved blocks install that is still unprobed. Those probes are what make a missing tool fail the `full` run (task 069).
 - **Stage 3 label check.** Where Stage 3 decides whether Podman is present, also assert that the `powbox.podman` label and the binary agree. An image with Podman but no label would silently lose the shared image store; an image with the label but no Podman would run a useless writer.
 - **Podman block content.** Keep the engine config drop-in directory creation (`mkdir -p -m 0755 /etc/containers/containers.conf.d`) in the same layer as before the `COPY`; the base Dockerfile comment on that `COPY` explains the BuildKit `--chmod` pitfall.
 - **`pg-dev-up` is tested from source.** `scripts/test-pg-dev-up-scoped.sh` runs the repo copy against the baked server binaries in Stage 2; point it at the new path.
@@ -84,7 +86,9 @@ Measured in a current container with `pandoc` 3.1.11.1 and the static `typst` 0.
 
 - The lean image contains none of `podman`, `docker`, `psql`, `pg-dev-up`, `chromium`, `marp`, `mmdc`, `playwright`, and contains `typst` 0.13.1.
 - In a lean container, `pandoc` turns a Markdown file with a table, an image and non-ASCII text into a PDF using `--pdf-engine=typst`, with no network access and nothing installed.
-- A lean container starts cleanly: no Podman warnings from the entrypoint, and no image-store writer container is started by the launcher.
+- A lean container starts cleanly: no Podman warnings from the entrypoint, and no image-store writer container is created by the launcher. A `full` launch on a host with `/dev/fuse` still creates one.
+- The gate is shown to work by observation, not by absence of leftovers: `docker events --filter event=create` during a lean launch shows no writer container, and during a `full` launch shows one (see "Validation").
+- The core Stage 1 list in both drivers contains no probe for a moved tool, and `./commands/smoke-test.sh` passes against the lean image with Stage 2 and Stage 3 reported as not applicable.
 - An image built with `full` selected passes the whole smoke test, including Stage 2, Stage 3 and the label check, and its containers resolve pre-cached images as before.
 - The instruction file in a lean container documents Typst PDF output and says a browser is not part of the base; in a `full` container the appended section documents Chromium, Marp, Mermaid, Playwright, Podman and PostgreSQL.
 - `scripts/base-source-files.txt` matches the base `COPY` lines, and no tracked file still references the old `docker/shared/` paths of the moved helpers.
@@ -93,7 +97,8 @@ Measured in a current container with `pandoc` 3.1.11.1 and the static `typst` 0.
 ## Validation
 
 Static checks run in-container.
-Ask the maintainer to build both images on the host, run `./commands/smoke-test.sh` against each, launch one lean and one `full` container through `cc`, and confirm with `docker ps -a` that the lean launch started no writer. Record both image sizes in the PR description. On Windows, run the launcher once through PowerShell to exercise the mirrored gate.
+If the gate decision is a small function of the image label, unit-test it in a pure-shell suite in both languages (label present, absent, empty, `<no value>`) with a fake `docker` on `PATH` that answers `image inspect`. `scripts/test-context-mount-config.sh` shows the fake-`docker` technique, but only to prove Docker is not reached; driving the whole launcher as far as the writer block through a fake would mean answering every earlier Docker call, so do not attempt that.
+Ask the maintainer to build both images on the host, run `./commands/smoke-test.sh` against each, and launch one lean and one `full` container through `cc`. `docker ps -a` cannot show whether the gate works: the writer runs with `--rm`, and on a lean image it would exit at once, so it is gone either way. Instead, start `docker events --filter event=create` in a second terminal before each launch. The lean launch must create only the agent container; the `full` launch must also create the writer. Record both image sizes in the PR description. On Windows, run the launcher once through PowerShell to exercise the mirrored gate.
 
 ## Review plan
 

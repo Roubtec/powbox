@@ -12,7 +12,7 @@ The agreed composition is:
 - a user who edits their own set maintains or deletes its probes;
 - stages that need host orchestration stay in the repo and run only when the image has the tool they test.
 
-This task builds that mechanism while every tool is still in the base, so it changes no outcome yet. Tasks 071 and 073 then move probes into `docker/layers/full/` alongside the tools.
+This task builds that mechanism while every tool is still in the base, so every stage still runs against today's image. One outcome would change by accident and must be preserved on purpose: Stage 3 is currently the only thing that fails an image that lost Podman, and gating Stage 3 on Podman's presence would turn that failure into "not applicable" (see "Capability gating" below). Tasks 071 and 073 then move probes into `docker/layers/full/` alongside the tools.
 
 ## Scope
 
@@ -20,12 +20,13 @@ This task builds that mechanism while every tool is still in the base, so it cha
 
 1. An optional `smoke-probes.txt` in a layer set directory, read by both smoke drivers and run as its own stage.
 2. Capability gating of Stage 2 (PostgreSQL) and Stage 3 (Podman): run when the image has the tool, report "not in this image" otherwise.
-3. A reporting distinction between a stage that was **skipped** and one that is **not applicable** to the image.
-4. Bash and PowerShell parity, unit coverage, and `docs/smoke-tests.md`.
+3. A core Stage 1 presence probe for `podman`, so that gating Stage 3 does not let a missing engine pass.
+4. A reporting distinction between a stage that was **skipped** and one that is **not applicable** to the image.
+5. Bash and PowerShell parity, unit coverage, and `docs/smoke-tests.md`.
 
 **Out of scope:**
 
-- Moving any probe out of the core list (tasks 071, 073).
+- Moving any probe out of the core list (tasks 071, 073). This task adds one probe to it and removes none.
 - Layer sets adding their own host-orchestrated stages. A set contributes in-container probes only.
 - CI (task 065).
 
@@ -35,12 +36,14 @@ This task builds that mechanism while every tool is still in the base, so it cha
 - `commands/smoke-test.sh` and `commands/smoke-test.ps1`: the Stage 1 call into `scripts/smoke-test-image.{sh,ps1}`, the Stage 2 block gated by `POWBOX_SMOKE_SKIP_DB`, the Stage 3 block gated by `POWBOX_SMOKE_SKIP_PODMAN`, the `skipped` array and the end-of-run banner.
 - `scripts/smoke-test-image.sh`: probes are passed to the container as positional arguments and each runs in its own `sh -ec`; the header explains why, and why every probe must be a single line.
 - `scripts/test-smoke-probe-wrapper.sh` unit-tests that runner and its `.sh`/`.ps1` parity.
+- `scripts/smoke-test-podman.sh` and its `.ps1` mirror: the header says a missing podman "FAILS rather than skipping: a current image must ship the engine", and the in-container probe runs `command -v podman … || fail "podman is not installed in this image"`. `docs/smoke-tests.md` ("Partial runs, host gates, and skipping") says the same: "A genuinely broken image — missing engine, dropped drop-in — fails the stage on any host." The Stage 1 list has no `podman` probe today. It does have `psql --version` and `pg-dev-up check`, so Stage 2 has no such gap.
 - `docs/smoke-tests.md`: "What each stage is for", "Partial runs, host gates, and skipping", "The banner is not complete", "The PowerShell mirror".
 
 ## Target files or areas
 
 - `commands/smoke-test.sh`, `commands/smoke-test.ps1`.
 - `scripts/smoke-test-image.sh`, `scripts/smoke-test-image.ps1` only if the probe-file reader belongs there.
+- `scripts/smoke-test-podman.sh`, `scripts/smoke-test-podman.ps1` — the header comments quoted above, which must describe the new division of labour (presence is asserted by a Stage 1 probe; the stage runs only on an image that has the engine). The scripts' own `command -v podman` check stays, because they can be run directly.
 - `scripts/test-smoke-probe-wrapper.sh` (or a sibling suite) for the reader and its parity.
 - `docs/smoke-tests.md`, and the smoke summary in `README.md` ("Host Validation", "Continuous Integration") where it enumerates stages.
 
@@ -52,8 +55,10 @@ This task builds that mechanism while every tool is still in the base, so it cha
   - Label present but the set directory is missing from the working tree: record it in `skipped` with a warning (the run is partial), and fail instead when `POWBOX_SMOKE_REQUIRE_IMAGE` is set.
   - Image digest label differs from the working tree's digest: warn that the image is stale relative to the probes, then run them anyway.
 - **File format.** One probe per line. Blank lines and lines whose first non-space character is `#` are ignored. Strip a trailing CR. Nothing else is interpreted: the line is handed to the existing runner unchanged, so every guarantee in the `scripts/smoke-test-image.sh` header still holds. Order is preserved, because probes may rely on filesystem state left by an earlier one (the golangci-lint fixture probes do).
-- **Stage name.** Run the file as its own stage right after Stage 1, labelled `Stage 1b — layer-set probes (<set>)` in both drivers, through the same `smoke-test-image` driver so a failure prints the index → probe manifest.
-- **Capability gating.** Decide Stage 2 by whether `pg-dev-up` is on the image's `PATH`, and Stage 3 by whether `podman` is, using one short `docker run --rm --entrypoint sh` per check. Keep `POWBOX_SMOKE_SKIP_DB` and `POWBOX_SMOKE_SKIP_PODMAN` working as they do today; the capability check comes first.
+- **Stage name.** Run the file as its own stage right after Stage 1, labelled `Stage 1b — layer-set probes (<set>)` in `commands/smoke-test.sh` and `Stage 1b - layer-set probes (<set>)` in `commands/smoke-test.ps1`, through the same `smoke-test-image` driver so a failure prints the index → probe manifest. The `.ps1` driver is ASCII-only and uses a hyphen wherever the `.sh` driver uses an em dash; its banner comment explains why (a non-ASCII byte would force a UTF-8 BOM).
+- **Capability gating.** Decide Stage 2 by whether `pg-dev-up` is on the image's `PATH`, and Stage 3 by whether `podman` is, using one short `docker run --rm --entrypoint sh` per check. Keep `POWBOX_SMOKE_SKIP_DB` and `POWBOX_SMOKE_SKIP_PODMAN` working as they do today for an image that has the tool; the capability check comes first, so on an image without the tool the stage is "not applicable" whatever the variables say.
+- **Keep a missing engine a failure.** Add `command -v podman >/dev/null` to the core Stage 1 probe list in both drivers, in this task. Until task 073 moves it into `docker/layers/full/smoke-probes.txt`, that probe is what fails an image that lost Podman; without it, such an image would pass between this task and 073 with Stage 3 reported as not applicable. Reword the `docs/smoke-tests.md` sentence quoted in "Context and references" to match: a missing engine now fails Stage 1, a dropped drop-in still fails Stage 3.
+- **Reachability.** While the core list holds the `psql`, `pg-dev-up check` and `podman` probes, an image without those tools fails Stage 1 and the run stops there, so the "not applicable" path cannot be reached end to end before task 073. Cover the gate decision and the banner in the pure-shell suite instead. That needs them factored so they can run without the stages (a small helper both umbrellas call, for example), with a fake `docker` on `PATH` answering the capability check; `scripts/test-context-mount-config.sh` shows the fake-`docker` technique.
 - **Reporting.** Add a separate list for "not applicable to this image" and print it in the banner as information. It must not make the run "partial": a lean image without Podman has been fully tested. A skip requested by a variable or forced by the host stays in `skipped` as today.
 - **No silent pass for `full`.** Capability gating alone would let a `full` image that lost Podman pass with Stage 3 reported as not applicable. The guard is the set's own probe file: tasks 071 and 073 must put a presence probe for every tool the set installs into `docker/layers/full/smoke-probes.txt`. State this rule in `docs/smoke-tests.md` so set authors know the probe file is what makes absence a failure.
 - The scoped PostgreSQL suite that Stage 2 runs (`scripts/test-pg-dev-up-scoped.sh`) is gated together with the rest of Stage 2.
@@ -61,18 +66,21 @@ This task builds that mechanism while every tool is still in the base, so it cha
 
 ## Acceptance criteria
 
-- Against the current all-in-one image with no layer label, both drivers behave exactly as before: same stages, same banner.
+- Against the current all-in-one image with no layer label, both drivers run the same stages with the same banner as before; the only difference is the added `podman` presence probe in Stage 1.
+- An image without `podman` fails Stage 1 on that probe, in both drivers.
 - Against an image labelled with a set that has `smoke-probes.txt`, Stage 1b runs those probes in file order, and a failing probe fails the run and is named by index with the manifest printed.
-- Against an image without `pg-dev-up`, Stage 2 is reported as not applicable and the run is not marked partial; likewise Stage 3 without `podman`.
-- `POWBOX_SMOKE_SKIP_DB` and `POWBOX_SMOKE_SKIP_PODMAN` still record a skip and mark the run partial.
+- When the capability check finds no `pg-dev-up`, Stage 2 is reported as not applicable and the run is not marked partial; likewise Stage 3 without `podman`. At this point that is shown by the unit coverage described under "Reachability"; it becomes observable end to end once task 073 has moved the probes.
+- Against an image that has the tool, `POWBOX_SMOKE_SKIP_DB` and `POWBOX_SMOKE_SKIP_PODMAN` still record a skip and mark the run partial.
 - A probe file with CRLF line endings, comments and blank lines yields the same probe list in bash and PowerShell.
-- A multi-line or continuation-ending probe in the file is rejected by the existing driver check, not run truncated.
-- `docs/smoke-tests.md` describes Stage 1b, the file format, the three label/file cases, the not-applicable list and the presence-probe rule.
+- A probe line ending in a line continuation (a trailing backslash) is rejected by the existing driver check, not run truncated or joined with the next line.
+- `docs/smoke-tests.md` describes Stage 1b, the file format, the four label/file cases listed under "Which set", the not-applicable list and the presence-probe rule.
+- The headers of `scripts/smoke-test-podman.{sh,ps1}` and `docs/smoke-tests.md` no longer claim that Stage 3 is what fails an image with no engine.
 - `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`) and `./scripts/run-pure-shell-tests.sh` pass.
 
 ## Validation
 
-- Unit-test the probe-file reader and its bash/PowerShell parity in the pure-shell suite, with fixtures for CRLF, comments, blank lines and an ordering-sensitive pair.
+- Unit-test the probe-file reader and its bash/PowerShell parity in the pure-shell suite, with fixtures for CRLF, comments, blank lines, a trailing-backslash line and an ordering-sensitive pair.
+- Unit-test the capability gate and the banner as described under "Reachability": tool present, tool absent, and tool present with the skip variable set.
 - The stage behaviour needs images. Ask the maintainer to run `./commands/smoke-test.sh` on the host against the current image (no behaviour change expected), and against a small `custom` set with a two-line probe file, one line deliberately failing. Tier 1 (task 065) covers the rest once it has landed.
 
 ## Review plan

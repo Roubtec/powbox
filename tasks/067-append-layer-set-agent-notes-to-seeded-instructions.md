@@ -16,7 +16,8 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 2. A host-side staging step that composes the core template and the selected set's notes into one file.
 3. `docker/agent/Dockerfile` copying the staged file instead of the raw template.
 4. One sentence in the core template pointing at the appended section.
-5. Bash and PowerShell parity, a unit suite, and documentation.
+5. Tier 1's `paths:` filter, so a change to the staging script triggers an image build.
+6. Bash and PowerShell parity, a unit suite, and documentation.
 
 **Out of scope:**
 
@@ -30,6 +31,7 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 - `docker/agent/Dockerfile`, section "Per-agent seed assets": two `COPY --chown=node:node docker/shared/container-agent.md.tmpl …/agent.md.tmpl` lines, one per agent, followed by the `build-epoch` `RUN`.
 - `docker/shared/entrypoint-claude-hook.sh` and `docker/shared/entrypoint-codex-hook.sh` render `agent.md.tmpl` with `envsubst`, substituting **only** `${AGENT_NAME}`, `${AGENT_AUTONOMY_FLAG}`, `${AGENT_CONFIG_DIR}` and `${AGENT_PEERS}`, and re-render when the image's `build-epoch` is at least the volume's recorded epoch.
 - `scripts/build-image.sh`, function `fetch_agent_skills`: the precedent for host-side staging into a gitignored directory (`.agent-skills-src`) that the agent Dockerfile then COPYs. A standalone `docker build` without the staging step fails at the COPY by design.
+- `.github/workflows/native-linux-build.yml`: the `paths:` filter lists the build-input scripts by pattern (`scripts/build-image.*`, and `scripts/layers-*` once task 065 has landed). Nothing there matches `scripts/stage-agent-template.*`, although the staging script decides the content of a file baked into the agent image.
 - `README.md`, "Updating Agent Instructions".
 
 ## Target files or areas
@@ -39,6 +41,7 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 - `docker/agent/Dockerfile` — the two template `COPY` lines.
 - `docker/shared/container-agent.md.tmpl` — one pointer sentence under "Available tooling".
 - `.gitignore` — the staging directory.
+- `.github/workflows/native-linux-build.yml` — add `scripts/stage-agent-template.*` to the `paths:` filter. No cache key changes: the script feeds the agent image only, which Tier 1 never caches.
 - A new pure-shell suite under `scripts/`.
 - `README.md` ("Updating Agent Instructions", "Layout"), `docs/entrypoint-and-runtime.md`.
 
@@ -61,7 +64,8 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 - The bash and PowerShell staging scripts produce byte-identical output for the same inputs, including notes saved with CRLF.
 - An agent image built with a `custom` set containing notes renders those notes into both agents' instruction files on container start, and a notes-only edit followed by `agent-update` reaches a restarted container.
 - `docker/agent/Dockerfile` no longer copies `docker/shared/container-agent.md.tmpl` directly.
-- `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`), `markdownlint-cli2` on changed Markdown, and `./scripts/run-pure-shell-tests.sh` pass.
+- A PR that changes only `scripts/stage-agent-template.sh` or its `.ps1` sibling triggers Tier 1.
+- `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`), `actionlint` on the workflow, `markdownlint-cli2` on changed Markdown, and `./scripts/run-pure-shell-tests.sh` pass.
 
 ## Validation
 

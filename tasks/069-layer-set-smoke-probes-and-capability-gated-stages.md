@@ -52,7 +52,8 @@ This task builds that mechanism while every tool is still in the base, so every 
 - **Which set.** Read `powbox.layers.set` from the image under test, not from `.powbox-layers`: the smoke test must describe the image it was given. The probes come from `docker/layers/<set>/smoke-probes.txt` in the working tree.
   - No label: the image is lean; there is no layer stage, and that is not a skip.
   - Label present, file absent, set other than `full`: the set ships no probes; print one note line and continue. This is how a user opts out of layer tests for a set of their own.
-  - Label `full`, file absent: fail the run. `full` is the committed set, its probe file is what makes a lost tool a failure once tasks 071 and 073 have moved the tool probes out of Stage 1, and a deleted or renamed `docker/layers/full/smoke-probes.txt` must not turn that into a note. This task commits the file as a skeleton (a header comment and no probe lines) so that `full` has one from the start. The whole `docker/layers/full/` directory missing from the working tree is the same hard failure, whatever `POWBOX_SMOKE_REQUIRE_IMAGE` says: the skip-with-warning case below is for sets other than `full`.
+  - Label `full`, file absent: fail the run. `full` is the committed set, its probe file is what makes a lost tool a failure once tasks 071 and 073 have moved the tool probes out of Stage 1, and a deleted or renamed `docker/layers/full/smoke-probes.txt` must not turn that into a note. This task commits the file as a skeleton (a header comment and no probe lines) so that `full` has one from the start.
+  - Label `full`, the whole `docker/layers/full/` directory missing from the working tree: the same hard failure, whatever `POWBOX_SMOKE_REQUIRE_IMAGE` says; the skip-with-warning case for a missing directory below is for sets other than `full`.
   - Label present, file present, but no probe line survives the reader (the skeleton, or a file of comments): print one note line naming the file and run no Stage 1b. `scripts/smoke-test-image.sh` exits 1 when handed no command at all, so the reader must not call the driver with an empty list; this case is distinct from "file absent" and is not a skip.
   - Label present, set other than `full`, but the set directory is missing from the working tree: record it in `skipped` with a warning (the run is partial), and fail instead when `POWBOX_SMOKE_REQUIRE_IMAGE` is set.
   - Image digest label differs from the working tree's digest: warn that the image is stale relative to the probes, then run them anyway.
@@ -83,7 +84,7 @@ This task builds that mechanism while every tool is still in the base, so every 
 
 ## Validation
 
-- Unit-test the probe-file reader and its bash/PowerShell parity in the pure-shell suite, with fixtures for CRLF, comments, blank lines, a trailing-backslash line and an ordering-sensitive pair.
+- Unit-test the probe-file reader and its bash/PowerShell parity in the pure-shell suite, with fixtures for CRLF, comments, blank lines, a trailing-backslash line, an ordering-sensitive pair, and the two files that yield no probe line (empty, and comments only).
 - Unit-test the capability gate and the banner as described under "Reachability": tool present, tool absent, and tool present with the explicit skip set.
 - The stage behaviour needs images. Ask the maintainer to run `./commands/smoke-test.sh` on the host against the current image (no behaviour change expected), and against a small `custom` set with a two-line probe file, one line deliberately failing. Tier 1 (task 065) covers the rest once it has landed.
 

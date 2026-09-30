@@ -271,7 +271,10 @@ echo "Test: a management/query subcommand with an install-class-looking position
 # subcommand (why/list/remove/config/outdated) that writes no root node_modules, so even
 # in the regression-shaped condition they must stay silent. (A package literally named
 # `install`/`add`/`update` exists on the registry, so these are realistic queries.)
-err="$(wrapper_stderr "$WS" 1 "" "" why install)"
+# `why` and `cache delete` carry `--help` like the registry probes below: on pnpm 12 a bare
+# `pnpm why` scaffolds a package.json into the fixture, and `pnpm cache delete <pattern>`
+# really deletes from the user's metadata cache (PR #160 fresh review).
+err="$(wrapper_stderr "$WS" 1 "" "" why install --help)"
 assert_no_warn "$err" "'pnpm why install' does not warn (why is the subcommand)"
 err="$(wrapper_stderr "$WS" 1 "" "" list add)"
 assert_no_warn "$err" "'pnpm list add' does not warn (list is the subcommand)"
@@ -283,7 +286,7 @@ err="$(wrapper_stderr "$WS" 1 "" "" outdated add)"
 assert_no_warn "$err" "'pnpm outdated add' does not warn (outdated is the subcommand)"
 # `cache`/`stage` take a sub-action + package pattern; they must be recognized too so the
 # resolver does not skip them onto a trailing install-class word.
-err="$(wrapper_stderr "$WS" 1 "" "" cache delete add)"
+err="$(wrapper_stderr "$WS" 1 "" "" cache delete add --help)"
 assert_no_warn "$err" "'pnpm cache delete add' does not warn (cache is the subcommand)"
 err="$(wrapper_stderr "$WS" 1 "" "" stage view install)"
 assert_no_warn "$err" "'pnpm stage view install' does not warn (stage is the subcommand)"
@@ -503,6 +506,9 @@ echo "Test: 'pnpm build' (bare script, no install word) -> silent (ACCEPTED pre-
 # (the wrapper has always keyed off the resolved subcommand, never script-triggered auto-installs);
 # detecting it would need the package.json-aware redesign 002c declined as disproportionate. The
 # gate is evaluated before the terminal exec, so this stays hermetic regardless of the script run.
+# Deliberately no `--help`: it would only be an argument to the `build` script, and the point
+# is a bare script run. The fixture holds no package.json (every probe above that could
+# scaffold one carries `--help`), so the real pnpm fails fast here without writing anything.
 err="$(wrapper_stderr "$WS" 1 "" "" build)"
 assert_no_warn "$err" "'pnpm build' (bare script) does not warn (accepted pre-existing gap: no install-class subcommand resolved)"
 

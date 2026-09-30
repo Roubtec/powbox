@@ -413,19 +413,48 @@ echo "Test: 'pnpm build install' (script shorthand) -> warns (ACCEPTED benign fa
 err="$(wrapper_stderr "$WS" 1 "" "" build install --help)"
 assert_warns "$err" "'pnpm build install' warns (accepted benign false positive; script shorthand latches 'install')"
 
-echo "Test: 'pnpm --registry run install' (unlisted config-key global) -> silent (ACCEPTED, 002c)"
-# ACCEPTED residual per task 002c (approach C — accept & close). `--registry <url>` is a value-taking
-# CONFIG-KEY global that lives OUTSIDE `pnpm install --help`, so it is deliberately NOT enumerated in
-# the resolver's skip list — enumerating the open-ended npmrc config-key surface is exactly the
-# maintenance trap task-002b removed. So the resolver does not step over `--registry`'s value and
-# reads that value `run` as the subcommand, staying SILENT on what is really a root install (`run`
-# is consumed as the registry value, `install` is the subcommand). This pins the accepted
-# limitation: if a future change "fixes" it by enumerating config-key globals this assertion flips
-# to a warning and the test fails, forcing a conscious re-decision rather than a silent reopening of
-# the ever-growing-list trap. The trailing `--help` keeps the real `pnpm --registry run install
-# --help` hermetic (exits 0, writes no node_modules).
+echo "Test: 'pnpm --registry run install' -> warns (002c residual closed by pnpm 12's install --help)"
+# Formerly an ACCEPTED 002c residual: `--registry <url>` was a config-key global OUTSIDE pnpm 11's
+# `pnpm install --help`, so the resolver read its value `run` as the subcommand and stayed silent.
+# pnpm 12 documents `--registry` (with the other network/state flags) in `install --help`, so the
+# authoritative-list rule now steps over its value: `run` is consumed as the registry, `install` is
+# the subcommand, and the real root install warns. The rule itself is unchanged: config keys that
+# no `install --help` documents stay unlisted. The trailing `--help` keeps the real run hermetic.
 err="$(wrapper_stderr "$WS" 1 "" "" --registry run install --help)"
-assert_no_warn "$err" "'pnpm --registry run install' does not warn (accepted: unlisted config-key global's value 'run' read as the subcommand)"
+assert_warns "$err" "'pnpm --registry run install' warns (--registry's value 'run' is stepped over)"
+
+echo "Test: pnpm 12 path/glob-valued globals before the subcommand -> still warn"
+for flag in --state-dir --workspace-packages --npmrc-auth-file --userconfig --node-linker; do
+	err="$(wrapper_stderr "$WS" 1 "" "" "$flag" run install --help)"
+	assert_warns "$err" "'pnpm $flag run install' warns (the flag's value 'run' is stepped over)"
+done
+
+echo "Test: pnpm 12 'pipeline' (runs a frozen install) -> warns"
+# `pnpm pipeline` performs a frozen install before its task graph, writing node_modules with no
+# install word on the command line, so it is install-class: it refreshes shadows and, in the
+# regression-shaped condition, warns like `pnpm install`.
+err="$(wrapper_stderr "$WS" 1 "" "" pipeline --help)"
+assert_warns "$err" "'pnpm pipeline' warns (frozen install)"
+
+echo "Test: pnpm 12 name-taking subcommands with an install-class positional -> silent"
+# pnpm 12 adds subcommands (and exposes aliases) whose positional can be an install-class word.
+# The resolver must stop at them rather than latch the trailing word.
+for cmd in "set-script install" "ss add" "pkg set" "peers install" "shim add" "lane update" \
+	"undeprecate install" "unstar add" "uni add" "tst install" "stop install" "issues add" \
+	"licences add" "dist-tags add" "owners add" "dislink add"; do
+	# shellcheck disable=SC2086 # deliberate word-split of the "<cmd> <positional>" pair
+	err="$(wrapper_stderr "$WS" 1 "" "" $cmd)"
+	assert_no_warn "$err" "'pnpm $cmd' does not warn"
+done
+
+echo "Test: pnpm 12 prefix commands still reach the wrapped install -> warns"
+# `recursive`/`multi`/`m` and `with <version>` wrap another subcommand, so they are deliberately
+# NOT recognized: the resolver must walk past them (and the version) to the real `install`.
+for cmd in "recursive install" "m install" "multi install" "with 11 install"; do
+	# shellcheck disable=SC2086 # deliberate word-split of the command words
+	err="$(wrapper_stderr "$WS" 1 "" "" $cmd --help)"
+	assert_warns "$err" "'pnpm $cmd' warns (prefix command wraps a root install)"
+done
 
 echo "Test: 'pnpm build' (bare script, no install word) -> silent (ACCEPTED pre-existing gap, 002c)"
 # ACCEPTED residual per task 002c (approach C — accept & close). A bare `pnpm build` resolves to NO

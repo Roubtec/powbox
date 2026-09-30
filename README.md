@@ -53,7 +53,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 8, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
+- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 10, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -937,11 +937,11 @@ Expected results:
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
 
-Codex preserves any existing `config.toml` settings in the `codex-config` volume, but the container now auto-seeds a missing `[tui].status_line` plus a missing top-level `terminal_title` default.
+Codex preserves any existing `config.toml` settings in the `codex-config` volume, but the container now auto-seeds a missing `[tui].status_line` default.
 The seeded status line uses Codex-native items for model, current directory, remaining context, 5-hour usage, weekly usage, and used tokens.
-`terminal_title` is a separate Codex setting for the terminal window or tab title, not the bottom status line.
-The seeded title surfaces current directory, git branch, model, and thread title when the terminal supports title updates.
-That means a fresh or reset Codex config starts with a richer native status line and title, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
+Terminal window/tab titles use Codex's own defaults unless you configure `[tui].terminal_title`; powbox no longer seeds the unrecognized top-level `terminal_title` key.
+If an older container already seeded that top-level key, remove it from `~/.codex/config.toml` to clear the startup warning.
+That means a fresh or reset Codex config starts with a richer native status line, while existing user customizations remain untouched except for compatibility migrations such as replacing Codex's removed `context-remaining-percent` status item with `context-remaining`.
 
 Claude likewise preserves existing `settings.json` values in the `claude-config` volume, and the container seeds one no-clobber default: a missing `respondToBashCommands` is set to `false`.
 That keeps a fresh Claude config's `!` bash commands context-only — their output feeds your next prompt instead of triggering a reply after each one (Claude Code's pre-2.1.186 behavior).

@@ -31,12 +31,18 @@
 set -uo pipefail
 
 # npm always unpacks a global package at lib/node_modules/<name>, so this directory
-# is stable across pnpm versions. pnpm's package `bin` entry is the executable ESM
-# launcher bin/pnpm.mjs (verified for the installed pnpm); some builds also ship a
-# non-executable bin/pnpm.cjs shim that re-imports it for older Corepack. The exec
-# block at the end prefers .mjs and falls back to .cjs so the wrapper degrades
-# gracefully rather than failing every call if that layout ever shifts.
-PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
+# is stable across pnpm versions; only the entry point inside it has moved. pnpm 12
+# ships as a native binary: its package `bin` entry is the extensionless `pnpm` at
+# the package root, which its preinstall replaces with the host's native executable
+# (a shebang-less placeholder that re-runs through Node when lifecycle scripts were
+# skipped), while bin/pnpm.mjs is now only a non-executable Corepack entry that
+# spawns that same binary one Node startup later. pnpm 10/11 instead had the
+# executable ESM launcher bin/pnpm.mjs as the entry, and some builds also shipped a
+# non-executable bin/pnpm.cjs shim for older Corepack. The exec block at the end
+# tries them in that order so the wrapper degrades gracefully rather than failing
+# every call if the layout shifts again.
+PNPM_PKGDIR="/usr/local/lib/node_modules/pnpm"
+PNPM_BINDIR="$PNPM_PKGDIR/bin"
 
 # pnpm subcommand classification, factored so the refresh trigger (the loop at the
 # bottom of this file) and the root-node_modules warning inside refresh_shadows share
@@ -50,10 +56,13 @@ PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
 # (`pnpm ci --help` → "Aliases: clean-install, ic, install-clean"): they write the project's
 # node_modules from the lockfile exactly like `install`, so they are install-class too — omitting
 # them let a mid-session `pnpm ci` in a non-dev folder write host node_modules with no warning.
+# pnpm 12's `pipeline` runs "a frozen install" before its task graph (`pnpm pipeline --help`),
+# so it writes node_modules with no install word on the command line and must be listed too;
+# on pnpm 10/11, where it is not a subcommand, the extra match is a harmless idempotent refresh.
 is_install_class_subcommand() {
 	case "$1" in
 		install | i | install-test | it | add | update | up | upgrade | dedupe | import | rebuild | rb | fetch | link | ln | \
-			ci | clean-install | ic | install-clean) return 0 ;;
+			ci | clean-install | ic | install-clean | pipeline) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -107,6 +116,12 @@ is_name_arg_subcommand() {
 # recognized here exactly like an implemented one, e.g. access/team/token/profile); only a truly
 # unknown token falls through to a script run (`verify-deps-before-run` may install, then "Command
 # not found"). An unlisted brand-new subcommand only degrades to the same latching, never a crash.
+# pnpm 12 (a native rewrite) lists its full surface, aliases included, in plain `pnpm help`; the
+# second-to-last group below holds its additions (set-script/ss, pkg, peers, shim, change, lane, …)
+# and newly exposed aliases (uni, tst, issues, licences, dist-tags, owners, dislink). Its PREFIX
+# commands are deliberately NOT listed: `recursive`/`multi`/`m` and `with <version>` wrap another
+# subcommand (`pnpm m install`, `pnpm with 11 add x`), so the resolver must skip past them to the
+# real one — recognizing them would hide that install from the warning.
 is_known_subcommand() {
 	is_install_class_subcommand "$1" && return 0
 	is_name_arg_subcommand "$1" && return 0
@@ -122,7 +137,9 @@ is_known_subcommand() {
 			store | cache | config | c | doctor | env | deploy | server | \
 			root | bin | setup | pack | publish | init | stage | \
 			start | test | t | restart | clean | runtime | rt | self-update | \
-			approve-builds | ignored-builds | cat-file | cat-index | find-hash) return 0 ;;
+			approve-builds | ignored-builds | cat-file | cat-index | find-hash | \
+			set-script | ss | pkg | peers | shim | change | lane | stop | purge | prefix | pack-app | \
+			undeprecate | unstar | uni | tst | issues | licences | dist-tags | owners | dislink) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -151,7 +168,13 @@ is_known_subcommand() {
 # value-taking option `pnpm install --help` documents, so the resolver is complete with respect
 # to that authoritative list:
 #   - dirs:            `-C/--dir`, `--store-dir`, `--virtual-store-dir`, `--modules-dir`,
-#                      `--lockfile-dir`, `--global-dir`
+#                      `--lockfile-dir`, `--global-dir` — plus the two npm-compat aliases
+#                      `--help` does NOT list: `--prefix <DIR>` is `--dir` and `--store <DIR>`
+#                      is `--store-dir` (verified on pnpm 12.4.2: `pnpm --prefix /x root` prints
+#                      /x/node_modules exactly like `--dir`, and `pnpm --store run install
+#                      --help` prints INSTALL's help, i.e. `run` was consumed as the store
+#                      path). They are aliases of listed dir options, not config keys, so they
+#                      fall under the authoritative list rather than under residual #1 below.
 #   - selectors/specs: `--filter/-F/--filter-prod`, `--trust-policy-exclude`
 #   - glob patterns:   `--hoist-pattern`, `--public-hoist-pattern`,
 #                      `--changed-files-ignore-pattern`, `--test-pattern`
@@ -160,6 +183,16 @@ is_known_subcommand() {
 #   - enums:           `--package-import-method`, `--trust-policy` (pnpm spells their values out in
 #                      `install --help` — `--package-import-method auto|clone|copy|hardlink`,
 #                      `--trust-policy no-downgrade|off` — but does NOT validate before consuming)
+#   - pnpm 12 additions to that same `pnpm install --help` list: `--state-dir`,
+#                      `--workspace-packages`, `--npmrc-auth-file` (alias `--userconfig`),
+#                      `--node-linker`, `--merge-git-branch-lockfiles-branch-pattern`, and the
+#                      network group `--registry`, `--https-proxy`, `--http-proxy`, `--no-proxy`,
+#                      `--pnpr-server`, `--user-agent`. `--registry` was the 002c "unlisted
+#                      config-key global" residual under pnpm 11; pnpm 12 documents it in
+#                      `install --help`, so the authoritative-list rule now covers it. pnpm 11
+#                      consumes each of these values the same way, so listing them is harmless
+#                      there. (`--color[=<when>]` takes its value only `=`-joined, so it is not a
+#                      bare value-taker.) The pnpm 11-only entries above stay for pinned projects.
 # (their `=`-joined forms are a single self-contained token: the prev-value check matches only a
 # bare `--reporter`, never `--reporter=silent`, and the joined token is not a subcommand name, so
 # the loop just steps past it like any other unrecognized arg — there is no separate `-*` branch.) A
@@ -175,9 +208,10 @@ is_known_subcommand() {
 # and stay silent, which is why the skip list matters.
 #
 # Known residual #1 (config-key false NEGATIVE — exotic, accepted): pnpm also accepts value-taking
-# GLOBAL/config-key options that do NOT appear in `pnpm install --help` — `--node-linker`,
-# `--registry`/`--ca`/`--https-proxy`, the `--fetch-*` numerics, and in principle any
-# `--<npmrc-key> <value>` (all verified to consume their token and install on pnpm 11.8.0). These
+# GLOBAL/config-key options that do NOT appear in `pnpm install --help` — `--ca`, the `--fetch-*`
+# numerics, and in principle any `--<npmrc-key> <value>` (all verified to consume their token and
+# install on pnpm 11.8.0; `--node-linker`/`--registry`/`--https-proxy` were in this group until
+# pnpm 12 documented them in `install --help`, which moved them into the list above). These
 # are an open-ended set we deliberately do NOT enumerate here (the ever-growing-list trap task-002b
 # set out to avoid), so an `--<unlisted-value-taking-global> <subcommand-name> install` still
 # resolves to that subcommand-name value and stays silent.
@@ -215,14 +249,17 @@ pnpm_subcommand() {
 		# is the flag's argument (a path/package selector that could collide with a
 		# subcommand name), never the subcommand, so skip it.
 		case "$prev" in
-			-C | --dir | --store-dir | --virtual-store-dir | --modules-dir | \
+			-C | --dir | --prefix | --store-dir | --store | --virtual-store-dir | --modules-dir | \
 				--lockfile-dir | --global-dir | \
 				--filter | -F | --filter-prod | --trust-policy-exclude | \
 				--hoist-pattern | --public-hoist-pattern | \
 				--changed-files-ignore-pattern | --test-pattern | \
 				--cpu | --libc | --os | --reporter | --loglevel | \
 				--package-import-method | --trust-policy | \
-				--network-concurrency | --child-concurrency | --trust-policy-ignore-after)
+				--network-concurrency | --child-concurrency | --trust-policy-ignore-after | \
+				--state-dir | --workspace-packages | --npmrc-auth-file | --userconfig | \
+				--node-linker | --merge-git-branch-lockfiles-branch-pattern | \
+				--registry | --https-proxy | --http-proxy | --no-proxy | --pnpr-server | --user-agent)
 				# This token is the flag's value. Reset prev to a non-flag sentinel so the
 				# value itself cannot be re-read as a value-taking flag on the next
 				# iteration: a dir/selector/pattern literally named like one of these flags
@@ -256,21 +293,23 @@ refresh_shadows() {
 	# into that project, so the /workspace guard and the project-scoping walk below
 	# must key off that target rather than the raw $PWD — otherwise the early return
 	# here would skip the very refresh this wrapper exists to do. pnpm accepts
-	# `-C <dir>`, `--dir <dir>`, and the `=`-joined forms; a later flag wins.
+	# `-C <dir>`, `--dir <dir>`, the undocumented npm-compat alias `--prefix <dir>`
+	# (same meaning, verified on pnpm 12.4.2 — see the resolver's dirs note), and the
+	# `=`-joined forms of all three; a later flag wins.
 	local effdir="$PWD" prev="" a
 	for a in "$@"; do
 		case "$prev" in
-			-C | --dir)
-				# This token is `-C/--dir`'s value. Consume it and reset prev to a non-flag
-				# sentinel so the value itself cannot be re-read as `-C/--dir` on the next
-				# iteration (the same consumed-value-re-read class fixed in pnpm_subcommand).
+			-C | --dir | --prefix)
+				# This token is `-C/--dir/--prefix`'s value. Consume it and reset prev to a
+				# non-flag sentinel so the value itself cannot be re-read as a dir flag on the
+				# next iteration (the same consumed-value-re-read class fixed in pnpm_subcommand).
 				effdir="$a"
 				prev=""
 				continue
 				;;
 		esac
 		case "$a" in
-			-C=* | --dir=*) effdir="${a#*=}" ;;
+			-C=* | --dir=* | --prefix=*) effdir="${a#*=}" ;;
 		esac
 		prev="$a"
 	done
@@ -360,11 +399,13 @@ for arg in "$@"; do
 	fi
 done
 
-# Delegate to the real pnpm. Keep the proven happy path (exec the executable .mjs)
-# and add fallbacks: run a non-executable entry via `node` (the .cjs shim isn't
-# chmod +x), and try the .cjs shim if the .mjs is absent. node is always on PATH in
-# this image, just as the .mjs's `#!/usr/bin/env node` shebang already requires.
-if [ -x "$PNPM_BINDIR/pnpm.mjs" ]; then
+# Delegate to the real pnpm. Prefer pnpm 12's package-root entry (the native binary,
+# ~40 ms faster per call than routing through Node), then pnpm 10/11's executable
+# .mjs, then run a non-executable entry via `node` (pnpm 12's Corepack .mjs, or the
+# .cjs shim, neither of which is chmod +x). node is always on PATH in this image.
+if [ -f "$PNPM_PKGDIR/pnpm" ] && [ -x "$PNPM_PKGDIR/pnpm" ]; then
+	exec "$PNPM_PKGDIR/pnpm" "$@"
+elif [ -x "$PNPM_BINDIR/pnpm.mjs" ]; then
 	exec "$PNPM_BINDIR/pnpm.mjs" "$@"
 elif [ -f "$PNPM_BINDIR/pnpm.mjs" ]; then
 	exec node "$PNPM_BINDIR/pnpm.mjs" "$@"

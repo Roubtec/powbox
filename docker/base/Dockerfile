@@ -128,7 +128,18 @@ RUN pwsh -NoProfile -NonInteractive -Command \
 # otherwise agents can apply it with `-Settings <path>`.
 COPY PSScriptAnalyzerSettings.psd1 /usr/local/share/powershell/PSScriptAnalyzerSettings.psd1
 
-# Install pnpm
+# Silence npm's "New major version of npm available!" notice, image-wide. npm is
+# whatever the node:24 base bundles (it moves with Node, not independently), so
+# the notice is unactionable noise at the end of every `npm install -g` in the
+# base and agent builds and in every in-session npm call. Declared here, right
+# before the first npm install, so it covers those layers without busting the
+# apt layers above. An ENV (not a baked npmrc) so a session can still opt back
+# in by overriding it.
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# Install pnpm. Unpinned: pnpm v10+ honors a project's `packageManager` field
+# and transparently runs that pinned version (e.g. pnpm@11.x under this global
+# 12.x), so the global one only matters for repos without a pin.
 RUN npm install -g pnpm
 
 # Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram
@@ -434,21 +445,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # mssql-tools18, and it carries the SDK packages too. That layer ends with an
 # `rm -rf /var/lib/apt/lists/*`, hence the `apt-get update` here.
 #
-# Version choice: the 8.0 LTS band, pinned only to major.minor (the
-# postgresql-16 / mssql-tools18 precedent, NOT the sha256-pinned tarball
-# treatment Go and OPA need — this is a signed distro repo). It is the band
-# projects currently pin in CI (`actions/setup-dotnet` with `8.0.4xx`), and the
-# apt candidate resolves inside that band, so a local run and a CI run agree on
-# the SDK feature band. `dotnet-sdk-8.0` pulls its own runtime, the ASP.NET
-# runtime, and the targeting/apphost packs, so `dotnet test -f net8.0` works
-# with nothing else installed. Because the Microsoft repo is already wired, a
-# project needing a different band is one `sudo apt-get update && sudo apt-get
-# install -y dotnet-sdk-N.0` away in-session — the same escape hatch
+# Version choice: the 10.0 LTS band (supported to 2028-11-14; 8.0's support
+# ends 2026-11-10), pinned only to major.minor (the postgresql-16 /
+# mssql-tools18 precedent, NOT the sha256-pinned tarball treatment Go and OPA
+# need — this is a signed distro repo). It is the major projects currently pin
+# in CI (`actions/setup-dotnet` with `10.0.1xx`). The apt candidate tracks the
+# NEWEST 10.0 feature band (10.0.4xx at the time of writing), so a local run
+# and a CI run agree on the runtime and language major but not necessarily on
+# the SDK feature band. `dotnet-sdk-10.0` pulls its own runtime, the ASP.NET
+# runtime, and the targeting/apphost packs, so `dotnet test -f net10.0` works
+# with nothing else installed. A project still targeting an older TFM
+# (`net8.0`) BUILDS with this SDK alone — the targeting pack comes from NuGet —
+# but its binaries and tests do not RUN without that runtime ("You must install
+# or update .NET to run this application"); `DOTNET_ROLL_FORWARD=Major` runs
+# them on the baked 10.0 runtime instead. Because the Microsoft repo is already
+# wired, a project needing a different band is one `sudo apt-get update && sudo
+# apt-get install -y dotnet-sdk-N.0` away in-session — the same escape hatch
 # GOTOOLCHAIN=auto gives Go projects. The `update` is not optional: this layer
 # ends by clearing /var/lib/apt/lists and no later layer repopulates it, so a
 # bare `apt-get install` in a fresh container fails with "Unable to locate
 # package" even though the source is configured.
-# Baking a second SDK is deliberately avoided: each one is ~575 MB.
+# Baking a second SDK is deliberately avoided: each one is ~600 MB (8.0 was
+# ~575 MB, 10.0 is ~645 MB).
 #
 # `dotnet format` and `dotnet test` ship inside the SDK, so no companion lint or
 # test-runner package is installed (contrast golangci-lint, which Go needs
@@ -459,7 +477,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Placed low, beside the other late tool layers, so an SDK bump never busts the
 # expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    dotnet-sdk-8.0 \
+    dotnet-sdk-10.0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the substrate startup scripts shared by every agent while still root.

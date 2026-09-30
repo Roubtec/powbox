@@ -271,18 +271,20 @@ echo "Test: a management/query subcommand with an install-class-looking position
 # subcommand (why/list/remove/config/outdated) that writes no root node_modules, so even
 # in the regression-shaped condition they must stay silent. (A package literally named
 # `install`/`add`/`update` exists on the registry, so these are realistic queries.)
-# `why` and `cache delete` carry `--help` like the registry probes below: on pnpm 12 a bare
-# `pnpm why` scaffolds a package.json into the fixture, and `pnpm cache delete <pattern>`
-# really deletes from the user's metadata cache (PR #160 fresh review).
+# `why`, `remove`, `outdated` and `cache delete` carry `--help` like the registry probes below:
+# on pnpm 12 a bare `pnpm why`/`remove`/`outdated` scaffolds a package.json into the fixture
+# (which would then let the bare `pnpm build` probe at the end run a real empty install), and
+# `pnpm cache delete <pattern>` really deletes from the user's metadata cache (PR #160 fresh
+# review, rounds 1-2). Every bare probe that remains was measured to leave the fixture empty.
 err="$(wrapper_stderr "$WS" 1 "" "" why install --help)"
 assert_no_warn "$err" "'pnpm why install' does not warn (why is the subcommand)"
 err="$(wrapper_stderr "$WS" 1 "" "" list add)"
 assert_no_warn "$err" "'pnpm list add' does not warn (list is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" remove update)"
+err="$(wrapper_stderr "$WS" 1 "" "" remove update --help)"
 assert_no_warn "$err" "'pnpm remove update' does not warn (remove is the subcommand)"
 err="$(wrapper_stderr "$WS" 1 "" "" config get install)"
 assert_no_warn "$err" "'pnpm config get install' does not warn (config is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" outdated add)"
+err="$(wrapper_stderr "$WS" 1 "" "" outdated add --help)"
 assert_no_warn "$err" "'pnpm outdated add' does not warn (outdated is the subcommand)"
 # `cache`/`stage` take a sub-action + package pattern; they must be recognized too so the
 # resolver does not skip them onto a trailing install-class word.

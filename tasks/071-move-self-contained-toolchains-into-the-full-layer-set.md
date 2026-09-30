@@ -23,7 +23,7 @@ The target user of the lean image is someone running unattended agents over a fo
 **Also in scope:**
 
 - The matching rows of `docker/shared/container-agent.md.tmpl` move into a new `docker/layers/full/agent-notes.md`.
-- The matching Stage 1 probes move from `commands/smoke-test.{sh,ps1}` into a new `docker/layers/full/smoke-probes.txt`.
+- The matching Stage 1 probes move from `commands/smoke-test.{sh,ps1}` into the skeleton `docker/layers/full/smoke-probes.txt` that task 069 committed.
 - `scripts/base-source-files.txt`, the docs, and the CI cache keys follow.
 
 **Stays in the base (decided, do not move):** Node, npm, pnpm and its shadow wrapper; Python 3 and pip; git, gh, ssh; the shell utilities; `build-essential`, `make`, `patch` (native modules for `pip` and `npm` need a compiler); `shellcheck` and `shfmt` (agents write shell scripts constantly); `pandoc`, `poppler-utils`, `sqlite3`; the firewall, sudo and bubblewrap setup; `yq`.

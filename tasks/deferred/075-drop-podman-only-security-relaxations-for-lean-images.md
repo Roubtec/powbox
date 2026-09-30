@@ -2,16 +2,13 @@
 
 ## Why this task is deferred
 
-It only becomes actionable once task 073 has made Podman optional, and it needs an investigation on real hosts before anyone can say whether it is viable.
-Move it to `tasks/` when 073 has merged.
+It only becomes actionable once task 073 has made Podman optional, and it needs an investigation on real hosts before anyone can say whether it is viable. Move it to `tasks/` when 073 has merged.
 
 ## Why this task exists
 
-`compose.shared.yml` applies `security_opt: seccomp=unconfined, apparmor=unconfined, systempaths=unconfined` to **every** agent container.
-The comment above those lines explains that they exist so rootless Podman can run nested containers (`keyctl`, `pivot_root`, writable `/proc/sys`).
+`compose.shared.yml` applies `security_opt: seccomp=unconfined, apparmor=unconfined, systempaths=unconfined` to **every** agent container. The comment above those lines explains that they exist so rootless Podman can run nested containers (`keyctl`, `pivot_root`, writable `/proc/sys`).
 
-After task 073 the lean image has no Podman, yet its containers still run with those three relaxations.
-The lean image is aimed at unattended agent runs with web access, which is exactly where a tighter sandbox is worth the most.
+After task 073 the lean image has no Podman, yet its containers still run with those three relaxations. The lean image is aimed at unattended agent runs with web access, which is exactly where a tighter sandbox is worth the most.
 
 ## Scope
 

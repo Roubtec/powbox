@@ -2,9 +2,7 @@
 
 ## Why this task exists
 
-This is the first of two tasks that make the base image lean.
-It moves the toolchains that have **no runtime coupling** to the launcher or entrypoint: removing them from the base changes nothing about how a container starts.
-Task 073 then moves the coupled ones (Podman, PostgreSQL, the browser stack).
+This is the first of two tasks that make the base image lean. It moves the toolchains that have **no runtime coupling** to the launcher or entrypoint: removing them from the base changes nothing about how a container starts. Task 073 then moves the coupled ones (Podman, PostgreSQL, the browser stack).
 
 The target user of the lean image is someone running unattended agents over a folder, who needs Node and Python as the agent's own automation runtime, git and the shell tools, and document conversion, but not language toolchains.
 
@@ -20,7 +18,7 @@ The target user of the lean image is someone running unattended agents over a fo
 | cmake, ninja, pkg-config, ccache, `libssl-dev`, `zlib1g-dev` | 63 MB | the "General-purpose native/CGo/CMake build dependencies" block |
 | OPA | 52 MB | |
 | PHP 8.4 packages + composer | 28 MB | from the first `apt-get install` block |
-| `mssql-tools18`, `unixodbc-dev`, the Microsoft apt repo config | 3 MB | the repo config serves PowerShell and .NET too, so it moves with them |
+| `mssql-tools18`, `unixodbc-dev`, the Microsoft apt repo config | 3 MB | the repo config serves PowerShell and .NET too, so it moves with them; `unixodbc-dev` is not in the Microsoft block but in the first `apt-get install` block, like the PHP packages |
 
 **Also in scope:**
 
@@ -83,8 +81,7 @@ The target user of the lean image is someone running unattended agents over a fo
 
 ## Validation
 
-Static checks and the pure-shell suites run in-container.
-The image contents need a host build: ask the maintainer to run `./build.sh all` with and without `.powbox-layers` set to `full`, then `./commands/smoke-test.sh` against each, and to report the two image sizes (`docker image ls`) for the PR description. Tier 1 covers both on the PR.
+Static checks and the pure-shell suites run in-container. The image contents need a host build: ask the maintainer to run `./build.sh all` with and without `.powbox-layers` set to `full`, then `./commands/smoke-test.sh` against each, and to report the two image sizes (`docker image ls`) for the PR description. Tier 1 covers both on the PR.
 
 ## Review plan
 

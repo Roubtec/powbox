@@ -2,9 +2,7 @@
 
 ## Why this task exists
 
-Agents learn what the container offers from the instruction file rendered from `docker/shared/container-agent.md.tmpl` (seeded as `CLAUDE.md` / `AGENTS.md` in each agent's config volume).
-Once tools move into an optional layer set (tasks 071 and 073), the core template must describe only the lean image, and whatever a layer set adds has to be documented by that set.
-A user who builds their own set needs a plain way to tell the agents what they added.
+Agents learn what the container offers from the instruction file rendered from `docker/shared/container-agent.md.tmpl` (seeded as `CLAUDE.md` / `AGENTS.md` in each agent's config volume). Once tools move into an optional layer set (tasks 071 and 073), the core template must describe only the lean image, and whatever a layer set adds has to be documented by that set. A user who builds their own set needs a plain way to tell the agents what they added.
 
 This task adds that channel: a hand-written `agent-notes.md` in the layer set, appended to the core template at build time.
 

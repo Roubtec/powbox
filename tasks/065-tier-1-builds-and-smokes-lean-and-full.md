@@ -2,9 +2,7 @@
 
 ## Why this task exists
 
-Task 063 adds an optional layer-set image between the base and the agent image.
-Once tools start moving out of the base (tasks 071 and 073), there are two supported images: the lean one a new user gets, and lean + `full`, which the maintainer runs.
-If CI builds only one of them, the other rots: the lean image can silently depend on a tool that moved, and the committed `full` set can stop building.
+Task 063 adds an optional layer-set image between the base and the agent image. Once tools start moving out of the base (tasks 071 and 073), there are two supported images: the lean one a new user gets, and lean + `full`, which the maintainer runs. If CI builds only one of them, the other rots: the lean image can silently depend on a tool that moved, and the committed `full` set can stop building.
 
 This task makes Tier 1 build and smoke both, **before** any tool moves, so tasks 071 and 073 land under coverage.
 
@@ -44,7 +42,7 @@ This task makes Tier 1 build and smoke both, **before** any tool moves, so tasks
 - **Assert what was built.** After each build, check the agent image's `powbox.layers.set` label (empty for lean, `full` for the second pass). A pass that silently built the wrong parent must fail the job rather than smoke the same image twice.
 - **Paths filter.** Add `scripts/layers-*` to the `paths:` list, next to `scripts/build-image.*`.
 - **Layers cache.** Cache the layers image as a tarball like the base: key it on the base cache key plus `hashFiles('docker/layers/full/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh')`, with no `restore-keys` for the same reason the base cache has none. The two scripts belong in the key because they decide the labels the tarball was stamped with: a changed digest algorithm against an old tarball would make every run rebuild the set while the cache entry, which is immutable, stays stale. While `full` is a skeleton the cache saves almost no build time, yet its tarball already stores every base layer a second time (see "Cache quota"); the saving arrives once tasks 071 and 073 move the large toolchains in.
-- **A cache hit must be recognised.** On a hit, `docker load` the layers tarball before `./build.sh agent`; on a miss, let `./build.sh agent` bake it and save the tarball afterwards. Task 063's `agent` target skips the layers bake only when the loaded image's `powbox.layers.set`, `powbox.layers.digest` and `powbox.layers.base.id` labels match the working tree and the loaded base image. Confirm in the run log that a hit on both tarballs performs no layers bake. A bake there means the currency test does not survive `docker save` / `docker load` on the runner; that is a defect to fix in the build script, not something to work around in the workflow.
+- **A cache hit must be recognised.** On a hit, `docker load` the layers tarball before `./build.sh agent`; on a miss, let `./build.sh agent` bake it and save the tarball afterwards. Task 063's `agent` target skips the layers bake only when the loaded image's `powbox.layers.set`, `powbox.layers.digest` and `powbox.layers.base.id` labels match the working tree and the loaded base image. Keep the full pass on the `agent` target: `all` always bakes the layers image (task 063, "Targets"), and on a runner whose BuildKit cache is empty that reinstalls the whole set even with both tarballs loaded. Confirm in the run log that a hit on both tarballs performs no layers bake. When a bake does happen there, first compare the loaded layers image's `powbox.layers.base.id` label with the loaded base's `.Id`. If they differ, the base cache entry was evicted and re-created while the layers entry survived under the same key; a cache entry cannot be overwritten, so every run rebakes the set until the key changes. That is slow but correct, and the remedy is to delete the stale layers entry (`gh cache delete <key>`), not to change the build. If they are equal and the bake still happens, the currency test does not survive `docker save` / `docker load` on the runner; that is a defect to fix in the build script, not something to work around in the workflow.
 - **Base cache key.** Review the `hashFiles(...)` list of the base cache against `scripts/base-source-files.txt` and add `scripts/layers-select.sh` / `scripts/layers-digest.sh` only if the base build reads them (it should not).
 - **PowerShell Stage 6 step.** Run it once, after the full pass. It is a launcher-level check and gains nothing from running twice.
 - **Disk and time.** Hosted runners have limited disk. Prune dangling images between the passes if the second pass runs short, and measure the job time on the PR; raise `timeout-minutes` only with the measured number in the comment.
@@ -65,8 +63,7 @@ This task makes Tier 1 build and smoke both, **before** any tool moves, so tasks
 
 ## Validation
 
-Run `actionlint .github/workflows/native-linux-build.yml` locally.
-The workflow itself can only be validated by its own run on the PR: confirm from the run log that the two passes built different parents (the label assertions) and record the total job time in the PR description.
+Run `actionlint .github/workflows/native-linux-build.yml` locally. The workflow itself can only be validated by its own run on the PR: confirm from the run log that the two passes built different parents (the label assertions) and record the total job time in the PR description.
 
 ## Review plan
 

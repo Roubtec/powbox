@@ -50,7 +50,7 @@ max_depth = 1
 ```
 
 - `max_depth = 1`: root fans out to many subagents, but subagents do **not** recursively spawn their own — matches how the powbox skills work today and keeps token cost predictable. (`max_depth = 2` would enable recursive fan-out; out of scope unless explicitly wanted.)
-- Needs a new **scalar-under-table** seed helper. The existing `ensure_table_array_setting` / `ensure_top_level_array_setting` only handle array values; add an `ensure_table_scalar_setting "$CONFIG_FILE" "agents" "max_threads" "9"` sibling that inserts `key = value` under `[agents]` only when absent.
+- Needs a new **scalar-under-table** seed helper. The existing `ensure_table_array_setting` only handles an array value under a table (its top-level sibling `ensure_top_level_array_setting` was removed with the unsupported `terminal_title` seed in PR #160); add an `ensure_table_scalar_setting "$CONFIG_FILE" "agents" "max_threads" "9"` sibling that inserts `key = value` under `[agents]` only when absent.
 - Pro: stable feature, no unstable-feature warning. Con: carries the forward-compat risk above (breaks if v2 ever becomes default) and stays on the older subsystem.
 
 ### Option B — enable v2 (recommended)
@@ -88,4 +88,4 @@ multi_agent_v2 = true
 ## Notes / context
 
 - A live one-off of Option B has already been applied to this container's persistent codex-config volume (`[features] multi_agent_v2 = true`) to unblock immediate parallelism; that is **not** the image default — this task is what makes it (or Option A) a baked default for all future containers.
-- References: `docker/shared/entrypoint-codex-hook.sh` (the `ensure_table_array_setting` / `ensure_top_level_array_setting` no-clobber helpers to extend), README "Codex config" seeding paragraph, and `codex features enable multi_agent_v2` for the canonical Option-B shape.
+- References: `docker/shared/entrypoint-codex-hook.sh` (the `ensure_table_array_setting` no-clobber helper to extend; the hook has no top-level-array helper any more), README "Codex config" seeding paragraph, and `codex features enable multi_agent_v2` for the canonical Option-B shape.

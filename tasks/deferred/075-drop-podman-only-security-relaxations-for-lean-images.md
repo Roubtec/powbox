@@ -16,7 +16,7 @@ After task 073 the lean image has no Podman, yet its containers still run with t
 
 1. Establish which of the three `security_opt` entries a Podman-less container still needs for powbox's own features.
 2. If at least one can be dropped: gate it on the image, using the `powbox.podman` label task 073 introduces, in both launchers.
-3. Decide whether the `/dev/fuse` and `/dev/net/tun` passthrough should follow the same gate at that point.
+3. Decide whether the `/dev/fuse` and `/dev/net/tun` passthrough should follow the same gate. This is a separate question from the `security_opt` entries, to be answered even when all three of them stay (see "Context and references").
 
 **Out of scope:**
 
@@ -27,7 +27,7 @@ After task 073 the lean image has no Podman, yet its containers still run with t
 
 - `compose.shared.yml`, the `security_opt` block and its comment.
 - `compose.fuse.yml`, `compose.netdev.yml`, and `PODMAN_DEVICE_MODE` in `scripts/launch-agent.sh` with its `powbox.podman-devices` label and recreate-on-change handling; `scripts/launch-agent.ps1` mirrors it.
-- Task 073's "Decisions" section records why the devices were left alone at that time: they add no capability while seccomp is unconfined and `SYS_ADMIN` is granted. That reasoning changes if this task restores the default seccomp profile.
+- Task 073's "Decisions" section records why the devices were left alone at that time: the firewall still bounds tun traffic, and gating them recreates containers on every set switch. It also records that the mappings are a real grant: Docker's device cgroup denies opening a device node until a `--device` mapping allows it, independently of seccomp and of `SYS_ADMIN`, so a lean container keeps access to `/dev/fuse` and `/dev/net/tun` that neither of the other relaxations gives it. Assess and document that exposure whatever this task finds about the three `security_opt` entries; the device decision does not hinge on seccomp being tightened.
 - `docs/rootless-podman.md`.
 
 ## Target files or areas

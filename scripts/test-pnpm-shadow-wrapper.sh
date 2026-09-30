@@ -233,6 +233,37 @@ assert_warns "$err" "'pnpm --filter run install' warns (filter value 'run' is no
 err="$(wrapper_stderr "$WS" 1 "" "" --store-dir --filter install --help)"
 assert_warns "$err" "'pnpm --store-dir --filter install' warns (a consumed value equal to a flag name does not swallow the real subcommand)"
 
+echo "Test: the undocumented dir aliases --prefix (=--dir) and --store (=--store-dir) -> parity with the canonical options"
+# PR #160 copilot review: pnpm accepts `--prefix <DIR>` as `--dir` and `--store <DIR>` as
+# `--store-dir` without listing either in `--help` (verified on pnpm 12.4.2). The resolver must
+# step over their values exactly like the canonical spellings, or `pnpm --store run install`
+# resolves to `run` and a real root install stays silent; the `=`-joined form is a single
+# token the resolver steps past anyway, pinned here for parity. `--store` carries the
+# colliding-value cases: `--prefix` also sets the EFFECTIVE directory, so a value that is not
+# an existing directory (`run`, `--filter`) makes the refresh return before the warning —
+# that install is pnpm's own ENOENT to report, never a node_modules write — which is why the
+# `--prefix` cases below mirror the canonical `-C "$WS"` test with real directories instead.
+err="$(wrapper_stderr "$WS" 1 "" "" --store run install --help)"
+assert_warns "$err" "'pnpm --store run install' warns (--store's value 'run' is stepped over)"
+err="$(wrapper_stderr "$WS" 1 "" "" --store=run install --help)"
+assert_warns "$err" "'pnpm --store=run install' warns (joined form)"
+# The consumed-value collision guard applies to the alias too.
+err="$(wrapper_stderr "$WS" 1 "" "" --store --filter install --help)"
+assert_warns "$err" "'pnpm --store --filter install' warns (a consumed alias value equal to a flag name does not swallow the real subcommand)"
+err="$(wrapper_stderr "$WS" 1 "" "" --prefix "$WS" install --help)"
+assert_warns "$err" "'pnpm --prefix <ws> install' warns (parity with the canonical -C <ws> case)"
+# `--prefix` also names the EFFECTIVE directory, like `-C/--dir`: an install targeted at the
+# workspace root from a subpackage (or from outside /workspace) is a root install and must
+# warn, and one targeted at a subpackage from the root must not.
+err="$(wrapper_stderr "$WS/packages/foo" 1 "" "" --prefix "$WS" install --help)"
+assert_warns "$err" "'pnpm --prefix <ws> install' from a subpackage warns (--prefix names the root as the effective dir)"
+err="$(wrapper_stderr "$WS/packages/foo" 1 "" "" --prefix="$WS" install --help)"
+assert_warns "$err" "'pnpm --prefix=<ws> install' from a subpackage warns (joined form)"
+err="$(wrapper_stderr "$WS" 1 "" "" --prefix "$WS/packages/foo" install --help)"
+assert_no_warn "$err" "'pnpm --prefix <ws>/packages/foo install' from the root does not warn (effective dir is the subpackage)"
+err="$(wrapper_stderr /tmp 1 "" "" --prefix "$WS" install --help)"
+assert_warns "$err" "'pnpm --prefix <ws> install' from outside /workspace warns (the effective dir, not \$PWD, is what the guard keys off)"
+
 echo "Test: a management/query subcommand with an install-class-looking positional -> silent"
 # The subcommand resolver must recognize NON-install subcommands too, or it skips them and
 # latches the trailing install-class word. `pnpm why install` / `pnpm list add` / `pnpm
@@ -274,15 +305,21 @@ echo "Test: an npm-compat registry/query command with an install-class positiona
 # named `install`; it writes no root node_modules, so it must stay silent. If the resolver
 # did not recognize `view`/… it would skip it and latch the trailing `install`, falsely
 # warning. (`install`/`add`/`update` all exist on the registry, so these are realistic.)
-err="$(wrapper_stderr "$WS" 1 "" "" view install)"
+# Every registry-reaching probe in this file carries a trailing `--help`: the wrapper
+# classifies the command BEFORE its terminal exec, so the assertion is unchanged, while the
+# real pnpm then prints usage instead of contacting the registry — `star`/`deprecate`/
+# `owner add` and pnpm 12's `unstar`/`undeprecate` would otherwise MUTATE registry state
+# whenever credentials are present (PR #160 copilot review; `pnpm undeprecate install` with
+# no `--help` was measured to look the package up on the registry).
+err="$(wrapper_stderr "$WS" 1 "" "" view install --help)"
 assert_no_warn "$err" "'pnpm view install' does not warn (view is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" info add)"
+err="$(wrapper_stderr "$WS" 1 "" "" info add --help)"
 assert_no_warn "$err" "'pnpm info add' does not warn (info is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" search update)"
+err="$(wrapper_stderr "$WS" 1 "" "" search update --help)"
 assert_no_warn "$err" "'pnpm search update' does not warn (search is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" star update)"
+err="$(wrapper_stderr "$WS" 1 "" "" star update --help)"
 assert_no_warn "$err" "'pnpm star update' does not warn (star is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" dist-tag ls install)"
+err="$(wrapper_stderr "$WS" 1 "" "" dist-tag ls install --help)"
 assert_no_warn "$err" "'pnpm dist-tag ls install' does not warn (dist-tag is the subcommand)"
 
 echo "Test: more npm-compat commands whose natural positional is an install-class word -> silent"
@@ -290,20 +327,20 @@ echo "Test: more npm-compat commands whose natural positional is an install-clas
 # are realistic with NO contrived package name: `owner add` is a documented sub-action of the
 # `owner` command, and `bugs`/`repo`/`docs` take a package whose name can be `install`/`add`.
 # The resolver must recognize the real command so it does not latch the trailing word.
-err="$(wrapper_stderr "$WS" 1 "" "" owner add lodash)"
+err="$(wrapper_stderr "$WS" 1 "" "" owner add lodash --help)"
 assert_no_warn "$err" "'pnpm owner add lodash' does not warn (owner is the subcommand, add is its sub-action)"
-err="$(wrapper_stderr "$WS" 1 "" "" bugs install)"
+err="$(wrapper_stderr "$WS" 1 "" "" bugs install --help)"
 assert_no_warn "$err" "'pnpm bugs install' does not warn (bugs is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" repo add)"
+err="$(wrapper_stderr "$WS" 1 "" "" repo add --help)"
 assert_no_warn "$err" "'pnpm repo add' does not warn (repo is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" docs install)"
+err="$(wrapper_stderr "$WS" 1 "" "" docs install --help)"
 assert_no_warn "$err" "'pnpm docs install' does not warn (docs is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" deprecate install msg)"
+err="$(wrapper_stderr "$WS" 1 "" "" deprecate install msg --help)"
 assert_no_warn "$err" "'pnpm deprecate install' does not warn (deprecate is the subcommand)"
 # Aliases of the registry commands must resolve too: `show`->view, `find`->search.
-err="$(wrapper_stderr "$WS" 1 "" "" show install)"
+err="$(wrapper_stderr "$WS" 1 "" "" show install --help)"
 assert_no_warn "$err" "'pnpm show install' does not warn (show is a view alias)"
-err="$(wrapper_stderr "$WS" 1 "" "" find update)"
+err="$(wrapper_stderr "$WS" 1 "" "" find update --help)"
 assert_no_warn "$err" "'pnpm find update' does not warn (find is a search alias)"
 
 echo "Test: the 'la' list alias -> silent (codex P3, PR #70)"
@@ -322,13 +359,13 @@ echo "Test: npm-compat account/admin stub commands -> silent (recognized though 
 # there instead of skipping it and latching the trailing `add`/`install`, which would falsely
 # warn. (token/access/profile use `install` as a stand-in install-class positional to prove the
 # trailing word is not latched as the subcommand.)
-err="$(wrapper_stderr "$WS" 1 "" "" team add scope:team user)"
+err="$(wrapper_stderr "$WS" 1 "" "" team add scope:team user --help)"
 assert_no_warn "$err" "'pnpm team add' does not warn (team is the subcommand, add is its sub-action)"
-err="$(wrapper_stderr "$WS" 1 "" "" token install)"
+err="$(wrapper_stderr "$WS" 1 "" "" token install --help)"
 assert_no_warn "$err" "'pnpm token install' does not warn (token is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" access add)"
+err="$(wrapper_stderr "$WS" 1 "" "" access add --help)"
 assert_no_warn "$err" "'pnpm access add' does not warn (access is the subcommand)"
-err="$(wrapper_stderr "$WS" 1 "" "" profile install)"
+err="$(wrapper_stderr "$WS" 1 "" "" profile install --help)"
 assert_no_warn "$err" "'pnpm profile install' does not warn (profile is the subcommand)"
 
 echo "Test: 'ci' (frozen-lockfile install) and its aliases -> warn (PR #70 fresh-review follow-up)"
@@ -439,11 +476,13 @@ assert_warns "$err" "'pnpm pipeline' warns (frozen install)"
 echo "Test: pnpm 12 name-taking subcommands with an install-class positional -> silent"
 # pnpm 12 adds subcommands (and exposes aliases) whose positional can be an install-class word.
 # The resolver must stop at them rather than latch the trailing word.
+# The trailing `--help` keeps the real pnpm off the registry (`undeprecate`/`unstar`/
+# `dist-tags`/`owners` are registry-mutating commands; see the registry block above).
 for cmd in "set-script install" "ss add" "pkg set" "peers install" "shim add" "lane update" \
 	"undeprecate install" "unstar add" "uni add" "tst install" "stop install" "issues add" \
 	"licences add" "dist-tags add" "owners add" "dislink add"; do
 	# shellcheck disable=SC2086 # deliberate word-split of the "<cmd> <positional>" pair
-	err="$(wrapper_stderr "$WS" 1 "" "" $cmd)"
+	err="$(wrapper_stderr "$WS" 1 "" "" $cmd --help)"
 	assert_no_warn "$err" "'pnpm $cmd' does not warn"
 done
 

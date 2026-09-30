@@ -168,7 +168,13 @@ is_known_subcommand() {
 # value-taking option `pnpm install --help` documents, so the resolver is complete with respect
 # to that authoritative list:
 #   - dirs:            `-C/--dir`, `--store-dir`, `--virtual-store-dir`, `--modules-dir`,
-#                      `--lockfile-dir`, `--global-dir`
+#                      `--lockfile-dir`, `--global-dir` — plus the two npm-compat aliases
+#                      `--help` does NOT list: `--prefix <DIR>` is `--dir` and `--store <DIR>`
+#                      is `--store-dir` (verified on pnpm 12.4.2: `pnpm --prefix /x root` prints
+#                      /x/node_modules exactly like `--dir`, and `pnpm --store run install
+#                      --help` prints INSTALL's help, i.e. `run` was consumed as the store
+#                      path). They are aliases of listed dir options, not config keys, so they
+#                      fall under the authoritative list rather than under residual #1 below.
 #   - selectors/specs: `--filter/-F/--filter-prod`, `--trust-policy-exclude`
 #   - glob patterns:   `--hoist-pattern`, `--public-hoist-pattern`,
 #                      `--changed-files-ignore-pattern`, `--test-pattern`
@@ -243,7 +249,7 @@ pnpm_subcommand() {
 		# is the flag's argument (a path/package selector that could collide with a
 		# subcommand name), never the subcommand, so skip it.
 		case "$prev" in
-			-C | --dir | --store-dir | --virtual-store-dir | --modules-dir | \
+			-C | --dir | --prefix | --store-dir | --store | --virtual-store-dir | --modules-dir | \
 				--lockfile-dir | --global-dir | \
 				--filter | -F | --filter-prod | --trust-policy-exclude | \
 				--hoist-pattern | --public-hoist-pattern | \
@@ -287,21 +293,23 @@ refresh_shadows() {
 	# into that project, so the /workspace guard and the project-scoping walk below
 	# must key off that target rather than the raw $PWD — otherwise the early return
 	# here would skip the very refresh this wrapper exists to do. pnpm accepts
-	# `-C <dir>`, `--dir <dir>`, and the `=`-joined forms; a later flag wins.
+	# `-C <dir>`, `--dir <dir>`, the undocumented npm-compat alias `--prefix <dir>`
+	# (same meaning, verified on pnpm 12.4.2 — see the resolver's dirs note), and the
+	# `=`-joined forms of all three; a later flag wins.
 	local effdir="$PWD" prev="" a
 	for a in "$@"; do
 		case "$prev" in
-			-C | --dir)
-				# This token is `-C/--dir`'s value. Consume it and reset prev to a non-flag
-				# sentinel so the value itself cannot be re-read as `-C/--dir` on the next
-				# iteration (the same consumed-value-re-read class fixed in pnpm_subcommand).
+			-C | --dir | --prefix)
+				# This token is `-C/--dir/--prefix`'s value. Consume it and reset prev to a
+				# non-flag sentinel so the value itself cannot be re-read as a dir flag on the
+				# next iteration (the same consumed-value-re-read class fixed in pnpm_subcommand).
 				effdir="$a"
 				prev=""
 				continue
 				;;
 		esac
 		case "$a" in
-			-C=* | --dir=*) effdir="${a#*=}" ;;
+			-C=* | --dir=* | --prefix=*) effdir="${a#*=}" ;;
 		esac
 		prev="$a"
 	done

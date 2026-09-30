@@ -19,7 +19,18 @@ FROM ${BASE_IMAGE}
 ARG CODEX_VERSION=latest
 ENV CODEX_CONFIG_DIR=/home/node/.codex
 USER root
-RUN npm install -g @openai/codex@${CODEX_VERSION}
+# The npm package is only a JS launcher; the real binary ships as a per-platform
+# optionalDependency (@openai/codex-linux-<arch>, ~450 MB unpacked). npm treats
+# a failed fetch of an OPTIONAL dependency as non-fatal: it silently drops the
+# platform package, exits 0, and the layer ships a codex that dies with "Missing
+# optional dependency @openai/codex-linux-x64". Probe it with `codex --version`,
+# reinstall once (the failure is a transient download error), and fail the
+# build if it is still missing rather than cache a broken layer.
+RUN npm install -g @openai/codex@${CODEX_VERSION} \
+    && { codex --version >/dev/null 2>&1 \
+        || { echo "codex platform binary missing after install; retrying once" >&2 \
+            && npm install -g @openai/codex@${CODEX_VERSION} \
+            && codex --version >/dev/null; }; }
 USER node
 
 # --- Shared linters (stable layers between the agent installs) ---------------

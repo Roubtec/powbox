@@ -128,7 +128,18 @@ RUN pwsh -NoProfile -NonInteractive -Command \
 # otherwise agents can apply it with `-Settings <path>`.
 COPY PSScriptAnalyzerSettings.psd1 /usr/local/share/powershell/PSScriptAnalyzerSettings.psd1
 
-# Install pnpm
+# Silence npm's "New major version of npm available!" notice, image-wide. npm is
+# whatever the node:24 base bundles (it moves with Node, not independently), so
+# the notice is unactionable noise at the end of every `npm install -g` in the
+# base and agent builds and in every in-session npm call. Declared here, right
+# before the first npm install, so it covers those layers without busting the
+# apt layers above. An ENV (not a baked npmrc) so a session can still opt back
+# in by overriding it.
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# Install pnpm. Unpinned: pnpm v10+ honors a project's `packageManager` field
+# and transparently runs that pinned version (e.g. pnpm@11.x under this global
+# 12.x), so the global one only matters for repos without a pin.
 RUN npm install -g pnpm
 
 # Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram

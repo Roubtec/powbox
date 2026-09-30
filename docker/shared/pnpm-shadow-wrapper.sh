@@ -31,12 +31,18 @@
 set -uo pipefail
 
 # npm always unpacks a global package at lib/node_modules/<name>, so this directory
-# is stable across pnpm versions. pnpm's package `bin` entry is the executable ESM
-# launcher bin/pnpm.mjs (verified for the installed pnpm); some builds also ship a
-# non-executable bin/pnpm.cjs shim that re-imports it for older Corepack. The exec
-# block at the end prefers .mjs and falls back to .cjs so the wrapper degrades
-# gracefully rather than failing every call if that layout ever shifts.
-PNPM_BINDIR="/usr/local/lib/node_modules/pnpm/bin"
+# is stable across pnpm versions; only the entry point inside it has moved. pnpm 12
+# ships as a native binary: its package `bin` entry is the extensionless `pnpm` at
+# the package root, which its preinstall replaces with the host's native executable
+# (a shebang-less placeholder that re-runs through Node when lifecycle scripts were
+# skipped), while bin/pnpm.mjs is now only a non-executable Corepack entry that
+# spawns that same binary one Node startup later. pnpm 10/11 instead had the
+# executable ESM launcher bin/pnpm.mjs as the entry, and some builds also shipped a
+# non-executable bin/pnpm.cjs shim for older Corepack. The exec block at the end
+# tries them in that order so the wrapper degrades gracefully rather than failing
+# every call if the layout shifts again.
+PNPM_PKGDIR="/usr/local/lib/node_modules/pnpm"
+PNPM_BINDIR="$PNPM_PKGDIR/bin"
 
 # pnpm subcommand classification, factored so the refresh trigger (the loop at the
 # bottom of this file) and the root-node_modules warning inside refresh_shadows share
@@ -360,11 +366,13 @@ for arg in "$@"; do
 	fi
 done
 
-# Delegate to the real pnpm. Keep the proven happy path (exec the executable .mjs)
-# and add fallbacks: run a non-executable entry via `node` (the .cjs shim isn't
-# chmod +x), and try the .cjs shim if the .mjs is absent. node is always on PATH in
-# this image, just as the .mjs's `#!/usr/bin/env node` shebang already requires.
-if [ -x "$PNPM_BINDIR/pnpm.mjs" ]; then
+# Delegate to the real pnpm. Prefer pnpm 12's package-root entry (the native binary,
+# ~40 ms faster per call than routing through Node), then pnpm 10/11's executable
+# .mjs, then run a non-executable entry via `node` (pnpm 12's Corepack .mjs, or the
+# .cjs shim, neither of which is chmod +x). node is always on PATH in this image.
+if [ -f "$PNPM_PKGDIR/pnpm" ] && [ -x "$PNPM_PKGDIR/pnpm" ]; then
+	exec "$PNPM_PKGDIR/pnpm" "$@"
+elif [ -x "$PNPM_BINDIR/pnpm.mjs" ]; then
 	exec "$PNPM_BINDIR/pnpm.mjs" "$@"
 elif [ -f "$PNPM_BINDIR/pnpm.mjs" ]; then
 	exec node "$PNPM_BINDIR/pnpm.mjs" "$@"

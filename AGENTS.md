@@ -42,7 +42,7 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 
 ## PowerShell Linting
 
-- Lint with `pwsh -Command "Invoke-ScriptAnalyzer -Path ."`. `Invoke-ScriptAnalyzer` is a `pwsh` cmdlet, not a shell command on `PATH`.
+- Lint with `pwsh -Command "Invoke-ScriptAnalyzer -Path . -Recurse"` from the repo root. `Invoke-ScriptAnalyzer` is a `pwsh` cmdlet, not a shell command on `PATH`. `-Recurse` is required: without it only the scripts directly in the given directory are analyzed (here just `build.ps1`), so the run reports nothing while `commands/`, `scripts/` and `shell/` go unchecked. Tier 0 runs the same recursive pass and blocks on error-severity findings.
 - The repo-root `PSScriptAnalyzerSettings.psd1` is auto-applied (PSScriptAnalyzer discovers it in the analyzed directory) and is baked into the image as the house default at `/usr/local/share/powershell/PSScriptAnalyzerSettings.psd1`. It excludes rules that clash with these CLI-style scripts — see the file for the per-rule rationale.
 - To override the config for a single run, pass an explicit `-Settings`: `-Settings @{}` for a full unfiltered pass against all default rules, or e.g. `-Settings @{IncludeRules=@('PSReviewUnusedParameter')}` to run one otherwise-excluded rule across the tree. Note that `-IncludeRule` alone does **not** override `ExcludeRules` — the auto-discovered config wins.
 

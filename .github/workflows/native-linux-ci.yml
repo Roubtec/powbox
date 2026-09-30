@@ -117,7 +117,9 @@ jobs:
             echo "::warning::shfmt found formatting differences in changed shell scripts (advisory, not blocking). Run 'shfmt -w <file>' to apply. The repo is not yet fully shfmt-normalized."
           fi
 
-      # pwsh ships on ubuntu-latest; PSScriptAnalyzer does not, so install it.
+      # pwsh ships on ubuntu-latest, and so does PSScriptAnalyzer (1.25.0 on the
+      # ubuntu-24.04 image at the time of writing), so the install below is a
+      # fallback that only runs when the pinned version is not preinstalled.
       # Uses the repo's PSScriptAnalyzerSettings.psd1 (its ExcludeRules mirror the
       # intentional CLI-script patterns). Gate only on error-severity findings so
       # the existing tree's warning/info results do not turn Tier 0 red; all

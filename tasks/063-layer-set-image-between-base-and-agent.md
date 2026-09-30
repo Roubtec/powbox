@@ -77,7 +77,7 @@ These were settled with the maintainer; implement them rather than reopening the
 - `shell/powbox.sh`, `shell/powbox.ps1` — `agent-update`, `agent-full-rebuild`, `agent-image-info`.
 - `build.ps1`, and `_Powbox-InvokeBuild` in `shell/powbox.ps1` — both restrict the target with `ValidateSet("base", "agent", "all")`, as does `scripts/build-image.ps1`; add `layers` to all three. `build.sh` is a plain `exec` of `scripts/build-image.sh` and needs no change. `_Powbox-BuildFromTable` accepts only `agent` and `all`, which stays right.
 - `docker/agent/Dockerfile` — comments and label meaning only (the two comments named in "Context and references"); no instruction moves.
-- `.gitignore` — `.powbox-layers`, and `docker/layers/custom/*` with a `!docker/layers/custom/.gitkeep` exception.
+- `.gitignore` — add `docker/layers/custom/*` with a `!docker/layers/custom/.gitkeep` exception. The `.powbox-layers` entry already exists (commit `021a6ec` added it ahead of this task); shorten its comment to what the file is, dropping the "once task 063 lands" wording and the task number, since a task pointer goes stale once the implementation has landed.
 - `docker/layers/full/Dockerfile` (skeleton: the contract lines and a comment), `docker/layers/custom/.gitkeep`, `.powbox-layers.example`.
 - `README.md` ("Layout", "Build Modes", "Profile Shortcuts"), `docs/architecture.md` ("Rules the file map does not state"), `docs/skills-refresh-and-provenance.md`, `AGENTS.md` if its key-path or validation text is affected.
 

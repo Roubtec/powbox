@@ -37,7 +37,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$TARGET" in
-base | agent | all) ;;
+base | layers | agent | all) ;;
 *)
 	echo "Unknown build target: $TARGET" >&2
 	exit 1
@@ -66,6 +66,9 @@ image-affecting PRs to main, unless the PR is labeled `non-code`.
 EOF
 	exit 1
 fi
+
+# shellcheck source=scripts/build-image-lib.sh
+. "${ROOT_DIR}/scripts/build-image-lib.sh"
 
 # Upstream base image, parsed from the base Dockerfile's FROM so it never drifts
 # from what is actually built. BASE_SOURCE_DIGEST is resolved lazily just before
@@ -100,6 +103,37 @@ POWBOX_COMMIT="$(powbox_commit)"
 # empty label just means check-updates cannot detect recipe staleness, never a
 # false rebuild.
 POWBOX_BASE_RECIPE_DIGEST="$("${ROOT_DIR}/scripts/base-source-digest.sh" 2>/dev/null || true)"
+
+# The layer set named by .powbox-layers (empty: none, the lean image), its
+# directory, which is the layers bake's whole build context, and its digest.
+# Resolved for every target that builds above the base, before any fetch or
+# build, so an invalid selector or a set that breaks the layer Dockerfile
+# contract stops the run before it changes anything.
+LAYERS_SET=""
+LAYERS_DIR=""
+LAYERS_DIGEST=""
+if [ "$TARGET" != base ]; then
+	LAYERS_SET="$("${ROOT_DIR}/scripts/layers-select.sh")" || exit 1
+	if [ -n "$LAYERS_SET" ]; then
+		LAYERS_DIR="docker/layers/${LAYERS_SET}"
+		digest_rc=0
+		LAYERS_DIGEST="$("${ROOT_DIR}/scripts/layers-digest.sh" "$LAYERS_DIR")" || digest_rc=$?
+		case "$digest_rc" in
+		0) ;;
+		3)
+			# No sha256 tool: the image can still be built, but without a digest it
+			# is never judged current, and the update check cannot see set edits.
+			echo "warning: the digest of layer set '${LAYERS_SET}' cannot be computed; ${POWBOX_LAYERS_TAG} will be baked on every build." >&2
+			;;
+		*) exit 1 ;;
+		esac
+	fi
+fi
+if [ "$TARGET" = layers ] && [ -z "$LAYERS_SET" ]; then
+	echo "No layer set is selected, so there is nothing for the layers target to build." >&2
+	echo "Name one in .powbox-layers (see .powbox-layers.example)." >&2
+	exit 1
+fi
 
 # --- agent-skills fetch (host-side, credentials never enter the image) --------
 # The Codex skill palette baked into the agent image comes ENTIRELY from
@@ -196,57 +230,14 @@ No image was built."
 	echo "agent-skills at ${AGENT_SKILLS_COMMIT}"
 }
 
-image_label() {
-	# Echo a label value off a local image, or empty when the image/label is absent.
-	local v
-	v="$(docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}" 2>/dev/null)" || return 0
-	[ "$v" = "<no value>" ] && v=""
-	printf '%s' "$v"
-}
-
-base_image_id() {
-	# Content ID of the local base image (empty when absent). The parent half of
-	# the Codex layer's cache key: stamped onto the agent (powbox.base.image.id)
-	# and compared against the previous agent's recorded value to tell whether a
-	# separate base rebuild will bust that layer.
-	docker image inspect powbox-agent-base:latest --format '{{.Id}}' 2>/dev/null || true
-}
-
-# Commit that built the Codex install layer. Stamping it inside that layer would
-# bust its cache on every commit (defeating the Codex-below-Claude ordering), so
-# resolve it here: use HEAD when the layer will rebuild this run, otherwise carry
-# the existing image's recorded value forward. The reuse test mirrors Docker's
-# cache key for that layer: its parent (the base image) AND the install
-# instruction (CODEX_VERSION). See docs/skills-refresh-and-provenance.md.
+# Values the bake steps below fill in for the agent and layers targets.
+# BASE_IMAGE is the agent's parent: the base, or the layer-set image when a set
+# is selected.
+BASE_IMAGE="$POWBOX_BASE_TAG"
 POWBOX_COMMIT_CODEX="$POWBOX_COMMIT"
-resolve_codex_commit() {
-	# Any of these rebuild the Codex layer, so it was built at HEAD.
-	[ "$NO_CACHE" = true ] && return 0
-	[ "$PULL" = true ] && return 0
-	case "$TARGET" in base | all) return 0 ;; esac
-	docker image inspect powbox-agent:latest >/dev/null 2>&1 || return 0
-	# The Codex layer's parent is the base image, so a base that differs from the
-	# one the previous agent was built on (e.g. a separate `build.sh base`)
-	# rebuilds the Codex layer regardless of version. Only an identical base ID
-	# means the layer can be reused; an absent base (about to be built) or a
-	# previous agent with no recorded base ID counts as changed -> HEAD.
-	local cur_base_id prev_base_id
-	cur_base_id="$(base_image_id)"
-	prev_base_id="$(image_label powbox-agent:latest powbox.base.image.id)"
-	[ -n "$cur_base_id" ] && [ "$cur_base_id" = "$prev_base_id" ] || return 0
-	local prev_ver prev_commit
-	prev_ver="$(image_label powbox-agent:latest powbox.codex.version)"
-	prev_commit="$(image_label powbox-agent:latest powbox.commit.codex)"
-	# Same base and same Codex version => layer reused, so carry its recorded
-	# commit forward. An image built before provenance labelling has none to
-	# carry, and we cannot know which commit built the reused layer, so record
-	# "unknown" rather than misattributing this build's HEAD to it. A differing
-	# version rebuilds the layer at HEAD (the default).
-	if [ "$prev_ver" = "$CODEX_VERSION" ]; then
-		POWBOX_COMMIT_CODEX="${prev_commit:-unknown}"
-	fi
-}
-resolve_codex_commit
+POWBOX_COMMIT_BASE="unknown"
+POWBOX_PARENT_SIGNATURE=""
+POWBOX_LAYERS_BASE_ID=""
 
 registry_base_digest() {
 	docker buildx imagetools inspect "$BASE_SOURCE_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null || true
@@ -301,21 +292,34 @@ run_bake() {
 
 	cmd+=("${target_args[@]}")
 
-	echo "Running: CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} CODEX_VERSION=${CODEX_VERSION} POWBOX_COMMIT=${POWBOX_COMMIT} POWBOX_COMMIT_CODEX=${POWBOX_COMMIT_CODEX} AGENT_SKILLS_COMMIT=${AGENT_SKILLS_COMMIT} ${cmd[*]}"
-	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
-		CODEX_VERSION="$CODEX_VERSION" \
-		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
-		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
-		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST" \
-		POWBOX_COMMIT="$POWBOX_COMMIT" \
-		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
-		POWBOX_BASE_IMAGE_ID="$(base_image_id)" \
-		AGENT_SKILLS_COMMIT="$AGENT_SKILLS_COMMIT" \
-		"${cmd[@]}"
+	local env_args=(
+		BASE_IMAGE="$BASE_IMAGE"
+		CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION"
+		CODEX_VERSION="$CODEX_VERSION"
+		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE"
+		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST"
+		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST"
+		POWBOX_COMMIT="$POWBOX_COMMIT"
+		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX"
+		POWBOX_COMMIT_BASE="$POWBOX_COMMIT_BASE"
+		POWBOX_PARENT_SIGNATURE="$POWBOX_PARENT_SIGNATURE"
+		AGENT_SKILLS_COMMIT="$AGENT_SKILLS_COMMIT"
+	)
+	if [ -n "$LAYERS_SET" ]; then
+		env_args+=(
+			POWBOX_LAYERS_DIR="$LAYERS_DIR"
+			POWBOX_LAYERS_SET="$LAYERS_SET"
+			POWBOX_LAYERS_DIGEST="$LAYERS_DIGEST"
+			POWBOX_LAYERS_BASE_ID="$POWBOX_LAYERS_BASE_ID"
+		)
+	fi
+
+	echo "Running: ${env_args[*]} ${cmd[*]}"
+	env "${env_args[@]}" "${cmd[@]}"
 }
 
 ensure_base_image() {
-	if docker image inspect powbox-agent-base:latest >/dev/null 2>&1; then
+	if docker image inspect "$POWBOX_BASE_TAG" >/dev/null 2>&1; then
 		return
 	fi
 
@@ -325,25 +329,84 @@ ensure_base_image() {
 	# for, and rebuilding it fresh unconditionally on every no-cache top-layer
 	# build would be unnecessarily slow. Use `build.sh base --no-cache` if you
 	# explicitly want a fresh base.
-	echo "Base image powbox-agent-base:latest was not found locally. Building it first."
-	resolve_base_source_digest false
-	CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION" \
-		CODEX_VERSION="$CODEX_VERSION" \
-		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE" \
-		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST" \
-		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST" \
-		POWBOX_COMMIT="$POWBOX_COMMIT" \
-		POWBOX_COMMIT_CODEX="$POWBOX_COMMIT_CODEX" \
-		docker buildx bake --file "${ROOT_DIR}/docker-bake.hcl" base
+	echo "Base image $POWBOX_BASE_TAG was not found locally. Building it first."
+	run_bake false false base
+}
+
+# The base step of the layers and agent targets: refresh the base under --pull,
+# otherwise build it only when it is missing.
+prepare_base() {
+	if [ "$PULL" = true ]; then
+		run_bake true false base
+	else
+		ensure_base_image
+	fi
+}
+
+bake_layers() {
+	# Usage: bake_layers <with_no_cache>
+	# Records the base this bake builds FROM, read now, after the run's base
+	# step, for the next run's currency test.
+	POWBOX_LAYERS_BASE_ID="$(image_id "$POWBOX_BASE_TAG")"
+	run_bake false "$1" layers
+	# The bake labels the image with that base whatever the set built on, so
+	# check its layers, and that it records no ONBUILD trigger, before anything
+	# is built on it.
+	local mismatch
+	mismatch="$(layers_base_mismatch)"
+	if [ -n "$mismatch" ]; then
+		echo "error: ${mismatch}." >&2
+		echo "The final stage of ${LAYERS_DIR}/Dockerfile must be built FROM \${BASE_IMAGE}." >&2
+		exit 1
+	fi
+	mismatch="$(layers_onbuild_triggers)"
+	if [ -n "$mismatch" ]; then
+		echo "error: ${mismatch}." >&2
+		echo "Remove every ONBUILD from ${LAYERS_DIR}/Dockerfile." >&2
+		exit 1
+	fi
+}
+
+# Bake the layer-set image only when it is not current for the selected set
+# (see layers_stale_reason). Always from cache, like ensure_base_image: the
+# agent target's --no-cache is about the agent's own layers.
+ensure_layers_image() {
+	local reason
+	reason="$(layers_stale_reason "$LAYERS_SET" "$LAYERS_DIGEST")"
+	if [ -z "$reason" ]; then
+		echo "Layer-set image $POWBOX_LAYERS_TAG is current for set '${LAYERS_SET}'; reusing it."
+		return
+	fi
+	echo "Baking $POWBOX_LAYERS_TAG: ${reason}."
+	bake_layers false
+}
+
+bake_agent() {
+	# Usage: bake_agent <with_no_cache>
+	# Everything read off the parent here describes the image the agent is
+	# actually built FROM, so it runs after the base and layer-set steps.
+	BASE_IMAGE="$POWBOX_BASE_TAG"
+	if [ -n "$LAYERS_SET" ]; then
+		BASE_IMAGE="$POWBOX_LAYERS_TAG"
+	fi
+	POWBOX_PARENT_SIGNATURE="$(parent_signature "$BASE_IMAGE")"
+	POWBOX_COMMIT_CODEX="$(resolve_codex_commit "$POWBOX_COMMIT" "$CODEX_VERSION" "$POWBOX_PARENT_SIGNATURE" "$1")"
+	# The agent's top metadata layer writes the base commit to its file and
+	# stamps it as the agent's own label, so the two always agree. It is read off
+	# the base itself, which a layer-set image is proven to be built on: a set's
+	# own LABEL could override the copy the layer-set image inherits.
+	POWBOX_COMMIT_BASE="$(image_label "$POWBOX_BASE_TAG" powbox.commit.base)"
+	[ -n "$POWBOX_COMMIT_BASE" ] || POWBOX_COMMIT_BASE="unknown"
+	run_bake false "$1" agent
 }
 
 # --pull only makes sense for the base image (whose FROM is an upstream
 # registry image); it re-pulls that upstream tag into the local image store
-# (see resolve_base_source_digest). The agent image's only FROM is the
-# locally-built powbox-agent-base, which is not a registry image, so when the
-# user requests --pull on the agent target we refresh the base first (cascading
-# any digest change into the agent layers automatically) and then build the
-# agent.
+# (see resolve_base_source_digest). The layer-set and agent images build FROM
+# local images, not registry ones, so --pull on those targets refreshes the base
+# first; the layer-set image is then not current (its recorded base ID no
+# longer matches) and is baked again on the new base, and the agent follows it.
+# Without a selected set the agent sits directly on the refreshed base.
 # The agent image bakes its whole Codex skill palette from the fetched
 # agent-skills clone, so fetch it before any agent bake. Done
 # here (not for the base-only target) so `build.sh base` never needs network
@@ -353,16 +416,22 @@ case "$TARGET" in
 all)
 	fetch_agent_skills
 	run_bake "$PULL" "$NO_CACHE" base
-	run_bake false "$NO_CACHE" agent
+	if [ -n "$LAYERS_SET" ]; then
+		bake_layers "$NO_CACHE"
+	fi
+	bake_agent "$NO_CACHE"
 	;;
 agent)
 	fetch_agent_skills
-	if [ "$PULL" = true ]; then
-		run_bake true false base
-	else
-		ensure_base_image
+	prepare_base
+	if [ -n "$LAYERS_SET" ]; then
+		ensure_layers_image
 	fi
-	run_bake false "$NO_CACHE" agent
+	bake_agent "$NO_CACHE"
+	;;
+layers)
+	prepare_base
+	bake_layers "$NO_CACHE"
 	;;
 base)
 	run_bake "$PULL" "$NO_CACHE" base

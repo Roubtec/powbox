@@ -41,7 +41,7 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 
 1. base (`powbox-agent-base`)
 2. Codex install layer (infrequent updates)
-3. stable shared-linter layers (`actionlint`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the base image used by the provenance resolver
+3. stable shared-linter layers (`actionlint`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the agent image's own parent (the base, or the layer-set image `powbox-agent-layers:latest` when a layer set is selected), which is what the provenance resolver models
 4. Claude install layer (frequent, larger updates)
 5. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
 
@@ -84,6 +84,7 @@ Collapse `compose.claude.yml` and `compose.codex.yml` so both config volumes and
 
 - `docker-bake.hcl`: replace the `claude` and `codex` targets with a single `agent` target (dockerfile `docker/agent/Dockerfile`, tag `powbox-agent:latest`, args `CLAUDE_CODE_VERSION` + `CODEX_VERSION`). Keep the `base` target. Update the `all`/`default` groups.
 - `scripts/build-image.sh`: targets become `base | agent | all`. Keep `--claude-version` / `--codex-version` (both feed the one image). `--pull` still applies only to the upstream base.
+- A `layers` target has been added since, for the optional layer-set image between the base and the agent (see [architecture.md](architecture.md) → "Rules the file map does not state" and README "Layer sets").
 
 ### Minimal-layer updates
 

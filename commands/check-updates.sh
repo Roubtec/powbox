@@ -6,6 +6,7 @@
 # tab-separated row per component for `agent-update` to consume:
 #
 #     base	<ok|stale|unknown>	<baked-digest|->	<latest-digest|->
+#     layers	<ok|stale>	<baked-set@digest|->	<wanted-set@digest|->
 #     claude	<ok|stale|unknown>	<baked-version|->	<latest-version|->
 #     codex	<ok|stale|unknown>	<baked-version|->	<latest-version|->
 #
@@ -14,6 +15,14 @@
 # be determined (npm/registry unreachable) and must never force a rebuild. The
 # baked/latest versions let agent-update pin each binary so Docker rebuilds only
 # the layers that actually changed.
+#
+# The layers row compares the layer set the running agent image was built from
+# (its inherited powbox.layers.set / powbox.layers.digest labels) with the set
+# .powbox-layers selects now and that set's recomputed digest; "-" means no set
+# (the lean image), and a digest that cannot be computed shows as "<set>@-".
+# A differing set name is stale whether or not a digest is available; an equal
+# name is stale only when a computed digest differs. An invalid selector, or a
+# set that breaks the layer Dockerfile contract, is an error (exit 1), not a row.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -170,6 +179,62 @@ compare() {
 	fi
 }
 
+# The layer set's row value: "<set>@<digest>", "<set>@-" without a digest, or
+# "-" for no set.
+layers_value() {
+	if [ -z "$1" ]; then
+		echo "-"
+	else
+		echo "${1}@${2:--}"
+	fi
+}
+
+# The same value for the report, with the digest shortened like the base's.
+layers_display() {
+	local short
+	if [ -z "$1" ]; then
+		echo "(none — lean image)"
+		return
+	fi
+	short="$(short_digest "$2")"
+	if [ -n "$short" ]; then
+		echo "${1}@${short}"
+	else
+		echo "$1"
+	fi
+}
+
+compare_layers() {
+	local status="$1" baked_set="$2" baked_digest="$3" wanted_set="$4" wanted_digest="$5"
+	local b w
+	b="$(layers_display "$baked_set" "$baked_digest")"
+	w="$(layers_display "$wanted_set" "$wanted_digest")"
+	if [ "$status" = stale ]; then
+		printf '  %-8s  %s -> %s  ** update available **\n' "Layers" "$b" "$w"
+	elif [ -n "$wanted_set" ] && [ -z "$wanted_digest" ]; then
+		printf '  %-8s  %s  (up to date; digest not computable)\n' "Layers" "$wanted_set"
+	else
+		printf '  %-8s  %s  (up to date)\n' "Layers" "$w"
+	fi
+}
+
+# -------------------------------------------------------------------
+# Layer set (an invalid selector or set fails the check outright)
+# -------------------------------------------------------------------
+
+layers_wanted_set="$("${ROOT_DIR}/scripts/layers-select.sh")" || exit 1
+layers_wanted_digest=""
+if [ -n "$layers_wanted_set" ]; then
+	digest_rc=0
+	layers_wanted_digest="$("${ROOT_DIR}/scripts/layers-digest.sh" "${ROOT_DIR}/docker/layers/${layers_wanted_set}")" || digest_rc=$?
+	# Status 3 is "no sha256 tool": an undeterminable digest never forces a
+	# rebuild, so only the set-name half of the comparison runs.
+	case "$digest_rc" in
+	0 | 3) ;;
+	*) exit 1 ;;
+	esac
+fi
+
 # -------------------------------------------------------------------
 # Gather versions
 # -------------------------------------------------------------------
@@ -183,8 +248,14 @@ base_source="" base_baked="" base_latest=""
 # is stale independently of the upstream node:24-trixie-slim digest. See
 # scripts/base-source-digest.sh.
 base_recipe_baked="" base_recipe_now="" recipe_stale=false
+layers_baked_set="" layers_baked_digest=""
 
 if has_image "$AGENT_IMAGE"; then
+	# Read off the agent image, because that is what containers run; it inherits
+	# both labels from the layer-set image it was built on, and has neither when
+	# it was built lean.
+	layers_baked_set="$(image_label "$AGENT_IMAGE" 'powbox.layers.set')"
+	layers_baked_digest="$(image_label "$AGENT_IMAGE" 'powbox.layers.digest')"
 	versions_raw="$(baked_versions_raw "$AGENT_IMAGE")"
 	claude_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CLAUDE://p' | head -1 | sed 's/ *(.*//; s/[[:space:]]*$//')"
 	codex_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CODEX://p' | head -1 | sed 's/^codex-cli *//; s/[[:space:]]*$//')"
@@ -232,6 +303,13 @@ if [ -n "$base_source" ]; then
 	base_latest="$(registry_digest "$base_source")"
 fi
 
+layers_status=ok
+if [ "$layers_baked_set" != "$layers_wanted_set" ]; then
+	layers_status=stale
+elif [ -n "$layers_wanted_digest" ] && [ "$layers_baked_digest" != "$layers_wanted_digest" ]; then
+	layers_status=stale
+fi
+
 # -------------------------------------------------------------------
 # Porcelain: one tab-separated row per component (see header comment).
 # -------------------------------------------------------------------
@@ -247,6 +325,10 @@ if $PORCELAIN; then
 	printf '%s\t%s\t%s\t%s\n' base \
 		"$base_status" \
 		"${base_baked:--}" "${base_latest:--}"
+	printf '%s\t%s\t%s\t%s\n' layers \
+		"$layers_status" \
+		"$(layers_value "$layers_baked_set" "$layers_baked_digest")" \
+		"$(layers_value "$layers_wanted_set" "$layers_wanted_digest")"
 	printf '%s\t%s\t%s\t%s\n' claude \
 		"$(component_status "$claude_baked" "$claude_latest")" \
 		"${claude_baked:--}" "${claude_latest:--}"
@@ -266,9 +348,10 @@ fi
 echo ""
 echo "Agent update check:"
 if [ -n "$base_baked" ] || [ -n "$base_latest" ] || [ "$recipe_stale" = true ]; then compare_base "$base_baked" "$base_latest" "$recipe_stale"; fi
-# Codex before Claude: the report mirrors their order in the Docker layer stack
-# (base -> codex -> stable linters -> claude -> cheap upper layers); the stable
-# and cheap layers have no version rows of their own.
+# The rows mirror the image stack (base -> layer set -> codex -> stable linters
+# -> claude -> cheap upper layers); the stable and cheap layers have no rows of
+# their own. The Layers row always prints, so "no set" is stated, not implied.
+compare_layers "$layers_status" "$layers_baked_set" "$layers_baked_digest" "$layers_wanted_set" "$layers_wanted_digest"
 if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi
 if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
 echo ""

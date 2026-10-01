@@ -4,8 +4,9 @@
 # (scripts/layers-digest.{sh,ps1}), the build drivers' image decisions
 # (scripts/build-image-lib.{sh,ps1}: layer-set currency, parent signature,
 # Codex-commit resolution), the update check's layers row
-# (commands/check-updates.{sh,ps1}) and agent-update's routing of a stale set
-# (shell/powbox.{sh,ps1}). Docker, npm and the build are fakes on PATH, so no
+# (commands/check-updates.{sh,ps1}), agent-update's routing of a stale set and
+# agent-image-info (shell/powbox.{sh,ps1}), and both build drivers' dispatch
+# (scripts/build-image.{sh,ps1}). Docker, npm and the build are fakes on PATH, so no
 # daemon or image is needed. Every PowerShell twin is run against the same
 # fixture and must agree with the bash one; without pwsh those halves report an
 # honest skip.
@@ -865,6 +866,27 @@ au_case "--refresh with a stale layer set" stale ok 2.0.0 --refresh "all --claud
 if ! $HAVE_PWSH; then
 	skipped "agent-update PowerShell routing (pwsh not installed)"
 fi
+
+echo "Test: agent-image-info shows the layer set and the commit that built it"
+
+info_case() {
+	local label="$1" st="$2" want="$3" out
+	# shellcheck disable=SC2016 # expanded by the inner bash
+	out="$(with_fakes "$st" bash -c '. "$0"; agent-image-info' "$ROOT_DIR/shell/powbox.sh" 2>&1)"
+	assert_contains "agent-image-info [$label]" "$(printf '%s\n' "$out" | grep 'layers:')" "$want"
+	assert_contains "agent-image-info [$label]: codex row intact" "$out" "codex:        c1  (codex 0.50.0)"
+	if $HAVE_PWSH; then
+		out="$(with_fakes "$st" pwsh -NoProfile -Command ". '$ROOT_DIR/shell/powbox.ps1'; agent-image-info" 2>&1)"
+		assert_contains "agent-image-info [$label]: PowerShell" "$(printf '%s\n' "$out" | grep 'layers:')" "$want"
+		assert_contains "agent-image-info [$label]: PowerShell codex row intact" "$out" "codex:        c1  (codex 0.50.0)"
+	fi
+}
+INFO_STATE="$(new_state)"
+mkimage "$INFO_STATE" "$AGENT" powbox.commit.base=c0 powbox.commit.codex=c1 powbox.commit.claude=c2 powbox.codex.version=0.50.0 powbox.claude.version=2.0.0
+info_case "lean" "$INFO_STATE" "layers:       none (lean image)"
+mkimage "$INFO_STATE" "$AGENT" powbox.commit.base=c0 powbox.commit.codex=c1 powbox.commit.claude=c2 powbox.codex.version=0.50.0 powbox.claude.version=2.0.0 \
+	powbox.layers.set=full "powbox.layers.digest=$DIGEST" powbox.commit.layers=c9
+info_case "on a set" "$INFO_STATE" "layers:       c9  (set full, digest $DIGEST)"
 
 # ---------------------------------------------------------------------------
 # 6. Build-driver dispatch, end to end against the simulating fake docker

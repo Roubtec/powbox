@@ -54,11 +54,13 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 ## Layout
 
 - `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 10, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
-- `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base; installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
+- `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
+- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `custom/` is yours and gitignored apart from its `.gitkeep`
+- `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
 - `compose.selfhosted.yml`: [self-hosted mode](#self-hosted-mode---isolated) overlay — replaces the host workspace bind mount with a per-instance named volume the container clones into itself (added to the `-f` chain only with `--isolated`)
-- `docker-bake.hcl`: named Bake targets for `base`, `agent`, and `all`
+- `docker-bake.hcl`: named Bake targets for `base`, `layers`, and `agent`, plus the `all` group (base and agent; the build scripts add `layers` when a set is selected)
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
@@ -73,20 +75,65 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 Cached builds are the default.
 
-Use the root build wrappers to rebuild the images you need. Build targets are `base`, `agent`, and `all`.
+Use the root build wrappers to rebuild the images you need. Build targets are `base`, `layers`, `agent`, and `all`:
 
-Both `--claude-version` and `--codex-version` feed the single `agent` image. The Dockerfile installs Codex directly on the base, stable shared-linter layers above it, and Claude above those, so bumping the Claude version (the common, frequent case) busts only the Claude layer and the cheap asset/entrypoint layers above it, while the Codex and linter layers underneath are reused from cache. Bumping the Codex version rebuilds the linter and Claude layers on top as a side effect — an accepted, rarer cost. `agent-update` exploits this by pinning each agent binary's version per build (see [Profile Shortcuts](#profile-shortcuts)).
+- `base` builds `powbox-agent-base:latest` only.
+- `layers` builds the selected [layer set](#layer-sets) into `powbox-agent-layers:latest`, always, building the base first when it is missing; it fails when no set is selected.
+- `agent` builds `powbox-agent:latest`, first building the base when it is missing and, with a set selected, baking the layer-set image when it is not current.
+- `all` builds the base, then the layer-set image when a set is selected, then the agent.
+
+`--no-cache` applies to the images a target always builds: on `agent` it covers the agent's own layers, while a base or layer-set image it has to build on the way still comes from cache. `--pull` re-pulls the upstream image the base is built FROM; on `layers`, `agent` and `all` it refreshes the base first, and the images above follow it.
+
+Both `--claude-version` and `--codex-version` feed the single `agent` image. The Dockerfile installs Codex directly on its parent (the base, or the layer-set image), stable shared-linter layers above it, and Claude above those, so bumping the Claude version (the common, frequent case) busts only the Claude layer and the cheap asset/entrypoint layers above it, while the Codex and linter layers underneath are reused from cache. Bumping the Codex version rebuilds the linter and Claude layers on top as a side effect — an accepted, rarer cost. `agent-update` exploits this by pinning each agent binary's version per build (see [Profile Shortcuts](#profile-shortcuts)).
 
 Examples:
 
 ```bash
 ./build.sh base
+./build.sh layers
 ./build.sh agent
 ./build.sh agent --claude-version latest
 ./build.sh agent --codex-version latest
 ./build.sh agent --codex-version latest --no-cache
 ./build.sh base --no-cache --pull
 ```
+
+### Layer sets
+
+The base image is kept to what every user needs; heavier toolchains can live in an optional **layer set**, a Dockerfile under `docker/layers/<set>/` that is baked into `powbox-agent-layers:latest` between the base and the agent image. Exactly one set is selected, or none:
+
+- No `.powbox-layers` file, or one holding only blank and `#` lines: no set. The agent image is built directly on the lean base, and no layer-set image is built.
+- `full`: the maintainer's bundle in `docker/layers/full/`. It installs nothing yet; tools move into it later.
+- `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of `full`.
+- Any other directory under `docker/layers/` with a `Dockerfile` can be named the same way.
+
+```bash
+# Select the maintainer's bundle (the template's one uncommented line is `full`)
+cp .powbox-layers.example .powbox-layers
+./build.sh agent
+
+# Or start your own set from a copy of it, and select that
+cp -r docker/layers/full/. docker/layers/custom/
+echo custom > .powbox-layers
+./build.sh agent
+```
+
+The selector is the first line of `.powbox-layers` that is neither blank nor a `#` comment, trimmed of whitespace; CRLF line endings and a UTF-8 BOM are accepted (in Windows PowerShell 5.1 write it with `Set-Content .powbox-layers full`, since a `>` redirect writes UTF-16). The name must match `^[a-z0-9][a-z0-9._-]*$` and `docker/layers/<name>/Dockerfile` must exist; otherwise the build and the update check fail with a message naming the value or path, rather than quietly building the lean image. The build and the update check both read the selector through `scripts/layers-select.{sh,ps1}`, so a bash shell and a PowerShell one always agree on the set.
+
+A layer Dockerfile follows a small contract, which `docker/layers/full/Dockerfile` spells out in its header:
+
+- It starts with `ARG BASE_IMAGE=powbox-agent-base:latest` and `FROM ${BASE_IMAGE}`, switches to `USER root` for installs, and ends with `USER node`, the user the base ends with and the agent Dockerfile assumes.
+- Its build context is its own directory, not the repo root, so a copied set works unchanged; a set that needs a file from the repo keeps its own copy.
+- Every `COPY` and `ADD` carries `--chmod=<mode>`, and the directory holds regular files only (no symlinks; create links in a `RUN`). The set's digest covers file contents, not modes or link targets, so these rules keep every build input inside what the digest sees; a violation fails the build with the offending line or path named.
+- It sets no `powbox.*` labels: the bake target stamps `powbox.layers.set`, `powbox.layers.digest` (a sha256 over every file in the set directory, from `scripts/layers-digest.{sh,ps1}`), `powbox.layers.base.id` (the ID of the base it was built on) and `powbox.commit.layers`. The agent image inherits them.
+
+The `agent` target bakes the layer-set image only when it is not current: when it is missing, was built from another set, its recorded digest differs from the working tree's, or it was built on a base other than the present `powbox-agent-base:latest`. So `./build.sh base` followed by `./build.sh agent` (or `./build.sh agent --pull`) rebuilds the set on the new base before the agent, and an unchanged set is reused as is. The `all` and `layers` targets always bake it, from cache unless `--no-cache` is given.
+
+`agent-check-updates` reports a `Layers` row comparing the set the running agent image was built from with the one selected now, and `agent-update` rebuilds a stale set through the `agent` target, from cache and without touching the base (see [Profile Shortcuts](#profile-shortcuts)).
+
+A base baked at a new commit with an unchanged recipe changes only the base's labels, not its filesystem layers. The layer-set image built on it is then not current, because the base's ID moved, and is baked again; its steps are expected to come out of the cache with new labels only, and so are the agent's install layers when the build pins the same versions as the one before. That expectation rests on BuildKit keying a child's steps on its parent's layers and configuration rather than on the parent's image ID.
+
+Switching from a set back to no set leaves `powbox-agent-layers:latest` behind, unused. It is not deleted automatically; remove it with `docker image rm powbox-agent-layers:latest`.
 
 ### Iterating on a baked script without a rebuild
 
@@ -111,7 +158,7 @@ After editing the template, rebuild the agent image for the changes to take effe
 
 ```bash
 ./build.sh agent
-# or rebuild everything (base + agent)
+# or rebuild everything (base, the layer-set image when a set is selected, agent)
 ./build.sh
 ```
 
@@ -213,14 +260,14 @@ If you are using the profile shortcuts described below, the same script is expos
 
 ### Image provenance
 
-Each image records the powbox commit it was built from, so you can tell whether a running image predates repo changes even when the agent binaries themselves are current. Because the build is layered, a piecemeal-updated image can carry up to **three** distinct commits: the base image has its own parent, and the Claude layer can be rebuilt without touching the Codex layer below it.
+Each image records the powbox commit it was built from, so you can tell whether a running image predates repo changes even when the agent binaries themselves are current. Because the build is layered, a piecemeal-updated image can carry up to **four** distinct commits: the base image and the layer-set image (when a set is selected) each have their own, and the Claude layer can be rebuilt without touching the Codex layer below it.
 
 The commit that built each layer is recorded two ways:
 
-- **Image labels** `powbox.commit.{base,codex,claude}` (plus `powbox.{codex,claude}.version`) for host-side `docker image inspect`. The host helper `agent-image-info` prints them alongside your working-tree HEAD, and `agent-update` shows the same block before asking to rebuild.
-- **Baked files** `/home/node/.powbox/{base,codex,claude}.commit` for in-container reading. The `powbox-provenance` command prints them; an agent in the container can diff the building commit against the powbox repo (`git -C <powbox-repo> diff <claude-commit>..HEAD`).
+- **Image labels** `powbox.commit.{base,layers,codex,claude}` (plus `powbox.{codex,claude}.version` and the set's `powbox.layers.{set,digest}`) for host-side `docker image inspect`. The host helper `agent-image-info` prints them alongside your working-tree HEAD, and `agent-update` shows the same block before asking to rebuild. The base and layer-set commits mean "last baked at this commit", which is not always the commit that last changed their content: a cached rebake at a new commit moves them.
+- **Baked files** `/home/node/.powbox/{base,codex,claude}.commit` for in-container reading, all written by the agent image's top metadata layer (`base.commit` from the label the agent inherits, so the two always agree; the base image itself carries its commit as a label only). The `powbox-provenance` command prints them; an agent in the container can diff the building commit against the powbox repo (`git -C <powbox-repo> diff <claude-commit>..HEAD`). The layer-set commit has no file and is visible host-side only.
 
-The Codex commit is special: stamping it inside the Codex install layer would bust that layer's cache on every commit (defeating the Codex-below-Claude ordering), so the build script computes it — using `HEAD` when that layer rebuilds and carrying the previous value forward when it is reused — and records it only in the top metadata layer. A `-dirty` suffix marks an image built from an uncommitted worktree. No automated decision is made from these commits; they are introspection only.
+The Codex commit is special: stamping it inside the Codex install layer would bust that layer's cache on every commit (defeating the Codex-below-Claude ordering), so the build script computes it — using `HEAD` when that layer rebuilds and carrying the previous value forward when it is reused, judged by the agent's parent's layers and inherited configuration plus the Codex version — and records it only in the top metadata layer. A `-dirty` suffix marks an image built from an uncommitted worktree. No automated decision is made from these commits; they are introspection only.
 
 ## Runtime
 
@@ -678,13 +725,13 @@ Functions exposed by both libraries:
 - `cc-list`, `cx-list`, `agent-list` — list agent containers (self-hosted ones get a trailing `[self-hosted name=… repo=… ref=…]` marker so you can resume an instance by its `--name` without an inspect)
 - `agent-volumes` — list agent-related Docker volumes
 - `agent-prune-stopped`, `agent-prune-volumes`, `agent-prune` — cleanup helpers
-- `agent-check-updates` — compare baked agent versions against the latest npm releases, and the base image's recorded source digest against the current `node:24-trixie-slim` registry digest
-- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base + the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet. After a successful rebuild it offers (on a TTY) to re-seed skills from the fresh image via `agent-update-skills`.
-- `agent-update --refresh` (PowerShell: `-Refresh`) — rebuild even when nothing is stale: the full stack (base + agent) is rebuilt from the current repo state, cached and without `--pull`, with every current binary pinned to its baked version — the way to pick up powbox recipe changes (a changed Dockerfile layer busts its own cache by content, so no `--no-cache` is needed; unchanged layers are reused). When updates *are* pending, `--refresh` takes them too and widens the rebuild to the full stack.
-- `agent-full-rebuild` — the nuclear option: re-pull the upstream base image and rebuild everything from scratch with the latest package and agent versions (`build.sh all --pull --no-cache`), for when the images are in an unknown state and you want a clean slate. For plain recipe changes `agent-update --refresh` is much faster. (To rebuild with one agent held at a specific version, call the build script directly: `build.sh agent --claude-version <v> --codex-version <v>`.)
+- `agent-check-updates` — compare baked agent versions against the latest npm releases, the base image's recorded source digest against the current `node:24-trixie-slim` registry digest, and the [layer set](#layer-sets) the agent image was built from against the one `.powbox-layers` selects now (the `Layers` row; "none — lean image" when neither has one)
+- `agent-update` — show the full update report, then (only when something is stale) prompt for confirmation before rebuilding. A stale base triggers a full `build.sh all --pull --no-cache` (base, the layer-set image when a set is selected, and the agent image on top); otherwise the unified image is rebuilt once with each binary's version pinned, so only the stale agent's layer (plus the cheap layers above it) rebuilds while the unchanged binary's layer is reused from cache — no `--no-cache`. A stale layer set (the set was edited, another was selected, or the selector was removed) rebuilds through the `agent` target from cache, without `--pull` and without touching the base: the layer-set image is rebaked when it is not current and the agent is rebuilt on it (or on the base, with no set selected), both binaries pinned to their baked versions unless they are stale too. On confirmation it re-checks, so an update you approve in another terminal while the prompt waits is still picked up. A missing or unlabeled image counts as stale, so this also bootstraps a machine that has no images yet. After a successful rebuild it offers (on a TTY) to re-seed skills from the fresh image via `agent-update-skills`.
+- `agent-update --refresh` (PowerShell: `-Refresh`) — rebuild even when nothing is stale: the full stack (base, the layer-set image when a set is selected, and the agent) is rebuilt from the current repo state, cached and without `--pull`, with every current binary pinned to its baked version — the way to pick up powbox recipe changes (a changed Dockerfile layer busts its own cache by content, so no `--no-cache` is needed; unchanged layers are reused). At a new commit with an unchanged recipe, the base and the layer set are expected to come out of the cache with new labels only, and so are the agent's Codex, linter and Claude install layers when the previous build pinned the same versions, as an earlier `agent-update` leaves it; the top metadata layer and the cheap layers above it rebuild, as at every new commit. The first `--refresh` after an unpinned `./build.sh` run (both versions at `latest`) reinstalls both agents once, because the version arguments change from `latest` to numbers. When updates *are* pending, `--refresh` takes them too and widens the rebuild to the full stack.
+- `agent-full-rebuild` — the nuclear option: re-pull the upstream base image and rebuild everything (base, layer-set image, agent) from scratch with the latest package and agent versions (`build.sh all --pull --no-cache`), for when the images are in an unknown state and you want a clean slate. For plain recipe changes `agent-update --refresh` is much faster. (To rebuild with one agent held at a specific version, call the build script directly: `build.sh agent --claude-version <v> --codex-version <v>`.)
 - `agent-reset-claude-history` — wipe per-project Claude session history from the shared `claude-config` volume (credentials and settings preserved); forwards flags like `--dry-run`/`--force` (bash) or `-WhatIf`/`-Force` (PowerShell)
 - `agent-update-skills` — re-seed the image-baked skills onto the `claude-config` / `codex-config` volumes, overriding the startup no-clobber so a rebuilt image's updated skill text replaces the stale volume copies. Skills are tracked by a `.powbox-seeded` ownership marker, so it refreshes only powbox's own copies and leaves user-authored skills alone. Flags: `--dry-run`/`-DryRun` (preview the plan), `--prune`/`-Prune` (remove obsolete seeds no longer baked), `--adopt-all`/`-AdoptAll` (take the baked version of unmarked name-collisions); on a TTY it prompts before pruning/adopting. Rebuild the image first so the baked skills are current.
-- `agent-image-info` — print the powbox commit that built each layer of `powbox-agent:latest` (base / codex / claude/top) from the image's `powbox.commit.*` labels, plus your working-tree HEAD, so a stale image is obvious even when the agent binaries are current. In-container, the baked `powbox-provenance` command prints the same from `/home/node/.powbox/*.commit`. See [Image provenance](#image-provenance).
+- `agent-image-info` — print the powbox commit that built each layer of `powbox-agent:latest` (base / layers / codex / claude/top) from the image's `powbox.commit.*` labels, with the layer set's name and digest (or "none (lean image)"), plus your working-tree HEAD, so a stale image is obvious even when the agent binaries are current. In-container, the baked `powbox-provenance` command prints the base, Codex and Claude commits from `/home/node/.powbox/*.commit`; the layer-set commit is host-side only. See [Image provenance](#image-provenance).
 
 ### Environment Variables
 

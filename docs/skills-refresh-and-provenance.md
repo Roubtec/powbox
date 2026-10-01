@@ -68,10 +68,11 @@ codex-config volume — see `entrypoint-codex-hook.sh:155-160`.)
 `LABEL`s / baked files. The existing `powbox.base.source.digest` label is computed
 this way and is the precedent to follow for commit provenance.
 
-Agent image layer order (`docker/agent/Dockerfile`): `FROM base` → **codex install
-(low)** → shared-linter installs → **claude install (high)** → asset COPY +
-`RUN date +%s%N` epoch → entrypoint COPY. Codex stays directly on the base because
-the provenance resolver models that parent exactly. The epoch `RUN` is
+Agent image layer order (`docker/agent/Dockerfile`): `FROM` the base (or the
+layer-set image when a set is selected) → **codex install (low)** → shared-linter
+installs → **claude install (high)** → asset COPY + `RUN date +%s%N` epoch →
+entrypoint COPY. Codex stays directly on that parent because the provenance resolver
+models that parent exactly. The epoch `RUN` is
 non-deterministic, so the asset/epoch/entrypoint layers rebuild on **every** agent
 build; codex and the stable linter layers are reused on a claude-only update.
 
@@ -282,43 +283,55 @@ The codex read-back resolver was unit-tested against a `docker` stub across the
 rebuild/reuse matrix, and `agent-image-info` was exercised via a label stub; a real
 image build is still to be validated on the host.
 
-Reality: a piecemeal-updated stack can carry up to **three** distinct powbox commits.
+Reality: a piecemeal-updated stack can carry up to **three** distinct powbox commits, **four** since the optional layer-set image (`powbox-agent-layers:latest`, between the base and the agent) was added.
 
 | Anchor | Changes when | Recorded where |
 |---|---|---|
-| **base** | base rebuild only (separate image, own parent) | label + file on the base image |
-| **codex** | codex layer rebuilt — a codex version bump, or a base rebuild that re-parents it (reused on a claude-only update over the same base) | label + file on agent image, via **read-back** |
+| **base** | every base bake (separate image, own parent) | label on the base image, inherited by the images above; file written by the agent's top metadata layer from that label |
+| **layers** | every layer-set bake: each `all`, and an `agent` build that finds the layer-set image not current (set, digest or base ID changed) | label on the layer-set image, inherited by the agent; no file (see below) |
+| **codex** | codex layer rebuilt — a codex version bump, or a parent change that re-parents it (reused on a claude-only update, and on a label-only rebake of the parent) | label + file on agent image, via **read-back** |
 | **claude / top** | every agent build | label + file on agent image (current HEAD) |
+
+The base and layers anchors mean "last baked at this commit", not "content last changed at this commit". A base bake at a new commit with an unchanged recipe reuses every filesystem layer and only restamps labels, and so does the layer-set bake that follows it, yet both labels move to the new commit. The codex anchor is the only one that tries to name the commit that built the content, because it is resolved from the cache behaviour rather than from the bake.
+
+The layers anchor has no in-container file, and `powbox-provenance` prints no layers line: a user-owned layer Dockerfile cannot be made to write one, and while the agent's top metadata layer could write it from the inherited `powbox.commit.layers` label (the way it writes `base.commit`), that was left out to keep `powbox-provenance` and its output unchanged. The layers commit is exposed host-side only, through `agent-image-info`.
 
 **Cache-safety crux:** codex's commit **cannot** be stamped inside the codex install
 layer. We pass the current HEAD on every build, so any `RUN` referencing a commit
 `ARG` in that layer would bust the codex layer on every commit — destroying the
 layer-reuse the "codex below claude" ordering exists to preserve. Therefore codex's
 commit is computed in `build-image.sh`:
-- codex rebuilt this run (codex forced to latest, or `base`/`all`/`--no-cache`, no
-  existing image, **or the base image changed** since the previous agent was built)
-  → `powbox.commit.codex = HEAD`;
-- codex pinned/reused on the *same* base → read the prior `powbox.commit.codex` off
-  the existing `powbox-agent:latest` and **carry it forward unchanged**.
+- codex rebuilt this run (codex forced to latest, `--no-cache`, no existing image,
+  **or the agent's parent changed** in a way that busts the layer since the previous
+  agent was built) → `powbox.commit.codex = HEAD`;
+- codex pinned/reused on an *equivalent* parent → read the prior `powbox.commit.codex`
+  off the existing `powbox-agent:latest` and **carry it forward unchanged**.
 
-`build-image.{sh,ps1}` distinguishes the cases by mirroring Docker's cache key for the
-codex layer — its **parent** (the base image) and its **install instruction**
-(`CODEX_VERSION`). It records `powbox.base.image.id` and `powbox.codex.version` on the
-agent and carries the codex commit forward only when *both* the current base image ID
-and the requested `CODEX_VERSION` match what the previous `powbox-agent:latest` recorded;
-otherwise the layer rebuilds at HEAD. The version half aligns with the `agent-update`
-orchestration (claude-only update passes the same baked codex version → carry forward;
-codex update passes a new one → HEAD); the base half catches a separately rebuilt base
-(`build.sh base` then `build.sh agent`) that re-parents and thus rebuilds the codex
-layer. Degrades gracefully to HEAD for ad-hoc builds; acceptable because **no logic
-flows off these hashes** (introspection only).
+`build-image.{sh,ps1}` distinguish the cases (in `build-image-lib.{sh,ps1}`,
+`resolve_codex_commit` / `Resolve-CodexCommit`) by approximating BuildKit's cache key
+for the codex layer — its **parent** and its **install instruction** (`CODEX_VERSION`).
+The parent is the image the agent is actually built FROM: the base, or the layer-set
+image when a set is selected. It is resolved after the run's base and layer-set steps,
+so a base or set rebuilt earlier in the same run is the one compared. The parent is
+summarised as `powbox.parent.signature`: a sha256 over its layer chain
+(`.RootFS.Layers`) and the inherited configuration a `RUN` executes under
+(`.Config.Env`, `.Config.Shell`, `.Config.WorkingDir`, `.Config.User`), in that fixed
+order, with the labels deliberately left out. The resolver records that signature and
+`powbox.codex.version` on the agent and carries the codex commit forward only when
+*both* the current parent's signature and the requested `CODEX_VERSION` match what the
+previous `powbox-agent:latest` recorded; otherwise the layer rebuilds at HEAD.
+
+Why a signature and not the parent's image ID: the base no longer carries a commit-stamped file layer, so a base baked at a new commit (`base`, `all`, `--pull` with an unchanged upstream) changes only its labels, and therefore its ID, while its layers and environment stay put and the codex layer is reused. Comparing the ID would stamp HEAD on a reused layer; that is also why `all` and `--pull` no longer short-circuit to HEAD and go through the comparison like any other run. The layer chain alone would err the other way for a parent that changes only an `ENV`, `SHELL`, `WORKDIR` or `USER` line, which BuildKit is understood to key the `RUN` on; that was not measured on a build, and if it is wrong the cost is HEAD stamped on a reused layer, the resolver's existing fallback. This is a different question from the layer-set currency test, which compares the base's ID on purpose: that one asks "must the layer-set image be rebuilt", this one asks "will Docker reuse the codex layer". The version half aligns with the `agent-update` orchestration (claude-only update passes the same baked codex version → carry forward; codex update passes a new one → HEAD); the parent half catches a base or layer set that gained a layer (`build.sh base` then `build.sh agent` after a recipe edit) and thus rebuilds the codex layer. Degrades gracefully to HEAD for ad-hoc builds; acceptable because the label is informational and **no logic flows off these hashes** (introspection only).
 
 **Known limitation (accepted):** the codex commit is resolved *before* the build, so it
 predicts Docker's cache decision rather than observing it. Two residual cases can still
 attribute the codex layer to a carried-forward commit when it was actually rebuilt:
 (a) the BuildKit build cache is evicted between runs (e.g. `docker builder prune`), which
-the host cannot detect without running the build; and (b) a Dockerfile instruction *at or
-above* the codex layer is edited without bumping `CODEX_VERSION`. Both require either
+the host cannot detect without running the build; (b) a Dockerfile instruction *at or
+above* the codex layer is edited without bumping `CODEX_VERSION`; and (c) the parent
+signature approximates the cache key rather than reproducing it, so a parent change it
+does not cover (any inherited setting outside the four config fields above) goes
+unseen. Both require either
 external cache surgery or a source edit (which carries its own commit), and in the worst
 case `powbox-provenance` shows a codex commit slightly behind HEAD — never wrong in a way
 any runtime logic depends on. Fully closing them would require observing per-layer cache
@@ -326,13 +339,17 @@ hits from the build output (or relabelling after the build), which is disproport
 an introspection-only surface.
 
 **Surface via both:**
-- **Labels** `powbox.commit.{base,codex,claude}` → host-side `docker inspect` /
+- **Labels** `powbox.commit.{base,layers,codex,claude}` → host-side `docker inspect` /
   `docker image inspect`, no container needed (what `agent-update` output and the
   `zsh` helper read).
-- **Baked files** under a stable path (e.g. `/home/node/.powbox/{base,codex,agent}.commit`;
-  base's is inherited via `FROM`) → in-container `cat`, enabling "an agent in this
-  environment diffs the building branch against the working branch"
-  (`git diff <commit>..HEAD` against the powbox repo).
+- **Baked files** under a stable path (`/home/node/.powbox/{base,codex,claude}.commit`)
+  → in-container `cat`, enabling "an agent in this environment diffs the building
+  branch against the working branch" (`git diff <commit>..HEAD` against the powbox
+  repo). All three are written by the agent's top metadata layer; `base.commit` comes
+  from the `powbox.commit.base` label of the agent's actual parent (passed as
+  `POWBOX_COMMIT_BASE`), so it always matches the label the agent inherits. The base
+  image keeps its commit as a label only: a file written there gave the base a new
+  top layer at every commit, which reinstalled everything built on it.
 
 The single agent `build-commit` baked in THIS branch (D6) is the same value as the
 `claude/top` anchor, so the stacked branch builds on it without rework.

@@ -27,9 +27,13 @@
 #     mode a copied file gets comes from the Dockerfile, which is hashed, never
 #     from the checkout (a Windows checkout has no Unix modes, and Git tracks
 #     only the executable bit).
+# The Dockerfile's final stage must also build FROM ${BASE_IMAGE}, directly or
+# through earlier stages: the bake stamps the base's ID on the layer image as
+# powbox.layers.base.id, which the update check trusts as proof the image sits
+# on that base, so a set built on any other image must not get a digest.
 # The Dockerfile check joins backslash continuations and skips comment and blank
 # lines inside them, as Docker does. It does not parse heredoc bodies or an
-# `# escape=` directive: a heredoc line that itself reads as a COPY or ADD
+# `# escape=` directive: a heredoc line that itself reads as a COPY, ADD or FROM
 # instruction is checked too, which errs towards rejecting.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
@@ -91,7 +95,45 @@ is_blank_or_comment() {
 	return 1
 }
 
-# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>.
+# Whether the latest stage descends from ${BASE_IMAGE}, and the names of the
+# stages so far that do (space-separated, lowercased as Docker matches them).
+from_count=0
+from_line=0
+from_logical=""
+from_on_base=false
+base_stages=" "
+
+# Record a FROM: its flags are skipped, then the image, then an optional AS name.
+note_from() {
+	local -a words=("${@:3}")
+	local i=1 image name=""
+	while [ "$i" -lt "${#words[@]}" ]; do
+		case "${words[$i]}" in --*) i=$((i + 1)) ;; *) break ;; esac
+	done
+	image="${words[$i]:-}"
+	if [ $((i + 2)) -lt "${#words[@]}" ] && [ "$(printf '%s' "${words[$((i + 1))]}" | tr '[:upper:]' '[:lower:]')" = as ]; then
+		name="$(printf '%s' "${words[$((i + 2))]}" | tr '[:upper:]' '[:lower:]')"
+	fi
+	from_count=$((from_count + 1))
+	from_line="$1"
+	from_logical="$2"
+	from_on_base=false
+	# shellcheck disable=SC2016 # the literal reference, not an expansion
+	case "$image" in
+	'${BASE_IMAGE}' | '$BASE_IMAGE') from_on_base=true ;;
+	*)
+		case "$base_stages" in
+		*" $(printf '%s' "$image" | tr '[:upper:]' '[:lower:]') "*) from_on_base=true ;;
+		esac
+		;;
+	esac
+	if $from_on_base && [ -n "$name" ]; then
+		base_stages="${base_stages}${name} "
+	fi
+}
+
+# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>,
+# and pass a FROM to note_from.
 # Flags are the leading --name=value words after the keyword; Docker accepts
 # instruction flags only in that position and only in the = form.
 check_instruction() {
@@ -101,6 +143,10 @@ check_instruction() {
 	[ "${#words[@]}" -gt 0 ] || return 0
 	local i=0 keyword
 	keyword="$(printf '%s' "${words[0]}" | tr '[:lower:]' '[:upper:]')"
+	if [ "$keyword" = FROM ]; then
+		note_from "$lineno" "$logical" "${words[@]}"
+		return 0
+	fi
 	if [ "$keyword" = ONBUILD ] && [ "${#words[@]}" -gt 1 ]; then
 		keyword="$(printf '%s' "${words[1]}" | tr '[:lower:]' '[:upper:]')"
 		i=1
@@ -152,6 +198,12 @@ while [ "$i" -lt "$n" ]; do
 	check_instruction "$start" "$logical"
 	i=$((i + 1))
 done
+
+if [ "$from_count" -eq 0 ]; then
+	report "${SET_DIR}/Dockerfile: no FROM; the final stage must build FROM \${BASE_IMAGE}"
+elif ! $from_on_base; then
+	report "${SET_DIR}/Dockerfile:${from_line}: the final stage must build FROM \${BASE_IMAGE} (directly or through an earlier stage): ${from_logical}"
+fi
 
 entries="$(mktemp)"
 trap 'rm -f "$entries"' EXIT

@@ -7,7 +7,9 @@
 # built and exercised before any tool moves here.
 #
 # The contract every layer Dockerfile follows (README "Layer sets"):
-#   - start with the two lines below, so the build scripts can pass the base;
+#   - start with the two lines below, so the build scripts can pass the base,
+#     and build the final stage on it (directly or through a stage that is):
+#     the bake labels this image with the base's ID as proof of the chain;
 #   - switch to USER root for installs and end with USER node, the user the
 #     base ends with and the agent Dockerfile assumes;
 #   - give every COPY and ADD a --chmod=<mode>: the build context is this

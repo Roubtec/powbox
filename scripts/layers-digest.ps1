@@ -70,12 +70,41 @@ function Get-StrippedContinuation([string]$Line) {
     return $t.Substring(0, $t.Length - 1)
 }
 
-# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>.
+# Whether the latest stage descends from ${BASE_IMAGE}, and the names of the
+# stages so far that do (lowercased, as Docker matches them).
+$script:fromCount = 0
+$script:fromLine = 0
+$script:fromLogical = ''
+$script:fromOnBase = $false
+$script:baseStages = New-Object System.Collections.Generic.HashSet[string]
+
+# Record a FROM: its flags are skipped, then the image, then an optional AS name.
+function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
+    $i = 1
+    while ($i -lt $Words.Count -and $Words[$i].StartsWith('--', [System.StringComparison]::Ordinal)) { $i++ }
+    $image = if ($i -lt $Words.Count) { $Words[$i] } else { '' }
+    $name = ''
+    if (($i + 2) -lt $Words.Count -and $Words[$i + 1].ToLowerInvariant() -eq 'as') {
+        $name = $Words[$i + 2].ToLowerInvariant()
+    }
+    $script:fromCount++
+    $script:fromLine = $LineNo
+    $script:fromLogical = $Logical
+    $script:fromOnBase = ($image -ceq '${BASE_IMAGE}' -or $image -ceq '$BASE_IMAGE' -or $script:baseStages.Contains($image.ToLowerInvariant()))
+    if ($script:fromOnBase -and $name) { [void]$script:baseStages.Add($name) }
+}
+
+# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>,
+# and pass a FROM to Register-From.
 function Test-Instruction([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -eq 0) { return }
     $i = 0
     $keyword = $words[0].ToUpperInvariant()
+    if ($keyword -eq 'FROM') {
+        Register-From -LineNo $LineNo -Logical $Logical -Words $words
+        return
+    }
     if ($keyword -eq 'ONBUILD' -and $words.Count -gt 1) {
         $keyword = $words[1].ToUpperInvariant()
         $i = 1
@@ -123,6 +152,12 @@ while ($i -lt $n) {
     }
     Test-Instruction $start $logical
     $i++
+}
+
+if ($script:fromCount -eq 0) {
+    Write-DigestError "${SetDir}/Dockerfile: no FROM; the final stage must build FROM `${BASE_IMAGE}"
+} elseif (-not $script:fromOnBase) {
+    Write-DigestError "${SetDir}/Dockerfile:$($script:fromLine): the final stage must build FROM `${BASE_IMAGE} (directly or through an earlier stage): $($script:fromLogical)"
 }
 
 $files = New-Object System.Collections.Generic.List[string]

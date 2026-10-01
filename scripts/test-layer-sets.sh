@@ -440,21 +440,31 @@ dockerfile_case() {
 	fi
 }
 
-dockerfile_case "COPY without --chmod" $'FROM x\nUSER root\nCOPY notes.md /opt/notes.md\nUSER node\n' reject "Dockerfile:3:" "COPY notes.md /opt/notes.md"
-dockerfile_case "ADD without --chmod" $'FROM x\nADD notes.md /opt/\n' reject "Dockerfile:2:" "ADD without --chmod="
-dockerfile_case "lowercase copy" $'FROM x\ncopy notes.md /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "COPY with --chown only" $'FROM x\nCOPY --chown=node:node notes.md /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "ONBUILD COPY without --chmod" $'FROM x\nONBUILD COPY notes.md /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "empty --chmod=" $'FROM x\nCOPY --chmod= notes.md /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "--chmod= after the sources does not count" $'FROM x\nCOPY notes.md --chmod=644 /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "continued COPY lacking --chmod, named by its first line" $'FROM x\nRUN true\nCOPY \\\n    notes.md \\\n    /opt/\n' reject "Dockerfile:3: COPY without --chmod=<mode>"
-dockerfile_case "two violations, both named" $'FROM x\nCOPY a /a\nADD b /b\n' reject "Dockerfile:2:" "Dockerfile:3:"
-dockerfile_case "COPY with --chmod" $'FROM x\nCOPY --chmod=644 notes.md /opt/\n' ok
-dockerfile_case "ADD with --chmod among other flags" $'FROM x\nADD --chown=node:node --chmod=0755 notes.md /opt/\n' ok
-dockerfile_case "--chmod= on a continuation line" $'FROM x\nCOPY \\\n  # comment inside the instruction\n\n  --chmod=644 notes.md /opt/\n' ok
-dockerfile_case "CRLF Dockerfile" $'FROM x\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' ok
-dockerfile_case "COPY in a comment or a RUN" $'FROM x\n# COPY notes.md /opt/\nRUN echo COPY notes.md /opt/\n' ok
+dockerfile_case "COPY without --chmod" $'FROM ${BASE_IMAGE}\nUSER root\nCOPY notes.md /opt/notes.md\nUSER node\n' reject "Dockerfile:3:" "COPY notes.md /opt/notes.md"
+dockerfile_case "ADD without --chmod" $'FROM ${BASE_IMAGE}\nADD notes.md /opt/\n' reject "Dockerfile:2:" "ADD without --chmod="
+dockerfile_case "lowercase copy" $'FROM ${BASE_IMAGE}\ncopy notes.md /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "COPY with --chown only" $'FROM ${BASE_IMAGE}\nCOPY --chown=node:node notes.md /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "ONBUILD COPY without --chmod" $'FROM ${BASE_IMAGE}\nONBUILD COPY notes.md /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "empty --chmod=" $'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "--chmod= after the sources does not count" $'FROM ${BASE_IMAGE}\nCOPY notes.md --chmod=644 /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "continued COPY lacking --chmod, named by its first line" $'FROM ${BASE_IMAGE}\nRUN true\nCOPY \\\n    notes.md \\\n    /opt/\n' reject "Dockerfile:3: COPY without --chmod=<mode>"
+dockerfile_case "two violations, both named" $'FROM ${BASE_IMAGE}\nCOPY a /a\nADD b /b\n' reject "Dockerfile:2:" "Dockerfile:3:"
+dockerfile_case "COPY with --chmod" $'FROM ${BASE_IMAGE}\nCOPY --chmod=644 notes.md /opt/\n' ok
+dockerfile_case "ADD with --chmod among other flags" $'FROM ${BASE_IMAGE}\nADD --chown=node:node --chmod=0755 notes.md /opt/\n' ok
+dockerfile_case "--chmod= on a continuation line" $'FROM ${BASE_IMAGE}\nCOPY \\\n  # comment inside the instruction\n\n  --chmod=644 notes.md /opt/\n' ok
+dockerfile_case "CRLF Dockerfile" $'FROM ${BASE_IMAGE}\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' ok
+dockerfile_case "COPY in a comment or a RUN" $'FROM ${BASE_IMAGE}\n# COPY notes.md /opt/\nRUN echo COPY notes.md /opt/\n' ok
 dockerfile_case "no COPY at all" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nUSER root\nUSER node' ok
+# The final stage must descend from ${BASE_IMAGE}: the bake stamps the base's ID
+# on the layer image, which the update check trusts as proof of the chain.
+dockerfile_case "final stage on another image" $'FROM busybox\nUSER node\n' reject "Dockerfile:1: the final stage must build FROM \${BASE_IMAGE}" "FROM busybox"
+dockerfile_case "no FROM at all" $'ARG BASE_IMAGE=b\n' reject "Dockerfile: no FROM"
+dockerfile_case "builder stage last" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM golang AS build\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "final stage named after a non-base stage" $'FROM golang AS b\nFROM b\n' reject "Dockerfile:2: the final stage"
+dockerfile_case "FROM rule and --chmod rule both named" $'FROM busybox\nCOPY a /a\n' reject "Dockerfile:2: COPY without" "Dockerfile:1: the final stage"
+dockerfile_case "unbraced \$BASE_IMAGE, lowercase from" $'ARG BASE_IMAGE=b\nfrom $BASE_IMAGE\n' ok
+dockerfile_case "--platform flag and a stage built on the base" $'ARG BASE_IMAGE=b\nFROM --platform=linux/amd64 ${BASE_IMAGE} AS Base\nFROM base\n' ok
+dockerfile_case "builder stage first, base stage last" $'ARG BASE_IMAGE=b\nFROM golang AS build\nRUN true\nFROM ${BASE_IMAGE}\nCOPY --from=build --chmod=755 /x /x\n' ok
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -537,14 +547,20 @@ if $HAVE_PWSH; then
 	dig_parity "a directory symlink" "$set_dirlink"
 	dig_parity "a FIFO" "$set_fifo"
 	dig_parity "no Dockerfile" "$set_nodf"
-	for body in $'FROM x\nCOPY a /a\nADD b /b\n' \
-		$'FROM x\nCOPY \\\n    notes.md \\\n    /opt/\n' \
-		$'FROM x\nCOPY \\\n  # comment inside the instruction\n\n  --chmod=644 notes.md /opt/\n' \
-		$'FROM x\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' \
-		$'FROM x\nONBUILD copy --chown=a notes.md /opt/\n' \
-		$'FROM x\nCOPY --chmod= notes.md /opt/\n' \
-		$'FROM x\nCOPY notes.md' \
-		$'FROM x\n\tCOPY\tnotes.md\t/opt/   \n'; do
+	for body in $'FROM ${BASE_IMAGE}\nCOPY a /a\nADD b /b\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY \\\n    notes.md \\\n    /opt/\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY \\\n  # comment inside the instruction\n\n  --chmod=644 notes.md /opt/\n' \
+		$'FROM ${BASE_IMAGE}\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' \
+		$'FROM ${BASE_IMAGE}\nONBUILD copy --chown=a notes.md /opt/\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
+		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \
+		$'FROM busybox\nCOPY a /a\n' \
+		$'ARG BASE_IMAGE=b\n' \
+		$'FROM\n' \
+		$'FROM golang AS b\nFROM B\n' \
+		$'FROM --platform=x ${BASE_IMAGE} as Base\nFROM BASE\n' \
+		$'FROM golang AS build\nFROM $BASE_IMAGE\n'; do
 		d="$(mktemp -d "$WORK_ROOT/dfp.XXXXXX")"
 		make_set "$d"
 		printf '%s' "$body" >"$d/Dockerfile"

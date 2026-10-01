@@ -51,13 +51,13 @@ Out of scope: hashing modes into the digest (the digest format deliberately matc
 ## Implementation notes
 
 - Prerequisite: PR #161 (task 063) merged, or this task stacked on its branch.
-- Option A: parse the `--mount=` value as BuildKit does. A JSON-form `RUN ["…"]` takes no flags, so only the shell form matters. Match keys case-insensitively only where BuildKit does; when unsure, err toward rejecting, as the scans already do for `# escape=` and non-ASCII spellings.
+- Option A: parse the `--mount=` value as BuildKit does. Flags precede the command in both forms: `RUN --mount=type=bind,target=/ctx ["cp", "-p", "/ctx/tool", "/usr/local/bin/tool"]` is a bind mount too, so read the leading flags whether the rest is shell form or JSON (exec) form. Match keys case-insensitively only where BuildKit does; when unsure, err toward rejecting, as the scans already do for `# escape=` and non-ASCII spellings.
 - Option A interacts with `ONBUILD RUN --mount`, which is already rejected as an `ONBUILD` — no special case needed.
 - Whichever option is chosen, the `full` set must still build: it has no `RUN --mount` today.
 
 ## Acceptance criteria
 
-- Option A: both scans reject `RUN --mount=type=bind,target=/x …`, `RUN --mount=target=/x …` and a bind spelled with other key orders or `source=`, naming the line; both accept `--mount=type=bind,from=build,…`, `--mount=type=cache,…`, `--mount=type=secret,…`; stdout, stderr and exit match byte for byte for every new body.
+- Option A: both scans reject `RUN --mount=type=bind,target=/x …`, `RUN --mount=target=/x …`, a bind spelled with other key orders or `source=`, and each of those before a JSON (exec) form command, naming the line; both accept `--mount=type=bind,from=build,…`, `--mount=type=cache,…`, `--mount=type=secret,…`; stdout, stderr and exit match byte for byte for every new body.
 - Option B: the three docs no longer claim the contract removes every build input, and say plainly that a context bind mount exposes modes outside the digest.
 - `bash scripts/test-layer-sets.sh` passes with no skips on a host with `pwsh`; `shellcheck`, `shfmt -d` and PSScriptAnalyzer are clean on the touched files.
 

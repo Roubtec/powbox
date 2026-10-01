@@ -8,7 +8,7 @@
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract or
 # cannot be read (every offending line or path is named on stderr); 2 on a usage
-# error. The .sh's status 3 (no sha256 tool, or no iconv) cannot happen here.
+# error. The .sh's status 3 (no sha256 tool) cannot happen here.
 param([string]$SetDir = '')
 
 $ErrorActionPreference = 'Stop'

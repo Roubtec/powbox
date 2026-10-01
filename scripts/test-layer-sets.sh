@@ -584,7 +584,7 @@ assert_eq "digest without an argument is a usage error (exit 2)" "$rc" "2"
 # broken set.
 NOSHA_BIN="$WORK_ROOT/nosha-bin"
 mkdir -p "$NOSHA_BIN"
-for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat; do
+for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat cmp iconv; do
 	ln -s "$(command -v "$tool")" "$NOSHA_BIN/$tool"
 done
 ln -s "$FAKE_BIN/docker" "$NOSHA_BIN/docker"
@@ -598,21 +598,43 @@ rc=0
 PATH="$NOSHA_BIN" bash "$DIG_SH" "$set_link" >/dev/null 2>&1 || rc=$?
 assert_eq "no sha256 tool: a broken set is still exit 1" "$rc" "1"
 
-# Without iconv the UTF-8 check cannot run: the rest of the scan still does,
-# and the digest is undeterminable rather than vouched for.
+# Without iconv the UTF-8 check, and so the contract, cannot be checked: the
+# set is refused rather than built unchecked.
 NOICONV_BIN="$WORK_ROOT/noiconv-bin"
 mkdir -p "$NOICONV_BIN"
-for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat wc sha256sum; do
+for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat cmp sha256sum; do
 	ln -s "$(command -v "$tool")" "$NOICONV_BIN/$tool"
 done
 rc=0
 out="$(PATH="$NOICONV_BIN" bash "$DIG_SH" "$set_a" 2>"$WORK_ROOT/noiconv.err")" || rc=$?
-assert_eq "no iconv: exit 3" "$rc" "3"
+assert_eq "no iconv: exit 1" "$rc" "1"
 assert_eq "no iconv: no digest printed" "$out" ""
 assert_contains "no iconv: says so" "$(cat "$WORK_ROOT/noiconv.err")" "no iconv tool"
-rc=0
-PATH="$NOICONV_BIN" bash "$DIG_SH" "$set_link" >/dev/null 2>&1 || rc=$?
-assert_eq "no iconv: a broken set is still exit 1" "$rc" "1"
+
+# An iconv that passes everything (as old or lax builds partly do) still
+# leaves the byte test to refuse surrogates and code points above U+10FFFF.
+LAXICONV_BIN="$WORK_ROOT/laxiconv-bin"
+mkdir -p "$LAXICONV_BIN"
+for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat cmp sha256sum; do
+	ln -s "$(command -v "$tool")" "$LAXICONV_BIN/$tool"
+done
+printf '#!/bin/sh\nexec cat\n' >"$LAXICONV_BIN/iconv"
+chmod +x "$LAXICONV_BIN/iconv"
+for bad in $'\xed\xa0\x80' $'\xed\xbf\xbf' $'\xf4\x90\x80\x80' $'\xf5\x80\x80\x80' $'\xf8\x88\x80\x80\x80'; do
+	d="$(mktemp -d "$WORK_ROOT/lax.XXXXXX")"
+	make_set "$d"
+	# shellcheck disable=SC2016 # a literal Dockerfile
+	printf 'FROM ${BASE_IMAGE}\nRUN echo %s\n' "$bad" >"$d/Dockerfile"
+	rc=0
+	PATH="$LAXICONV_BIN" bash "$DIG_SH" "$d" >/dev/null 2>"$WORK_ROOT/lax.err" || rc=$?
+	assert_eq "lax iconv: $(printf '%s' "$bad" | od -An -tx1 | tr -d ' \n') refused" "$rc" "1"
+	assert_contains "lax iconv: $(printf '%s' "$bad" | od -An -tx1 | tr -d ' \n') named" "$(cat "$WORK_ROOT/lax.err")" "not valid UTF-8"
+done
+d="$(mktemp -d "$WORK_ROOT/lax.XXXXXX")"
+make_set "$d"
+# shellcheck disable=SC2016 # a literal Dockerfile
+printf 'FROM ${BASE_IMAGE}\nRUN echo \xed\x9f\xbf \xf4\x8f\xbf\xbf\n' >"$d/Dockerfile"
+assert_eq "lax iconv: U+D7FF and U+10FFFF still pass" "$(PATH="$LAXICONV_BIN" bash "$DIG_SH" "$d" 2>/dev/null | cut -c1-7)" "sha256:"
 
 echo "Test: layers-digest.ps1 matches layers-digest.sh"
 if $HAVE_PWSH; then
@@ -698,6 +720,7 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nRUN echo \xf4\x90\x80\x80\n' \
 		$'FROM ${BASE_IMAGE}\nRUN echo \xf5\x80\x80\x80\n' \
 		$'FROM ${BASE_IMAGE}\nRUN echo \xf8\x88\x80\x80\x80\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<#\xed\xa0\x80\n#\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\nCOPY a b\n#\xed\xa0\x80\n' \
 		$'FROM ${BASE_IMAGE}\nRUN echo \xf4\x8f\xbf\xbf\xf0\x9f\x98\x80\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \

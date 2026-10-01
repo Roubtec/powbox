@@ -640,16 +640,23 @@ WORKDIR /home/node
 # so `agent-check-updates` can compare it against the current registry digest
 # and report whether a newer base is available. Both are supplied by
 # scripts/build-image.{sh,ps1}; the defaults are sane fallbacks when the image
-# is built outside that script. Declared last so changing the digest only
-# rebuilds this trivial metadata layer, never the substrate layers above.
+# is built outside that script.
+#
+# The four per-build ARGs below feed only the closing LABEL block. Keep every
+# RUN, COPY and ADD above them: a step declared after an ARG is keyed on its
+# value, so a step down here would run again at every new commit and give the
+# base a new top filesystem layer, which reinstalls everything built on it (the
+# layer-set image's set, the agent's Codex, linter and Claude layers). With
+# labels only, a bake at a new commit reuses every filesystem layer: the layer
+# chain stays the same, while the image ID, which covers the config, changes.
 ARG BASE_SOURCE_IMAGE="node:24-trixie-slim"
 ARG BASE_SOURCE_DIGEST=""
-# Powbox commit that built this base image. Recorded both as an inheritable
-# label (child agent images don't override powbox.commit.base, so they expose
-# the base's commit automatically) and as a baked file readable in-container.
-# The base has a different parent than the agent layers, so its commit can lag
-# the agent's. Supplied by scripts/build-image.{sh,ps1}. Declared last so a new
-# commit only rebuilds this trivial metadata layer.
+# Powbox commit that built this base image, recorded as an inheritable label
+# only: the layer-set and agent images don't override powbox.commit.base, so
+# they expose the base's commit automatically. The in-container
+# /home/node/.powbox/base.commit is written by the agent image's top metadata
+# layer from this label. The base has a different parent than the agent layers,
+# so its commit can lag the agent's. Supplied by scripts/build-image.{sh,ps1}.
 ARG POWBOX_COMMIT="unknown"
 # Digest over this base layer's powbox SOURCE inputs (this Dockerfile plus every
 # file it COPYs — see scripts/base-source-files.txt). Distinct from
@@ -660,17 +667,15 @@ ARG POWBOX_COMMIT="unknown"
 # triggers a base rebuild with no manual step. Supplied by
 # scripts/build-image.{sh,ps1} via scripts/base-source-digest.{sh,ps1}.
 #
-# Cache-key note: this ARG/LABEL sits in the base's FINAL, trivial metadata layer
-# (below every expensive apt/go/COPY layer), so a new digest only rebuilds this
-# layer. It is stamped on the BASE image only — nothing in the agent Dockerfile's
-# Codex install layer references it, so it cannot bust that layer's cache (the
+# Cache-key note: this ARG feeds a label only, below every expensive apt/go/COPY
+# layer, so it adds no filesystem layer and no step is keyed on it. It is
+# stamped on the BASE image only — nothing in the agent Dockerfile's Codex
+# install layer references it, so it cannot bust that layer's cache (the
 # constraint documented in docs/skills-refresh-and-provenance.md). When the base
 # recipe actually changes the base is rebuilt and re-parents the agent's Codex
-# layer anyway; when it does not, the digest is identical and this layer is a
-# cache hit, so the base image ID (and thus the Codex layer) is unaffected.
+# layer anyway. A new value on its own changes the base image ID but not its
+# layer chain.
 ARG POWBOX_BASE_RECIPE_DIGEST=""
-RUN mkdir -p /home/node/.powbox \
-    && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/base.commit
 # powbox.base.selfhosted is a static capability flag (Approach B): the clone path
 # for self-hosted (--isolated) mode lives entirely in THIS base layer
 # (seed-workspace.sh + entrypoint-core.sh's clone call), so its presence proves

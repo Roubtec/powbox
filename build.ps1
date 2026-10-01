@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("base", "agent", "all")]
+  [ValidateSet("base", "layers", "agent", "all")]
   [string]$Target = "all",
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",

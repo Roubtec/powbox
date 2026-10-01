@@ -303,22 +303,29 @@ _powbox_norm_label() {
 # Show the powbox commit that built each layer of powbox-agent:latest, plus the
 # powbox working-tree HEAD so a stale image (built from an older repo state) is
 # obvious even when the agent binaries themselves are current. A piecemeal build
-# can carry up to three distinct commits: the base image has its own parent, and
-# the Claude layer can rebuild without touching the Codex layer below it. The
-# base commit is read from the label the agent image inherits from its base.
+# can carry up to four distinct commits: the base image and the layer-set image
+# each have their own, and the Claude layer can rebuild without touching the
+# Codex layer below it. The base and layer-set commits are read from the labels
+# the agent image inherits from its parents.
 agent-image-info() {
     local img="powbox-agent:latest"
     if ! docker image inspect "$img" >/dev/null 2>&1; then
         echo "Image $img not found — build it with agent-update." >&2
         return 1
     fi
-    local base codex claude codexver claudever
-    IFS=$'\t' read -r base codex claude codexver claudever < <(
+    # '|' rather than a tab: IFS whitespace would merge the empty fields an
+    # image built without a layer set has.
+    local base codex claude codexver claudever layerset layersdigest layerscommit
+    IFS='|' read -r base codex claude codexver claudever layerset layersdigest layerscommit < <(
         docker image inspect "$img" --format \
-            '{{index .Config.Labels "powbox.commit.base"}}{{"\t"}}{{index .Config.Labels "powbox.commit.codex"}}{{"\t"}}{{index .Config.Labels "powbox.commit.claude"}}{{"\t"}}{{index .Config.Labels "powbox.codex.version"}}{{"\t"}}{{index .Config.Labels "powbox.claude.version"}}'
+            '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}'
     )
     echo "$img — powbox commit that built each layer:"
     printf '  base:         %s\n' "$(_powbox_norm_label "$base")"
+    case "$layerset" in
+        "" | "<no value>") printf '  layers:       none (lean image)\n' ;;
+        *) printf '  layers:       %s  (set %s, digest %s)\n' "$(_powbox_norm_label "$layerscommit")" "$layerset" "$(_powbox_norm_label "$layersdigest")" ;;
+    esac
     printf '  codex:        %s  (codex %s)\n' "$(_powbox_norm_label "$codex")" "$(_powbox_norm_label "$codexver")"
     printf '  claude/top:   %s  (claude %s)\n' "$(_powbox_norm_label "$claude")" "$(_powbox_norm_label "$claudever")"
     local head
@@ -358,7 +365,7 @@ _powbox_build_from_table() {
     local claude_ver="" codex_ver=""
     while IFS=$'\t' read -r name cstatus baked latest; do
         [ -n "$name" ] || continue
-        [ "$name" = base ] && continue
+        case "$name" in base | layers) continue ;; esac
         case "$force" in
             *" $name "*) ver="$latest" ;;   # forced: install latest
             *)           ver="$baked"  ;;    # unchanged: pin baked to reuse layer
@@ -377,10 +384,10 @@ _powbox_build_from_table() {
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
 }
 
-# Nuclear option: rebuild the entire stack — base + agent image — from the
-# current repo commit, re-pulling the upstream base and ignoring the layer
-# cache, with both agents at their latest release (build.sh all --pull
-# --no-cache). For when the images are in an unknown state and you want a
+# Nuclear option: rebuild the entire stack — base, the layer-set image when a
+# set is selected, and the agent image — from the current repo commit,
+# re-pulling the upstream base and ignoring the layer cache, with both agents at
+# their latest release (build.sh all --pull --no-cache). For when the images are in an unknown state and you want a
 # clean slate. To pick up powbox recipe changes without discarding cache, use
 # the much faster `agent-update --refresh` instead.
 agent-full-rebuild() {
@@ -396,18 +403,27 @@ agent-full-rebuild() {
 # before rebuilding. On confirmation we re-check rather than reusing the first
 # result, so an update approved in another terminal while this prompt was waiting
 # is still picked up. A stale base image is upstream of everything, so it triggers
-# a full --pull --no-cache rebuild of base + the agent image; otherwise only the
-# stale agents are forced to latest and the unified image is rebuilt with minimal
-# layers (the unchanged binary's layer is reused).
+# a full --pull --no-cache rebuild of the base, the layer-set image and the agent
+# image; otherwise only the stale agents are forced to latest and the unified
+# image is rebuilt with minimal layers (the unchanged binary's layer is reused).
+# A stale layer set (an edited set, or a different one selected) rebuilds through
+# the `agent` target from cache, which bakes the layer-set image only when it is
+# not current and leaves the base alone; both binaries stay pinned to their baked
+# versions unless they are stale too.
 #
 # --refresh removes the nothing-stale early exit and widens the build target to
-# `all`: the full stack is rebuilt from the current repo state (cached, no
-# --pull), so recipe edits under docker/ are picked up even when every binary is
-# current. No --no-cache is needed — Docker keys each layer's cache on its
-# instruction content, so changed layers rebuild and unchanged ones are reused.
-# Binaries are still pinned (stale ones to latest, current ones to their baked
-# version), so a pure recipe refresh never silently bumps an agent; when updates
-# ARE pending, --refresh takes them too. Extra args go to build.sh.
+# `all`: the full stack (base, layer-set image, agent) is rebuilt from the
+# current repo state (cached, no --pull), so recipe edits under docker/ are
+# picked up even when every binary is current. No --no-cache is needed — Docker
+# keys each layer's cache on its instruction content, so changed layers rebuild
+# and unchanged ones are reused: the base and the layer set come out of the cache
+# with new labels only, and so do the agent's install layers when the previous
+# build pinned the same versions. The first --refresh after an unpinned
+# `build.sh` run (both versions at `latest`) reinstalls both agents once, because
+# the version arguments change from `latest` to numbers. Binaries are still
+# pinned (stale ones to latest, current ones to their baked version), so a pure
+# recipe refresh never silently bumps an agent; when updates ARE pending,
+# --refresh takes them too. Extra args go to build.sh.
 agent-update() {
     local refresh=false arg
     local passthru=()
@@ -460,28 +476,33 @@ agent-update() {
     fi
 
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
-        echo "Base image is stale — rebuilding base (with --pull) and the agent image on top."
+        echo "Base image is stale — rebuilding base (with --pull) and the images on top."
         _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "${passthru[@]}"
         local rc=$?
         [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"
     fi
 
-    local name cstatus rest stale=""
+    local name cstatus rest stale="" layers_stale=false
     while IFS=$'\t' read -r name cstatus rest; do
         case "$name" in
             claude|codex) [ "$cstatus" = stale ] && stale="$stale $name" ;;
+            layers) [ "$cstatus" = stale ] && layers_stale=true ;;
         esac
     done < <(printf '%s\n' "$table")
     stale="${stale# }"
 
     if [ -z "$stale" ]; then
-        if [ "$refresh" != true ]; then
+        if [ "$refresh" = true ]; then
+            echo "Refreshing the full image stack (both binaries pinned to their baked versions)."
+            _powbox_build_from_table "$table" "" all "${passthru[@]}"
+        elif [ "$layers_stale" = true ]; then
+            echo "Layer set changed — rebuilding the layer-set and agent images from cache (both binaries pinned to their baked versions)."
+            _powbox_build_from_table "$table" "" agent "${passthru[@]}"
+        else
             echo "Nothing to update — already up to date."
             return 0
         fi
-        echo "Refreshing the full image stack (both binaries pinned to their baked versions)."
-        _powbox_build_from_table "$table" "" all "${passthru[@]}"
         local rc=$?
         [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"

@@ -6,8 +6,10 @@ node_modules/
 # Host-side staging clone of Roubtec/agent-skills, populated by build.sh for the
 # Codex skill bake (see scripts/build-image.sh). Never committed.
 .agent-skills-src/
-# Host-local layer-set selector (one line naming a docker/layers/<set>; absent
-# means the lean image). Read by the build and update scripts once task 063
-# lands; ignored ahead of that so a pre-created selector never marks a build
-# as -dirty.
+# Host-local layer-set selector: one line naming a docker/layers/<set>; absent
+# means the lean image (see .powbox-layers.example).
 .powbox-layers
+# A user's own layer set; only the placeholder that keeps the directory is
+# tracked.
+docker/layers/custom/*
+!docker/layers/custom/.gitkeep

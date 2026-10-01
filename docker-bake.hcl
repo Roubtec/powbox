@@ -1,3 +1,6 @@
+# The agent image's parent: powbox-agent-base:latest, or
+# powbox-agent-layers:latest when a layer set is selected. Supplied by
+# scripts/build-image.{sh,ps1}.
 variable "BASE_IMAGE" {
   default = "powbox-agent-base:latest"
 }
@@ -28,9 +31,9 @@ variable "POWBOX_BASE_RECIPE_DIGEST" {
   default = ""
 }
 
-# Powbox git commit that built the image's top layers (and the base image when
-# building base); baked into the skill ownership marker and the provenance
-# labels/files. Supplied by scripts/build-image.{sh,ps1}.
+# Powbox git commit that built the image's top layers (and the base or layer-set
+# image when building those); baked into the skill ownership marker and the
+# provenance labels/files. Supplied by scripts/build-image.{sh,ps1}.
 variable "POWBOX_COMMIT" {
   default = "unknown"
 }
@@ -43,12 +46,45 @@ variable "POWBOX_COMMIT_CODEX" {
   default = "unknown"
 }
 
-# Content ID of the base image this agent is built FROM, recorded in the top
-# metadata layer. The Codex install layer's parent is the base, so the build
-# script compares this against the current base to decide whether a separate
-# base rebuild busts that layer (and thus whether POWBOX_COMMIT_CODEX can be
+# Signature of the image this agent is built FROM (its layer chain plus the
+# environment, SHELL, WORKDIR and USER a RUN inherits), recorded as
+# powbox.parent.signature. The Codex install layer sits directly on that parent,
+# so the build script compares this against the next build's parent to decide
+# whether that layer is reused (and thus whether POWBOX_COMMIT_CODEX can be
 # carried forward). Supplied by scripts/build-image.{sh,ps1}.
-variable "POWBOX_BASE_IMAGE_ID" {
+variable "POWBOX_PARENT_SIGNATURE" {
+  default = ""
+}
+
+# powbox.commit.base of the agent's parent, written to
+# /home/node/.powbox/base.commit by the agent's top metadata layer (the base
+# image carries its commit as a label only). Supplied by
+# scripts/build-image.{sh,ps1}.
+variable "POWBOX_COMMIT_BASE" {
+  default = "unknown"
+}
+
+# The selected layer set (see .powbox-layers.example): its directory, which is
+# the layers target's whole build context, its name, and the digest of that
+# directory from scripts/layers-digest.{sh,ps1}. Supplied by
+# scripts/build-image.{sh,ps1}.
+variable "POWBOX_LAYERS_DIR" {
+  default = "docker/layers/full"
+}
+
+variable "POWBOX_LAYERS_SET" {
+  default = "full"
+}
+
+variable "POWBOX_LAYERS_DIGEST" {
+  default = ""
+}
+
+# Image ID of the powbox-agent-base:latest the layer-set image is built FROM,
+# recorded as powbox.layers.base.id so the next build can tell whether the base
+# moved underneath it. Not to be confused with POWBOX_PARENT_SIGNATURE, which
+# describes the agent's own parent. Supplied by scripts/build-image.{sh,ps1}.
+variable "POWBOX_LAYERS_BASE_ID" {
   default = ""
 }
 
@@ -88,8 +124,30 @@ target "agent" {
     CODEX_VERSION = CODEX_VERSION
     POWBOX_COMMIT = POWBOX_COMMIT
     POWBOX_COMMIT_CODEX = POWBOX_COMMIT_CODEX
-    POWBOX_BASE_IMAGE_ID = POWBOX_BASE_IMAGE_ID
+    POWBOX_COMMIT_BASE = POWBOX_COMMIT_BASE
+    POWBOX_PARENT_SIGNATURE = POWBOX_PARENT_SIGNATURE
     AGENT_SKILLS_COMMIT = AGENT_SKILLS_COMMIT
+  }
+}
+
+# Optional image between the base and the agent. Built only when a layer set is
+# selected, so the groups below leave it out and the build script names it
+# explicitly. The labels are set here, not in the set's own Dockerfile, so a
+# custom Dockerfile cannot omit them; they enter no build step's cache key, and
+# the agent image inherits them.
+target "layers" {
+  inherits = ["_common"]
+  context = POWBOX_LAYERS_DIR
+  dockerfile = "Dockerfile"
+  tags = ["powbox-agent-layers:latest"]
+  args = {
+    BASE_IMAGE = "powbox-agent-base:latest"
+  }
+  labels = {
+    "powbox.layers.set" = POWBOX_LAYERS_SET
+    "powbox.layers.digest" = POWBOX_LAYERS_DIGEST
+    "powbox.layers.base.id" = POWBOX_LAYERS_BASE_ID
+    "powbox.commit.layers" = POWBOX_COMMIT
   }
 }
 

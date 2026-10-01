@@ -12,6 +12,9 @@
 # layer on top as a side effect — an accepted, rarer cost. `agent-update` pins
 # concrete versions per agent binary so Docker rebuilds the minimum set of
 # layers for those updates.
+#
+# The parent is powbox-agent-base:latest, or powbox-agent-layers:latest when a
+# layer set is selected (scripts/build-image.{sh,ps1} pass BASE_IMAGE).
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 
@@ -34,8 +37,9 @@ RUN npm install -g @openai/codex@${CODEX_VERSION} \
 USER node
 
 # --- Shared linters (stable layers between the agent installs) ---------------
-# Keep these above Codex so its cache parent remains the base image; the
-# provenance resolver deliberately models that exact parent plus CODEX_VERSION.
+# Keep these above Codex so its cache parent remains this image's parent (the
+# base or the layer-set image); the provenance resolver deliberately models that
+# exact parent plus CODEX_VERSION.
 # actionlint is the current stable v1.7.12 release. Fetch its static Linux
 # tarball directly from GitHub and verify the per-architecture SHA256 published
 # in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
@@ -116,8 +120,13 @@ COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.ag
 # never affected. POWBOX_COMMIT is supplied by scripts/build-image.{sh,ps1}; the
 # default keeps standalone `docker build` working.
 #
-# /home/node/.powbox/{claude,codex}.commit are the in-container provenance
-# surface (base.commit is inherited from the base image). claude.commit equals
+# /home/node/.powbox/{base,claude,codex}.commit are the in-container provenance
+# surface. base.commit is POWBOX_COMMIT_BASE, the powbox.commit.base label of
+# this image's parent as the build script reads it, so it always matches the
+# label this image inherits; the base image carries its commit as a label only,
+# because a file written there would give the base a new layer at every commit.
+# POWBOX_COMMIT_BASE is declared here, below every install layer, so it keys
+# only this metadata layer. claude.commit equals
 # POWBOX_COMMIT (this top layer); codex.commit is POWBOX_COMMIT_CODEX, which the
 # build script carries forward when the Codex install layer is reused so it
 # reflects the commit that actually built Codex — not this build's commit. It is
@@ -129,10 +138,12 @@ COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.ag
 # stamped inside the Codex install layer (which would bust its cache).
 ARG POWBOX_COMMIT=unknown
 ARG POWBOX_COMMIT_CODEX=unknown
+ARG POWBOX_COMMIT_BASE=unknown
 ARG AGENT_SKILLS_COMMIT=unknown
 RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.agent-container/codex/build-epoch >/dev/null \
     && printf '%s\n' "${POWBOX_COMMIT}" | tee /home/node/.agent-container/claude/build-commit /home/node/.agent-container/codex/build-commit >/dev/null \
     && mkdir -p /home/node/.powbox \
+    && printf '%s\n' "${POWBOX_COMMIT_BASE}" > /home/node/.powbox/base.commit \
     && printf '%s\n' "${POWBOX_COMMIT}" > /home/node/.powbox/claude.commit \
     && printf '%s\n' "${POWBOX_COMMIT_CODEX}" > /home/node/.powbox/codex.commit \
     && printf '%s\n' "${AGENT_SKILLS_COMMIT}" > /home/node/.powbox/agent-skills.commit
@@ -196,16 +207,19 @@ COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads \
 
 # --- Provenance labels -------------------------------------------------------
 # Host-side introspection surface (docker image inspect / docker inspect). The
-# base commit is inherited from the base image's powbox.commit.base label.
-# powbox.base.image.id records the exact base this image was built FROM: the
-# Codex install layer's parent, so the build script compares it against the
-# current base to tell whether that layer will be reused (same base AND same
-# Codex version) and thus whether to carry its commit forward. Declared last so
-# they only rebuild this trivial metadata layer.
-ARG POWBOX_BASE_IMAGE_ID=""
+# base commit is inherited from the base image's powbox.commit.base label, and
+# with a layer set selected the powbox.layers.* and powbox.commit.layers labels
+# are inherited from the layer-set image. powbox.parent.signature describes the
+# image this one was built FROM, the Codex install layer's parent (its layer
+# chain plus the environment, SHELL, WORKDIR and USER a RUN inherits): the build
+# script compares it against the next build's parent to tell whether that layer
+# will be reused (same parent signature AND same Codex version) and thus whether
+# to carry its commit forward. Declared last so they only rebuild this trivial
+# metadata layer.
+ARG POWBOX_PARENT_SIGNATURE=""
 LABEL powbox.commit.claude="${POWBOX_COMMIT}" \
       powbox.commit.codex="${POWBOX_COMMIT_CODEX}" \
-      powbox.base.image.id="${POWBOX_BASE_IMAGE_ID}" \
+      powbox.parent.signature="${POWBOX_PARENT_SIGNATURE}" \
       powbox.codex.version="${CODEX_VERSION}" \
       powbox.claude.version="${CLAUDE_CODE_VERSION}" \
       powbox.agent-skills.commit="${AGENT_SKILLS_COMMIT}"

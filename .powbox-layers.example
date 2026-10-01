@@ -1,0 +1,13 @@
+# Layer-set selector template. Copy this file to .powbox-layers (gitignored) to
+# pick the layer set built between powbox-agent-base:latest and
+# powbox-agent:latest:
+#
+#   - no .powbox-layers, or one holding only blank and # lines: no layer set;
+#     the agent image is built directly on the lean base.
+#   - full: the maintainer's bundle in docker/layers/full/.
+#   - custom: your own set in docker/layers/custom/ (gitignored apart from its
+#     .gitkeep). Start from a copy: cp -r docker/layers/full/. docker/layers/custom/
+#
+# The first line that is neither blank nor a comment names the set. It must
+# match ^[a-z0-9][a-z0-9._-]*$ and docker/layers/<name>/Dockerfile must exist.
+full

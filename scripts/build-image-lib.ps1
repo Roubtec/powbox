@@ -1,0 +1,81 @@
+# Image-inspection decisions for scripts/build-image.ps1, dot-sourced by it and
+# exercised by scripts/test-layer-sets.sh against a fake `docker`. PowerShell twin
+# of scripts/build-image-lib.sh, which documents each decision; keep the two in
+# lockstep, since an image built by one driver is judged by the other on the next
+# build.
+
+$script:PowboxBaseTag = 'powbox-agent-base:latest'
+$script:PowboxLayersTag = 'powbox-agent-layers:latest'
+$script:PowboxAgentTag = 'powbox-agent:latest'
+
+function Get-ImageLabel {
+    param([string]$Image, [string]$Label)
+    $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $v -or $v -eq '<no value>') { return "" }
+    return ([string]$v).Trim()
+}
+
+function Get-ImageId {
+    param([string]$Image)
+    $id = docker image inspect $Image --format '{{.Id}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $id) { return "" }
+    return ([string]$id).Trim()
+}
+
+function Test-ImagePresent {
+    param([string]$Image)
+    docker image inspect $Image *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# See parent_signature in build-image-lib.sh: the same inspect line, plus LF,
+# hashed to the same bytes.
+function Get-ParentSignature {
+    param([string]$Image)
+    $raw = docker image inspect $Image --format '{{json .RootFS.Layers}} {{json .Config.Env}} {{json .Config.Shell}} {{json .Config.WorkingDir}} {{json .Config.User}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return "" }
+    $line = (@($raw) -join "`n") + "`n"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($line))
+    } finally {
+        $sha.Dispose()
+    }
+    return 'sha256:' + (-join ($hash | ForEach-Object { $_.ToString('x2') }))
+}
+
+# See layers_stale_reason in build-image-lib.sh. Returns "" when the layer-set
+# image is current.
+function Get-LayersStaleReason {
+    param([string]$Set, [string]$Digest)
+    $tag = $script:PowboxLayersTag
+    if (-not (Test-ImagePresent $tag)) { return "$tag does not exist" }
+    $baked = Get-ImageLabel $tag 'powbox.layers.set'
+    if ($baked -cne $Set) {
+        $shown = if ($baked) { $baked } else { 'none' }
+        return "$tag was built from layer set '$shown', not '$Set'"
+    }
+    $baked = Get-ImageLabel $tag 'powbox.layers.digest'
+    if (-not $Digest) { return "the digest of layer set '$Set' could not be computed" }
+    if ($baked -cne $Digest) { return "layer set '$Set' changed since $tag was built" }
+    $baseId = Get-ImageId $script:PowboxBaseTag
+    $baked = Get-ImageLabel $tag 'powbox.layers.base.id'
+    if (-not $baseId -or $baked -cne $baseId) { return "$tag was built on a different $($script:PowboxBaseTag)" }
+    return ""
+}
+
+# See resolve_codex_commit in build-image-lib.sh.
+function Resolve-CodexCommit {
+    param([string]$HeadCommit, [string]$CodexVersion, [string]$Signature, [bool]$NoCache)
+    $tag = $script:PowboxAgentTag
+    if ($NoCache -or -not (Test-ImagePresent $tag)) { return $HeadCommit }
+    $prevSignature = Get-ImageLabel $tag 'powbox.parent.signature'
+    if (-not $Signature -or $Signature -cne $prevSignature) { return $HeadCommit }
+    $prevVer = Get-ImageLabel $tag 'powbox.codex.version'
+    $prevCommit = Get-ImageLabel $tag 'powbox.commit.codex'
+    if ($prevVer -ceq $CodexVersion) {
+        if ($prevCommit) { return $prevCommit }
+        return 'unknown'
+    }
+    return $HeadCommit
+}

@@ -5,6 +5,7 @@
     # component for agent-update to consume:
     #
     #     base    <ok|stale|unknown>  <baked-digest|->   <latest-digest|->
+    #     layers  <ok|stale>          <baked-set@digest|->  <wanted-set@digest|->
     #     claude  <ok|stale|unknown>  <baked-version|->  <latest-version|->
     #     codex   <ok|stale|unknown>  <baked-version|->  <latest-version|->
     #
@@ -12,7 +13,9 @@
     # baked in (a missing image counts as stale); unknown means the latest could
     # not be determined (npm/registry unreachable) and must never force a
     # rebuild. The baked/latest versions let agent-update pin each binary so
-    # Docker rebuilds only the layers that actually changed.
+    # Docker rebuilds only the layers that actually changed. The layers row is
+    # described in commands/check-updates.sh; an invalid selector, or a set that
+    # breaks the layer Dockerfile contract, is an error (exit 1), not a row.
     [switch]$Porcelain
 )
 
@@ -181,6 +184,49 @@ function Write-Comparison([string]$Agent, [string]$Baked, [string]$Latest) {
     }
 }
 
+# The layer set's row value: "<set>@<digest>", "<set>@-" without a digest, or
+# "-" for no set.
+function Format-LayersValue([string]$Set, [string]$Digest) {
+    if (-not $Set) { return '-' }
+    if ($Digest) { return "$Set@$Digest" }
+    return "$Set@-"
+}
+
+# The same value for the report, with the digest shortened like the base's.
+function Format-LayersDisplay([string]$Set, [string]$Digest) {
+    if (-not $Set) { return '(none — lean image)' }
+    $short = Format-ShortDigest $Digest
+    if ($short) { return "$Set@$short" }
+    return $Set
+}
+
+function Write-LayersComparison([string]$Status, [string]$BakedSet, [string]$BakedDigest, [string]$WantedSet, [string]$WantedDigest) {
+    $b = Format-LayersDisplay $BakedSet $BakedDigest
+    $w = Format-LayersDisplay $WantedSet $WantedDigest
+    if ($Status -eq 'stale') {
+        Write-Host ("  {0,-8}  {1} -> {2}  ** update available **" -f 'Layers', $b, $w)
+    } elseif ($WantedSet -and -not $WantedDigest) {
+        Write-Host ("  {0,-8}  {1}  (up to date; digest not computable)" -f 'Layers', $WantedSet)
+    } else {
+        Write-Host ("  {0,-8}  {1}  (up to date)" -f 'Layers', $w)
+    }
+}
+
+# -------------------------------------------------------------------
+# Layer set (an invalid selector or set fails the check outright)
+# -------------------------------------------------------------------
+
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$layersWantedSet = & (Join-Path $repoRoot 'scripts/layers-select.ps1')
+if ($LASTEXITCODE -ne 0) { exit 1 }
+$layersWantedSet = if ($layersWantedSet) { ([string]$layersWantedSet).Trim() } else { '' }
+$layersWantedDigest = ''
+if ($layersWantedSet) {
+    $layersWantedDigest = & (Join-Path $repoRoot 'scripts/layers-digest.ps1') (Join-Path $repoRoot "docker/layers/$layersWantedSet")
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+    $layersWantedDigest = ([string]$layersWantedDigest).Trim()
+}
+
 # -------------------------------------------------------------------
 # Gather versions
 # -------------------------------------------------------------------
@@ -198,8 +244,15 @@ $baseLatest  = $null
 $baseRecipeBaked = $null
 $baseRecipeNow   = $null
 $recipeStale     = $false
+$layersBakedSet    = ''
+$layersBakedDigest = ''
 
 if (Test-ImageExists $AgentImage) {
+    # Read off the agent image, because that is what containers run; it inherits
+    # both labels from the layer-set image it was built on, and has neither when
+    # it was built lean.
+    $layersBakedSet    = [string](Get-ImageLabel $AgentImage 'powbox.layers.set')
+    $layersBakedDigest = [string](Get-ImageLabel $AgentImage 'powbox.layers.digest')
     $bakedVersions = Get-BakedAgentVersions $AgentImage
     $claudeBaked = $bakedVersions.Claude
     $codexBaked  = $bakedVersions.Codex
@@ -253,6 +306,13 @@ if ($baseSource) {
     $baseLatest = Get-RegistryDigest $baseSource
 }
 
+$layersStatus = 'ok'
+if ($layersBakedSet -cne $layersWantedSet) {
+    $layersStatus = 'stale'
+} elseif ($layersWantedDigest -and $layersBakedDigest -cne $layersWantedDigest) {
+    $layersStatus = 'stale'
+}
+
 # -------------------------------------------------------------------
 # Porcelain: one tab-separated row per component (see header comment).
 # -------------------------------------------------------------------
@@ -273,6 +333,7 @@ if ($Porcelain) {
     if ($recipeStale) { $baseStatus = 'stale' }
     $tab = "`t"
     'base' + $tab + $baseStatus + $tab + (Format-PorcelainValue $baseBaked) + $tab + (Format-PorcelainValue $baseLatest)
+    'layers' + $tab + $layersStatus + $tab + (Format-LayersValue $layersBakedSet $layersBakedDigest) + $tab + (Format-LayersValue $layersWantedSet $layersWantedDigest)
     'claude' + $tab + (Get-ComponentStatus $claudeBaked $claudeLatest) + $tab + (Format-PorcelainValue $claudeBaked) + $tab + (Format-PorcelainValue $claudeLatest)
     'codex' + $tab + (Get-ComponentStatus $codexBaked $codexLatest) + $tab + (Format-PorcelainValue $codexBaked) + $tab + (Format-PorcelainValue $codexLatest)
     $global:LASTEXITCODE = 0
@@ -289,9 +350,10 @@ if ($Porcelain) {
 Write-Host ''
 Write-Host 'Agent update check:'
 if ($baseBaked   -or $baseLatest -or $recipeStale)   { Write-BaseComparison $baseBaked $baseLatest -RecipeStale $recipeStale }
-# Codex before Claude: the report mirrors their order in the Docker layer stack
-# (base -> codex -> stable linters -> claude -> cheap upper layers); the stable
-# and cheap layers have no version rows of their own.
+# The rows mirror the image stack (base -> layer set -> codex -> stable linters
+# -> claude -> cheap upper layers); the stable and cheap layers have no rows of
+# their own. The Layers row always prints, so "no set" is stated, not implied.
+Write-LayersComparison -Status $layersStatus -BakedSet $layersBakedSet -BakedDigest $layersBakedDigest -WantedSet $layersWantedSet -WantedDigest $layersWantedDigest
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }
 if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
 Write-Host ''

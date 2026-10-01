@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("base", "agent", "all")]
+  [ValidateSet("base", "layers", "agent", "all")]
   [string]$Target = "all",
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",
@@ -11,6 +11,8 @@ $ErrorActionPreference = "Stop"
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Push-Location $rootDir
 try {
+  . (Join-Path $rootDir "scripts/build-image-lib.ps1")
+
   # Upstream base image, parsed from the base Dockerfile's FROM so it never
   # drifts from what is actually built. $script:BaseSourceDigest is resolved
   # lazily just before the base target is built and stamped onto the image as a
@@ -46,6 +48,31 @@ try {
     $script:PowboxBaseRecipeDigest = (& (Join-Path $rootDir "scripts/base-source-digest.ps1") 2>$null).Trim()
   } catch {
     $script:PowboxBaseRecipeDigest = ""
+  }
+
+  # The layer set named by .powbox-layers (empty: none, the lean image), its
+  # directory, which is the layers bake's whole build context, and its digest.
+  # Resolved for every target that builds above the base, before any fetch or
+  # build, so an invalid selector or a set that breaks the layer Dockerfile
+  # contract stops the run before it changes anything.
+  $script:LayersSet = ""
+  $script:LayersDir = ""
+  $script:LayersDigest = ""
+  if ($Target -ne "base") {
+    $selected = & (Join-Path $rootDir "scripts/layers-select.ps1")
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+    if ($selected) { $script:LayersSet = ([string]$selected).Trim() }
+    if ($script:LayersSet) {
+      $script:LayersDir = "docker/layers/$($script:LayersSet)"
+      $digest = & (Join-Path $rootDir "scripts/layers-digest.ps1") $script:LayersDir
+      if ($LASTEXITCODE -ne 0) { exit 1 }
+      $script:LayersDigest = ([string]$digest).Trim()
+    }
+  }
+  if ($Target -eq "layers" -and -not $script:LayersSet) {
+    [Console]::Error.WriteLine("No layer set is selected, so there is nothing for the layers target to build.")
+    [Console]::Error.WriteLine("Name one in .powbox-layers (see .powbox-layers.example).")
+    exit 1
   }
 
   # --- agent-skills fetch (host-side, credentials never enter the image) ------
@@ -131,55 +158,14 @@ No image was built.
     Write-Host "agent-skills at $($script:AgentSkillsCommit)"
   }
 
-  function Get-ImageLabel {
-    param([string]$Image, [string]$Label)
-    $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $v -or $v -eq '<no value>') { return "" }
-    return $v.Trim()
-  }
-
-  # Content ID of the local base image (empty when it is absent). This is the
-  # parent half of the Codex layer's cache key, so it is both stamped onto the
-  # agent (powbox.base.image.id) and compared against the previous agent's
-  # recorded value to tell whether a separate base rebuild will bust that layer.
-  function Get-BaseImageId {
-    $id = docker image inspect "powbox-agent-base:latest" --format '{{.Id}}' 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $id) { return "" }
-    return $id.Trim()
-  }
-
-  # Commit that built the Codex install layer. Stamping it inside that layer
-  # would bust its cache on every commit (defeating the Codex-below-Claude
-  # ordering), so resolve it here: HEAD when the layer rebuilds this run,
-  # otherwise carry the existing image's recorded value forward. The reuse test
-  # mirrors Docker's cache key for that layer: its parent (the base image) AND
-  # the install instruction (CodexVersion). See docs/skills-refresh-and-provenance.md.
-  function Get-CodexCommit {
-    if ($NoCache -or $Pull) { return $script:PowboxCommit }
-    if ($Target -eq 'base' -or $Target -eq 'all') { return $script:PowboxCommit }
-    docker image inspect "powbox-agent:latest" *> $null
-    if ($LASTEXITCODE -ne 0) { return $script:PowboxCommit }
-    # The Codex layer's parent is the base image, so a base that differs from the
-    # one the previous agent was built on (e.g. a separate `build.ps1 base`)
-    # rebuilds the Codex layer regardless of version. Only an identical base ID
-    # means the layer can be reused; an absent base (about to be built) or a
-    # previous agent with no recorded base ID counts as changed -> HEAD.
-    $curBaseId = Get-BaseImageId
-    $prevBaseId = Get-ImageLabel "powbox-agent:latest" "powbox.base.image.id"
-    if (-not $curBaseId -or $curBaseId -ne $prevBaseId) { return $script:PowboxCommit }
-    $prevVer = Get-ImageLabel "powbox-agent:latest" "powbox.codex.version"
-    $prevCommit = Get-ImageLabel "powbox-agent:latest" "powbox.commit.codex"
-    # Same base and same Codex version => layer reused, so carry its recorded
-    # commit forward. An image built before provenance labelling has none to
-    # carry, and we cannot know which commit built the reused layer, so record
-    # "unknown" rather than misattributing HEAD. A differing version rebuilds the
-    # layer at HEAD (returned below).
-    if ($prevVer -eq $CodexVersion) {
-      if ($prevCommit) { return $prevCommit } else { return "unknown" }
-    }
-    return $script:PowboxCommit
-  }
-  $script:PowboxCommitCodex = Get-CodexCommit
+  # Values the bake steps below fill in for the agent and layers targets.
+  # BaseImage is the agent's parent: the base, or the layer-set image when a set
+  # is selected.
+  $script:BaseImage = $script:PowboxBaseTag
+  $script:PowboxCommitCodex = $script:PowboxCommit
+  $script:PowboxCommitBase = "unknown"
+  $script:PowboxParentSignature = ""
+  $script:PowboxLayersBaseId = ""
 
   function Get-RegistryBaseDigest {
     $digest = docker buildx imagetools inspect $script:BaseSourceImage --format '{{.Manifest.Digest}}' 2>$null
@@ -237,18 +223,30 @@ No image was built.
 
     $docker_args += $Targets
 
-    Write-Host "Running: CLAUDE_CODE_VERSION=$ClaudeVersion CODEX_VERSION=$CodexVersion POWBOX_COMMIT=$($script:PowboxCommit) POWBOX_COMMIT_CODEX=$($script:PowboxCommitCodex) AGENT_SKILLS_COMMIT=$($script:AgentSkillsCommit) docker $($docker_args -join ' ')"
-    $env:CLAUDE_CODE_VERSION = $ClaudeVersion
-    $env:CODEX_VERSION = $CodexVersion
-    $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
-    $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
-    $env:POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
-    $env:POWBOX_COMMIT = $script:PowboxCommit
-    $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
-    $env:AGENT_SKILLS_COMMIT = $script:AgentSkillsCommit
-    # Resolved here (not at script top) so the agent target records the base it
-    # actually builds FROM, including a base just rebuilt earlier this run.
-    $env:POWBOX_BASE_IMAGE_ID = Get-BaseImageId
+    $bakeEnv = [ordered]@{
+      BASE_IMAGE                = $script:BaseImage
+      CLAUDE_CODE_VERSION       = $ClaudeVersion
+      CODEX_VERSION             = $CodexVersion
+      BASE_SOURCE_IMAGE         = $script:BaseSourceImage
+      BASE_SOURCE_DIGEST        = $script:BaseSourceDigest
+      POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
+      POWBOX_COMMIT             = $script:PowboxCommit
+      POWBOX_COMMIT_CODEX       = $script:PowboxCommitCodex
+      POWBOX_COMMIT_BASE        = $script:PowboxCommitBase
+      POWBOX_PARENT_SIGNATURE   = $script:PowboxParentSignature
+      AGENT_SKILLS_COMMIT       = $script:AgentSkillsCommit
+    }
+    if ($script:LayersSet) {
+      $bakeEnv["POWBOX_LAYERS_DIR"] = $script:LayersDir
+      $bakeEnv["POWBOX_LAYERS_SET"] = $script:LayersSet
+      $bakeEnv["POWBOX_LAYERS_DIGEST"] = $script:LayersDigest
+      $bakeEnv["POWBOX_LAYERS_BASE_ID"] = $script:PowboxLayersBaseId
+    }
+    $shown = @($bakeEnv.Keys | ForEach-Object { "$_=$($bakeEnv[$_])" }) -join ' '
+    Write-Host "Running: $shown docker $($docker_args -join ' ')"
+    foreach ($name in $bakeEnv.Keys) {
+      Set-Item -Path "Env:$name" -Value ([string]$bakeEnv[$name])
+    }
     docker @docker_args
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE
@@ -256,8 +254,7 @@ No image was built.
   }
 
   function Assert-BaseImage {
-    docker image inspect "powbox-agent-base:latest" *> $null
-    if ($LASTEXITCODE -eq 0) {
+    if (Test-ImagePresent $script:PowboxBaseTag) {
       return
     }
 
@@ -267,28 +264,64 @@ No image was built.
     # rebuilding it fresh unconditionally on every no-cache top-layer build
     # would be unnecessarily slow. Use `build.ps1 base -NoCache` if you
     # explicitly want a fresh base.
-    Write-Host "Base image powbox-agent-base:latest was not found locally. Building it first."
-    Resolve-BaseSourceDigest -WithPull:$false
-    $env:CLAUDE_CODE_VERSION = $ClaudeVersion
-    $env:CODEX_VERSION = $CodexVersion
-    $env:BASE_SOURCE_IMAGE = $script:BaseSourceImage
-    $env:BASE_SOURCE_DIGEST = $script:BaseSourceDigest
-    $env:POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest
-    $env:POWBOX_COMMIT = $script:PowboxCommit
-    $env:POWBOX_COMMIT_CODEX = $script:PowboxCommitCodex
-    docker buildx bake --file (Join-Path $rootDir "docker-bake.hcl") base
-    if ($LASTEXITCODE -ne 0) {
-      exit $LASTEXITCODE
+    Write-Host "Base image $($script:PowboxBaseTag) was not found locally. Building it first."
+    Invoke-Bake -Targets @("base")
+  }
+
+  # The base step of the layers and agent targets: refresh the base under
+  # -Pull, otherwise build it only when it is missing.
+  function Initialize-BaseImage {
+    if ($Pull) {
+      Invoke-Bake -Targets @("base") -WithPull
+    } else {
+      Assert-BaseImage
     }
+  }
+
+  # Records the base this bake builds FROM, read now, after the run's base
+  # step, for the next run's currency test.
+  function Invoke-LayersBake {
+    param([switch]$WithNoCache)
+    $script:PowboxLayersBaseId = Get-ImageId $script:PowboxBaseTag
+    Invoke-Bake -Targets @("layers") -WithNoCache:$WithNoCache
+  }
+
+  # Bake the layer-set image only when it is not current for the selected set
+  # (see Get-LayersStaleReason). Always from cache, like Assert-BaseImage: the
+  # agent target's -NoCache is about the agent's own layers.
+  function Assert-LayersImage {
+    $reason = Get-LayersStaleReason -Set $script:LayersSet -Digest $script:LayersDigest
+    if (-not $reason) {
+      Write-Host "Layer-set image $($script:PowboxLayersTag) is current for set '$($script:LayersSet)'; reusing it."
+      return
+    }
+    Write-Host "Baking $($script:PowboxLayersTag): $reason."
+    Invoke-LayersBake
+  }
+
+  # Everything read off the parent here describes the image the agent is
+  # actually built FROM, so it runs after the base and layer-set steps.
+  function Invoke-AgentBake {
+    param([switch]$WithNoCache)
+    $script:BaseImage = if ($script:LayersSet) { $script:PowboxLayersTag } else { $script:PowboxBaseTag }
+    $script:PowboxParentSignature = Get-ParentSignature $script:BaseImage
+    $script:PowboxCommitCodex = Resolve-CodexCommit -HeadCommit $script:PowboxCommit -CodexVersion $CodexVersion -Signature $script:PowboxParentSignature -NoCache:$WithNoCache.IsPresent
+    # The base commit file is written by the agent's top metadata layer from the
+    # label its parent carries (a layer-set image inherits it from the base), so
+    # the file and the label the agent inherits always agree.
+    $script:PowboxCommitBase = Get-ImageLabel $script:BaseImage "powbox.commit.base"
+    if (-not $script:PowboxCommitBase) { $script:PowboxCommitBase = "unknown" }
+    Invoke-Bake -Targets @("agent") -WithNoCache:$WithNoCache
   }
 
   # -Pull only makes sense for the base image (whose FROM is an upstream
   # registry image); it re-pulls that upstream tag into the local image store
-  # (see Resolve-BaseSourceDigest). The agent image's only FROM is the
-  # locally-built powbox-agent-base, which is not a registry image, so when the
-  # user requests -Pull on the agent target we refresh the base first (cascading
-  # any digest change into the agent layers automatically) and then build the
-  # agent.
+  # (see Resolve-BaseSourceDigest). The layer-set and agent images build FROM
+  # local images, not registry ones, so -Pull on those targets refreshes the
+  # base first; the layer-set image is then not current (its recorded base ID
+  # no longer matches) and is baked again on the new base, and the agent
+  # follows it. Without a selected set the agent sits directly on the
+  # refreshed base.
   # The agent image bakes its whole Codex skill palette from the fetched
   # agent-skills clone, so fetch it before any agent bake. Done
   # here (not for the base-only target) so `build.ps1 base` never needs network
@@ -298,16 +331,18 @@ No image was built.
     "all" {
       Fetch-AgentSkills
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
-      Invoke-Bake -Targets @("agent") -WithNoCache:$NoCache
+      if ($script:LayersSet) { Invoke-LayersBake -WithNoCache:$NoCache }
+      Invoke-AgentBake -WithNoCache:$NoCache
     }
     "agent" {
       Fetch-AgentSkills
-      if ($Pull) {
-        Invoke-Bake -Targets @("base") -WithPull
-      } else {
-        Assert-BaseImage
-      }
-      Invoke-Bake -Targets @("agent") -WithNoCache:$NoCache
+      Initialize-BaseImage
+      if ($script:LayersSet) { Assert-LayersImage }
+      Invoke-AgentBake -WithNoCache:$NoCache
+    }
+    "layers" {
+      Initialize-BaseImage
+      Invoke-LayersBake -WithNoCache:$NoCache
     }
     "base" {
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache

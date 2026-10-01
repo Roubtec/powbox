@@ -536,6 +536,12 @@ dockerfile_case "a U+200B line hides no COPY" $'FROM ${BASE_IMAGE}\nRUN echo \\\
 dockerfile_case "U+00AD before a comment is not a comment" $'FROM ${BASE_IMAGE}\nRUN echo \\\n\xc2\xad# x\nONBUILD RUN true\n' reject "Dockerfile:4: ONBUILD is not allowed"
 dockerfile_case "U+200B after a heredoc terminator does not end it" $'FROM ${BASE_IMAGE}\nRUN <<EOF\xe2\x80\x8b\nEOF\nRUN <<\'LABEL a=b\'\nEOF\xe2\x80\x8b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\n' reject "Dockerfile:6: ONBUILD is not allowed"
 dockerfile_case "U+FEFF before ONBUILD is not ONBUILD" $'FROM ${BASE_IMAGE}\n\xef\xbb\xbfONBUILD RUN true\n' ok
+dockerfile_case "a heredoc name holding an invalid byte" $'FROM ${BASE_IMAGE}\nRUN <<#\xff\n#\xef\xbf\xbd\nCOPY a b\n#\xff\n' reject "Dockerfile: not valid UTF-8"
+dockerfile_case "nested heredocs keyed on invalid bytes" $'FROM ${BASE_IMAGE}\nRUN <<#\xff\n#\xfe\nRUN <<#Z\n#\xef\xbf\xbd\nCOPY a b\n#Z\n#\xff\n' reject "Dockerfile: not valid UTF-8"
+dockerfile_case "an encoded surrogate" $'FROM ${BASE_IMAGE}\nRUN echo \xed\xa0\x80\n' reject "Dockerfile: not valid UTF-8"
+dockerfile_case "an overlong encoding" $'FROM ${BASE_IMAGE}\nRUN echo \xc0\xaf\n' reject "Dockerfile: not valid UTF-8"
+dockerfile_case "a code point above U+10FFFF" $'FROM ${BASE_IMAGE}\nRUN echo \xf4\x90\x80\x80\n' reject "Dockerfile: not valid UTF-8"
+dockerfile_case "a noncharacter is valid UTF-8" $'FROM ${BASE_IMAGE}\nRUN echo \xef\xbf\xbe\n' ok
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -591,6 +597,22 @@ assert_contains "no sha256 tool: says so" "$(cat "$WORK_ROOT/nosha.err")" "no sh
 rc=0
 PATH="$NOSHA_BIN" bash "$DIG_SH" "$set_link" >/dev/null 2>&1 || rc=$?
 assert_eq "no sha256 tool: a broken set is still exit 1" "$rc" "1"
+
+# Without iconv the UTF-8 check cannot run: the rest of the scan still does,
+# and the digest is undeterminable rather than vouched for.
+NOICONV_BIN="$WORK_ROOT/noiconv-bin"
+mkdir -p "$NOICONV_BIN"
+for tool in bash env dirname sed head grep sort find mktemp rm tr cut cat wc sha256sum; do
+	ln -s "$(command -v "$tool")" "$NOICONV_BIN/$tool"
+done
+rc=0
+out="$(PATH="$NOICONV_BIN" bash "$DIG_SH" "$set_a" 2>"$WORK_ROOT/noiconv.err")" || rc=$?
+assert_eq "no iconv: exit 3" "$rc" "3"
+assert_eq "no iconv: no digest printed" "$out" ""
+assert_contains "no iconv: says so" "$(cat "$WORK_ROOT/noiconv.err")" "no iconv tool"
+rc=0
+PATH="$NOICONV_BIN" bash "$DIG_SH" "$set_link" >/dev/null 2>&1 || rc=$?
+assert_eq "no iconv: a broken set is still exit 1" "$rc" "1"
 
 echo "Test: layers-digest.ps1 matches layers-digest.sh"
 if $HAVE_PWSH; then
@@ -668,6 +690,15 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\n\xc2\xadONBUILD RUN true\n' \
 		$'FROM ${BASE_IMAGE}\nRUN <<EOF\xe2\x80\x8b\nEOF\nCOPY a /a\n' \
 		$'# esc\xe2\x80\x8bape=`\nFROM ${BASE_IMAGE}\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<#\xff\n#\xef\xbf\xbd\nCOPY a b\n#\xff\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<#\xff\n#\xfe\nRUN <<#Z\n#\xef\xbf\xbd\nCOPY a b\n#Z\n#\xff\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xed\xa0\x80\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xc0\xaf\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xef\xbf\xbe\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xf4\x90\x80\x80\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xf5\x80\x80\x80\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xf8\x88\x80\x80\x80\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \xf4\x8f\xbf\xbf\xf0\x9f\x98\x80\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
 		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \

@@ -39,7 +39,8 @@
 # the set built on, so the build drivers prove the chain from the built image's
 # filesystem layers (layers_base_mismatch in build-image-lib.sh).
 # The Dockerfile check follows the rules of BuildKit's Dockerfile parser where
-# they decide what is an instruction: it refuses a NUL byte, drops a UTF-8 BOM
+# they decide what is an instruction: it refuses invalid UTF-8 and a NUL byte,
+# drops a UTF-8 BOM
 # and trailing CRs, trims leading Unicode whitespace (U+00A0 and the like)
 # where BuildKit does, joins a line ending in an unescaped backslash, followed
 # only by spaces or tabs, to the next without adding anything, skips comment
@@ -56,8 +57,9 @@
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
-# usage error; 3 when no sha256 tool is available, which callers treat as an
-# undeterminable digest rather than a broken set. Nothing is printed on stdout
+# usage error; 3 when no sha256 tool, or no iconv to check the Dockerfile's
+# encoding, is available, which callers treat as an undeterminable digest
+# rather than a broken set. Nothing is printed on stdout
 # unless the status is 0.
 set -euo pipefail
 export LC_ALL=C
@@ -400,6 +402,22 @@ skip_heredocs() {
 	done
 }
 
+# BuildKit, this scan and the .ps1 would each read invalid UTF-8 their own way
+# (a heredoc name holding a stray byte ends at a different line in each), so
+# the Dockerfile must be valid UTF-8. iconv is a POSIX utility; without it the
+# check cannot run, and the digest is reported undeterminable (status 3) once
+# the rest of the scan has run.
+utf8_unchecked=false
+if ! command -v iconv >/dev/null 2>&1; then
+	utf8_unchecked=true
+elif ! iconv -f UTF-8 -t UTF-8 <"$SET_DIR/Dockerfile" >/dev/null 2>&1 ||
+	# glibc's iconv still passes code points above U+10FFFF (F4 90.., and the
+	# F5..FD leads of the old 4- to 6-byte forms), which UTF-8 and Go exclude.
+	grep -q -a -e $'[\xf5-\xfd]' -e $'\xf4[\x90-\xbf]' "$SET_DIR/Dockerfile"; then
+	report "${SET_DIR}/Dockerfile: not valid UTF-8"
+	exit 1
+fi
+
 # `read` drops NUL bytes, which would join what Docker reads as separate lines
 # (and the .ps1 keeps), so a Dockerfile holding one is refused outright.
 if [ "$(tr -d '\000' <"$SET_DIR/Dockerfile" | wc -c)" -ne "$(wc -c <"$SET_DIR/Dockerfile")" ]; then
@@ -497,6 +515,10 @@ done < <(sort -z "$entries")
 
 if ! printf '' | sha256_hex >/dev/null 2>&1; then
 	echo "layers-digest: no sha256 tool (need sha256sum, shasum, or openssl)" >&2
+	exit 3
+fi
+if $utf8_unchecked; then
+	echo "layers-digest: no iconv tool to check that ${SET_DIR}/Dockerfile is valid UTF-8" >&2
 	exit 3
 fi
 

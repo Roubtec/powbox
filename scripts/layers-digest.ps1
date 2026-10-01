@@ -8,7 +8,7 @@
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract or
 # cannot be read (every offending line or path is named on stderr); 2 on a usage
-# error. The .sh's status 3 (no sha256 tool) cannot happen here.
+# error. The .sh's status 3 (no sha256 tool, or no iconv) cannot happen here.
 param([string]$SetDir = '')
 
 $ErrorActionPreference = 'Stop'
@@ -268,7 +268,14 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
 $heredocOpener = [regex]'^[0-9]*<<(-?)[ \t\r]*([^<]*)\z'
 $directive = [regex]'^([A-Za-z][A-Za-z0-9]*)[ \t\n\r\v\f]*=[ \t\n\r\v\f]*(.*[^ \t\n\r\v\f])[ \t\n\r\v\f]*\z'
 
-$content = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($dockerfile))
+# See the .sh: a Dockerfile that is not valid UTF-8 is refused, so a stray
+# byte is never decoded to U+FFFD here while the .sh keeps it raw.
+try {
+    $content = (New-Object System.Text.UTF8Encoding($false, $true)).GetString([System.IO.File]::ReadAllBytes($dockerfile))
+} catch [System.Text.DecoderFallbackException] {
+    Write-DigestError "${SetDir}/Dockerfile: not valid UTF-8"
+    exit 1
+}
 # See the .sh: its `read` drops NUL bytes, so a Dockerfile holding one is
 # refused in both.
 if ($content.Contains([string][char]0)) {

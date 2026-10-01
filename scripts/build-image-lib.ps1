@@ -86,7 +86,7 @@ function Get-LayersOnBuildTrigger {
     $triggers = docker image inspect $tag --format '{{json .Config.OnBuild}}' 2>$null
     if ($LASTEXITCODE -ne 0) { return "the ONBUILD triggers of $tag could not be read" }
     $triggers = (@($triggers) -join "`n").Trim()
-    if ($triggers -ceq 'null' -or $triggers -ceq '[]') { return "" }
+    if ([string]::Equals($triggers, 'null', [System.StringComparison]::Ordinal) -or [string]::Equals($triggers, '[]', [System.StringComparison]::Ordinal)) { return "" }
     return "$tag records ONBUILD triggers, which would run in the agent build outside the set's digest: $triggers"
 }
 

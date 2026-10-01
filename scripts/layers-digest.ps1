@@ -80,9 +80,18 @@ function ConvertTo-AsciiLower([string]$Text) {
     return [regex]::Replace($Text, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
 }
 
+# Every string comparison here is ordinal, as the .sh's byte comparisons are:
+# PowerShell's -eq/-ceq/-contains and .NET's StartsWith/EndsWith without a
+# StringComparison compare by culture, which ignores zero-width and format
+# characters (U+200B, U+00AD, U+FEFF), so "ONBUILD" would equal U+FEFF ONBUILD
+# and a U+200B line would read as blank, where BuildKit and the .sh disagree.
+function Test-SameString([string]$A, [string]$B) {
+    return [string]::Equals($A, $B, [System.StringComparison]::Ordinal)
+}
+
 function Test-BlankOrComment([string]$Line) {
     $t = $Line.TrimStart($lineSpace)
-    return ($t -eq '' -or $t.StartsWith('#'))
+    return ($t.Length -eq 0 -or $t.StartsWith('#', [System.StringComparison]::Ordinal))
 }
 
 function Get-StrippedContinuation([string]$Line) {
@@ -104,13 +113,13 @@ function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
     while ($i -lt $Words.Count -and $Words[$i].StartsWith('--', [System.StringComparison]::Ordinal)) { $i++ }
     $image = if ($i -lt $Words.Count) { ConvertFrom-ShellWord $Words[$i] } else { '' }
     $name = ''
-    if (($i + 2) -lt $Words.Count -and (ConvertTo-AsciiLower $Words[$i + 1]) -ceq 'as') {
+    if (($i + 2) -lt $Words.Count -and (Test-SameString (ConvertTo-AsciiLower $Words[$i + 1]) 'as')) {
         $name = ConvertTo-AsciiLower $Words[$i + 2]
     }
     $script:fromCount++
     $script:fromLine = $LineNo
     $script:fromLogical = $Logical
-    $script:fromOnBase = ($image -ceq '${BASE_IMAGE}' -or $image -ceq '$BASE_IMAGE' -or $script:baseStages.Contains((ConvertTo-AsciiLower $image)))
+    $script:fromOnBase = ((Test-SameString $image '${BASE_IMAGE}') -or (Test-SameString $image '$BASE_IMAGE') -or $script:baseStages.Contains((ConvertTo-AsciiLower $image)))
     if ($script:fromOnBase -and $name) { [void]$script:baseStages.Add($name) }
 }
 
@@ -120,15 +129,15 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -eq 0) { return }
     $keyword = ConvertTo-AsciiUpper $words[0]
-    if ($keyword -ceq 'FROM') {
+    if (Test-SameString $keyword 'FROM') {
         Register-From -LineNo $LineNo -Logical $Logical -Words $words
         return
     }
-    if ($keyword -ceq 'ONBUILD') {
+    if (Test-SameString $keyword 'ONBUILD') {
         Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ONBUILD is not allowed (its trigger runs in the agent build, outside the set's digest): $Logical"
         return
     }
-    if ($keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
+    if (-not (Test-SameString $keyword 'COPY') -and -not (Test-SameString $keyword 'ADD')) { return }
     for ($i = 1; $i -lt $words.Count; $i++) {
         $w = $words[$i]
         if ($w.StartsWith('--chmod=', [System.StringComparison]::Ordinal) -and $w.Length -gt 8) { return }
@@ -149,9 +158,9 @@ function Get-ShellWord([string]$Text) {
         $c = [string]$Text[$k]
         if ($quote) {
             [void]$word.Append($c)
-            if ($c -ceq $quote) {
+            if (Test-SameString $c $quote) {
                 $quote = ''
-            } elseif ($c -ceq '\' -and $quote -ceq '"' -and ($k + 1) -lt $Text.Length) {
+            } elseif ((Test-SameString $c '\') -and (Test-SameString $quote '"') -and ($k + 1) -lt $Text.Length) {
                 $k++
                 [void]$word.Append($Text[$k])
             }
@@ -161,24 +170,24 @@ function Get-ShellWord([string]$Text) {
             if ($have) { $out.Add($word.ToString()) }
             [void]$word.Clear()
             $have = $false
-        } elseif ($c -ceq '\') {
+        } elseif (Test-SameString $c '\') {
             [void]$word.Append($c)
             $have = $true
             if (($k + 1) -lt $Text.Length) {
                 $k++
                 [void]$word.Append($Text[$k])
             }
-        } elseif ($c -ceq '"' -or $c -ceq "'") {
+        } elseif ((Test-SameString $c '"') -or (Test-SameString $c "'")) {
             $quote = $c
             [void]$word.Append($c)
             $have = $true
-        } elseif ($c -ceq '<') {
+        } elseif (Test-SameString $c '<') {
             [void]$word.Append($c)
             $have = $true
-            if (($k + 1) -lt $Text.Length -and $Text[$k + 1] -ceq '<') {
+            if (($k + 1) -lt $Text.Length -and $Text[$k + 1] -eq [char]'<') {
                 $k++
                 [void]$word.Append('<')
-                while (($k + 1) -lt $Text.Length -and @(' ', "`t", "`r") -ccontains [string]$Text[$k + 1]) {
+                while (($k + 1) -lt $Text.Length -and " `t`r".IndexOf($Text[$k + 1]) -ge 0) {
                     $k++
                     [void]$word.Append($Text[$k])
                 }
@@ -198,20 +207,20 @@ function ConvertFrom-ShellWord([string]$Text) {
     $quote = ''
     for ($k = 0; $k -lt $Text.Length; $k++) {
         $c = [string]$Text[$k]
-        if ($quote -ceq "'") {
-            if ($c -ceq "'") { $quote = '' } else { [void]$out.Append($c) }
-        } elseif ($quote -ceq '"') {
-            if ($c -ceq '"') {
+        if (Test-SameString $quote "'") {
+            if (Test-SameString $c "'") { $quote = '' } else { [void]$out.Append($c) }
+        } elseif (Test-SameString $quote '"') {
+            if (Test-SameString $c '"') {
                 $quote = ''
-            } elseif ($c -ceq '\' -and ($k + 1) -lt $Text.Length -and @('"', '\', '$') -ccontains [string]$Text[$k + 1]) {
+            } elseif ((Test-SameString $c '\') -and ($k + 1) -lt $Text.Length -and '"\$'.IndexOf($Text[$k + 1]) -ge 0) {
                 $k++
                 [void]$out.Append($Text[$k])
             } else {
                 [void]$out.Append($c)
             }
-        } elseif ($c -ceq "'" -or $c -ceq '"') {
+        } elseif ((Test-SameString $c "'") -or (Test-SameString $c '"')) {
             $quote = $c
-        } elseif ($c -ceq '\') {
+        } elseif (Test-SameString $c '\') {
             if (($k + 1) -lt $Text.Length) {
                 $k++
                 [void]$out.Append($Text[$k])
@@ -229,12 +238,12 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
     if (-not $Logical.Contains('<<')) { return }
     $words = @(Get-ShellWord $Logical)
     if ($words.Count -lt 2) { return }
-    if ((ConvertTo-AsciiUpper $words[0]) -ceq 'ONBUILD') {
+    if (Test-SameString (ConvertTo-AsciiUpper $words[0]) 'ONBUILD') {
         $words = @($words | Select-Object -Skip 1)
         if ($words.Count -lt 2) { return }
     }
     $keyword = ConvertTo-AsciiUpper $words[0]
-    if ($keyword -cne 'RUN' -and $keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
+    if (-not (Test-SameString $keyword 'RUN') -and -not (Test-SameString $keyword 'COPY') -and -not (Test-SameString $keyword 'ADD')) { return }
     for ($w = 1; $w -lt $words.Count; $w++) {
         $m = $heredocOpener.Match($words[$w])
         if (-not $m.Success) { continue }
@@ -248,7 +257,7 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
             $script:i++
             $body = $lines[$script:i]
             if ($chomp) { $body = $body.TrimStart([char]"`t") }
-            if ($body -ceq $name) { $found = $true; break }
+            if (Test-SameString $body $name) { $found = $true; break }
         }
         if (-not $found) {
             Write-DigestError "${SetDir}/Dockerfile:${LineNo}: heredoc $name is never terminated: $Logical"
@@ -273,7 +282,7 @@ foreach ($raw in $content.Split([char]"`n")) {
     $lines.Add($raw.TrimEnd([char]"`r"))
 }
 # A trailing LF leaves one empty element that the .sh's read loop never sees.
-if ($content.EndsWith("`n")) { $lines.RemoveAt($lines.Count - 1) }
+if ($content.EndsWith("`n", [System.StringComparison]::Ordinal)) { $lines.RemoveAt($lines.Count - 1) }
 
 $n = $lines.Count
 
@@ -281,11 +290,11 @@ $n = $lines.Count
 # Docker knows; any other line ends them.
 for ($i = 0; $i -lt $n; $i++) {
     $t = $lines[$i].TrimStart($lineSpace)
-    if (-not $t.StartsWith('#')) { break }
+    if (-not $t.StartsWith('#', [System.StringComparison]::Ordinal)) { break }
     $m = $directive.Match($t.Substring(1).TrimStart($lineSpace))
     if (-not $m.Success) { break }
-    if (@('syntax', 'escape', 'check') -cnotcontains (ConvertTo-AsciiLower $m.Groups[1].Value)) { break }
-    if ((ConvertTo-AsciiLower $m.Groups[1].Value) -ceq 'escape' -and $m.Groups[2].Value -cne '\') {
+    if ([Array]::IndexOf(@('syntax', 'escape', 'check'), (ConvertTo-AsciiLower $m.Groups[1].Value)) -lt 0) { break }
+    if ((Test-SameString (ConvertTo-AsciiLower $m.Groups[1].Value) 'escape') -and -not (Test-SameString $m.Groups[2].Value '\')) {
         Write-DigestError "${SetDir}/Dockerfile:$($i + 1): only the default \ escape is supported: $($lines[$i])"
     }
 }

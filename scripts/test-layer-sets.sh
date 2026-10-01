@@ -531,6 +531,11 @@ dockerfile_case "<< then U+00A0 opens no heredoc" $'FROM ${BASE_IMAGE}\nRUN true
 dockerfile_case "<< then a tab and a CR still opens one" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<\t\rEOF\nFROM busybox\nEOF\n' ok
 dockerfile_case "U+00A0 separates a heredoc word" $'FROM ${BASE_IMAGE}\nRUN true\xc2\xa0<<"EOF\\\\"\ntrue\nEOF\\\nONBUILD COPY --chmod=644 . /x\n' reject "Dockerfile:5: ONBUILD is not allowed"
 dockerfile_case "U+00A0 ends a heredoc name" $'FROM ${BASE_IMAGE}\nRUN true <<\'LABEL a=b\'\xc2\xa0c=d\ntrue\nLABEL a=b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\xc2\xa0c=d\n' reject "Dockerfile:5: ONBUILD is not allowed"
+dockerfile_case "a U+200B line inside a continuation is not blank" $'FROM ${BASE_IMAGE}\nRUN echo \\\n\xe2\x80\x8b\nONBUILD RUN true\n' reject "Dockerfile:4: ONBUILD is not allowed"
+dockerfile_case "a U+200B line hides no COPY" $'FROM ${BASE_IMAGE}\nRUN echo \\\n\xe2\x80\x8b\nCOPY a /a\n' reject "Dockerfile:4: COPY without"
+dockerfile_case "U+00AD before a comment is not a comment" $'FROM ${BASE_IMAGE}\nRUN echo \\\n\xc2\xad# x\nONBUILD RUN true\n' reject "Dockerfile:4: ONBUILD is not allowed"
+dockerfile_case "U+200B after a heredoc terminator does not end it" $'FROM ${BASE_IMAGE}\nRUN <<EOF\xe2\x80\x8b\nEOF\nRUN <<\'LABEL a=b\'\nEOF\xe2\x80\x8b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\n' reject "Dockerfile:6: ONBUILD is not allowed"
+dockerfile_case "U+FEFF before ONBUILD is not ONBUILD" $'FROM ${BASE_IMAGE}\n\xef\xbb\xbfONBUILD RUN true\n' ok
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -554,6 +559,7 @@ reject_case "an empty directory" "$set_emptydir" "$set_emptydir/cache/inner: emp
 
 set_nul="$WORK_ROOT/set-nul"
 make_set "$set_nul"
+# shellcheck disable=SC2016 # a literal Dockerfile
 printf 'FROM ${BASE_IMAGE}\nARG a=b\\\000\nONBUILD RUN true\n' >"$set_nul/Dockerfile"
 reject_case "a NUL byte" "$set_nul" "$set_nul/Dockerfile: contains a NUL byte"
 
@@ -654,6 +660,14 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nRUN true <<\'LABEL a=b\'\xc2\xa0c=d\ntrue\nLABEL a=b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\xc2\xa0c=d\n' \
 		$'FROM ${BASE_IMAGE}\nRUN cat <<<<EOF\nFROM busybox\n' \
 		$'FROM ${BASE_IMAGE}\nRUN cat \\<<EOF\nFROM busybox\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \\\n\xe2\x80\x8b\nONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \\\n\xe2\x80\x8b\nCOPY a /a\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \\\n\xc2\xad# x\nONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<EOF\xe2\x80\x8b\nEOF\nRUN <<\'LABEL a=b\'\nEOF\xe2\x80\x8b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\n' \
+		$'FROM ${BASE_IMAGE}\n\xef\xbb\xbfONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\n\xc2\xadONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<EOF\xe2\x80\x8b\nEOF\nCOPY a /a\n' \
+		$'# esc\xe2\x80\x8bape=`\nFROM ${BASE_IMAGE}\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
 		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \
@@ -1266,6 +1280,8 @@ run_sequence() {
 	rc=0
 	out="$(build "$lang" "$st" agent "${PIN[@]}" 2>&1)" || rc=$?
 	assert_eq "[$lang] set recording ONBUILD: not current next time, no agent on it" "$(bakes "$st")" "layers"
+	assert_eq "[$lang] set recording ONBUILD: the next build fails too" "$([ "$rc" -ne 0 ] && echo failed)" failed
+	assert_contains "[$lang] set recording ONBUILD: the next build says why" "$out" "records ONBUILD triggers"
 	rm "$st/layers-onbuild"
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] ONBUILD removed: layers and agent baked" "$(bakes "$st")" "layers,agent"

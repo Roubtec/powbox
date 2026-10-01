@@ -492,7 +492,13 @@ dockerfile_case "ONBUILD heredoc body is not an instruction" $'ARG BASE_IMAGE=b\
 dockerfile_case "escaped quote opens no quote" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN echo \\" <<EOF\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
 dockerfile_case "backslash-quoted heredoc name" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<\\EOF\nfrom x\nEOF\n' ok
 dockerfile_case "<< EOF with a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN python3 - << EOF\nfrom os import path\nEOF\n' ok
-dockerfile_case "<<- EOF with a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<- EOF >/x\n\thello\n\tEOF\nUSER node\n' ok
+dockerfile_case "<<- then a space opens no heredoc, as in BuildKit" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<- EOF >/x\n\tFROM busybox\n\tEOF\n' reject "Dockerfile:4: the final stage"
+dockerfile_case "quoted heredoc name holding a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN <<\'END SCRIPT\'\necho hi\nEND SCRIPT\nUSER node\n' ok
+dockerfile_case "double-quoted name with a space skips a FROM body line" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<"A B" >/f\nFROM busybox\nA B\n' ok
+dockerfile_case "escaped quote inside a double-quoted name" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<"E\\"F"\nFROM y\nE"F\n' ok
+dockerfile_case "vertical tab separates FROM from its image" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM\vbusybox\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "form feed separates COPY from its sources" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nCOPY\fa /b\n' reject "Dockerfile:3: COPY without"
+dockerfile_case "<< in shell arithmetic is a heredoc to Docker too" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n' reject "heredoc 3)) is never terminated"
 dockerfile_case "<< EOF body cannot stand in for the final FROM" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
 
 set_link="$WORK_ROOT/set-link"
@@ -607,7 +613,12 @@ if $HAVE_PWSH; then
 		$'FROM busybox\nRUN echo \\" <<EOF\nFROM ${BASE_IMAGE}\nEOF\n' \
 		$'FROM ${BASE_IMAGE}\nRUN cat <<\\EOF\nfrom x\nEOF\n' \
 		$'FROM ${BASE_IMAGE}\nRUN cat <<- EOF >/x\n\thello\n\tEOF\n' \
-		$'FROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n'; do
+		$'FROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<\'END SCRIPT\'\nFROM y\nEND SCRIPT\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<"E\\"F"\nFROM y\nE"F\n' \
+		$'FROM ${BASE_IMAGE}\nRUN\vcat\v<<EOF\nFROM y\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nFROM\vbusybox\nCOPY\fa /b\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n'; do
 		d="$(mktemp -d "$WORK_ROOT/dfp.XXXXXX")"
 		make_set "$d"
 		printf '%s' "$body" >"$d/Dockerfile"

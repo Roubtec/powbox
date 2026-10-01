@@ -39,8 +39,7 @@
 # << 'EOF' after RUN, COPY or ADD, also behind ONBUILD), so a body line that
 # reads as FROM or COPY is neither taken for a stage nor checked; an
 # unterminated heredoc is an error, as it is to Docker. It is a scan, not a
-# parser: words are split on whitespace, so a quoted heredoc name holding a
-# space is not recognised. Only the default backslash escape is supported: an
+# parser: it reads no variables and no JSON-form arguments. Only the default backslash escape is supported: an
 # `# escape=` parser directive setting any other character is rejected, since
 # it changes how Docker joins lines.
 #
@@ -99,6 +98,8 @@ strip_backslash() {
 	printf '%s' "${s%\\}"
 }
 
+DOCKER_EXTRA_SPACE=$'\v\f\r'
+
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -152,7 +153,9 @@ note_from() {
 check_instruction() {
 	local lineno="$1" logical="$2"
 	local -a words
-	read -r -a words <<<"$logical" || true
+	# Docker splits an instruction on space, tab, VT, FF and CR; `read` splits
+	# only on the first two, so map the others to spaces for it.
+	read -r -a words <<<"${logical//[$DOCKER_EXTRA_SPACE]/ }" || true
 	[ "${#words[@]}" -gt 0 ] || return 0
 	local i=0 keyword
 	keyword="$(upper "${words[0]}")"
@@ -177,33 +180,115 @@ check_instruction() {
 	report "${SET_DIR}/Dockerfile:${lineno}: ${keyword} without --chmod=<mode>: ${logical}"
 }
 
+# Split $1 into the words BuildKit's shell lexer sees when it looks for
+# heredocs: unquoted whitespace separates words, while quotes and backslash
+# escapes stay in the word along with any whitespace they cover. The words are
+# left in SHELL_WORDS.
+shell_words() {
+	local s="$1" k c word="" quote="" have=false
+	SHELL_WORDS=()
+	for ((k = 0; k < ${#s}; k++)); do
+		c="${s:k:1}"
+		if [ -n "$quote" ]; then
+			word+="$c"
+			if [ "$c" = "$quote" ]; then
+				quote=""
+			elif [ "$c" = "\\" ] && [ "$quote" = '"' ] && [ $((k + 1)) -lt "${#s}" ]; then
+				k=$((k + 1))
+				word+="${s:k:1}"
+			fi
+			continue
+		fi
+		case "$c" in
+		' ' | $'\t' | $'\n' | $'\v' | $'\f' | $'\r')
+			if $have; then SHELL_WORDS+=("$word"); fi
+			word=""
+			have=false
+			;;
+		\\)
+			word+="$c"
+			have=true
+			if [ $((k + 1)) -lt "${#s}" ]; then
+				k=$((k + 1))
+				word+="${s:k:1}"
+			fi
+			;;
+		\" | \')
+			quote="$c"
+			word+="$c"
+			have=true
+			;;
+		*)
+			word+="$c"
+			have=true
+			;;
+		esac
+	done
+	if $have; then SHELL_WORDS+=("$word"); fi
+}
+
+# The value of a shell word: quotes removed and backslash escapes resolved (in
+# double quotes a backslash escapes only " \ $ and `).
+unquote_word() {
+	local s="$1" k c out="" quote=""
+	for ((k = 0; k < ${#s}; k++)); do
+		c="${s:k:1}"
+		if [ "$quote" = "'" ]; then
+			if [ "$c" = "'" ]; then quote=""; else out+="$c"; fi
+		elif [ "$quote" = '"' ]; then
+			if [ "$c" = '"' ]; then
+				quote=""
+			elif [ "$c" = "\\" ] && [ $((k + 1)) -lt "${#s}" ]; then
+				case "${s:k+1:1}" in
+				'"' | \\ | '$' | '`')
+					k=$((k + 1))
+					out+="${s:k:1}"
+					;;
+				*) out+="$c" ;;
+				esac
+			else
+				out+="$c"
+			fi
+		elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+			quote="$c"
+		elif [ "$c" = "\\" ]; then
+			if [ $((k + 1)) -lt "${#s}" ]; then
+				k=$((k + 1))
+				out+="${s:k:1}"
+			fi
+		else
+			out+="$c"
+		fi
+	done
+	printf '%s' "$out"
+}
+
 # Skip the bodies of the heredocs a RUN, COPY or ADD (also behind ONBUILD)
-# opens, advancing i past each terminator in turn. A word inside quotes opens no
-# heredoc; a backslash escapes the next character except inside single quotes.
+# opens, advancing i past each terminator in turn. As in BuildKit, a heredoc
+# opener is a word reading <<NAME or <<-NAME (optionally after a file
+# descriptor), or a bare << followed by the name as the next word; the name is
+# the word's value, so a quoted one may hold spaces.
 skip_heredocs() {
 	local lineno="$1" logical="$2"
-	local -a words
-	read -r -a words <<<"$logical" || true
+	shell_words "$logical"
+	local -a words=(${SHELL_WORDS[@]+"${SHELL_WORDS[@]}"})
 	[ "${#words[@]}" -gt 1 ] || return 0
 	if [ "$(upper "${words[0]}")" = ONBUILD ]; then
 		words=("${words[@]:1}")
 		[ "${#words[@]}" -gt 1 ] || return 0
 	fi
 	case "$(upper "${words[0]}")" in RUN | COPY | ADD) ;; *) return 0 ;; esac
-	local idx=1 w k c quote="" chomp rest name body found
+	local idx=1 chomp rest name body found
 	while [ "$idx" -lt "${#words[@]}" ]; do
-		w="${words[$idx]}"
-		if [ -z "$quote" ] && [[ "$w" =~ ^[0-9]*'<<'(-?)([^<]*)$ ]]; then
+		if [[ "${words[$idx]}" =~ ^[0-9]*'<<'(-?)([^<]*)$ ]]; then
 			chomp="${BASH_REMATCH[1]}"
 			rest="${BASH_REMATCH[2]}"
-			# Docker also takes whitespace between << (or <<-) and the name.
-			if [ -z "$rest" ] && [ $((idx + 1)) -lt "${#words[@]}" ]; then
+			if [ -z "$rest" ] && [ -z "$chomp" ] && [ $((idx + 1)) -lt "${#words[@]}" ]; then
 				idx=$((idx + 1))
-				w="${words[$idx]}"
-				rest="$w"
+				rest="${words[$idx]}"
 			fi
 			name=""
-			[[ "$rest" == *"<"* ]] || name="${rest//[\"\'\\]/}"
+			[[ "$rest" == *"<"* ]] || name="$(unquote_word "$rest")"
 			if [ -n "$name" ]; then
 				found=false
 				while [ $((i + 1)) -lt "$n" ]; do
@@ -220,16 +305,6 @@ skip_heredocs() {
 				$found || report "${SET_DIR}/Dockerfile:${lineno}: heredoc ${name} is never terminated: ${logical}"
 			fi
 		fi
-		for ((k = 0; k < ${#w}; k++)); do
-			c="${w:k:1}"
-			if [ "$c" = "\\" ] && [ "$quote" != "'" ]; then
-				k=$((k + 1))
-			elif [ -z "$quote" ]; then
-				case "$c" in \" | \') quote="$c" ;; esac
-			elif [ "$c" = "$quote" ]; then
-				quote=""
-			fi
-		done
 		idx=$((idx + 1))
 	done
 }

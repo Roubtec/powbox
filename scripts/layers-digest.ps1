@@ -54,10 +54,11 @@ if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf) -or (Test-SymbolicL
     exit 1
 }
 
-# The same whitespace class as the .sh's [[:space:]] under LC_ALL=C, and the
-# narrower one its `read -a` splits words on.
+# The same whitespace class as the .sh's [[:space:]] under LC_ALL=C, which is
+# also what Docker splits an instruction's words on.
 $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
-$wordSeparators = [char[]]@(' ', "`t", "`n")
+$wordSeparators = $whitespace
+$dockerSpace = $whitespace
 # As Docker's continuation rule: a backslash ending the line continues it, unless
 # another backslash precedes it.
 $continuation = [regex]'(^|[^\\])\\[ \t\n\r\v\f]*\z'
@@ -129,12 +130,84 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
     Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ${keyword} without --chmod=<mode>: $Logical"
 }
 
-# Skip the bodies of the heredocs a RUN, COPY or ADD (also behind ONBUILD)
-# opens, advancing $script:i past each terminator in turn. A word inside quotes
-# opens no heredoc; a backslash escapes the next character except inside single
-# quotes.
+# See shell_words in the .sh: the words BuildKit's shell lexer sees when it
+# looks for heredocs, quotes and backslash escapes kept in them.
+function Get-ShellWord([string]$Text) {
+    $out = New-Object System.Collections.Generic.List[string]
+    $word = New-Object System.Text.StringBuilder
+    $quote = ''
+    $have = $false
+    for ($k = 0; $k -lt $Text.Length; $k++) {
+        $c = [string]$Text[$k]
+        if ($quote) {
+            [void]$word.Append($c)
+            if ($c -ceq $quote) {
+                $quote = ''
+            } elseif ($c -ceq '\' -and $quote -ceq '"' -and ($k + 1) -lt $Text.Length) {
+                $k++
+                [void]$word.Append($Text[$k])
+            }
+            continue
+        }
+        if ($dockerSpace -contains $Text[$k]) {
+            if ($have) { $out.Add($word.ToString()) }
+            [void]$word.Clear()
+            $have = $false
+        } elseif ($c -ceq '\') {
+            [void]$word.Append($c)
+            $have = $true
+            if (($k + 1) -lt $Text.Length) {
+                $k++
+                [void]$word.Append($Text[$k])
+            }
+        } elseif ($c -ceq '"' -or $c -ceq "'") {
+            $quote = $c
+            [void]$word.Append($c)
+            $have = $true
+        } else {
+            [void]$word.Append($c)
+            $have = $true
+        }
+    }
+    if ($have) { $out.Add($word.ToString()) }
+    return $out.ToArray()
+}
+
+# See unquote_word in the .sh.
+function ConvertFrom-ShellWord([string]$Text) {
+    $out = New-Object System.Text.StringBuilder
+    $quote = ''
+    for ($k = 0; $k -lt $Text.Length; $k++) {
+        $c = [string]$Text[$k]
+        if ($quote -ceq "'") {
+            if ($c -ceq "'") { $quote = '' } else { [void]$out.Append($c) }
+        } elseif ($quote -ceq '"') {
+            if ($c -ceq '"') {
+                $quote = ''
+            } elseif ($c -ceq '\' -and ($k + 1) -lt $Text.Length -and @('"', '\', '$', '`') -ccontains [string]$Text[$k + 1]) {
+                $k++
+                [void]$out.Append($Text[$k])
+            } else {
+                [void]$out.Append($c)
+            }
+        } elseif ($c -ceq "'" -or $c -ceq '"') {
+            $quote = $c
+        } elseif ($c -ceq '\') {
+            if (($k + 1) -lt $Text.Length) {
+                $k++
+                [void]$out.Append($Text[$k])
+            }
+        } else {
+            [void]$out.Append($c)
+        }
+    }
+    return $out.ToString()
+}
+
+# See skip_heredocs in the .sh: skip the bodies of the heredocs a RUN, COPY or
+# ADD (also behind ONBUILD) opens, advancing $script:i past each terminator.
 function Skip-Heredoc([int]$LineNo, [string]$Logical) {
-    $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
+    $words = @(Get-ShellWord $Logical)
     if ($words.Count -lt 2) { return }
     if ((ConvertTo-AsciiUpper $words[0]) -ceq 'ONBUILD') {
         $words = @($words | Select-Object -Skip 1)
@@ -142,44 +215,27 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
     }
     $keyword = ConvertTo-AsciiUpper $words[0]
     if ($keyword -cne 'RUN' -and $keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
-    $quote = ''
     for ($w = 1; $w -lt $words.Count; $w++) {
-        $word = $words[$w]
-        $m = $heredocOpener.Match($word)
-        if (-not $quote -and $m.Success) {
-            $chomp = $m.Groups[1].Value
-            $rest = $m.Groups[2].Value
-            # Docker also takes whitespace between << (or <<-) and the name.
-            if (-not $rest -and ($w + 1) -lt $words.Count) {
-                $w++
-                $word = $words[$w]
-                $rest = $word
-            }
-            $name = ''
-            if (-not $rest.Contains('<')) { $name = $rest.Replace('"', '').Replace("'", '').Replace('\', '') }
-            if ($name) {
-                $found = $false
-                while (($script:i + 1) -lt $n) {
-                    $script:i++
-                    $body = $lines[$script:i]
-                    if ($chomp) { $body = $body.TrimStart([char]"`t") }
-                    if ($body -ceq $name) { $found = $true; break }
-                }
-                if (-not $found) {
-                    Write-DigestError "${SetDir}/Dockerfile:${LineNo}: heredoc $name is never terminated: $Logical"
-                }
-            }
+        $m = $heredocOpener.Match($words[$w])
+        if (-not $m.Success) { continue }
+        $chomp = $m.Groups[1].Value
+        $rest = $m.Groups[2].Value
+        if (-not $rest -and -not $chomp -and ($w + 1) -lt $words.Count) {
+            $w++
+            $rest = $words[$w]
         }
-        $chars = $word.ToCharArray()
-        for ($k = 0; $k -lt $chars.Count; $k++) {
-            $c = [string]$chars[$k]
-            if ($c -ceq '\' -and $quote -cne "'") {
-                $k++
-            } elseif (-not $quote) {
-                if ($c -ceq '"' -or $c -ceq "'") { $quote = $c }
-            } elseif ($c -ceq $quote) {
-                $quote = ''
-            }
+        $name = ''
+        if (-not $rest.Contains('<')) { $name = ConvertFrom-ShellWord $rest }
+        if (-not $name) { continue }
+        $found = $false
+        while (($script:i + 1) -lt $n) {
+            $script:i++
+            $body = $lines[$script:i]
+            if ($chomp) { $body = $body.TrimStart([char]"`t") }
+            if ($body -ceq $name) { $found = $true; break }
+        }
+        if (-not $found) {
+            Write-DigestError "${SetDir}/Dockerfile:${LineNo}: heredoc $name is never terminated: $Logical"
         }
     }
 }

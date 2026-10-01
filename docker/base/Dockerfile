@@ -652,10 +652,9 @@ WORKDIR /home/node
 ARG BASE_SOURCE_IMAGE="node:24-trixie-slim"
 ARG BASE_SOURCE_DIGEST=""
 # Powbox commit that built this base image, recorded as an inheritable label
-# only: the layer-set and agent images don't override powbox.commit.base, so
-# they expose the base's commit automatically. The in-container
-# /home/node/.powbox/base.commit is written by the agent image's top metadata
-# layer from this label. The base has a different parent than the agent layers,
+# only. The agent image restamps powbox.commit.base, and writes the in-container
+# /home/node/.powbox/base.commit, from this label as the build script reads it
+# off the base. The base has a different parent than the agent layers,
 # so its commit can lag the agent's. Supplied by scripts/build-image.{sh,ps1}.
 ARG POWBOX_COMMIT="unknown"
 # Digest over this base layer's powbox SOURCE inputs (this Dockerfile plus every

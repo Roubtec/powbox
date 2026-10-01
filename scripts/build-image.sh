@@ -391,10 +391,11 @@ bake_agent() {
 	fi
 	POWBOX_PARENT_SIGNATURE="$(parent_signature "$BASE_IMAGE")"
 	POWBOX_COMMIT_CODEX="$(resolve_codex_commit "$POWBOX_COMMIT" "$CODEX_VERSION" "$POWBOX_PARENT_SIGNATURE" "$1")"
-	# The base commit file is written by the agent's top metadata layer from the
-	# label its parent carries (a layer-set image inherits it from the base), so
-	# the file and the label the agent inherits always agree.
-	POWBOX_COMMIT_BASE="$(image_label "$BASE_IMAGE" powbox.commit.base)"
+	# The agent's top metadata layer writes the base commit to its file and
+	# stamps it as the agent's own label, so the two always agree. It is read off
+	# the base itself, which a layer-set image is proven to be built on: a set's
+	# own LABEL could override the copy the layer-set image inherits.
+	POWBOX_COMMIT_BASE="$(image_label "$POWBOX_BASE_TAG" powbox.commit.base)"
 	[ -n "$POWBOX_COMMIT_BASE" ] || POWBOX_COMMIT_BASE="unknown"
 	run_bake false "$1" agent
 }

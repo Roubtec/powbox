@@ -347,8 +347,8 @@ an introspection-only surface.
   → in-container `cat`, enabling "an agent in this environment diffs the building
   branch against the working branch" (`git diff <commit>..HEAD` against the powbox
   repo). All three are written by the agent's top metadata layer; `base.commit` comes
-  from the `powbox.commit.base` label of the agent's actual parent (passed as
-  `POWBOX_COMMIT_BASE`), so it always matches the label the agent inherits. The base
+  from the base image's `powbox.commit.base` label (passed as `POWBOX_COMMIT_BASE`),
+  which the agent also restamps as its own label, so the two always agree. The base
   image keeps its commit as a label only: a file written there gave the base a new
   top layer at every commit, which reinstalled everything built on it.
 

@@ -122,8 +122,9 @@ COPY --chown=node:node .agent-skills-src/codex/dev-skills/skills/ /home/node/.ag
 #
 # /home/node/.powbox/{base,claude,codex}.commit are the in-container provenance
 # surface. base.commit is POWBOX_COMMIT_BASE, the powbox.commit.base label of
-# this image's parent as the build script reads it, so it always matches the
-# label this image inherits; the base image carries its commit as a label only,
+# the base image as the build script reads it, which the label block at the end
+# also stamps on this image, so the two always agree; the base image carries
+# its commit as a label only,
 # because a file written there would give the base a new layer at every commit.
 # POWBOX_COMMIT_BASE is declared here, below every install layer, so it keys
 # only this metadata layer. claude.commit equals
@@ -207,8 +208,9 @@ COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads \
 
 # --- Provenance labels -------------------------------------------------------
 # Host-side introspection surface (docker image inspect / docker inspect). The
-# base commit is inherited from the base image's powbox.commit.base label, and
-# with a layer set selected the powbox.layers.* and powbox.commit.layers labels
+# base commit is restamped from POWBOX_COMMIT_BASE rather than inherited, since
+# a layer set's own LABEL could override the inherited copy; with a layer set
+# selected the powbox.layers.* and powbox.commit.layers labels
 # are inherited from the layer-set image. powbox.parent.signature describes the
 # image this one was built FROM, the Codex install layer's parent (its layer
 # chain plus the environment, SHELL, WORKDIR and USER a RUN inherits): the build
@@ -217,7 +219,8 @@ COPY --chmod=755 .agent-skills-src/plugins/dev-skills/bin/gh-review-threads \
 # to carry its commit forward. Declared last so they only rebuild this trivial
 # metadata layer.
 ARG POWBOX_PARENT_SIGNATURE=""
-LABEL powbox.commit.claude="${POWBOX_COMMIT}" \
+LABEL powbox.commit.base="${POWBOX_COMMIT_BASE}" \
+      powbox.commit.claude="${POWBOX_COMMIT}" \
       powbox.commit.codex="${POWBOX_COMMIT_CODEX}" \
       powbox.parent.signature="${POWBOX_PARENT_SIGNATURE}" \
       powbox.codex.version="${CODEX_VERSION}" \

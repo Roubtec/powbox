@@ -321,10 +321,11 @@ No image was built.
     $script:BaseImage = if ($script:LayersSet) { $script:PowboxLayersTag } else { $script:PowboxBaseTag }
     $script:PowboxParentSignature = Get-ParentSignature $script:BaseImage
     $script:PowboxCommitCodex = Resolve-CodexCommit -HeadCommit $script:PowboxCommit -CodexVersion $CodexVersion -Signature $script:PowboxParentSignature -NoCache:$WithNoCache.IsPresent
-    # The base commit file is written by the agent's top metadata layer from the
-    # label its parent carries (a layer-set image inherits it from the base), so
-    # the file and the label the agent inherits always agree.
-    $script:PowboxCommitBase = Get-ImageLabel $script:BaseImage "powbox.commit.base"
+    # The agent's top metadata layer writes the base commit to its file and
+    # stamps it as the agent's own label, so the two always agree. It is read off
+    # the base itself, which a layer-set image is proven to be built on: a set's
+    # own LABEL could override the copy the layer-set image inherits.
+    $script:PowboxCommitBase = Get-ImageLabel $script:PowboxBaseTag "powbox.commit.base"
     if (-not $script:PowboxCommitBase) { $script:PowboxCommitBase = "unknown" }
     Invoke-Bake -Targets @("agent") -WithNoCache:$WithNoCache
   }

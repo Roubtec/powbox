@@ -130,6 +130,10 @@ fake_bake() {
 			if [ "$t" = layers ] && [ -f "$state/layers-signature-source" ]; then
 				cp "$state/layers-signature-source" "$dir/signature-source"
 			fi
+			# A set's own LABEL lines, applied before the bake target's labels.
+			if [ "$t" = layers ] && [ -d "$state/layers-labels" ]; then
+				cp "$state/layers-labels/"* "$dir/labels/"
+			fi
 			# A set whose ONBUILD escaped the Dockerfile scan records it here.
 			if [ "$t" = layers ] && [ -f "$state/layers-onbuild" ]; then
 				cp "$state/layers-onbuild" "$dir/onbuild"
@@ -141,6 +145,7 @@ fake_bake() {
 				echo "$POWBOX_LAYERS_BASE_ID" >"$dir/labels/powbox.layers.base.id"
 				echo "$POWBOX_COMMIT" >"$dir/labels/powbox.commit.layers"
 			else
+				echo "$POWBOX_COMMIT_BASE" >"$dir/labels/powbox.commit.base"
 				echo "$POWBOX_COMMIT" >"$dir/labels/powbox.commit.claude"
 				echo "$POWBOX_COMMIT_CODEX" >"$dir/labels/powbox.commit.codex"
 				echo "$POWBOX_PARENT_SIGNATURE" >"$dir/labels/powbox.parent.signature"
@@ -1339,6 +1344,17 @@ run_sequence() {
 	rm "$st/layers-onbuild"
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] ONBUILD removed: layers and agent baked" "$(bakes "$st")" "layers,agent"
+
+	# A set that LABELs powbox.commit.base overrides the copy its image inherits;
+	# the agent still records the base's own commit, as label and as file.
+	mkdir -p "$st/layers-labels"
+	echo bogus >"$st/layers-labels/powbox.commit.base"
+	build "$lang" "$st" layers >/dev/null
+	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
+	rm -r "$st/layers-labels"
+	assert_eq "[$lang] set forging the base commit: layers and agent baked" "$(bakes "$st")" "layers,agent"
+	assert_eq "[$lang] set forging the base commit: agent label is the base's" "$(label "$st" "$AGENT" powbox.commit.base)" "$(label "$st" "$BASE" powbox.commit.base)"
+	assert_eq "[$lang] set forging the base commit: base.commit file is the base's" "$(cat "$st/images/powbox-agent_latest/base.commit")" "$(label "$st" "$BASE" powbox.commit.base)"
 
 	rm "$br/.powbox-layers"
 	rc=0

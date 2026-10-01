@@ -56,9 +56,10 @@ variable "POWBOX_PARENT_SIGNATURE" {
   default = ""
 }
 
-# powbox.commit.base of the agent's parent, written to
-# /home/node/.powbox/base.commit by the agent's top metadata layer (the base
-# image carries its commit as a label only). Supplied by
+# powbox.commit.base of the base image, written to
+# /home/node/.powbox/base.commit by the agent's top metadata layer and
+# restamped as the agent's own label (the base image carries its commit as a
+# label only). Supplied by
 # scripts/build-image.{sh,ps1}.
 variable "POWBOX_COMMIT_BASE" {
   default = "unknown"

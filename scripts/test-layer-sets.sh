@@ -498,6 +498,8 @@ dockerfile_case "double-quoted name with a space skips a FROM body line" $'ARG B
 dockerfile_case "escaped quote inside a double-quoted name" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<"E\\"F"\nFROM y\nE"F\n' ok
 dockerfile_case "vertical tab separates FROM from its image" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM\vbusybox\n' reject "Dockerfile:3: the final stage"
 dockerfile_case "form feed separates COPY from its sources" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nCOPY\fa /b\n' reject "Dockerfile:3: COPY without"
+dockerfile_case "quoted FROM image is compared unquoted" $'ARG BASE_IMAGE=b\nFROM "${BASE_IMAGE}"\nUSER node\n' ok
+dockerfile_case "backtick in a double-quoted name stays literal" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<"E\\`F"\nFROM y\nE\\`F\n' ok
 dockerfile_case "<< in shell arithmetic is a heredoc to Docker too" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n' reject "heredoc 3)) is never terminated"
 dockerfile_case "<< EOF body cannot stand in for the final FROM" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
 
@@ -618,7 +620,9 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nRUN cat <<"E\\"F"\nFROM y\nE"F\n' \
 		$'FROM ${BASE_IMAGE}\nRUN\vcat\v<<EOF\nFROM y\nEOF\n' \
 		$'FROM ${BASE_IMAGE}\nFROM\vbusybox\nCOPY\fa /b\n' \
-		$'FROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n'; do
+		$'FROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n' \
+		$'FROM "${BASE_IMAGE}" AS "b"\nFROM b\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<"E\\`F"\nFROM y\nE\\`F\n'; do
 		d="$(mktemp -d "$WORK_ROOT/dfp.XXXXXX")"
 		make_set "$d"
 		printf '%s' "$body" >"$d/Dockerfile"

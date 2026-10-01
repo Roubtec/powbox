@@ -39,9 +39,10 @@
 # << 'EOF' after RUN, COPY or ADD, also behind ONBUILD), so a body line that
 # reads as FROM or COPY is neither taken for a stage nor checked; an
 # unterminated heredoc is an error, as it is to Docker. It is a scan, not a
-# parser: it reads no variables and no JSON-form arguments. Only the default backslash escape is supported: an
-# `# escape=` parser directive setting any other character is rejected, since
-# it changes how Docker joins lines.
+# parser: it reads no variables and no JSON-form arguments, though it compares
+# FROM's image by its unquoted value, as Docker does. Only the default backslash
+# escape is supported: an `# escape=` parser directive setting any other
+# character is rejected, since it changes how Docker joins lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
@@ -124,7 +125,7 @@ note_from() {
 	while [ "$i" -lt "${#words[@]}" ]; do
 		case "${words[$i]}" in --*) i=$((i + 1)) ;; *) break ;; esac
 	done
-	image="${words[$i]:-}"
+	image="$(unquote_word "${words[$i]:-}")"
 	if [ $((i + 2)) -lt "${#words[@]}" ] && [ "$(lower "${words[$((i + 1))]}")" = as ]; then
 		name="$(lower "${words[$((i + 2))]}")"
 	fi
@@ -228,7 +229,7 @@ shell_words() {
 }
 
 # The value of a shell word: quotes removed and backslash escapes resolved (in
-# double quotes a backslash escapes only " \ $ and `).
+# double quotes a backslash escapes only " $ and \, as in BuildKit's lexer).
 unquote_word() {
 	local s="$1" k c out="" quote=""
 	for ((k = 0; k < ${#s}; k++)); do
@@ -240,7 +241,7 @@ unquote_word() {
 				quote=""
 			elif [ "$c" = "\\" ] && [ $((k + 1)) -lt "${#s}" ]; then
 				case "${s:k+1:1}" in
-				'"' | \\ | '$' | '`')
+				'"' | \\ | '$')
 					k=$((k + 1))
 					out+="${s:k:1}"
 					;;
@@ -270,6 +271,7 @@ unquote_word() {
 # the word's value, so a quoted one may hold spaces.
 skip_heredocs() {
 	local lineno="$1" logical="$2"
+	[[ "$logical" == *'<<'* ]] || return 0
 	shell_words "$logical"
 	local -a words=(${SHELL_WORDS[@]+"${SHELL_WORDS[@]}"})
 	[ "${#words[@]}" -gt 1 ] || return 0

@@ -94,7 +94,7 @@ $script:baseStages = New-Object 'System.Collections.Generic.HashSet[string]' ([S
 function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
     $i = 1
     while ($i -lt $Words.Count -and $Words[$i].StartsWith('--', [System.StringComparison]::Ordinal)) { $i++ }
-    $image = if ($i -lt $Words.Count) { $Words[$i] } else { '' }
+    $image = if ($i -lt $Words.Count) { ConvertFrom-ShellWord $Words[$i] } else { '' }
     $name = ''
     if (($i + 2) -lt $Words.Count -and (ConvertTo-AsciiLower $Words[$i + 1]) -ceq 'as') {
         $name = ConvertTo-AsciiLower $Words[$i + 2]
@@ -184,7 +184,7 @@ function ConvertFrom-ShellWord([string]$Text) {
         } elseif ($quote -ceq '"') {
             if ($c -ceq '"') {
                 $quote = ''
-            } elseif ($c -ceq '\' -and ($k + 1) -lt $Text.Length -and @('"', '\', '$', '`') -ccontains [string]$Text[$k + 1]) {
+            } elseif ($c -ceq '\' -and ($k + 1) -lt $Text.Length -and @('"', '\', '$') -ccontains [string]$Text[$k + 1]) {
                 $k++
                 [void]$out.Append($Text[$k])
             } else {
@@ -207,6 +207,7 @@ function ConvertFrom-ShellWord([string]$Text) {
 # See skip_heredocs in the .sh: skip the bodies of the heredocs a RUN, COPY or
 # ADD (also behind ONBUILD) opens, advancing $script:i past each terminator.
 function Skip-Heredoc([int]$LineNo, [string]$Logical) {
+    if (-not $Logical.Contains('<<')) { return }
     $words = @(Get-ShellWord $Logical)
     if ($words.Count -lt 2) { return }
     if ((ConvertTo-AsciiUpper $words[0]) -ceq 'ONBUILD') {

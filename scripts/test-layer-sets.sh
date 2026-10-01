@@ -465,6 +465,21 @@ dockerfile_case "FROM rule and --chmod rule both named" $'FROM busybox\nCOPY a /
 dockerfile_case "unbraced \$BASE_IMAGE, lowercase from" $'ARG BASE_IMAGE=b\nfrom $BASE_IMAGE\n' ok
 dockerfile_case "--platform flag and a stage built on the base" $'ARG BASE_IMAGE=b\nFROM --platform=linux/amd64 ${BASE_IMAGE} AS Base\nFROM base\n' ok
 dockerfile_case "builder stage first, base stage last" $'ARG BASE_IMAGE=b\nFROM golang AS build\nRUN true\nFROM ${BASE_IMAGE}\nCOPY --from=build --chmod=755 /x /x\n' ok
+# Lines are read as Docker reads them: heredoc bodies are not instructions,
+# continuations join with nothing added, and only the backslash escape is known.
+dockerfile_case "heredoc body cannot stand in for the final FROM" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN cat <<\'EOF\' >/tmp/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "COPY heredoc body cannot stand in for the final FROM" $'FROM busybox\nCOPY --chmod=644 <<EOF /x\nFROM $BASE_IMAGE\nEOF\n' reject "Dockerfile:1: the final stage"
+dockerfile_case "heredoc body lines are not instructions" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN <<EOF\nfrom busybox\ncopy a b\nEOF\n' ok
+dockerfile_case "<<- heredoc ends at a tab-indented terminator" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN <<-"EOT" bash\n\tFROM busybox\n\tEOT\nUSER node\n' ok
+dockerfile_case "two heredocs on one instruction" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nCOPY --chmod=644 <<A <<B /dst/\nFROM x\nA\nCOPY y\nB\n' ok
+dockerfile_case "unterminated heredoc" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<EOF\nhello\n' reject "Dockerfile:3: heredoc EOF is never terminated"
+dockerfile_case "<< inside quotes opens no heredoc" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo "a <<EOF b"\nFROM busybox\n' reject "Dockerfile:4: the final stage"
+dockerfile_case "here-string is not a heredoc" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<<hello\n' ok
+dockerfile_case "continuation joins mid-word" $'ARG BASE_IMAGE=b\nFROM ${BASE_\\\nIMAGE}\n' ok
+dockerfile_case "backtick escape directive" $'# escape=`\nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default \\ escape is supported"
+dockerfile_case "backslash escape directive" $'# Escape = \\ \nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' ok
+dockerfile_case "escape after an instruction is a comment" $'ARG BASE_IMAGE=b\n# escape=`\nFROM ${BASE_IMAGE}\n' ok
+dockerfile_case "UTF-8 BOM before a directive" $'\xef\xbb\xbf# escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -560,7 +575,17 @@ if $HAVE_PWSH; then
 		$'FROM\n' \
 		$'FROM golang AS b\nFROM B\n' \
 		$'FROM --platform=x ${BASE_IMAGE} as Base\nFROM BASE\n' \
-		$'FROM golang AS build\nFROM $BASE_IMAGE\n'; do
+		$'FROM golang AS build\nFROM $BASE_IMAGE\n' \
+		$'FROM ${BASE_IMAGE}\nFROM busybox\nRUN cat <<\'EOF\' >/x\nFROM ${BASE_IMAGE}\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nRUN <<-"EOT" bash\n\tFROM busybox\n\tEOT\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY --chmod=644 <<A <<B /dst/\nFROM x\nA\nCOPY y\nB\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<EOF\nhello\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo "a <<EOF b"\nFROM busybox\n' \
+		$'FROM ${BASE_\\\nIMAGE}\n' \
+		$'# escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'\xef\xbb\xbf# escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'FROM ${BASE_IMAGE} AS \xc3\x89\nFROM \xc3\xa9\n' \
+		$'FROM ${BASE_IMAGE}\nonbu\xc4\xb1ld COPY a b\n'; do
 		d="$(mktemp -d "$WORK_ROOT/dfp.XXXXXX")"
 		make_set "$d"
 		printf '%s' "$body" >"$d/Dockerfile"

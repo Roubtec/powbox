@@ -60,6 +60,15 @@ $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $wordSeparators = [char[]]@(' ', "`t", "`n")
 $continuation = [regex]'\\[ \t\n\r\v\f]*\z'
 
+# Case folding of ASCII letters only, as the .sh's tr under LC_ALL=C does;
+# ToUpperInvariant would also fold, say, a dotless i into I.
+function ConvertTo-AsciiUpper([string]$Text) {
+    return [regex]::Replace($Text, '[a-z]', { param($m) $m.Value.ToUpperInvariant() })
+}
+function ConvertTo-AsciiLower([string]$Text) {
+    return [regex]::Replace($Text, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
+}
+
 function Test-BlankOrComment([string]$Line) {
     $t = $Line.TrimStart($whitespace)
     return ($t -eq '' -or $t.StartsWith('#'))
@@ -76,7 +85,7 @@ $script:fromCount = 0
 $script:fromLine = 0
 $script:fromLogical = ''
 $script:fromOnBase = $false
-$script:baseStages = New-Object System.Collections.Generic.HashSet[string]
+$script:baseStages = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
 
 # Record a FROM: its flags are skipped, then the image, then an optional AS name.
 function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
@@ -84,13 +93,13 @@ function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
     while ($i -lt $Words.Count -and $Words[$i].StartsWith('--', [System.StringComparison]::Ordinal)) { $i++ }
     $image = if ($i -lt $Words.Count) { $Words[$i] } else { '' }
     $name = ''
-    if (($i + 2) -lt $Words.Count -and $Words[$i + 1].ToLowerInvariant() -eq 'as') {
-        $name = $Words[$i + 2].ToLowerInvariant()
+    if (($i + 2) -lt $Words.Count -and (ConvertTo-AsciiLower $Words[$i + 1]) -ceq 'as') {
+        $name = ConvertTo-AsciiLower $Words[$i + 2]
     }
     $script:fromCount++
     $script:fromLine = $LineNo
     $script:fromLogical = $Logical
-    $script:fromOnBase = ($image -ceq '${BASE_IMAGE}' -or $image -ceq '$BASE_IMAGE' -or $script:baseStages.Contains($image.ToLowerInvariant()))
+    $script:fromOnBase = ($image -ceq '${BASE_IMAGE}' -or $image -ceq '$BASE_IMAGE' -or $script:baseStages.Contains((ConvertTo-AsciiLower $image)))
     if ($script:fromOnBase -and $name) { [void]$script:baseStages.Add($name) }
 }
 
@@ -100,16 +109,16 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -eq 0) { return }
     $i = 0
-    $keyword = $words[0].ToUpperInvariant()
-    if ($keyword -eq 'FROM') {
+    $keyword = ConvertTo-AsciiUpper $words[0]
+    if ($keyword -ceq 'FROM') {
         Register-From -LineNo $LineNo -Logical $Logical -Words $words
         return
     }
-    if ($keyword -eq 'ONBUILD' -and $words.Count -gt 1) {
-        $keyword = $words[1].ToUpperInvariant()
+    if ($keyword -ceq 'ONBUILD' -and $words.Count -gt 1) {
+        $keyword = ConvertTo-AsciiUpper $words[1]
         $i = 1
     }
-    if ($keyword -ne 'COPY' -and $keyword -ne 'ADD') { return }
+    if ($keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
     for ($i++; $i -lt $words.Count; $i++) {
         $w = $words[$i]
         if ($w.StartsWith('--chmod=', [System.StringComparison]::Ordinal) -and $w.Length -gt 8) { return }
@@ -118,7 +127,48 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
     Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ${keyword} without --chmod=<mode>: $Logical"
 }
 
+# Skip the bodies of the heredocs a RUN, COPY or ADD opens, advancing $script:i
+# past each terminator in turn. A word inside quotes opens no heredoc.
+function Skip-Heredoc([int]$LineNo, [string]$Logical) {
+    $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
+    if ($words.Count -lt 2) { return }
+    $keyword = ConvertTo-AsciiUpper $words[0]
+    if ($keyword -cne 'RUN' -and $keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
+    $quote = ''
+    for ($w = 1; $w -lt $words.Count; $w++) {
+        $word = $words[$w]
+        $m = $heredocOpener.Match($word)
+        if (-not $quote -and $m.Success) {
+            $chomp = $m.Groups[1].Value
+            $name = $m.Groups[2].Value.Replace('"', '').Replace("'", '')
+            if ($name) {
+                $found = $false
+                while (($script:i + 1) -lt $n) {
+                    $script:i++
+                    $body = $lines[$script:i]
+                    if ($chomp) { $body = $body.TrimStart([char]"`t") }
+                    if ($body -ceq $name) { $found = $true; break }
+                }
+                if (-not $found) {
+                    Write-DigestError "${SetDir}/Dockerfile:${LineNo}: heredoc $name is never terminated: $Logical"
+                }
+            }
+        }
+        foreach ($c in $word.ToCharArray()) {
+            if (-not $quote) {
+                if ($c -eq [char]'"' -or $c -eq [char]"'") { $quote = [string]$c }
+            } elseif ([string]$c -ceq $quote) {
+                $quote = ''
+            }
+        }
+    }
+}
+
+$heredocOpener = [regex]'^[0-9]*<<(-?)([^<]+)\z'
+$directive = [regex]'^#[ \t]*([A-Za-z][A-Za-z0-9]*)[ \t]*=[ \t]*(.*[^ \t])[ \t]*\z'
+
 $content = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($dockerfile))
+if ($content.StartsWith([string][char]0xFEFF, [System.StringComparison]::Ordinal)) { $content = $content.Substring(1) }
 $lines = New-Object System.Collections.Generic.List[string]
 foreach ($raw in $content.Split([char]"`n")) {
     if ($raw.EndsWith("`r")) { $raw = $raw.Substring(0, $raw.Length - 1) }
@@ -128,6 +178,16 @@ foreach ($raw in $content.Split([char]"`n")) {
 if ($content.EndsWith("`n")) { $lines.RemoveAt($lines.Count - 1) }
 
 $n = $lines.Count
+
+# Parser directives are the leading `# name=value` lines.
+for ($i = 0; $i -lt $n; $i++) {
+    $m = $directive.Match($lines[$i])
+    if (-not $m.Success) { break }
+    if ((ConvertTo-AsciiLower $m.Groups[1].Value) -ceq 'escape' -and $m.Groups[2].Value -cne '\') {
+        Write-DigestError "${SetDir}/Dockerfile:$($i + 1): only the default \ escape is supported: $($lines[$i])"
+    }
+}
+
 $i = 0
 while ($i -lt $n) {
     $line = $lines[$i]
@@ -144,13 +204,14 @@ while ($i -lt $n) {
         $next = $lines[$i]
         if (Test-BlankOrComment $next) { continue }
         if ($continuation.IsMatch($next)) {
-            $logical = $logical + ' ' + (Get-StrippedContinuation $next)
+            $logical = $logical + (Get-StrippedContinuation $next)
         } else {
-            $logical = $logical + ' ' + $next
+            $logical = $logical + $next
             $cont = $false
         }
     }
     Test-Instruction $start $logical
+    Skip-Heredoc $start $logical
     $i++
 }
 

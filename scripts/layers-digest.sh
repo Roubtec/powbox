@@ -31,10 +31,15 @@
 # through earlier stages: the bake stamps the base's ID on the layer image as
 # powbox.layers.base.id, which the update check trusts as proof the image sits
 # on that base, so a set built on any other image must not get a digest.
-# The Dockerfile check joins backslash continuations and skips comment and blank
-# lines inside them, as Docker does. It does not parse heredoc bodies or an
-# `# escape=` directive: a heredoc line that itself reads as a COPY, ADD or FROM
-# instruction is checked too, which errs towards rejecting.
+# The Dockerfile check reads the file as Docker's stock syntax does: it drops a
+# UTF-8 BOM, joins backslash continuations without adding anything between the
+# joined lines, skips comment and blank lines inside them, and skips heredoc
+# bodies (<<EOF, <<-EOF, <<'EOF' after RUN, COPY or ADD), so a body line that
+# reads as FROM or COPY is neither taken for a stage nor checked. A heredoc left
+# unterminated is an error, as it is to Docker. Words are split on whitespace, so
+# a quoted heredoc terminator holding a space is not recognised. Only the
+# default backslash escape is supported: an `# escape=` parser directive setting
+# any other character is rejected, since it changes how Docker joins lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
@@ -89,6 +94,9 @@ strip_backslash() {
 	printf '%s' "${s%\\}"
 }
 
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 is_blank_or_comment() {
 	local s="${1#"${1%%[![:space:]]*}"}"
 	case "$s" in "" | "#"*) return 0 ;; esac
@@ -111,8 +119,8 @@ note_from() {
 		case "${words[$i]}" in --*) i=$((i + 1)) ;; *) break ;; esac
 	done
 	image="${words[$i]:-}"
-	if [ $((i + 2)) -lt "${#words[@]}" ] && [ "$(printf '%s' "${words[$((i + 1))]}" | tr '[:upper:]' '[:lower:]')" = as ]; then
-		name="$(printf '%s' "${words[$((i + 2))]}" | tr '[:upper:]' '[:lower:]')"
+	if [ $((i + 2)) -lt "${#words[@]}" ] && [ "$(lower "${words[$((i + 1))]}")" = as ]; then
+		name="$(lower "${words[$((i + 2))]}")"
 	fi
 	from_count=$((from_count + 1))
 	from_line="$1"
@@ -123,7 +131,7 @@ note_from() {
 	'${BASE_IMAGE}' | '$BASE_IMAGE') from_on_base=true ;;
 	*)
 		case "$base_stages" in
-		*" $(printf '%s' "$image" | tr '[:upper:]' '[:lower:]') "*) from_on_base=true ;;
+		*" $(lower "$image") "*) from_on_base=true ;;
 		esac
 		;;
 	esac
@@ -142,13 +150,13 @@ check_instruction() {
 	read -r -a words <<<"$logical" || true
 	[ "${#words[@]}" -gt 0 ] || return 0
 	local i=0 keyword
-	keyword="$(printf '%s' "${words[0]}" | tr '[:lower:]' '[:upper:]')"
+	keyword="$(upper "${words[0]}")"
 	if [ "$keyword" = FROM ]; then
 		note_from "$lineno" "$logical" "${words[@]}"
 		return 0
 	fi
 	if [ "$keyword" = ONBUILD ] && [ "${#words[@]}" -gt 1 ]; then
-		keyword="$(printf '%s' "${words[1]}" | tr '[:lower:]' '[:upper:]')"
+		keyword="$(upper "${words[1]}")"
 		i=1
 	fi
 	case "$keyword" in COPY | ADD) ;; *) return 0 ;; esac
@@ -164,12 +172,61 @@ check_instruction() {
 	report "${SET_DIR}/Dockerfile:${lineno}: ${keyword} without --chmod=<mode>: ${logical}"
 }
 
+# Skip the bodies of the heredocs a RUN, COPY or ADD opens, advancing i past
+# each terminator in turn. A word inside quotes opens no heredoc.
+skip_heredocs() {
+	local lineno="$1" logical="$2"
+	local -a words
+	read -r -a words <<<"$logical" || true
+	[ "${#words[@]}" -gt 1 ] || return 0
+	case "$(upper "${words[0]}")" in RUN | COPY | ADD) ;; *) return 0 ;; esac
+	local w k c quote="" chomp name body found
+	for w in "${words[@]:1}"; do
+		if [ -z "$quote" ] && [[ "$w" =~ ^[0-9]*'<<'(-?)([^<]+)$ ]]; then
+			chomp="${BASH_REMATCH[1]}"
+			name="${BASH_REMATCH[2]//[\"\']/}"
+			if [ -n "$name" ]; then
+				found=false
+				while [ $((i + 1)) -lt "$n" ]; do
+					i=$((i + 1))
+					body="${lines[$i]}"
+					if [ -n "$chomp" ]; then
+						while [ "${body:0:1}" = $'\t' ]; do body="${body:1}"; done
+					fi
+					if [ "$body" = "$name" ]; then
+						found=true
+						break
+					fi
+				done
+				$found || report "${SET_DIR}/Dockerfile:${lineno}: heredoc ${name} is never terminated: ${logical}"
+			fi
+		fi
+		for ((k = 0; k < ${#w}; k++)); do
+			c="${w:k:1}"
+			if [ -z "$quote" ]; then
+				case "$c" in \" | \') quote="$c" ;; esac
+			elif [ "$c" = "$quote" ]; then
+				quote=""
+			fi
+		done
+	done
+}
+
 lines=()
 while IFS= read -r line || [ -n "$line" ]; do
 	lines+=("${line%$'\r'}")
 done <"$SET_DIR/Dockerfile"
-
 n="${#lines[@]}"
+[ "$n" -eq 0 ] || lines[0]="${lines[0]#$'\xef\xbb\xbf'}"
+
+# Parser directives are the leading `# name=value` lines.
+for ((i = 0; i < n; i++)); do
+	[[ "${lines[$i]}" =~ ^#[[:blank:]]*([A-Za-z][A-Za-z0-9]*)[[:blank:]]*=[[:blank:]]*(.*[^[:blank:]])[[:blank:]]*$ ]] || break
+	if [ "$(lower "${BASH_REMATCH[1]}")" = escape ] && [ "${BASH_REMATCH[2]}" != "\\" ]; then
+		report "${SET_DIR}/Dockerfile:$((i + 1)): only the default \\ escape is supported: ${lines[$i]}"
+	fi
+done
+
 i=0
 while [ "$i" -lt "$n" ]; do
 	line="${lines[$i]}"
@@ -189,13 +246,14 @@ while [ "$i" -lt "$n" ]; do
 		next="${lines[$i]}"
 		is_blank_or_comment "$next" && continue
 		if ends_with_backslash "$next"; then
-			logical="${logical} $(strip_backslash "$next")"
+			logical="${logical}$(strip_backslash "$next")"
 		else
-			logical="${logical} ${next}"
+			logical="${logical}${next}"
 			cont=false
 		fi
 	done
 	check_instruction "$start" "$logical"
+	skip_heredocs "$start" "$logical"
 	i=$((i + 1))
 done
 

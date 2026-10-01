@@ -17,7 +17,8 @@
 #     file contents, not modes, so a mode must come from this file;
 #   - keep only regular files in the directory (a symlink is rejected; create
 #     links in a RUN);
-#   - set no powbox.* labels: the bake target stamps them.
+#   - set no powbox.* labels: the bake target stamps them;
+#   - keep the default backslash escape (no `# escape=` naming another).
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
 

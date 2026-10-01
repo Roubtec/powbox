@@ -349,6 +349,15 @@ bake_layers() {
 	# step, for the next run's currency test.
 	POWBOX_LAYERS_BASE_ID="$(image_id "$POWBOX_BASE_TAG")"
 	run_bake false "$1" layers
+	# The bake labels the image with that base whatever the set built on, so
+	# check its layers before anything is built on it.
+	local mismatch
+	mismatch="$(layers_base_mismatch)"
+	if [ -n "$mismatch" ]; then
+		echo "error: ${mismatch}." >&2
+		echo "The final stage of ${LAYERS_DIR}/Dockerfile must be built FROM \${BASE_IMAGE}." >&2
+		exit 1
+	fi
 }
 
 # Bake the layer-set image only when it is not current for the selected set

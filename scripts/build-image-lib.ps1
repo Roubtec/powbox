@@ -54,6 +54,31 @@ function Get-ParentSignature {
     return 'sha256:' + (-join ($hash | ForEach-Object { $_.ToString('x2') }))
 }
 
+function Get-ImageRootFs {
+    param([string]$Image)
+    $v = docker image inspect $Image --format '{{json .RootFS.Layers}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $v) { return "" }
+    return ([string]$v).Trim()
+}
+
+# See layers_base_mismatch in build-image-lib.sh. Returns "" when the layer-set
+# image is built on the base that exists now.
+function Get-LayersBaseMismatch {
+    $base = $script:PowboxBaseTag
+    $tag = $script:PowboxLayersTag
+    $baseLayers = Get-ImageRootFs $base
+    $layers = Get-ImageRootFs $tag
+    if (-not $baseLayers -or -not $layers) {
+        return "the filesystem layers of $tag and $base could not be read"
+    }
+    $open = $baseLayers
+    if ($open.EndsWith(']', [System.StringComparison]::Ordinal)) { $open = $open.Substring(0, $open.Length - 1) }
+    if ($layers -cne $baseLayers -and -not $layers.StartsWith($open + ',', [System.StringComparison]::Ordinal)) {
+        return "$tag is not built on ${base}: its filesystem layers do not start with the base's"
+    }
+    return ""
+}
+
 # See layers_stale_reason in build-image-lib.sh. Returns "" when the layer-set
 # image is current.
 function Get-LayersStaleReason {
@@ -71,7 +96,7 @@ function Get-LayersStaleReason {
     $baseId = Get-ImageId $script:PowboxBaseTag
     $baked = Get-ImageLabel $tag 'powbox.layers.base.id'
     if (-not $baseId -or $baked -cne $baseId) { return "$tag was built on a different $($script:PowboxBaseTag)" }
-    return ""
+    return (Get-LayersBaseMismatch)
 }
 
 # See resolve_codex_commit in build-image-lib.sh.

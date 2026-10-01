@@ -51,14 +51,41 @@ parent_signature() {
 	return 0
 }
 
+# The JSON list of an image's filesystem layer digests, or empty when absent.
+image_rootfs() {
+	docker image inspect "$1" --format '{{json .RootFS.Layers}}' 2>/dev/null || true
+}
+
+# Print why powbox-agent-layers:latest is not built on the
+# powbox-agent-base:latest that exists now, or nothing when it is: the base's
+# filesystem layers must open the layer-set image's. The bake stamps
+# powbox.layers.base.id with the base it passes in, whatever image the set's
+# final stage actually starts from, so this is what proves the chain; the
+# Dockerfile scan in scripts/layers-digest.sh only catches the plain mistake
+# early.
+layers_base_mismatch() {
+	local base_layers layers
+	base_layers="$(image_rootfs "$POWBOX_BASE_TAG")"
+	layers="$(image_rootfs "$POWBOX_LAYERS_TAG")"
+	if [ -z "$base_layers" ] || [ -z "$layers" ]; then
+		echo "the filesystem layers of $POWBOX_LAYERS_TAG and $POWBOX_BASE_TAG could not be read"
+		return 0
+	fi
+	case "$layers" in
+	"$base_layers" | "${base_layers%]},"*) ;;
+	*) echo "$POWBOX_LAYERS_TAG is not built on $POWBOX_BASE_TAG: its filesystem layers do not start with the base's" ;;
+	esac
+}
+
 # Usage: layers_stale_reason <set> <digest>
 # Print why powbox-agent-layers:latest must be baked for the selected set, or
 # nothing when it is current: present, labelled with this set and this digest,
 # and built FROM the powbox-agent-base:latest that exists now. Call it after the
 # run's base step, so a base rebuilt earlier in the same run is the one compared.
 # The base is compared by image ID, not by layer chain, so a base change that
-# alters only its config (an ENV line, a label) still reaches the agent. An empty
-# digest (undeterminable) never counts as current.
+# alters only its config (an ENV line, a label) still reaches the agent; the
+# layer chain is checked as well, by layers_base_mismatch. An empty digest
+# (undeterminable) never counts as current.
 layers_stale_reason() {
 	local set="$1" digest="$2" baked base_id
 	if ! docker image inspect "$POWBOX_LAYERS_TAG" >/dev/null 2>&1; then
@@ -85,6 +112,7 @@ layers_stale_reason() {
 		echo "$POWBOX_LAYERS_TAG was built on a different $POWBOX_BASE_TAG"
 		return 0
 	fi
+	layers_base_mismatch
 }
 
 # Usage: resolve_codex_commit <head-commit> <codex-version> <parent-signature> <no-cache:true|false>

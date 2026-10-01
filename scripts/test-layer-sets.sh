@@ -83,7 +83,8 @@ img_dir() { printf '%s/images/%s' "$state" "$(printf '%s' "$1" | tr ':/' '__')";
 # exported, then write the images a real bake would leave, with labels set and
 # inherited the way the bake file and Dockerfiles set them. A base bake writes a
 # new ID over an unchanged layer chain unless the test staged a different one
-# in base-signature-source; the skeleton layer set adds no layer either.
+# in base-signature-source; the skeleton layer set adds no layer either, unless
+# the test staged layers-signature-source (a set built on some other image).
 fake_bake() {
 	local no_cache=false t n parent dir pdir
 	shift 2 # --file <bake file>
@@ -126,6 +127,9 @@ fake_bake() {
 			mkdir -p "$dir"
 			cp -r "$pdir/labels" "$dir/labels"
 			cp "$pdir/signature-source" "$dir/signature-source"
+			if [ "$t" = layers ] && [ -f "$state/layers-signature-source" ]; then
+				cp "$state/layers-signature-source" "$dir/signature-source"
+			fi
 			echo "sha256:$t-$n" >"$dir/id"
 			if [ "$t" = layers ]; then
 				echo "$POWBOX_LAYERS_SET" >"$dir/labels/powbox.layers.set"
@@ -165,6 +169,7 @@ case "$1 $2" in
 	fmt="$2"
 	case "$fmt" in
 	'{{.Id}}') cat "$dir/id"; exit 0 ;;
+	'{{json .RootFS.Layers}}') cut -d' ' -f1 "$dir/signature-source"; exit 0 ;;
 	'{{json .RootFS.Layers}}'*) cat "$dir/signature-source"; exit 0 ;;
 	esac
 	out="$fmt"
@@ -480,6 +485,15 @@ dockerfile_case "backtick escape directive" $'# escape=`\nARG BASE_IMAGE=b\nFROM
 dockerfile_case "backslash escape directive" $'# Escape = \\ \nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' ok
 dockerfile_case "escape after an instruction is a comment" $'ARG BASE_IMAGE=b\n# escape=`\nFROM ${BASE_IMAGE}\n' ok
 dockerfile_case "UTF-8 BOM before a directive" $'\xef\xbb\xbf# escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
+dockerfile_case "escaped trailing backslash does not continue" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo C:\\\\\nFROM busybox\n' reject "Dockerfile:4: the final stage"
+dockerfile_case "indented escape directive" $'  # escape=`\nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
+dockerfile_case "an unknown directive ends the directives" $'# custom=value\n# escape=`\nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' ok
+dockerfile_case "ONBUILD heredoc body is not an instruction" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nONBUILD RUN cat <<EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "escaped quote opens no quote" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN echo \\" <<EOF\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "backslash-quoted heredoc name" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<\\EOF\nfrom x\nEOF\n' ok
+dockerfile_case "<< EOF with a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN python3 - << EOF\nfrom os import path\nEOF\n' ok
+dockerfile_case "<<- EOF with a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<- EOF >/x\n\thello\n\tEOF\nUSER node\n' ok
+dockerfile_case "<< EOF body cannot stand in for the final FROM" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -585,7 +599,15 @@ if $HAVE_PWSH; then
 		$'# escape=`\nFROM ${BASE_IMAGE}\n' \
 		$'\xef\xbb\xbf# escape=`\nFROM ${BASE_IMAGE}\n' \
 		$'FROM ${BASE_IMAGE} AS \xc3\x89\nFROM \xc3\xa9\n' \
-		$'FROM ${BASE_IMAGE}\nonbu\xc4\xb1ld COPY a b\n'; do
+		$'FROM ${BASE_IMAGE}\nonbu\xc4\xb1ld COPY a b\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo C:\\\\\nFROM busybox\n' \
+		$'  # escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'# custom=value\n# escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'FROM busybox\nONBUILD RUN cat <<EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' \
+		$'FROM busybox\nRUN echo \\" <<EOF\nFROM ${BASE_IMAGE}\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<\\EOF\nfrom x\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<- EOF >/x\n\thello\n\tEOF\n' \
+		$'FROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n'; do
 		d="$(mktemp -d "$WORK_ROOT/dfp.XXXXXX")"
 		make_set "$d"
 		printf '%s' "$body" >"$d/Dockerfile"
@@ -662,6 +684,13 @@ currency_case "base absent" full "$DIGEST" "built on a different"
 current_layers
 rm -r "$CUR_STATE/images/powbox-agent-layers_latest"
 currency_case "layers image absent" full "$DIGEST" "does not exist"
+current_layers
+set_image_field "$CUR_STATE" "$LAYERS" signature-source '["sha256:l1","sha256:l2","sha256:l3"] ["PATH=/usr/bin"] null "/home/node" "node"'
+currency_case "layers adds a layer on the base" full "$DIGEST" ""
+set_image_field "$CUR_STATE" "$LAYERS" signature-source '["sha256:l1","sha256:l20"] ["PATH=/usr/bin"] null "/home/node" "node"'
+currency_case "layer digest sharing a prefix with the base's" full "$DIGEST" "is not built on powbox-agent-base:latest"
+set_image_field "$CUR_STATE" "$LAYERS" signature-source '["sha256:busybox"] ["PATH=/usr/bin"] null "/home/node" "node"'
+currency_case "labelled with the base but built on another image" full "$DIGEST" "is not built on powbox-agent-base:latest"
 if ! $HAVE_PWSH; then
 	skipped "currency PowerShell parity (pwsh not installed)"
 fi
@@ -1124,6 +1153,21 @@ run_sequence() {
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] custom set: layers and agent baked" "$(bakes "$st")" "layers,agent"
 	assert_eq "[$lang] custom set: agent carries it" "$(label "$st" "$AGENT" powbox.layers.set)" "custom"
+
+	# A set whose final stage escapes the Dockerfile scan but starts from another
+	# image: the bake still labels it with the base, so its layers decide.
+	printf '%s\n' '["sha256:busybox"] ["PATH=/usr/bin"] null "/" "root"' >"$st/layers-signature-source"
+	rc=0
+	out="$(build "$lang" "$st" layers 2>&1)" || rc=$?
+	assert_eq "[$lang] set not built on the base: build fails" "$([ "$rc" -ne 0 ] && echo failed)" failed
+	assert_contains "[$lang] set not built on the base: says why" "$out" "is not built on powbox-agent-base:latest"
+	assert_eq "[$lang] set not built on the base: only the layer-set bake ran" "$(bakes "$st")" "layers"
+	rc=0
+	out="$(build "$lang" "$st" agent "${PIN[@]}" 2>&1)" || rc=$?
+	assert_eq "[$lang] set not built on the base: not current next time, no agent on it" "$(bakes "$st")" "layers"
+	rm "$st/layers-signature-source"
+	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
+	assert_eq "[$lang] set fixed: layers and agent baked" "$(bakes "$st")" "layers,agent"
 
 	rm "$br/.powbox-layers"
 	rc=0

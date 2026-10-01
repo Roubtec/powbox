@@ -58,7 +58,9 @@ if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf) -or (Test-SymbolicL
 # narrower one its `read -a` splits words on.
 $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $wordSeparators = [char[]]@(' ', "`t", "`n")
-$continuation = [regex]'\\[ \t\n\r\v\f]*\z'
+# As Docker's continuation rule: a backslash ending the line continues it, unless
+# another backslash precedes it.
+$continuation = [regex]'(^|[^\\])\\[ \t\n\r\v\f]*\z'
 
 # Case folding of ASCII letters only, as the .sh's tr under LC_ALL=C does;
 # ToUpperInvariant would also fold, say, a dotless i into I.
@@ -127,11 +129,17 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
     Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ${keyword} without --chmod=<mode>: $Logical"
 }
 
-# Skip the bodies of the heredocs a RUN, COPY or ADD opens, advancing $script:i
-# past each terminator in turn. A word inside quotes opens no heredoc.
+# Skip the bodies of the heredocs a RUN, COPY or ADD (also behind ONBUILD)
+# opens, advancing $script:i past each terminator in turn. A word inside quotes
+# opens no heredoc; a backslash escapes the next character except inside single
+# quotes.
 function Skip-Heredoc([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -lt 2) { return }
+    if ((ConvertTo-AsciiUpper $words[0]) -ceq 'ONBUILD') {
+        $words = @($words | Select-Object -Skip 1)
+        if ($words.Count -lt 2) { return }
+    }
     $keyword = ConvertTo-AsciiUpper $words[0]
     if ($keyword -cne 'RUN' -and $keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
     $quote = ''
@@ -140,7 +148,15 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
         $m = $heredocOpener.Match($word)
         if (-not $quote -and $m.Success) {
             $chomp = $m.Groups[1].Value
-            $name = $m.Groups[2].Value.Replace('"', '').Replace("'", '')
+            $rest = $m.Groups[2].Value
+            # Docker also takes whitespace between << (or <<-) and the name.
+            if (-not $rest -and ($w + 1) -lt $words.Count) {
+                $w++
+                $word = $words[$w]
+                $rest = $word
+            }
+            $name = ''
+            if (-not $rest.Contains('<')) { $name = $rest.Replace('"', '').Replace("'", '').Replace('\', '') }
             if ($name) {
                 $found = $false
                 while (($script:i + 1) -lt $n) {
@@ -154,18 +170,22 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
                 }
             }
         }
-        foreach ($c in $word.ToCharArray()) {
-            if (-not $quote) {
-                if ($c -eq [char]'"' -or $c -eq [char]"'") { $quote = [string]$c }
-            } elseif ([string]$c -ceq $quote) {
+        $chars = $word.ToCharArray()
+        for ($k = 0; $k -lt $chars.Count; $k++) {
+            $c = [string]$chars[$k]
+            if ($c -ceq '\' -and $quote -cne "'") {
+                $k++
+            } elseif (-not $quote) {
+                if ($c -ceq '"' -or $c -ceq "'") { $quote = $c }
+            } elseif ($c -ceq $quote) {
                 $quote = ''
             }
         }
     }
 }
 
-$heredocOpener = [regex]'^[0-9]*<<(-?)([^<]+)\z'
-$directive = [regex]'^#[ \t]*([A-Za-z][A-Za-z0-9]*)[ \t]*=[ \t]*(.*[^ \t])[ \t]*\z'
+$heredocOpener = [regex]'^[0-9]*<<(-?)([^<]*)\z'
+$directive = [regex]'^[ \t\n\r\v\f]*#[ \t\n\r\v\f]*([A-Za-z][A-Za-z0-9]*)[ \t\n\r\v\f]*=[ \t\n\r\v\f]*(.*[^ \t\n\r\v\f])[ \t\n\r\v\f]*\z'
 
 $content = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($dockerfile))
 if ($content.StartsWith([string][char]0xFEFF, [System.StringComparison]::Ordinal)) { $content = $content.Substring(1) }
@@ -179,10 +199,12 @@ if ($content.EndsWith("`n")) { $lines.RemoveAt($lines.Count - 1) }
 
 $n = $lines.Count
 
-# Parser directives are the leading `# name=value` lines.
+# Parser directives are the leading `# name=value` lines naming a directive
+# Docker knows; any other line ends them.
 for ($i = 0; $i -lt $n; $i++) {
     $m = $directive.Match($lines[$i])
     if (-not $m.Success) { break }
+    if (@('syntax', 'escape', 'check') -cnotcontains (ConvertTo-AsciiLower $m.Groups[1].Value)) { break }
     if ((ConvertTo-AsciiLower $m.Groups[1].Value) -ceq 'escape' -and $m.Groups[2].Value -cne '\') {
         Write-DigestError "${SetDir}/Dockerfile:$($i + 1): only the default \ escape is supported: $($lines[$i])"
     }

@@ -28,18 +28,21 @@
 #     from the checkout (a Windows checkout has no Unix modes, and Git tracks
 #     only the executable bit).
 # The Dockerfile's final stage must also build FROM ${BASE_IMAGE}, directly or
-# through earlier stages: the bake stamps the base's ID on the layer image as
-# powbox.layers.base.id, which the update check trusts as proof the image sits
-# on that base, so a set built on any other image must not get a digest.
-# The Dockerfile check reads the file as Docker's stock syntax does: it drops a
-# UTF-8 BOM, joins backslash continuations without adding anything between the
-# joined lines, skips comment and blank lines inside them, and skips heredoc
-# bodies (<<EOF, <<-EOF, <<'EOF' after RUN, COPY or ADD), so a body line that
-# reads as FROM or COPY is neither taken for a stage nor checked. A heredoc left
-# unterminated is an error, as it is to Docker. Words are split on whitespace, so
-# a quoted heredoc terminator holding a space is not recognised. Only the
-# default backslash escape is supported: an `# escape=` parser directive setting
-# any other character is rejected, since it changes how Docker joins lines.
+# through earlier stages. This only catches the plain mistake before anything
+# is built: the bake labels the layer image with the base it passes in whatever
+# the set built on, so the build drivers prove the chain from the built image's
+# filesystem layers (layers_base_mismatch in build-image-lib.sh).
+# The Dockerfile check follows the rules of BuildKit's Dockerfile parser where
+# they decide what is an instruction: it drops a UTF-8 BOM, joins a line ending
+# in an unescaped backslash to the next without adding anything, skips comment
+# and blank lines inside continuations, and skips heredoc bodies (<<EOF, <<-EOF,
+# << 'EOF' after RUN, COPY or ADD, also behind ONBUILD), so a body line that
+# reads as FROM or COPY is neither taken for a stage nor checked; an
+# unterminated heredoc is an error, as it is to Docker. It is a scan, not a
+# parser: words are split on whitespace, so a quoted heredoc name holding a
+# space is not recognised. Only the default backslash escape is supported: an
+# `# escape=` parser directive setting any other character is rejected, since
+# it changes how Docker joins lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
@@ -84,8 +87,10 @@ report() {
 	errors=$((errors + 1))
 }
 
+# As Docker's continuation rule: a backslash ending the line continues it, unless
+# another backslash precedes it.
 ends_with_backslash() {
-	[[ "$1" =~ \\[[:space:]]*$ ]]
+	[[ "$1" =~ (^|[^\\])\\[[:space:]]*$ ]]
 }
 
 strip_backslash() {
@@ -172,19 +177,33 @@ check_instruction() {
 	report "${SET_DIR}/Dockerfile:${lineno}: ${keyword} without --chmod=<mode>: ${logical}"
 }
 
-# Skip the bodies of the heredocs a RUN, COPY or ADD opens, advancing i past
-# each terminator in turn. A word inside quotes opens no heredoc.
+# Skip the bodies of the heredocs a RUN, COPY or ADD (also behind ONBUILD)
+# opens, advancing i past each terminator in turn. A word inside quotes opens no
+# heredoc; a backslash escapes the next character except inside single quotes.
 skip_heredocs() {
 	local lineno="$1" logical="$2"
 	local -a words
 	read -r -a words <<<"$logical" || true
 	[ "${#words[@]}" -gt 1 ] || return 0
+	if [ "$(upper "${words[0]}")" = ONBUILD ]; then
+		words=("${words[@]:1}")
+		[ "${#words[@]}" -gt 1 ] || return 0
+	fi
 	case "$(upper "${words[0]}")" in RUN | COPY | ADD) ;; *) return 0 ;; esac
-	local w k c quote="" chomp name body found
-	for w in "${words[@]:1}"; do
-		if [ -z "$quote" ] && [[ "$w" =~ ^[0-9]*'<<'(-?)([^<]+)$ ]]; then
+	local idx=1 w k c quote="" chomp rest name body found
+	while [ "$idx" -lt "${#words[@]}" ]; do
+		w="${words[$idx]}"
+		if [ -z "$quote" ] && [[ "$w" =~ ^[0-9]*'<<'(-?)([^<]*)$ ]]; then
 			chomp="${BASH_REMATCH[1]}"
-			name="${BASH_REMATCH[2]//[\"\']/}"
+			rest="${BASH_REMATCH[2]}"
+			# Docker also takes whitespace between << (or <<-) and the name.
+			if [ -z "$rest" ] && [ $((idx + 1)) -lt "${#words[@]}" ]; then
+				idx=$((idx + 1))
+				w="${words[$idx]}"
+				rest="$w"
+			fi
+			name=""
+			[[ "$rest" == *"<"* ]] || name="${rest//[\"\'\\]/}"
 			if [ -n "$name" ]; then
 				found=false
 				while [ $((i + 1)) -lt "$n" ]; do
@@ -203,12 +222,15 @@ skip_heredocs() {
 		fi
 		for ((k = 0; k < ${#w}; k++)); do
 			c="${w:k:1}"
-			if [ -z "$quote" ]; then
+			if [ "$c" = "\\" ] && [ "$quote" != "'" ]; then
+				k=$((k + 1))
+			elif [ -z "$quote" ]; then
 				case "$c" in \" | \') quote="$c" ;; esac
 			elif [ "$c" = "$quote" ]; then
 				quote=""
 			fi
 		done
+		idx=$((idx + 1))
 	done
 }
 
@@ -219,9 +241,11 @@ done <"$SET_DIR/Dockerfile"
 n="${#lines[@]}"
 [ "$n" -eq 0 ] || lines[0]="${lines[0]#$'\xef\xbb\xbf'}"
 
-# Parser directives are the leading `# name=value` lines.
+# Parser directives are the leading `# name=value` lines naming a directive
+# Docker knows; any other line ends them.
 for ((i = 0; i < n; i++)); do
-	[[ "${lines[$i]}" =~ ^#[[:blank:]]*([A-Za-z][A-Za-z0-9]*)[[:blank:]]*=[[:blank:]]*(.*[^[:blank:]])[[:blank:]]*$ ]] || break
+	[[ "${lines[$i]}" =~ ^[[:space:]]*#[[:space:]]*([A-Za-z][A-Za-z0-9]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || break
+	case "$(lower "${BASH_REMATCH[1]}")" in syntax | escape | check) ;; *) break ;; esac
 	if [ "$(lower "${BASH_REMATCH[1]}")" = escape ] && [ "${BASH_REMATCH[2]}" != "\\" ]; then
 		report "${SET_DIR}/Dockerfile:$((i + 1)): only the default \\ escape is supported: ${lines[$i]}"
 	fi

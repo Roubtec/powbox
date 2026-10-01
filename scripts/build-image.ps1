@@ -284,6 +284,14 @@ No image was built.
     param([switch]$WithNoCache)
     $script:PowboxLayersBaseId = Get-ImageId $script:PowboxBaseTag
     Invoke-Bake -Targets @("layers") -WithNoCache:$WithNoCache
+    # The bake labels the image with that base whatever the set built on, so
+    # check its layers before anything is built on it.
+    $mismatch = Get-LayersBaseMismatch
+    if ($mismatch) {
+      [Console]::Error.WriteLine("error: $mismatch.")
+      [Console]::Error.WriteLine("The final stage of $($script:LayersDir)/Dockerfile must be built FROM `${BASE_IMAGE}.")
+      exit 1
+    }
   }
 
   # Bake the layer-set image only when it is not current for the selected set

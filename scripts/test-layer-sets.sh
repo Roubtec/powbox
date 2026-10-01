@@ -526,6 +526,13 @@ if $HAVE_PWSH; then
 	printf 'x\n' >"$set_names/sub-dir/f"
 	printf 'x\n' >"$set_names/sub.dir/f"
 	dig_parity "names that sort differently by locale" "$set_names"
+	# U+FF21 (EF BC A1) sorts before U+1F600 (F0 9F 98 80) by UTF-8 bytes, but
+	# after it by UTF-16 code units (FF21 vs the D83D surrogate).
+	set_utf8="$WORK_ROOT/set-utf8"
+	make_set "$set_utf8"
+	printf 'x\n' >"$set_utf8/"$'\xef\xbc\xa1'".txt"
+	printf 'y\n' >"$set_utf8/"$'\xf0\x9f\x98\x80'".txt"
+	dig_parity "names whose UTF-8 and UTF-16 orders differ" "$set_utf8"
 	dig_parity "a file symlink" "$set_link"
 	dig_parity "a directory symlink" "$set_dirlink"
 	dig_parity "a FIFO" "$set_fifo"
@@ -631,6 +638,14 @@ assert_eq "parent signature of an absent image is empty" "$(lib_sh "$SIG_STATE" 
 if $HAVE_PWSH; then
 	assert_eq "parent signature: PowerShell computes the same bytes" "$(lib_ps "$SIG_STATE" "Get-ParentSignature '$LAYERS'")" "$sig"
 	assert_eq "parent signature: PowerShell, absent image" "$(lib_ps "$SIG_STATE" "Get-ParentSignature 'nope:latest'")" ""
+	# A non-ASCII Env value under a non-UTF-8 console encoding, as Windows has by
+	# default: PowerShell must still hash the bytes docker printed.
+	sig_src=$'["sha256:aaa"] ["GREETING=caf\xc3\xa9 \xf0\x9f\x98\x80"] null "/home/node" "node"'
+	set_image_field "$SIG_STATE" "$LAYERS" signature-source "$sig_src"
+	sig="$(lib_sh "$SIG_STATE" parent_signature "$LAYERS")"
+	assert_eq "parent signature: non-ASCII Env, bash" "$sig" "sha256:$(printf '%s\n' "$sig_src" | sha256_of_stdin)"
+	assert_eq "parent signature: non-ASCII Env, PowerShell under a Latin-1 console" \
+		"$(lib_ps "$SIG_STATE" "[Console]::OutputEncoding = [System.Text.Encoding]::Latin1; Get-ParentSignature '$LAYERS'")" "$sig"
 else
 	skipped "parent signature PowerShell parity (pwsh not installed)"
 fi

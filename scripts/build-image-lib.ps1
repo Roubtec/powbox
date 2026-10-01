@@ -29,11 +29,21 @@ function Test-ImagePresent {
 }
 
 # See parent_signature in build-image-lib.sh: the same inspect line, plus LF,
-# hashed to the same bytes.
+# hashed to the same bytes. docker prints UTF-8 (an Env value may hold any
+# text), and PowerShell decodes a native command's output with the console
+# encoding, a legacy code page by default on Windows; decode it as UTF-8 so the
+# bytes hashed are the ones docker printed.
 function Get-ParentSignature {
     param([string]$Image)
-    $raw = docker image inspect $Image --format '{{json .RootFS.Layers}} {{json .Config.Env}} {{json .Config.Shell}} {{json .Config.WorkingDir}} {{json .Config.User}}' 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return "" }
+    $consoleEncoding = [Console]::OutputEncoding
+    try {
+        try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { $null = $_ }
+        $raw = docker image inspect $Image --format '{{json .RootFS.Layers}} {{json .Config.Env}} {{json .Config.Shell}} {{json .Config.WorkingDir}} {{json .Config.User}}' 2>$null
+        $rc = $LASTEXITCODE
+    } finally {
+        try { [Console]::OutputEncoding = $consoleEncoding } catch { $null = $_ }
+    }
+    if ($rc -ne 0 -or -not $raw) { return "" }
     $line = (@($raw) -join "`n") + "`n"
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {

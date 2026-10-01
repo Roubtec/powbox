@@ -324,15 +324,16 @@ previous `powbox-agent:latest` recorded; otherwise the layer rebuilds at HEAD.
 Why a signature and not the parent's image ID: the base no longer carries a commit-stamped file layer, so a base baked at a new commit (`base`, `all`, `--pull` with an unchanged upstream) changes only its labels, and therefore its ID, while its layers and environment stay put and the codex layer is reused. Comparing the ID would stamp HEAD on a reused layer; that is also why `all` and `--pull` no longer short-circuit to HEAD and go through the comparison like any other run. The layer chain alone would err the other way for a parent that changes only an `ENV`, `SHELL`, `WORKDIR` or `USER` line, which BuildKit is understood to key the `RUN` on; that was not measured on a build, and if it is wrong the cost is HEAD stamped on a reused layer, the resolver's existing fallback. This is a different question from the layer-set currency test, which compares the base's ID on purpose: that one asks "must the layer-set image be rebuilt", this one asks "will Docker reuse the codex layer". The version half aligns with the `agent-update` orchestration (claude-only update passes the same baked codex version → carry forward; codex update passes a new one → HEAD); the parent half catches a base or layer set that gained a layer (`build.sh base` then `build.sh agent` after a recipe edit) and thus rebuilds the codex layer. Degrades gracefully to HEAD for ad-hoc builds; acceptable because the label is informational and **no logic flows off these hashes** (introspection only).
 
 **Known limitation (accepted):** the codex commit is resolved *before* the build, so it
-predicts Docker's cache decision rather than observing it. Two residual cases can still
+predicts Docker's cache decision rather than observing it. Three residual cases can still
 attribute the codex layer to a carried-forward commit when it was actually rebuilt:
 (a) the BuildKit build cache is evicted between runs (e.g. `docker builder prune`), which
 the host cannot detect without running the build; (b) a Dockerfile instruction *at or
 above* the codex layer is edited without bumping `CODEX_VERSION`; and (c) the parent
 signature approximates the cache key rather than reproducing it, so a parent change it
 does not cover (any inherited setting outside the four config fields above) goes
-unseen. Both require either
-external cache surgery or a source edit (which carries its own commit), and in the worst
+unseen. The first two require either
+external cache surgery or a source edit (which carries its own commit), the third a parent
+change of a kind the signature leaves out, and in the worst
 case `powbox-provenance` shows a codex commit slightly behind HEAD — never wrong in a way
 any runtime logic depends on. Fully closing them would require observing per-layer cache
 hits from the build output (or relabelling after the build), which is disproportionate for

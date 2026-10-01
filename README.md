@@ -60,7 +60,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
 - `compose.selfhosted.yml`: [self-hosted mode](#self-hosted-mode---isolated) overlay — replaces the host workspace bind mount with a per-instance named volume the container clones into itself (added to the `-f` chain only with `--isolated`)
-- `docker-bake.hcl`: named Bake targets for `base`, `layers`, and `agent`, plus the `all` group (base and agent; the build scripts add `layers` when a set is selected)
+- `docker-bake.hcl`: named Bake targets for `base`, `layers`, and `agent`, plus the `all` and `default` groups (base and agent only; the build scripts bake each target on its own and bake `layers` only when a set is selected)
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers

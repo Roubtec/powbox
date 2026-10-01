@@ -467,9 +467,10 @@ function _Powbox-BuildFromTable {
 # Nuclear option: rebuild the entire stack - base, the layer-set image when a
 # set is selected, and the agent image - from the current repo commit,
 # re-pulling the upstream base and ignoring the layer cache, with both agents at
-# their latest release (build.ps1 all -Pull -NoCache). For when the images are in an unknown state and you want a clean
-# slate. To pick up powbox recipe changes without discarding cache, use the
-# much faster `agent-update -Refresh` instead.
+# their latest release (build.ps1 all -Pull -NoCache). For when the images are
+# in an unknown state and you want a clean slate. To pick up powbox recipe
+# changes without discarding cache, use the much faster `agent-update -Refresh`
+# instead.
 function agent-full-rebuild {
     $table = _Powbox-AgentPorcelain
     if ($LASTEXITCODE -eq 0) {

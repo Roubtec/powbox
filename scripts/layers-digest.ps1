@@ -129,15 +129,27 @@ $files = New-Object System.Collections.Generic.List[string]
 $entries = New-Object System.Collections.Generic.List[object]
 foreach ($item in @(Get-ChildItem -LiteralPath $setFull -Recurse -Force)) {
     $rel = $item.FullName.Substring($setFull.Length).TrimStart('/', '\').Replace('\', '/')
-    $entries.Add([PSCustomObject]@{ Rel = $rel; Item = $item })
+    $entries.Add([PSCustomObject]@{ Rel = $rel; Key = [System.Text.Encoding]::UTF8.GetBytes($rel); Item = $item })
 }
-$sortedRel = [string[]]@($entries | ForEach-Object { $_.Rel })
-$sortedItems = [object[]]@($entries | ForEach-Object { $_.Item })
-[System.Array]::Sort($sortedRel, $sortedItems, [System.StringComparer]::Ordinal)
+# Sort by the UTF-8 bytes of the path, as the .sh's `sort -z` under LC_ALL=C
+# does. StringComparer.Ordinal compares UTF-16 code units instead, which puts a
+# surrogate pair (U+1F600) before U+E000..U+FFFF (U+FF21) where the bytes put it
+# after, and would hash those sets differently from the .sh.
+$sorted = $entries.ToArray()
+[System.Array]::Sort($sorted, [System.Comparison[object]] {
+        param($a, $b)
+        $x = $a.Key
+        $y = $b.Key
+        $len = [System.Math]::Min($x.Length, $y.Length)
+        for ($j = 0; $j -lt $len; $j++) {
+            if ($x[$j] -ne $y[$j]) { return ([int]$x[$j] - [int]$y[$j]) }
+        }
+        return ($x.Length - $y.Length)
+    })
 
-for ($k = 0; $k -lt $sortedRel.Length; $k++) {
-    $rel = $sortedRel[$k]
-    $item = $sortedItems[$k]
+foreach ($entry in $sorted) {
+    $rel = $entry.Rel
+    $item = $entry.Item
     $path = "$SetDir/$rel"
     if (Test-SymbolicLink $item) {
         Write-DigestError "${path}: symlinks are not allowed in a layer set (create the link in a RUN instead)"

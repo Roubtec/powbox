@@ -106,23 +106,22 @@ function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
     if ($script:fromOnBase -and $name) { [void]$script:baseStages.Add($name) }
 }
 
-# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>,
-# and pass a FROM to Register-From.
+# Report an ONBUILD and a COPY or ADD whose flags lack --chmod=<mode>, and
+# pass a FROM to Register-From.
 function Test-Instruction([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -eq 0) { return }
-    $i = 0
     $keyword = ConvertTo-AsciiUpper $words[0]
     if ($keyword -ceq 'FROM') {
         Register-From -LineNo $LineNo -Logical $Logical -Words $words
         return
     }
-    if ($keyword -ceq 'ONBUILD' -and $words.Count -gt 1) {
-        $keyword = ConvertTo-AsciiUpper $words[1]
-        $i = 1
+    if ($keyword -ceq 'ONBUILD') {
+        Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ONBUILD is not allowed (its trigger runs in the agent build, outside the set's digest): $Logical"
+        return
     }
     if ($keyword -cne 'COPY' -and $keyword -cne 'ADD') { return }
-    for ($i++; $i -lt $words.Count; $i++) {
+    for ($i = 1; $i -lt $words.Count; $i++) {
         $w = $words[$i]
         if ($w.StartsWith('--chmod=', [System.StringComparison]::Ordinal) -and $w.Length -gt 8) { return }
         if (-not $w.StartsWith('--', [System.StringComparison]::Ordinal)) { break }

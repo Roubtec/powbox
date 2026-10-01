@@ -27,6 +27,9 @@
 #     mode a copied file gets comes from the Dockerfile, which is hashed, never
 #     from the checkout (a Windows checkout has no Unix modes, and Git tracks
 #     only the executable bit).
+# ONBUILD is rejected outright: its trigger runs while the agent image is built
+# on the layer image, from the agent build's context (the repository root), so
+# an ONBUILD COPY, ADD or RUN --mount could read inputs the digest never sees.
 # The Dockerfile's final stage must also build FROM ${BASE_IMAGE}, directly or
 # through earlier stages. This only catches the plain mistake before anything
 # is built: the bake labels the layer image with the base it passes in whatever
@@ -147,8 +150,8 @@ note_from() {
 	fi
 }
 
-# Report a COPY or ADD (also behind ONBUILD) whose flags lack --chmod=<mode>,
-# and pass a FROM to note_from.
+# Report an ONBUILD and a COPY or ADD whose flags lack --chmod=<mode>, and
+# pass a FROM to note_from.
 # Flags are the leading --name=value words after the keyword; Docker accepts
 # instruction flags only in that position and only in the = form.
 check_instruction() {
@@ -158,18 +161,18 @@ check_instruction() {
 	# only on the first two, so map the others to spaces for it.
 	read -r -a words <<<"${logical//[$DOCKER_EXTRA_SPACE]/ }" || true
 	[ "${#words[@]}" -gt 0 ] || return 0
-	local i=0 keyword
+	local i keyword
 	keyword="$(upper "${words[0]}")"
 	if [ "$keyword" = FROM ]; then
 		note_from "$lineno" "$logical" "${words[@]}"
 		return 0
 	fi
-	if [ "$keyword" = ONBUILD ] && [ "${#words[@]}" -gt 1 ]; then
-		keyword="$(upper "${words[1]}")"
-		i=1
+	if [ "$keyword" = ONBUILD ]; then
+		report "${SET_DIR}/Dockerfile:${lineno}: ONBUILD is not allowed (its trigger runs in the agent build, outside the set's digest): ${logical}"
+		return 0
 	fi
 	case "$keyword" in COPY | ADD) ;; *) return 0 ;; esac
-	i=$((i + 1))
+	i=1
 	while [ "$i" -lt "${#words[@]}" ]; do
 		case "${words[$i]}" in
 		--chmod=?*) return 0 ;;

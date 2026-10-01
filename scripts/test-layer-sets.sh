@@ -449,7 +449,11 @@ dockerfile_case "COPY without --chmod" $'FROM ${BASE_IMAGE}\nUSER root\nCOPY not
 dockerfile_case "ADD without --chmod" $'FROM ${BASE_IMAGE}\nADD notes.md /opt/\n' reject "Dockerfile:2:" "ADD without --chmod="
 dockerfile_case "lowercase copy" $'FROM ${BASE_IMAGE}\ncopy notes.md /opt/\n' reject "Dockerfile:2:"
 dockerfile_case "COPY with --chown only" $'FROM ${BASE_IMAGE}\nCOPY --chown=node:node notes.md /opt/\n' reject "Dockerfile:2:"
-dockerfile_case "ONBUILD COPY without --chmod" $'FROM ${BASE_IMAGE}\nONBUILD COPY notes.md /opt/\n' reject "Dockerfile:2:"
+dockerfile_case "ONBUILD COPY without --chmod" $'FROM ${BASE_IMAGE}\nONBUILD COPY notes.md /opt/\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "ONBUILD COPY with --chmod" $'FROM ${BASE_IMAGE}\nONBUILD COPY --chmod=644 notes.md /opt/\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "ONBUILD RUN with a bind mount" $'FROM ${BASE_IMAGE}\nonbuild RUN --mount=type=bind,target=/ctx cat /ctx/x\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "ONBUILD in a builder stage" $'FROM golang AS build\nONBUILD ADD --chmod=644 a /a\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "continued ONBUILD, named by its first line" $'FROM ${BASE_IMAGE}\nONBUILD \\\n  RUN true\n' reject "Dockerfile:2: ONBUILD is not allowed"
 dockerfile_case "empty --chmod=" $'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' reject "Dockerfile:2:"
 dockerfile_case "--chmod= after the sources does not count" $'FROM ${BASE_IMAGE}\nCOPY notes.md --chmod=644 /opt/\n' reject "Dockerfile:2:"
 dockerfile_case "continued COPY lacking --chmod, named by its first line" $'FROM ${BASE_IMAGE}\nRUN true\nCOPY \\\n    notes.md \\\n    /opt/\n' reject "Dockerfile:3: COPY without --chmod=<mode>"
@@ -488,7 +492,7 @@ dockerfile_case "UTF-8 BOM before a directive" $'\xef\xbb\xbf# escape=`\nFROM ${
 dockerfile_case "escaped trailing backslash does not continue" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo C:\\\\\nFROM busybox\n' reject "Dockerfile:4: the final stage"
 dockerfile_case "indented escape directive" $'  # escape=`\nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
 dockerfile_case "an unknown directive ends the directives" $'# custom=value\n# escape=`\nARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\n' ok
-dockerfile_case "ONBUILD heredoc body is not an instruction" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nONBUILD RUN cat <<EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "ONBUILD heredoc body is not an instruction" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nONBUILD RUN cat <<EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage" "Dockerfile:4: ONBUILD is not allowed"
 dockerfile_case "escaped quote opens no quote" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN echo \\" <<EOF\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
 dockerfile_case "backslash-quoted heredoc name" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<\\EOF\nfrom x\nEOF\n' ok
 dockerfile_case "<< EOF with a space" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN python3 - << EOF\nfrom os import path\nEOF\n' ok
@@ -589,6 +593,9 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nCOPY \\\n  # comment inside the instruction\n\n  --chmod=644 notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' \
 		$'FROM ${BASE_IMAGE}\nONBUILD copy --chown=a notes.md /opt/\n' \
+		$'FROM ${BASE_IMAGE}\nONBUILD COPY --chmod=644 a /a\n' \
+		$'FROM ${BASE_IMAGE}\nOnBuild RUN --mount=type=bind,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nONBUILD\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
 		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \

@@ -31,25 +31,28 @@
 # ONBUILD is rejected outright: its trigger runs while the agent image is built
 # on the layer image, from the agent build's context (the repository root), so
 # an ONBUILD COPY, ADD or RUN --mount could read inputs the digest never sees.
+# This scan rejects it early; the build drivers also refuse a layer image that
+# records any trigger (layers_onbuild_triggers in build-image-lib.sh).
 # The Dockerfile's final stage must also build FROM ${BASE_IMAGE}, directly or
 # through earlier stages. This only catches the plain mistake before anything
 # is built: the bake labels the layer image with the base it passes in whatever
 # the set built on, so the build drivers prove the chain from the built image's
 # filesystem layers (layers_base_mismatch in build-image-lib.sh).
 # The Dockerfile check follows the rules of BuildKit's Dockerfile parser where
-# they decide what is an instruction: it drops a UTF-8 BOM and trailing CRs,
-# trims leading Unicode whitespace (U+00A0 and the like) where BuildKit does,
-# joins a line ending in an unescaped backslash, followed only by spaces or
-# tabs, to the next without adding anything, skips comment and blank lines
-# inside continuations, folds keywords as Go's strings.ToLower does, and skips
-# heredoc bodies (<<EOF, <<-EOF,
-# << 'EOF' after RUN, COPY or ADD, also behind ONBUILD), so a body line that
-# reads as FROM or COPY is neither taken for a stage nor checked; an
-# unterminated heredoc is an error, as it is to Docker. It is a scan, not a
-# parser: it reads no variables and no JSON-form arguments, though it compares
-# FROM's image by its unquoted value, as Docker does. Only the default backslash
-# escape is supported: an `# escape=` parser directive setting any other
-# character is rejected, since it changes how Docker joins lines.
+# they decide what is an instruction: it refuses a NUL byte, drops a UTF-8 BOM
+# and trailing CRs, trims leading Unicode whitespace (U+00A0 and the like)
+# where BuildKit does, joins a line ending in an unescaped backslash, followed
+# only by spaces or tabs, to the next without adding anything, skips comment
+# and blank lines inside continuations, folds keywords as Go's strings.ToLower
+# does, and skips heredoc bodies (<<EOF, <<-EOF, << 'EOF' after RUN, COPY or
+# ADD, also behind ONBUILD, its words split as BuildKit's shell lexer splits
+# them), so a body line that reads as FROM or COPY is neither taken for a stage
+# nor checked; an unterminated heredoc is an error, as it is to Docker. It is a
+# scan, not a parser: it reads no variables and no JSON-form arguments, though
+# it compares FROM's image by its unquoted value, as Docker does. Only the
+# default backslash escape is supported: an `# escape=` parser directive
+# setting any other character is rejected, since it changes how Docker joins
+# lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
@@ -241,14 +244,30 @@ check_instruction() {
 }
 
 # Split $1 into the words BuildKit's shell lexer sees when it looks for
-# heredocs: unquoted whitespace separates words, while quotes and backslash
-# escapes stay in the word along with any whitespace they cover. The words are
+# heredocs: unquoted whitespace (Go's unicode.IsSpace, so UNICODE_SPACES too)
+# separates words, while quotes and backslash escapes stay in the word along
+# with any whitespace they cover. An unquoted << keeps the spaces, tabs and CRs
+# right after it in its word, as the lexer's processPossibleHeredoc does, so
+# `<< EOF` is one word and `<<` then a vertical tab is a bare <<. The words are
 # left in SHELL_WORDS.
 shell_words() {
-	local s="$1" k c word="" quote="" have=false
+	local s="$1" k c u word="" quote="" have=false
 	SHELL_WORDS=()
 	for ((k = 0; k < ${#s}; k++)); do
 		c="${s:k:1}"
+		if [ -z "$quote" ]; then
+			case "$c" in
+			$'\xc2' | $'\xe1' | $'\xe2' | $'\xe3')
+				for u in "${UNICODE_SPACES[@]}"; do
+					if [ "${s:k:${#u}}" = "$u" ]; then
+						c=" "
+						k=$((k + ${#u} - 1))
+						break
+					fi
+				done
+				;;
+			esac
+		fi
 		if [ -n "$quote" ]; then
 			word+="$c"
 			if [ "$c" = "$quote" ]; then
@@ -277,6 +296,19 @@ shell_words() {
 			quote="$c"
 			word+="$c"
 			have=true
+			;;
+		'<')
+			word+="$c"
+			have=true
+			if [ "${s:k+1:1}" = "<" ]; then
+				k=$((k + 1))
+				word+="<"
+				while [ $((k + 1)) -lt "${#s}" ]; do
+					case "${s:k+1:1}" in ' ' | $'\t' | $'\r') ;; *) break ;; esac
+					k=$((k + 1))
+					word+="${s:k:1}"
+				done
+			fi
 			;;
 		*)
 			word+="$c"
@@ -323,11 +355,13 @@ unquote_word() {
 	printf '%s' "$out"
 }
 
+HEREDOC_RE='^[0-9]*<<(-?)[ '$'\t\r'']*([^<]*)$'
+
 # Skip the bodies of the heredocs a RUN, COPY or ADD (also behind ONBUILD)
 # opens, advancing i past each terminator in turn. As in BuildKit, a heredoc
-# opener is a word reading <<NAME or <<-NAME (optionally after a file
-# descriptor), or a bare << followed by the name as the next word; the name is
-# the word's value, so a quoted one may hold spaces.
+# opener is a word reading <<NAME, << NAME (see shell_words) or <<-NAME,
+# optionally after a file descriptor; the name is the word's value, so a quoted
+# one may hold spaces.
 skip_heredocs() {
 	local lineno="$1" logical="$2"
 	[[ "$logical" == *'<<'* ]] || return 0
@@ -341,13 +375,9 @@ skip_heredocs() {
 	case "$(upper "${words[0]}")" in RUN | COPY | ADD) ;; *) return 0 ;; esac
 	local idx=1 chomp rest name body found
 	while [ "$idx" -lt "${#words[@]}" ]; do
-		if [[ "${words[$idx]}" =~ ^[0-9]*'<<'(-?)([^<]*)$ ]]; then
+		if [[ "${words[$idx]}" =~ $HEREDOC_RE ]]; then
 			chomp="${BASH_REMATCH[1]}"
 			rest="${BASH_REMATCH[2]}"
-			if [ -z "$rest" ] && [ -z "$chomp" ] && [ $((idx + 1)) -lt "${#words[@]}" ]; then
-				idx=$((idx + 1))
-				rest="${words[$idx]}"
-			fi
 			name=""
 			[[ "$rest" == *"<"* ]] || name="$(unquote_word "$rest")"
 			if [ -n "$name" ]; then
@@ -369,6 +399,13 @@ skip_heredocs() {
 		idx=$((idx + 1))
 	done
 }
+
+# `read` drops NUL bytes, which would join what Docker reads as separate lines
+# (and the .ps1 keeps), so a Dockerfile holding one is refused outright.
+if [ "$(tr -d '\000' <"$SET_DIR/Dockerfile" | wc -c)" -ne "$(wc -c <"$SET_DIR/Dockerfile")" ]; then
+	report "${SET_DIR}/Dockerfile: contains a NUL byte"
+	exit 1
+fi
 
 lines=()
 while IFS= read -r line || [ -n "$line" ]; do
@@ -419,6 +456,10 @@ while [ "$i" -lt "$n" ]; do
 			cont=false
 		fi
 	done
+	# BuildKit's splitCommand trims the joined line too, so leading whitespace
+	# a continuation brought in does not hide the keyword.
+	ltrim_space "$logical"
+	logical="$TRIMMED"
 	check_instruction "$start" "$logical"
 	skip_heredocs "$start" "$logical"
 	i=$((i + 1))

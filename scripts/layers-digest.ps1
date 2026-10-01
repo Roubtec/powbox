@@ -58,7 +58,6 @@ if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf) -or (Test-SymbolicL
 # also what Docker splits an instruction's words on.
 $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $wordSeparators = $whitespace
-$dockerSpace = $whitespace
 # Go's unicode.IsSpace, spelled out as the .sh's UNICODE_SPACES is rather than
 # left to [char]::IsWhiteSpace: BuildKit trims these from the start of an
 # instruction, a comment or an empty continuation line.
@@ -139,7 +138,8 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
 }
 
 # See shell_words in the .sh: the words BuildKit's shell lexer sees when it
-# looks for heredocs, quotes and backslash escapes kept in them.
+# looks for heredocs, quotes and backslash escapes kept in them, split on
+# $lineSpace, an unquoted << keeping the spaces, tabs and CRs after it.
 function Get-ShellWord([string]$Text) {
     $out = New-Object System.Collections.Generic.List[string]
     $word = New-Object System.Text.StringBuilder
@@ -157,7 +157,7 @@ function Get-ShellWord([string]$Text) {
             }
             continue
         }
-        if ($dockerSpace -contains $Text[$k]) {
+        if ($lineSpace -contains $Text[$k]) {
             if ($have) { $out.Add($word.ToString()) }
             [void]$word.Clear()
             $have = $false
@@ -172,6 +172,17 @@ function Get-ShellWord([string]$Text) {
             $quote = $c
             [void]$word.Append($c)
             $have = $true
+        } elseif ($c -ceq '<') {
+            [void]$word.Append($c)
+            $have = $true
+            if (($k + 1) -lt $Text.Length -and $Text[$k + 1] -ceq '<') {
+                $k++
+                [void]$word.Append('<')
+                while (($k + 1) -lt $Text.Length -and @(' ', "`t", "`r") -ccontains [string]$Text[$k + 1]) {
+                    $k++
+                    [void]$word.Append($Text[$k])
+                }
+            }
         } else {
             [void]$word.Append($c)
             $have = $true
@@ -229,10 +240,6 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
         if (-not $m.Success) { continue }
         $chomp = $m.Groups[1].Value
         $rest = $m.Groups[2].Value
-        if (-not $rest -and -not $chomp -and ($w + 1) -lt $words.Count) {
-            $w++
-            $rest = $words[$w]
-        }
         $name = ''
         if (-not $rest.Contains('<')) { $name = ConvertFrom-ShellWord $rest }
         if (-not $name) { continue }
@@ -249,10 +256,16 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
     }
 }
 
-$heredocOpener = [regex]'^[0-9]*<<(-?)([^<]*)\z'
+$heredocOpener = [regex]'^[0-9]*<<(-?)[ \t\r]*([^<]*)\z'
 $directive = [regex]'^([A-Za-z][A-Za-z0-9]*)[ \t\n\r\v\f]*=[ \t\n\r\v\f]*(.*[^ \t\n\r\v\f])[ \t\n\r\v\f]*\z'
 
 $content = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($dockerfile))
+# See the .sh: its `read` drops NUL bytes, so a Dockerfile holding one is
+# refused in both.
+if ($content.Contains([string][char]0)) {
+    Write-DigestError "${SetDir}/Dockerfile: contains a NUL byte"
+    exit 1
+}
 if ($content.StartsWith([string][char]0xFEFF, [System.StringComparison]::Ordinal)) { $content = $content.Substring(1) }
 $lines = New-Object System.Collections.Generic.List[string]
 foreach ($raw in $content.Split([char]"`n")) {
@@ -300,6 +313,9 @@ while ($i -lt $n) {
             $cont = $false
         }
     }
+    # BuildKit's splitCommand trims the joined line too, so leading whitespace
+    # a continuation brought in does not hide the keyword.
+    $logical = $logical.TrimStart($lineSpace)
     Test-Instruction $start $logical
     Skip-Heredoc $start $logical
     $i++

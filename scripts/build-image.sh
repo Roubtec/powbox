@@ -350,12 +350,19 @@ bake_layers() {
 	POWBOX_LAYERS_BASE_ID="$(image_id "$POWBOX_BASE_TAG")"
 	run_bake false "$1" layers
 	# The bake labels the image with that base whatever the set built on, so
-	# check its layers before anything is built on it.
+	# check its layers, and that it records no ONBUILD trigger, before anything
+	# is built on it.
 	local mismatch
 	mismatch="$(layers_base_mismatch)"
 	if [ -n "$mismatch" ]; then
 		echo "error: ${mismatch}." >&2
 		echo "The final stage of ${LAYERS_DIR}/Dockerfile must be built FROM \${BASE_IMAGE}." >&2
+		exit 1
+	fi
+	mismatch="$(layers_onbuild_triggers)"
+	if [ -n "$mismatch" ]; then
+		echo "error: ${mismatch}." >&2
+		echo "Remove every ONBUILD from ${LAYERS_DIR}/Dockerfile." >&2
 		exit 1
 	fi
 }

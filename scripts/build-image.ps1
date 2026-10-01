@@ -285,11 +285,18 @@ No image was built.
     $script:PowboxLayersBaseId = Get-ImageId $script:PowboxBaseTag
     Invoke-Bake -Targets @("layers") -WithNoCache:$WithNoCache
     # The bake labels the image with that base whatever the set built on, so
-    # check its layers before anything is built on it.
+    # check its layers, and that it records no ONBUILD trigger, before anything
+    # is built on it.
     $mismatch = Get-LayersBaseMismatch
     if ($mismatch) {
       [Console]::Error.WriteLine("error: $mismatch.")
       [Console]::Error.WriteLine("The final stage of $($script:LayersDir)/Dockerfile must be built FROM `${BASE_IMAGE}.")
+      exit 1
+    }
+    $mismatch = Get-LayersOnBuildTrigger
+    if ($mismatch) {
+      [Console]::Error.WriteLine("error: $mismatch.")
+      [Console]::Error.WriteLine("Remove every ONBUILD from $($script:LayersDir)/Dockerfile.")
       exit 1
     }
   }

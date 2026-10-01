@@ -77,6 +77,24 @@ layers_base_mismatch() {
 	esac
 }
 
+# Print why powbox-agent-layers:latest carries ONBUILD triggers, or nothing when
+# it carries none. A trigger runs when the agent is built on the image, from the
+# agent build's context (the repository root), so it could read files the set's
+# digest never sees. The Dockerfile scan in scripts/layers-digest.sh rejects
+# ONBUILD before anything is built; this reads what the image recorded, so a
+# trigger the scan missed still stops the build.
+layers_onbuild_triggers() {
+	local triggers
+	if ! triggers="$(docker image inspect "$POWBOX_LAYERS_TAG" --format '{{json .Config.OnBuild}}' 2>/dev/null)"; then
+		echo "the ONBUILD triggers of $POWBOX_LAYERS_TAG could not be read"
+		return 0
+	fi
+	case "$triggers" in
+	null | "[]") ;;
+	*) echo "$POWBOX_LAYERS_TAG records ONBUILD triggers, which would run in the agent build outside the set's digest: $triggers" ;;
+	esac
+}
+
 # Usage: layers_stale_reason <set> <digest>
 # Print why powbox-agent-layers:latest must be baked for the selected set, or
 # nothing when it is current: present, labelled with this set and this digest,
@@ -84,10 +102,11 @@ layers_base_mismatch() {
 # run's base step, so a base rebuilt earlier in the same run is the one compared.
 # The base is compared by image ID, not by layer chain, so a base change that
 # alters only its config (an ENV line, a label) still reaches the agent; the
-# layer chain is checked as well, by layers_base_mismatch. An empty digest
-# (undeterminable) never counts as current.
+# layer chain is checked as well, by layers_base_mismatch, and an image carrying
+# ONBUILD triggers (layers_onbuild_triggers) is never current either. An empty
+# digest (undeterminable) never counts as current.
 layers_stale_reason() {
-	local set="$1" digest="$2" baked base_id
+	local set="$1" digest="$2" baked base_id mismatch
 	if ! docker image inspect "$POWBOX_LAYERS_TAG" >/dev/null 2>&1; then
 		echo "$POWBOX_LAYERS_TAG does not exist"
 		return 0
@@ -112,7 +131,12 @@ layers_stale_reason() {
 		echo "$POWBOX_LAYERS_TAG was built on a different $POWBOX_BASE_TAG"
 		return 0
 	fi
-	layers_base_mismatch
+	mismatch="$(layers_base_mismatch)"
+	if [ -n "$mismatch" ]; then
+		echo "$mismatch"
+		return 0
+	fi
+	layers_onbuild_triggers
 }
 
 # Usage: resolve_codex_commit <head-commit> <codex-version> <parent-signature> <no-cache:true|false>

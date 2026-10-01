@@ -79,6 +79,17 @@ function Get-LayersBaseMismatch {
     return ""
 }
 
+# See layers_onbuild_triggers in build-image-lib.sh. Returns "" when the
+# layer-set image records no ONBUILD triggers.
+function Get-LayersOnBuildTrigger {
+    $tag = $script:PowboxLayersTag
+    $triggers = docker image inspect $tag --format '{{json .Config.OnBuild}}' 2>$null
+    if ($LASTEXITCODE -ne 0) { return "the ONBUILD triggers of $tag could not be read" }
+    $triggers = (@($triggers) -join "`n").Trim()
+    if ($triggers -ceq 'null' -or $triggers -ceq '[]') { return "" }
+    return "$tag records ONBUILD triggers, which would run in the agent build outside the set's digest: $triggers"
+}
+
 # See layers_stale_reason in build-image-lib.sh. Returns "" when the layer-set
 # image is current.
 function Get-LayersStaleReason {
@@ -96,7 +107,9 @@ function Get-LayersStaleReason {
     $baseId = Get-ImageId $script:PowboxBaseTag
     $baked = Get-ImageLabel $tag 'powbox.layers.base.id'
     if (-not $baseId -or $baked -cne $baseId) { return "$tag was built on a different $($script:PowboxBaseTag)" }
-    return (Get-LayersBaseMismatch)
+    $mismatch = Get-LayersBaseMismatch
+    if ($mismatch) { return $mismatch }
+    return (Get-LayersOnBuildTrigger)
 }
 
 # See resolve_codex_commit in build-image-lib.sh.

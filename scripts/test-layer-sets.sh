@@ -130,6 +130,10 @@ fake_bake() {
 			if [ "$t" = layers ] && [ -f "$state/layers-signature-source" ]; then
 				cp "$state/layers-signature-source" "$dir/signature-source"
 			fi
+			# A set whose ONBUILD escaped the Dockerfile scan records it here.
+			if [ "$t" = layers ] && [ -f "$state/layers-onbuild" ]; then
+				cp "$state/layers-onbuild" "$dir/onbuild"
+			fi
 			echo "sha256:$t-$n" >"$dir/id"
 			if [ "$t" = layers ]; then
 				echo "$POWBOX_LAYERS_SET" >"$dir/labels/powbox.layers.set"
@@ -171,6 +175,7 @@ case "$1 $2" in
 	'{{.Id}}') cat "$dir/id"; exit 0 ;;
 	'{{json .RootFS.Layers}}') cut -d' ' -f1 "$dir/signature-source"; exit 0 ;;
 	'{{json .RootFS.Layers}}'*) cat "$dir/signature-source"; exit 0 ;;
+	'{{json .Config.OnBuild}}') cat "$dir/onbuild" 2>/dev/null || echo null; exit 0 ;;
 	esac
 	out="$fmt"
 	re='\{\{ ?index \.Config\.Labels "([^"]*)" ?\}\}'
@@ -519,6 +524,13 @@ dockerfile_case "a U+00A0-indented comment is a comment" $'FROM ${BASE_IMAGE}\n\
 dockerfile_case "a U+00A0-only line inside a continuation is skipped" $'FROM busybox\nRUN echo \\\n\xc2\xa0\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: the final stage"
 dockerfile_case "escape directive indented with U+00A0" $'\xc2\xa0# escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
 dockerfile_case "escape directive with U+2003 after the #" $'#\xe2\x80\x83escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
+dockerfile_case "U+00A0 brought in by a continuation" $'FROM ${BASE_IMAGE}\n\\\n\xc2\xa0ONBUILD RUN true\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "<< then a vertical tab opens no heredoc" $'FROM ${BASE_IMAGE}\nRUN true <<\v\'RUN true\'\nONBUILD COPY --chmod=644 a /a\nRUN true\n' reject "Dockerfile:3: ONBUILD is not allowed"
+dockerfile_case "<< then a form feed opens no heredoc" $'FROM ${BASE_IMAGE}\nRUN true <<\fX\nCOPY a /a\nX\n' reject "Dockerfile:3: COPY without"
+dockerfile_case "<< then U+00A0 opens no heredoc" $'FROM ${BASE_IMAGE}\nRUN true <<\xc2\xa0X\nONBUILD RUN true\nX\n' reject "Dockerfile:3: ONBUILD is not allowed"
+dockerfile_case "<< then a tab and a CR still opens one" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<\t\rEOF\nFROM busybox\nEOF\n' ok
+dockerfile_case "U+00A0 separates a heredoc word" $'FROM ${BASE_IMAGE}\nRUN true\xc2\xa0<<"EOF\\\\"\ntrue\nEOF\\\nONBUILD COPY --chmod=644 . /x\n' reject "Dockerfile:5: ONBUILD is not allowed"
+dockerfile_case "U+00A0 ends a heredoc name" $'FROM ${BASE_IMAGE}\nRUN true <<\'LABEL a=b\'\xc2\xa0c=d\ntrue\nLABEL a=b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\xc2\xa0c=d\n' reject "Dockerfile:5: ONBUILD is not allowed"
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -539,6 +551,11 @@ set_emptydir="$WORK_ROOT/set-emptydir"
 make_set "$set_emptydir"
 mkdir -p "$set_emptydir/cache/inner"
 reject_case "an empty directory" "$set_emptydir" "$set_emptydir/cache/inner: empty directories are not allowed"
+
+set_nul="$WORK_ROOT/set-nul"
+make_set "$set_nul"
+printf 'FROM ${BASE_IMAGE}\nARG a=b\\\000\nONBUILD RUN true\n' >"$set_nul/Dockerfile"
+reject_case "a NUL byte" "$set_nul" "$set_nul/Dockerfile: contains a NUL byte"
 
 set_nodf="$WORK_ROOT/set-nodf"
 make_set "$set_nodf"
@@ -606,6 +623,7 @@ if $HAVE_PWSH; then
 	dig_parity "a directory symlink" "$set_dirlink"
 	dig_parity "a FIFO" "$set_fifo"
 	dig_parity "an empty directory" "$set_emptydir"
+	dig_parity "a NUL byte" "$set_nul"
 	dig_parity "no Dockerfile" "$set_nodf"
 	for body in $'FROM ${BASE_IMAGE}\nCOPY a /a\nADD b /b\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY \\\n    notes.md \\\n    /opt/\n' \
@@ -627,6 +645,15 @@ if $HAVE_PWSH; then
 		$'\xc2\xa0# escape=`\nFROM ${BASE_IMAGE}\n' \
 		$'#\xe2\x80\x83escape=`\nFROM ${BASE_IMAGE}\n' \
 		$'\xc2\x85FROM busybox\n' \
+		$'FROM ${BASE_IMAGE}\n\\\n\xc2\xa0ONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN true <<\v\'RUN true\'\nONBUILD COPY --chmod=644 a /a\nRUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN true <<\fX\nCOPY a /a\nX\n' \
+		$'FROM ${BASE_IMAGE}\nRUN true <<\xc2\xa0X\nONBUILD RUN true\nX\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<\t\rEOF\nFROM busybox\nEOF\n' \
+		$'FROM ${BASE_IMAGE}\nRUN true\xc2\xa0<<"EOF\\\\"\ntrue\nEOF\\\nONBUILD COPY --chmod=644 . /x\n' \
+		$'FROM ${BASE_IMAGE}\nRUN true <<\'LABEL a=b\'\xc2\xa0c=d\ntrue\nLABEL a=b\nONBUILD COPY --chmod=644 . /x\nLABEL a=b\xc2\xa0c=d\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat <<<<EOF\nFROM busybox\n' \
+		$'FROM ${BASE_IMAGE}\nRUN cat \\<<EOF\nFROM busybox\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
 		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \
@@ -744,6 +771,11 @@ set_image_field "$CUR_STATE" "$LAYERS" signature-source '["sha256:l1","sha256:l2
 currency_case "layer digest sharing a prefix with the base's" full "$DIGEST" "is not built on powbox-agent-base:latest"
 set_image_field "$CUR_STATE" "$LAYERS" signature-source '["sha256:busybox"] ["PATH=/usr/bin"] null "/home/node" "node"'
 currency_case "labelled with the base but built on another image" full "$DIGEST" "is not built on powbox-agent-base:latest"
+current_layers
+printf '%s\n' '[]' >"$CUR_STATE/images/powbox-agent-layers_latest/onbuild"
+currency_case "an empty ONBUILD list" full "$DIGEST" ""
+printf '%s\n' '["COPY --chmod=644 . /x"]' >"$CUR_STATE/images/powbox-agent-layers_latest/onbuild"
+currency_case "ONBUILD triggers recorded" full "$DIGEST" 'records ONBUILD triggers, which would run in the agent build outside the set'"'"'s digest: ["COPY --chmod=644 . /x"]'
 if ! $HAVE_PWSH; then
 	skipped "currency PowerShell parity (pwsh not installed)"
 fi
@@ -1221,6 +1253,22 @@ run_sequence() {
 	rm "$st/layers-signature-source"
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] set fixed: layers and agent baked" "$(bakes "$st")" "layers,agent"
+
+	# An ONBUILD the Dockerfile scan missed: the image records the trigger, so
+	# the build stops before the agent would run it from the repo-root context.
+	printf '%s\n' '["COPY --chmod=644 . /x"]' >"$st/layers-onbuild"
+	rc=0
+	out="$(build "$lang" "$st" layers 2>&1)" || rc=$?
+	assert_eq "[$lang] set recording ONBUILD: build fails" "$([ "$rc" -ne 0 ] && echo failed)" failed
+	assert_contains "[$lang] set recording ONBUILD: says why" "$out" "records ONBUILD triggers"
+	assert_contains "[$lang] set recording ONBUILD: names the remedy" "$out" "Remove every ONBUILD from"
+	assert_eq "[$lang] set recording ONBUILD: only the layer-set bake ran" "$(bakes "$st")" "layers"
+	rc=0
+	out="$(build "$lang" "$st" agent "${PIN[@]}" 2>&1)" || rc=$?
+	assert_eq "[$lang] set recording ONBUILD: not current next time, no agent on it" "$(bakes "$st")" "layers"
+	rm "$st/layers-onbuild"
+	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
+	assert_eq "[$lang] ONBUILD removed: layers and agent baked" "$(bakes "$st")" "layers,agent"
 
 	rm "$br/.powbox-layers"
 	rc=0

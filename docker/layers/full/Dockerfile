@@ -16,8 +16,8 @@
 #   - give every COPY and ADD a --chmod=<mode>: the build context is this
 #     directory alone, and its digest (scripts/layers-digest.{sh,ps1}) covers
 #     file contents, not modes, so a mode must come from this file;
-#   - keep only regular files in the directory (a symlink is rejected; create
-#     links in a RUN);
+#   - keep only regular files in the directory (a symlink or an empty
+#     directory is rejected; create those in a RUN);
 #   - use no ONBUILD: a trigger runs in the agent build, from the repo-root
 #     context, where it could read files the digest does not cover;
 #   - set no powbox.* labels: the bake target stamps them;

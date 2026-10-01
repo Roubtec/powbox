@@ -19,10 +19,11 @@
 #   - the digest is "sha256:" + sha256 of that concatenated buffer
 #
 # The digest is content-only on purpose. Docker's build context also carries
-# file modes and symlink targets, which a content-only digest would miss, so the
-# contract removes them as build inputs instead of hashing them:
-#   - a symlink or any other non-regular entry under the set is a hard error
-#     (a set that needs a link creates it in a RUN);
+# file modes, symlink targets and empty directories, which a content-only digest
+# would miss, so the contract removes them as build inputs instead of hashing
+# them:
+#   - a symlink, an empty directory or any other non-regular entry under the
+#     set is a hard error (a set that needs one creates it in a RUN);
 #   - every COPY and ADD in <set>/Dockerfile must carry --chmod=<mode>, so the
 #     mode a copied file gets comes from the Dockerfile, which is hashed, never
 #     from the checkout (a Windows checkout has no Unix modes, and Git tracks
@@ -36,9 +37,12 @@
 # the set built on, so the build drivers prove the chain from the built image's
 # filesystem layers (layers_base_mismatch in build-image-lib.sh).
 # The Dockerfile check follows the rules of BuildKit's Dockerfile parser where
-# they decide what is an instruction: it drops a UTF-8 BOM, joins a line ending
-# in an unescaped backslash to the next without adding anything, skips comment
-# and blank lines inside continuations, and skips heredoc bodies (<<EOF, <<-EOF,
+# they decide what is an instruction: it drops a UTF-8 BOM and trailing CRs,
+# trims leading Unicode whitespace (U+00A0 and the like) where BuildKit does,
+# joins a line ending in an unescaped backslash, followed only by spaces or
+# tabs, to the next without adding anything, skips comment and blank lines
+# inside continuations, folds keywords as Go's strings.ToLower does, and skips
+# heredoc bodies (<<EOF, <<-EOF,
 # << 'EOF' after RUN, COPY or ADD, also behind ONBUILD), so a body line that
 # reads as FROM or COPY is neither taken for a stage nor checked; an
 # unterminated heredoc is an error, as it is to Docker. It is a scan, not a
@@ -91,25 +95,77 @@ report() {
 }
 
 # As Docker's continuation rule: a backslash ending the line continues it, unless
-# another backslash precedes it.
+# another backslash precedes it. Only spaces and tabs may follow it.
+CONTINUATION_RE='(^|[^\\])\\[ '$'\t'']*$'
 ends_with_backslash() {
-	[[ "$1" =~ (^|[^\\])\\[[:space:]]*$ ]]
+	[[ "$1" =~ $CONTINUATION_RE ]]
 }
 
 strip_backslash() {
-	local s="$1"
-	s="${s%"${s##*[![:space:]]}"}"
+	local s="$1" blank=$' \t'
+	s="${s%"${s##*[!"$blank"]}"}"
 	printf '%s' "${s%\\}"
+}
+
+# The non-ASCII code points Go's unicode.IsSpace accepts (the Unicode
+# White_Space property), as their UTF-8 bytes. BuildKit trims them, with the
+# ASCII ones, from the start of an instruction, a comment or an empty
+# continuation line, so a line indented with U+00A0 is still an instruction.
+# Spelled with \x, as in smoke-test-image.sh, so the bytes do not depend on
+# the locale.
+UNICODE_SPACES=(
+	$'\xc2\x85'     # U+0085 NEXT LINE
+	$'\xc2\xa0'     # U+00A0 NO-BREAK SPACE
+	$'\xe1\x9a\x80' # U+1680 OGHAM SPACE MARK
+	$'\xe2\x80\x80' # U+2000 EN QUAD
+	$'\xe2\x80\x81' # U+2001 EM QUAD
+	$'\xe2\x80\x82' # U+2002 EN SPACE
+	$'\xe2\x80\x83' # U+2003 EM SPACE
+	$'\xe2\x80\x84' # U+2004 THREE-PER-EM SPACE
+	$'\xe2\x80\x85' # U+2005 FOUR-PER-EM SPACE
+	$'\xe2\x80\x86' # U+2006 SIX-PER-EM SPACE
+	$'\xe2\x80\x87' # U+2007 FIGURE SPACE
+	$'\xe2\x80\x88' # U+2008 PUNCTUATION SPACE
+	$'\xe2\x80\x89' # U+2009 THIN SPACE
+	$'\xe2\x80\x8a' # U+200A HAIR SPACE
+	$'\xe2\x80\xa8' # U+2028 LINE SEPARATOR
+	$'\xe2\x80\xa9' # U+2029 PARAGRAPH SEPARATOR
+	$'\xe2\x80\xaf' # U+202F NARROW NO-BREAK SPACE
+	$'\xe2\x81\x9f' # U+205F MEDIUM MATHEMATICAL SPACE
+	$'\xe3\x80\x80' # U+3000 IDEOGRAPHIC SPACE
+)
+
+# Set TRIMMED to $1 without the leading whitespace BuildKit trims: the ASCII
+# whitespace bytes and UNICODE_SPACES, in any order.
+ltrim_space() {
+	local s="$1" u again=true
+	while $again; do
+		again=false
+		s="${s#"${s%%[![:space:]]*}"}"
+		for u in "${UNICODE_SPACES[@]}"; do
+			if [[ "$s" == "$u"* ]]; then
+				s="${s#"$u"}"
+				again=true
+			fi
+		done
+	done
+	TRIMMED="$s"
 }
 
 DOCKER_EXTRA_SPACE=$'\v\f\r'
 
-upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+# BuildKit matches a keyword after Go's strings.ToLower, which also folds U+0130
+# (dotted capital I) to i and U+212A (Kelvin sign) to k: the only non-ASCII
+# letters it maps into ASCII. Fold them too, so ONBU\u0130LD is still ONBUILD.
+upper() {
+	local s="${1//$'\xc4\xb0'/I}"
+	printf '%s' "${s//$'\xe2\x84\xaa'/K}" | tr '[:lower:]' '[:upper:]'
+}
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 is_blank_or_comment() {
-	local s="${1#"${1%%[![:space:]]*}"}"
-	case "$s" in "" | "#"*) return 0 ;; esac
+	ltrim_space "$1"
+	case "$TRIMMED" in "" | "#"*) return 0 ;; esac
 	return 1
 }
 
@@ -316,7 +372,9 @@ skip_heredocs() {
 
 lines=()
 while IFS= read -r line || [ -n "$line" ]; do
-	lines+=("${line%$'\r'}")
+	# BuildKit strips every trailing CR, not only a CRLF's one.
+	while [[ "$line" == *$'\r' ]]; do line="${line%$'\r'}"; done
+	lines+=("$line")
 done <"$SET_DIR/Dockerfile"
 n="${#lines[@]}"
 [ "$n" -eq 0 ] || lines[0]="${lines[0]#$'\xef\xbb\xbf'}"
@@ -324,7 +382,10 @@ n="${#lines[@]}"
 # Parser directives are the leading `# name=value` lines naming a directive
 # Docker knows; any other line ends them.
 for ((i = 0; i < n; i++)); do
-	[[ "${lines[$i]}" =~ ^[[:space:]]*#[[:space:]]*([A-Za-z][A-Za-z0-9]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || break
+	ltrim_space "${lines[$i]}"
+	[[ "$TRIMMED" == "#"* ]] || break
+	ltrim_space "${TRIMMED:1}"
+	[[ "$TRIMMED" =~ ^([A-Za-z][A-Za-z0-9]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || break
 	case "$(lower "${BASH_REMATCH[1]}")" in syntax | escape | check) ;; *) break ;; esac
 	if [ "$(lower "${BASH_REMATCH[1]}")" = escape ] && [ "${BASH_REMATCH[2]}" != "\\" ]; then
 		report "${SET_DIR}/Dockerfile:$((i + 1)): only the default \\ escape is supported: ${lines[$i]}"
@@ -339,11 +400,13 @@ while [ "$i" -lt "$n" ]; do
 		i=$((i + 1))
 		continue
 	fi
-	logical="$line"
+	# BuildKit trims an instruction's first line, not its continuations.
+	ltrim_space "$line"
+	logical="$TRIMMED"
 	cont=false
-	if ends_with_backslash "$line"; then
+	if ends_with_backslash "$logical"; then
 		cont=true
-		logical="$(strip_backslash "$line")"
+		logical="$(strip_backslash "$logical")"
 	fi
 	while $cont && [ $((i + 1)) -lt "$n" ]; do
 		i=$((i + 1))
@@ -369,7 +432,7 @@ fi
 
 entries="$(mktemp)"
 trap 'rm -f "$entries"' EXIT
-if ! (cd "$SET_DIR" && find . -mindepth 1 ! -type d -print0) >"$entries"; then
+if ! (cd "$SET_DIR" && find . -mindepth 1 \( ! -type d -o -type d -empty \) -print0) >"$entries"; then
 	echo "layers-digest: cannot list $SET_DIR" >&2
 	exit 1
 fi
@@ -380,6 +443,8 @@ while IFS= read -r -d '' rel; do
 	path="${SET_DIR}/${rel}"
 	if [ -L "$path" ]; then
 		report "${path}: symlinks are not allowed in a layer set (create the link in a RUN instead)"
+	elif [ -d "$path" ]; then
+		report "${path}: empty directories are not allowed in a layer set (the digest covers files only; create the directory in a RUN instead)"
 	elif [ ! -f "$path" ]; then
 		report "${path}: not a regular file; only regular files are allowed in a layer set"
 	else

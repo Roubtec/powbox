@@ -59,13 +59,22 @@ if (-not (Test-Path -LiteralPath $dockerfile -PathType Leaf) -or (Test-SymbolicL
 $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $wordSeparators = $whitespace
 $dockerSpace = $whitespace
+# Go's unicode.IsSpace, spelled out as the .sh's UNICODE_SPACES is rather than
+# left to [char]::IsWhiteSpace: BuildKit trims these from the start of an
+# instruction, a comment or an empty continuation line.
+$lineSpace = [char[]](@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C, [char]0x85, [char]0xA0, [char]0x1680) +
+    @(0x2000..0x200A | ForEach-Object { [char]$_ }) +
+    @([char]0x2028, [char]0x2029, [char]0x202F, [char]0x205F, [char]0x3000))
 # As Docker's continuation rule: a backslash ending the line continues it, unless
-# another backslash precedes it.
-$continuation = [regex]'(^|[^\\])\\[ \t\n\r\v\f]*\z'
+# another backslash precedes it. Only spaces and tabs may follow it.
+$continuation = [regex]'(^|[^\\])\\[ \t]*\z'
 
 # Case folding of ASCII letters only, as the .sh's tr under LC_ALL=C does;
-# ToUpperInvariant would also fold, say, a dotless i into I.
+# ToUpperInvariant would also fold, say, a dotless i into I. U+0130 and U+212A
+# fold to I and K first, as in the .sh's upper (Go's strings.ToLower maps them
+# into ASCII, and BuildKit matches keywords with it).
 function ConvertTo-AsciiUpper([string]$Text) {
+    $Text = $Text.Replace([string][char]0x130, 'I').Replace([string][char]0x212A, 'K')
     return [regex]::Replace($Text, '[a-z]', { param($m) $m.Value.ToUpperInvariant() })
 }
 function ConvertTo-AsciiLower([string]$Text) {
@@ -73,12 +82,12 @@ function ConvertTo-AsciiLower([string]$Text) {
 }
 
 function Test-BlankOrComment([string]$Line) {
-    $t = $Line.TrimStart($whitespace)
+    $t = $Line.TrimStart($lineSpace)
     return ($t -eq '' -or $t.StartsWith('#'))
 }
 
 function Get-StrippedContinuation([string]$Line) {
-    $t = $Line.TrimEnd($whitespace)
+    $t = $Line.TrimEnd(' ', "`t")
     return $t.Substring(0, $t.Length - 1)
 }
 
@@ -241,14 +250,14 @@ function Skip-Heredoc([int]$LineNo, [string]$Logical) {
 }
 
 $heredocOpener = [regex]'^[0-9]*<<(-?)([^<]*)\z'
-$directive = [regex]'^[ \t\n\r\v\f]*#[ \t\n\r\v\f]*([A-Za-z][A-Za-z0-9]*)[ \t\n\r\v\f]*=[ \t\n\r\v\f]*(.*[^ \t\n\r\v\f])[ \t\n\r\v\f]*\z'
+$directive = [regex]'^([A-Za-z][A-Za-z0-9]*)[ \t\n\r\v\f]*=[ \t\n\r\v\f]*(.*[^ \t\n\r\v\f])[ \t\n\r\v\f]*\z'
 
 $content = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($dockerfile))
 if ($content.StartsWith([string][char]0xFEFF, [System.StringComparison]::Ordinal)) { $content = $content.Substring(1) }
 $lines = New-Object System.Collections.Generic.List[string]
 foreach ($raw in $content.Split([char]"`n")) {
-    if ($raw.EndsWith("`r")) { $raw = $raw.Substring(0, $raw.Length - 1) }
-    $lines.Add($raw)
+    # BuildKit strips every trailing CR, not only a CRLF's one.
+    $lines.Add($raw.TrimEnd([char]"`r"))
 }
 # A trailing LF leaves one empty element that the .sh's read loop never sees.
 if ($content.EndsWith("`n")) { $lines.RemoveAt($lines.Count - 1) }
@@ -258,7 +267,9 @@ $n = $lines.Count
 # Parser directives are the leading `# name=value` lines naming a directive
 # Docker knows; any other line ends them.
 for ($i = 0; $i -lt $n; $i++) {
-    $m = $directive.Match($lines[$i])
+    $t = $lines[$i].TrimStart($lineSpace)
+    if (-not $t.StartsWith('#')) { break }
+    $m = $directive.Match($t.Substring(1).TrimStart($lineSpace))
     if (-not $m.Success) { break }
     if (@('syntax', 'escape', 'check') -cnotcontains (ConvertTo-AsciiLower $m.Groups[1].Value)) { break }
     if ((ConvertTo-AsciiLower $m.Groups[1].Value) -ceq 'escape' -and $m.Groups[2].Value -cne '\') {
@@ -271,11 +282,12 @@ while ($i -lt $n) {
     $line = $lines[$i]
     $start = $i + 1
     if (Test-BlankOrComment $line) { $i++; continue }
-    $logical = $line
+    # BuildKit trims an instruction's first line, not its continuations.
+    $logical = $line.TrimStart($lineSpace)
     $cont = $false
-    if ($continuation.IsMatch($line)) {
+    if ($continuation.IsMatch($logical)) {
         $cont = $true
-        $logical = Get-StrippedContinuation $line
+        $logical = Get-StrippedContinuation $logical
     }
     while ($cont -and ($i + 1) -lt $n) {
         $i++
@@ -329,7 +341,12 @@ foreach ($entry in $sorted) {
         Write-DigestError "${path}: symlinks are not allowed in a layer set (create the link in a RUN instead)"
         continue
     }
-    if ($item.PSIsContainer) { continue }
+    if ($item.PSIsContainer) {
+        if (@(Get-ChildItem -LiteralPath $item.FullName -Force).Count -eq 0) {
+            Write-DigestError "${path}: empty directories are not allowed in a layer set (the digest covers files only; create the directory in a RUN instead)"
+        }
+        continue
+    }
     # On Unix a FIFO, socket or device still surfaces as a file item, and only
     # PowerShell's stat view tells it apart. Windows has no such entries.
     $stat = if ($item.PSObject.Properties['UnixStat']) { $item.UnixStat } else { $null }

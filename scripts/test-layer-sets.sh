@@ -380,8 +380,11 @@ assert_eq "digest does not depend on creation order" "$(digest "$set_b")" "$d_a"
 chmod +x "$set_b/notes.md"
 assert_eq "digest is content-only (a mode change does not move it)" "$(digest "$set_b")" "$d_a"
 
+# The digest hashes files only, so an empty directory, which COPY would still
+# copy, is rejected rather than silently left out (see "an empty directory").
 mkdir -p "$set_b/empty-dir"
-assert_eq "an empty directory is not hashed" "$(digest "$set_b")" "$d_a"
+assert_eq "an empty directory yields no digest" "$(digest "$set_b")" ""
+rmdir "$set_b/empty-dir"
 
 mkdir -p "$set_b/keep-only"
 : >"$set_b/keep-only/.gitkeep"
@@ -506,6 +509,16 @@ dockerfile_case "quoted FROM image is compared unquoted" $'ARG BASE_IMAGE=b\nFRO
 dockerfile_case "backtick in a double-quoted name stays literal" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN cat <<"E\\`F"\nFROM y\nE\\`F\n' ok
 dockerfile_case "<< in shell arithmetic is a heredoc to Docker too" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nRUN echo $((1 << 3))\n' reject "heredoc 3)) is never terminated"
 dockerfile_case "<< EOF body cannot stand in for the final FROM" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nFROM busybox\nRUN cat << EOF >/x\nFROM ${BASE_IMAGE}\nEOF\n' reject "Dockerfile:3: the final stage"
+dockerfile_case "ONBUILD indented with U+00A0" $'FROM ${BASE_IMAGE}\n\xc2\xa0ONBUILD COPY --chmod=644 a /a\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "ONBUILD indented with U+3000 and a tab" $'FROM ${BASE_IMAGE}\n\t\xe3\x80\x80ONBUILD RUN true\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "ONBUILD spelled with U+0130" $'FROM ${BASE_IMAGE}\nONBU\xc4\xb0LD RUN true\n' reject "Dockerfile:2: ONBUILD is not allowed"
+dockerfile_case "vertical tab after a backslash does not continue" $'FROM ${BASE_IMAGE}\nRUN echo \\\v\nONBUILD COPY --chmod=644 a /a\n' reject "Dockerfile:3: ONBUILD is not allowed"
+dockerfile_case "form feed after a backslash does not continue" $'FROM ${BASE_IMAGE}\nRUN echo \\\f\nONBUILD RUN true\n' reject "Dockerfile:3: ONBUILD is not allowed"
+dockerfile_case "every trailing CR is stripped before a continuation" $'FROM busybox\nRUN echo \\\r\r\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: the final stage"
+dockerfile_case "a U+00A0-indented comment is a comment" $'FROM ${BASE_IMAGE}\n\xc2\xa0# note \\\nONBUILD RUN true\n' reject "Dockerfile:3: ONBUILD is not allowed"
+dockerfile_case "a U+00A0-only line inside a continuation is skipped" $'FROM busybox\nRUN echo \\\n\xc2\xa0\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: the final stage"
+dockerfile_case "escape directive indented with U+00A0" $'\xc2\xa0# escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
+dockerfile_case "escape directive with U+2003 after the #" $'#\xe2\x80\x83escape=`\nFROM ${BASE_IMAGE}\n' reject "Dockerfile:1: only the default"
 
 set_link="$WORK_ROOT/set-link"
 make_set "$set_link"
@@ -521,6 +534,11 @@ set_fifo="$WORK_ROOT/set-fifo"
 make_set "$set_fifo"
 mkfifo "$set_fifo/pipe"
 reject_case "a FIFO" "$set_fifo" "$set_fifo/pipe" "not a regular file"
+
+set_emptydir="$WORK_ROOT/set-emptydir"
+make_set "$set_emptydir"
+mkdir -p "$set_emptydir/cache/inner"
+reject_case "an empty directory" "$set_emptydir" "$set_emptydir/cache/inner: empty directories are not allowed"
 
 set_nodf="$WORK_ROOT/set-nodf"
 make_set "$set_nodf"
@@ -587,6 +605,7 @@ if $HAVE_PWSH; then
 	dig_parity "a file symlink" "$set_link"
 	dig_parity "a directory symlink" "$set_dirlink"
 	dig_parity "a FIFO" "$set_fifo"
+	dig_parity "an empty directory" "$set_emptydir"
 	dig_parity "no Dockerfile" "$set_nodf"
 	for body in $'FROM ${BASE_IMAGE}\nCOPY a /a\nADD b /b\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY \\\n    notes.md \\\n    /opt/\n' \
@@ -596,6 +615,18 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nONBUILD COPY --chmod=644 a /a\n' \
 		$'FROM ${BASE_IMAGE}\nOnBuild RUN --mount=type=bind,target=/ctx true\n' \
 		$'FROM ${BASE_IMAGE}\nONBUILD\n' \
+		$'FROM ${BASE_IMAGE}\n\xc2\xa0ONBUILD COPY --chmod=644 a /a\n' \
+		$'FROM ${BASE_IMAGE}\n\t\xe3\x80\x80\xe2\x80\xafONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nONBU\xc4\xb0LD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nCOPY \xe2\x84\xaa /k\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \\\v\nONBUILD RUN true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN echo \\\f\nCOPY a /a\n' \
+		$'FROM busybox\nRUN echo \\ \t\r\r\nFROM ${BASE_IMAGE}\n' \
+		$'FROM ${BASE_IMAGE}\n\xc2\xa0# note \\\nONBUILD RUN true\n' \
+		$'FROM busybox\nRUN echo \\\n\xc2\xa0\nFROM ${BASE_IMAGE}\n' \
+		$'\xc2\xa0# escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'#\xe2\x80\x83escape=`\nFROM ${BASE_IMAGE}\n' \
+		$'\xc2\x85FROM busybox\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY --chmod= notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nCOPY notes.md' \
 		$'FROM ${BASE_IMAGE}\n\tCOPY\tnotes.md\t/opt/   \n' \

@@ -207,10 +207,10 @@ function Write-SmokeBanner {
     Write-Host "Entries naming a -Skip* switch or an environment variable were"
     Write-Host "skipped on request: drop or unset it to run them, and pass"
     Write-Host "-RequireImage to also fail on a missing image. The rest were"
-    Write-Host "decided by the host at runtime - nothing was set to skip them,"
-    Write-Host "and dropping a switch or unsetting a variable will not recover"
-    Write-Host "them: hosted CI has no /dev/net/tun, so Stage 3's nested half"
-    Write-Host "self-skips there. See docs/smoke-tests.md."
+    Write-Host "decided at runtime by the host or the working tree - nothing was"
+    Write-Host "set to skip them, and dropping a switch or unsetting a variable"
+    Write-Host "will not recover them: hosted CI has no /dev/net/tun, so Stage 3's"
+    Write-Host "nested half self-skips there. See docs/smoke-tests.md."
     Write-Host "==========================================================="
   }
   elseif ($NotApplicable.Count -gt 0) {

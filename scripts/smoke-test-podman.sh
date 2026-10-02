@@ -84,9 +84,9 @@ echo "Podman smoke test against $IMAGE — ${tun_note}, ${fuse_note}."
 
 # The in-container probe. Single-quoted so the host shell leaves its $vars alone;
 # it must therefore contain no single quotes. A non-zero exit is a failure: there
-# is no whole-stage skip sentinel — a missing engine is a real regression (use
-# POWBOX_SMOKE_SKIP_PODMAN=1 to skip the stage for a legacy image on purpose). The
-# output is tee'd to a log so the outer script can detect the ONE self-skip the probe
+# is no whole-stage skip sentinel. Its `command -v podman` check covers a direct
+# run of this script, where a missing engine must still fail; the umbrella runs
+# this stage only on an image with podman on its PATH. The output is tee'd to a log so the outer script can detect the ONE self-skip the probe
 # can emit — the distroless (shell-less) XFAIL reproduction when its image cannot be
 # pulled — and surface it in the umbrella banner (this file runs as the host user, so
 # it can write the parent's marker; the nested container's rootless userns cannot).

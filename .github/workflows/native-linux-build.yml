@@ -282,8 +282,10 @@ jobs:
       # Most often the entry is simply stale: a base entry evicted and
       # re-created while the layers entry survived under the same key, so the
       # loaded image records a different base ID. A reason that returns once the
-      # entry has been deleted and re-saved means the test does not survive
-      # docker save / docker load, which the warning names too.
+      # entry has been deleted and re-saved is not a stale entry: either the
+      # test does not survive docker save / docker load, or the set and digest
+      # this step derives no longer match what build.sh derives. The warning
+      # names both.
       - name: Build full image (base + layers + agent, layer set full)
         shell: bash
         env:
@@ -309,7 +311,7 @@ jobs:
               echo "build.sh's currency test calls the cached layer-set image current; expecting no layer-set bake."
               expect_reuse=true
             else
-              echo "::warning title=Stale layers cache entry::build.sh's currency test rejects the cached layer-set image: ${reason}. The entry is immutable, so every run rebakes the set until it is deleted: gh cache delete ${LAYERS_CACHE_KEY}. Usual causes: a base entry evicted and re-created while this one survived, or an input of the test that the layers key does not cover (add it to the key). If the same reason returns once the entry has been re-saved, the test does not survive docker save / docker load: fix scripts/build-image*.sh."
+              echo "::warning title=Stale layers cache entry::build.sh's currency test rejects the cached layer-set image: ${reason}. The entry is immutable, so every run rebakes the set until it is deleted: gh cache delete ${LAYERS_CACHE_KEY}. Usual causes: a base entry evicted and re-created while this one survived, or an input of the test that the layers key does not cover (add it to the key). If the same reason returns once the entry has been re-saved, deleting it again will not help: either the test does not survive docker save / docker load (fix scripts/build-image*.sh), or this step's set and digest no longer match the ones build.sh derives (fix this step)."
             fi
           else
             echo "Layers cache MISS — build.sh bakes the layer-set image."

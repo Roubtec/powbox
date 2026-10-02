@@ -477,6 +477,36 @@ dockerfile_case "--chmod= on a continuation line" $'FROM ${BASE_IMAGE}\nCOPY \\\
 dockerfile_case "CRLF Dockerfile" $'FROM ${BASE_IMAGE}\r\nCOPY --chmod=644 \\\r\n  notes.md /opt/\r\n' ok
 dockerfile_case "COPY in a comment or a RUN" $'FROM ${BASE_IMAGE}\n# COPY notes.md /opt/\nRUN echo COPY notes.md /opt/\n' ok
 dockerfile_case "no COPY at all" $'ARG BASE_IMAGE=b\nFROM ${BASE_IMAGE}\nUSER root\nUSER node' ok
+# A RUN bind mount of the build context shows the set's files with their
+# checkout modes, which the digest does not cover. The shapes follow
+# BuildKit v0.33.1's extractBuilderFlags and parseMount.
+RUN_BIND_MSG="RUN --mount= binding the build context is not allowed"
+dockerfile_case "RUN --mount=type=bind of the context" $'FROM ${BASE_IMAGE}\nUSER root\nRUN --mount=type=bind,target=/ctx cp -p /ctx/tool /usr/local/bin/tool\n' reject "Dockerfile:3: $RUN_BIND_MSG" "cp -p /ctx/tool"
+dockerfile_case "RUN --mount= without type= is a bind" $'FROM ${BASE_IMAGE}\nRUN --mount=target=/ctx cp -p /ctx/tool /t\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "bind keys in another order and case, with source=" $'FROM ${BASE_IMAGE}\nRUN --mount=source=tool,Target=/ctx,TYPE=Bind true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "bind with src= and dst=" $'FROM ${BASE_IMAGE}\nRUN --mount=src=tool,dst=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "bind before a JSON-form command" $'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,target=/ctx ["cp", "-p", "/ctx/tool", "/t"]\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "default-type mount before a JSON-form command" $'FROM ${BASE_IMAGE}\nRUN --mount=target=/ctx ["true"]\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "source= bind before a JSON-form command" $'FROM ${BASE_IMAGE}\nRUN --mount=source=tool,target=/ctx ["true"]\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "bind after another flag and a cache mount" $'FROM ${BASE_IMAGE}\nrun --network=none --mount=type=cache,target=/c\t--mount=target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "continued RUN, named by its first line" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c \\\n    --mount=source=tool,target=/in \\\n    cp -p /in/tool /t\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "bind in a builder stage" $'FROM busybox AS build\nRUN --mount=target=/ctx cp -p /ctx/tool /tool\nFROM ${BASE_IMAGE}\nCOPY --from=build --chmod=755 /tool /t\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "an empty from= is the context" $'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=,target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "the last from= wins" $'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=from=build,from=,target=/ctx true\n' reject "Dockerfile:3: $RUN_BIND_MSG"
+dockerfile_case "the last type= wins" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,type=bind,target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a from= expanding to nothing" $'FROM ${BASE_IMAGE}\nRUN --mount="type=bind,from=\'\',target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a type= from a variable" $'FROM ${BASE_IMAGE}\nARG MT=bind\nRUN --mount=type=$MT,target=/ctx true\n' reject "Dockerfile:3: $RUN_BIND_MSG"
+dockerfile_case "a quoted flag" $'FROM ${BASE_IMAGE}\nRUN --mo"unt=type=bind,target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a CSV-quoted type field" $'FROM ${BASE_IMAGE}\nRUN --mount=\'"type=bind",target=/ctx\' true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a 0xA0 byte splits a flag word" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,id=\xc3\xa0--mount=target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "two bind RUNs, both named" $'FROM ${BASE_IMAGE}\nRUN --mount=target=/a true\nRUN --mount=target=/b true\n' reject "Dockerfile:2: $RUN_BIND_MSG" "Dockerfile:3: $RUN_BIND_MSG"
+dockerfile_case "bind with from=<stage>" $'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=build,source=/out,target=/in cp /in/x /x\n' ok
+dockerfile_case "bind with FROM=<image>" $'FROM ${BASE_IMAGE}\nRUN --mount=FROM=busybox,target=/in ["true"]\n' ok
+dockerfile_case "cache, tmpfs, secret and ssh mounts" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c --mount=type=tmpfs,target=/t true\nRUN --mount=type=secret,id=tok --mount=TYPE=SSH true\n' ok
+dockerfile_case "a cache mount with an empty from=" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,from=,target=/c true\n' ok
+dockerfile_case "--mount= after -- belongs to the command" $'FROM ${BASE_IMAGE}\nRUN -- --mount=target=/ctx true\n' ok
+dockerfile_case "--mount= in a RUN's command" $'FROM ${BASE_IMAGE}\nRUN echo --mount=target=/ctx\n' ok
+dockerfile_case "a quoted 0xA0 byte splits nothing" $'FROM ${BASE_IMAGE}\nRUN --mount="type=cache,id=\xc3\xa0--mount=target=/ctx" true\n' ok
 # The final stage must descend from ${BASE_IMAGE}: the bake stamps the base's ID
 # on the layer image, which the update check trusts as proof of the chain.
 dockerfile_case "final stage on another image" $'FROM busybox\nUSER node\n' reject "Dockerfile:1: the final stage must build FROM \${BASE_IMAGE}" "FROM busybox"
@@ -687,6 +717,24 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nONBUILD copy --chown=a notes.md /opt/\n' \
 		$'FROM ${BASE_IMAGE}\nONBUILD COPY --chmod=644 a /a\n' \
 		$'FROM ${BASE_IMAGE}\nOnBuild RUN --mount=type=bind,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,target=/ctx cp -p /ctx/tool /t\nRUN --mount=target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=source=tool,Target=/ctx,TYPE=Bind true\nRUN --mount=src=tool,dst=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,target=/ctx ["cp", "-p", "/ctx/tool", "/t"]\nRUN --mount=target=/ctx ["true"]\nRUN --mount=source=tool,target=/ctx ["true"]\n' \
+		$'FROM ${BASE_IMAGE}\nrun --network=none --mount=type=cache,target=/c\t--mount=target=/ctx true   \n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c \\\n    --mount=source=tool,target=/in \\\n    cp -p /in/tool /t\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=,target=/ctx true\nRUN --mount=type=cache,type=bind,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount="type=bind,from=\'\',target=/ctx" true\nRUN --mount=type=$MT,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mo"unt=type=bind,target=/ctx" true\nRUN --mount=\'"type=bind",target=/ctx\' true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,id=\xc3\xa0--mount=target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,id=\xc2\x85--mount=target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount="type=cache,id=\xc3\xa0--mount=target=/ctx" true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=B\xc4\xb0ND,target=/ctx true\nRUN --mount=type=\xe2\x84\xaaache,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,from=,id=a\xc2\xa0\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=\'type=ca"che,target=/ctx\' true\nRUN --mount=\'"type=c""ache",target=/ctx\' true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount= true\nRUN --mount=type=bind,from=a$,target=/ctx true\n' \
+		$'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=build,source=/out,target=/in cp /in/x /x\nRUN --mount=FROM=busybox,target=/in ["true"]\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c --mount=type=tmpfs,target=/t true\nRUN --mount=type=secret,id=tok --mount=TYPE=SSH true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN -- --mount=target=/ctx true\nRUN echo --mount=target=/ctx\nRUN --mount=type=cache,target=/c \\\n' \
 		$'FROM ${BASE_IMAGE}\nONBUILD\n' \
 		$'FROM ${BASE_IMAGE}\n\xc2\xa0ONBUILD COPY --chmod=644 a /a\n' \
 		$'FROM ${BASE_IMAGE}\n\t\xe3\x80\x80\xe2\x80\xafONBUILD RUN true\n' \

@@ -143,15 +143,25 @@ jobs:
       # rebuild). It covers every file scripts/base-source-files.txt lists; the
       # layer-set selector and digest are deliberately absent, since the base
       # build never reads them.
+      #
+      # The layers key also carries the set's own digest, the value build.sh
+      # stamps as powbox.layers.digest: hashFiles() hashes file contents only,
+      # so a rename-only edit under docker/layers/full/ would keep the key while
+      # changing the digest, and the immutable entry would then be rebaked on
+      # every run. A set the digest script rejects gets a placeholder here, so
+      # the lean pass still runs and the full build reports the contract error.
       - name: Compute image cache keys
         id: keys
+        shell: bash
         env:
           BASE_INPUTS: ${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
           LAYERS_INPUTS: ${{ hashFiles('docker/layers/full/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh') }}
         run: |
+          set -euo pipefail
           base="powbox-base-${RUNNER_OS}-${BASE_INPUTS}"
           echo "base=${base}" >>"$GITHUB_OUTPUT"
-          echo "layers=powbox-layers-full-${RUNNER_OS}-${BASE_INPUTS}-${LAYERS_INPUTS}" >>"$GITHUB_OUTPUT"
+          digest="$(./scripts/layers-digest.sh docker/layers/full)" || digest=undigested
+          echo "layers=powbox-layers-full-${RUNNER_OS}-${BASE_INPUTS}-${LAYERS_INPUTS}-${digest#sha256:}" >>"$GITHUB_OUTPUT"
 
       # Cache-awareness, footprint-respecting edition. The cheap, robust win is
       # to cache the EXPENSIVE base image (node:24-trixie-slim + ~12 apt groups,
@@ -241,11 +251,12 @@ jobs:
 
       # The layer-set image cached like the base, and for the same reasons. The
       # key embeds the base key, so a base change re-keys the layers too, plus
-      # the set's own directory and the two scripts that decide the labels the
-      # tarball was stamped with: a changed digest algorithm against an old,
-      # immutable entry would otherwise rebake the set on every run while the
-      # entry stayed stale. No restore-keys, as for the base. Only the committed
-      # `full` set is cached; docker/layers/custom/ is never built here.
+      # the set's own directory, its digest (see "Compute image cache keys"),
+      # and the two scripts that decide the labels the tarball was stamped with:
+      # a changed digest algorithm against an old, immutable entry would
+      # otherwise rebake the set on every run while the entry stayed stale. No
+      # restore-keys, as for the base. Only the committed `full` set is cached;
+      # docker/layers/custom/ is never built here.
       - name: Restore layers image cache
         id: layerscache
         uses: actions/cache@v4
@@ -257,13 +268,15 @@ jobs:
       # on a runner whose BuildKit cache is empty that reinstalls the whole set
       # even with both tarballs loaded. `agent` skips the bake when the loaded
       # image's powbox.layers.{set,digest,base.id} labels match the working tree
-      # and the loaded base, so a hit on both caches must bake nothing; the step
-      # fails if it does, because that means the currency test does not survive
-      # docker save / docker load and scripts/build-image*.sh needs fixing. The
-      # one legitimate rebake on a hit is a base entry evicted and re-created
-      # while the layers entry survived under the same key: the loaded image then
-      # records a different base ID. Entries are immutable, so every run would
-      # rebake until the key changes; the step warns with the remedy instead.
+      # and the loaded base. So when the loaded image's three labels match, as
+      # the step checks first, build.sh must bake nothing; the step fails if it
+      # does, because that means the currency test does not survive docker
+      # save / docker load and scripts/build-image*.sh needs fixing. A hit whose
+      # labels do not match is a stale entry, not a build defect: most often a
+      # base entry evicted and re-created while the layers entry survived under
+      # the same key, so the loaded image records a different base ID. Entries
+      # are immutable, so every run would rebake until the key changes; the step
+      # warns with the remedy instead.
       - name: Build full image (base + layers + agent, layer set full)
         shell: bash
         env:
@@ -276,12 +289,21 @@ jobs:
             docker load -i /tmp/powbox-layers-image.tar
             rm -f /tmp/powbox-layers-image.tar
             loaded_id="$(docker image inspect powbox-agent-layers:latest --format '{{.Id}}')"
-            recorded_base="$(docker image inspect powbox-agent-layers:latest --format '{{json .Config.Labels}}' | jq -r '."powbox.layers.base.id" // empty')"
+            labels="$(docker image inspect powbox-agent-layers:latest --format '{{json .Config.Labels}}')"
+            recorded_set="$(jq -r '."powbox.layers.set" // empty' <<<"$labels")"
+            recorded_digest="$(jq -r '."powbox.layers.digest" // empty' <<<"$labels")"
+            recorded_base="$(jq -r '."powbox.layers.base.id" // empty' <<<"$labels")"
+            # An empty digest never counts as current in build.sh, so an
+            # undeterminable one never sets the expectation either.
+            digest="$(./scripts/layers-digest.sh docker/layers/full)" || digest=""
             base_id="$(docker image inspect powbox-agent-base:latest --format '{{.Id}}')"
-            if [ "$recorded_base" = "$base_id" ]; then
+            if [ "$recorded_set" = full ] && [ -n "$digest" ] &&
+              [ "$recorded_digest" = "$digest" ] && [ "$recorded_base" = "$base_id" ]; then
               expect_reuse=true
-            else
+            elif [ "$recorded_base" != "$base_id" ]; then
               echo "::warning title=Stale layers cache entry::The cached layer-set image records base ${recorded_base:-<none>}, but the loaded base is ${base_id}: the base entry was evicted and re-created while the layers entry survived, so every run rebakes the set until the entry is deleted. Remedy: gh cache delete ${LAYERS_CACHE_KEY}"
+            else
+              echo "::warning title=Stale layers cache entry::The cached layer-set image is labelled set '${recorded_set:-none}', digest ${recorded_digest:-<none>}, but the working tree's set is 'full', digest ${digest:-<none>}: the cache key no longer tracks every input build.sh compares, so every run rebakes the set until the key changes. Remedy: gh cache delete ${LAYERS_CACHE_KEY}, and add the missing input to the layers key."
             fi
           else
             echo "Layers cache MISS — build.sh bakes the layer-set image."

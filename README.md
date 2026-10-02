@@ -1037,12 +1037,13 @@ workflows keep cost proportional to the change:
   (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1` —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to Tier 1. The current 14-suite set is `test-claude-hook-skew.sh`,
+  routed to Tier 1. The current 16-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
-  `test-peer-review-run.sh`, `test-podman-compose-healthcheck.sh`,
-  `test-seed-marker-source.sh`, `test-sensitive-host-path.sh`,
-  `test-shadow-mounts-chown.sh`, `test-shadow-refresh-guard.sh`,
-  `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`,
+  `test-layer-sets.sh`, `test-peer-review-run.sh`,
+  `test-podman-compose-healthcheck.sh`, `test-seed-marker-source.sh`,
+  `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
+  `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
+  `test-stage-agent-template.sh`, `test-sync-codex-skills.sh`,
   `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
   A new suite is selected automatically; a
   suite-named log heading makes any non-zero exit obvious. The detect-shadows

@@ -57,6 +57,11 @@ if (Test-Path -LiteralPath $out -PathType Leaf) {
 $tmp = Join-Path $stagingDir ".agent.md.tmpl.$([System.Guid]::NewGuid().ToString('N'))"
 try {
     [System.IO.File]::WriteAllBytes($tmp, $bytes)
+    # Mode 0644 whatever the umask, as the .sh sets it: BuildKit's COPY cache key
+    # includes the file mode, so the two drivers must agree on it too.
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        [System.IO.File]::SetUnixFileMode($tmp, [System.IO.UnixFileMode]'UserRead, UserWrite, GroupRead, OtherRead')
+    }
     Move-Item -LiteralPath $tmp -Destination $out -Force
 } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }

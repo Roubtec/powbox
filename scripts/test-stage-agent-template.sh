@@ -217,6 +217,19 @@ else
 	skipped "PowerShell no-rewrite (pwsh not installed)"
 fi
 assert_eq "staged file is mode 0644" "$(stat -c %a "$(staged "$root")")" "644"
+for driver in sh ps1; do
+	if [ "$driver" = ps1 ] && ! $HAVE_PWSH; then
+		skipped "PowerShell under umask 077 (pwsh not installed)"
+		continue
+	fi
+	umask_root="$(new_root)"
+	if [ "$driver" = sh ]; then
+		(umask 077 && bash "$STAGE_SH" "" "$umask_root")
+	else
+		(umask 077 && pwsh -NoProfile -File "$STAGE_PS" "" "$umask_root")
+	fi
+	assert_eq "$driver under umask 077: staged file is still mode 0644" "$(stat -c %a "$(staged "$umask_root")")" "644"
+done
 assert_eq "no temp file left in the staging directory" "$(find "$root/.powbox-staging" -mindepth 1 | wc -l)" "1"
 printf 'changed\n' >"$root/docker/layers/demo/agent-notes.md"
 bash "$STAGE_SH" demo "$root"

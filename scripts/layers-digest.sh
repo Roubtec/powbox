@@ -57,10 +57,9 @@
 # scan, not a parser: it reads no variables and no JSON-form arguments, though
 # it compares FROM's image by its unquoted value, as Docker does, and it reads
 # a RUN's --mount= flags as BuildKit's extractBuilderFlags and parseMount do
-# (see flag_words). Only the
-# default backslash escape is supported: an `# escape=` parser directive
-# setting any other character is rejected, since it changes how Docker joins
-# lines.
+# (see flag_words). Only the default backslash escape is supported: an
+# `# escape=` parser directive setting any other character is rejected, since
+# it changes how Docker joins lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a

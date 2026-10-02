@@ -639,10 +639,13 @@ and could not self-rebuild; the post-rebuild run above was done on the trixie im
   subcommand) run on **every** host, and the nested-run/published-port/Compose-
   health-check checks **self-skip** when `/dev/net/tun` is absent — e.g. the Docker Desktop VM under the
   default `auto`, where `POWBOX_PODMAN=on` forces the full run. So an environment
-  that simply cannot do nested networking is not failed, but a genuinely broken
-  image (missing engine, dropped drop-in) **fails** the stage on any host — a
-  missing engine is a real regression, not a skip (use `POWBOX_SMOKE_SKIP_PODMAN=1`
-  / `POWBOX_PODMAN=off` to skip a legacy pre-Podman image on purpose). The full
+  that simply cannot do nested networking is not failed, but a broken engine on an
+  image that ships one (dropped drop-in, missing `compose` subcommand) **fails**
+  the stage on any host. A missing engine is caught earlier: a `command -v podman`
+  presence probe fails the smoke run, and the umbrella runs this stage only on an
+  image that has podman on its PATH, reporting it as not applicable otherwise
+  (see [smoke-tests.md](smoke-tests.md) → "Partial runs, host gates, and
+  skipping"). The full
   validation prompt above stays the deeper manual check (postgres on a named volume,
   compose + adminer, firewall-inheritance `LAN_BLOCKED`); the smoke test is the fast
   automated guard.

@@ -1090,9 +1090,12 @@ workflows keep cost proportional to the change:
   never matches the paths above). The expensive base image is cached (a `docker
   save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
   agent layers. The `full` layer-set image is cached the same way, under a key
-  that embeds the base key plus `docker/layers/full/**` and the layer-set
-  selector and digest scripts, so a change under `docker/layers/full/` alone
-  misses only the layers cache; a hit on both performs no layer-set bake. That
+  that embeds the base key plus `docker/layers/full/**`, the set's digest, the
+  layer-set selector and digest scripts, and `scripts/build-image-lib.sh`, so a
+  change under `docker/layers/full/` alone misses only the layers cache. On a
+  hit the job asks `build.sh`'s own currency test whether the loaded image is
+  current: if it is, the full pass must perform no layer-set bake, and if it is
+  not, the job warns that the cache entry is stale rather than failing. That
   tarball repeats every base layer, so the two together hold the base twice in
   the repository's Actions cache quota.
 

@@ -34,6 +34,8 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Sandbox | `bubblewrap` (`bwrap`) |
 | Containers | `podman`, `podman compose`, and a `docker` shim (→ `podman`) run **rootless** here — build images and spin up multi-service stacks (databases, Adminer, etc.) with `docker compose` / `podman compose`, no privileged daemon and no host Docker socket. Common dev images (`postgres`, `redis`, `mariadb`, `adminer`) are pre-cached in a shared read-only store, so they start without a pull. Storage is otherwise per-agent and persistent: pulled images and `podman volume`s (e.g. a database's data) survive container restarts, and each agent (Claude, Codex) keeps its own store for the same repo so concurrent agents never clobber each other. Reach a nested service from here via its **published port on `localhost`**; within a compose stack, containers reach each other by **service name**. Nested containers inherit this container's egress firewall. Uses `/dev/fuse` when the host exposes it, else the slower `vfs` driver. |
 
+Tools that an optional layer set adds to this image are listed at the end of this file, under "Additional tooling from the … layer set"; when that section is absent, the image carries only what the table above lists.
+
 ## Delegating to another agent
 
 This container ships more than one agent harness. Besides yourself, the following peer agent(s) are installed, on `PATH`, and already configured (each keeps its own persistent login and skills in this container):

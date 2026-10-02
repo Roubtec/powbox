@@ -230,6 +230,16 @@ No image was built."
 	echo "agent-skills at ${AGENT_SKILLS_COMMIT}"
 }
 
+# The agent image bakes .powbox-staging/agent.md.tmpl for both agents: the core
+# instruction template plus the selected layer set's agent-notes.md (see
+# scripts/stage-agent-template.sh). Staged before every agent bake, so it
+# always describes the set this run builds on, and never for the base or
+# layers targets, which do not read it.
+stage_agent_template() {
+	echo "Staging the agent instruction template (layer set: ${LAYERS_SET:-none})..."
+	"${ROOT_DIR}/scripts/stage-agent-template.sh" "$LAYERS_SET" "$ROOT_DIR"
+}
+
 # Values the bake steps below fill in for the agent and layers targets.
 # BASE_IMAGE is the agent's parent: the base, or the layer-set image when a set
 # is selected.
@@ -417,6 +427,7 @@ bake_agent() {
 case "$TARGET" in
 all)
 	fetch_agent_skills
+	stage_agent_template
 	run_bake "$PULL" "$NO_CACHE" base
 	if [ -n "$LAYERS_SET" ]; then
 		bake_layers "$NO_CACHE"
@@ -425,6 +436,7 @@ all)
 	;;
 agent)
 	fetch_agent_skills
+	stage_agent_template
 	prepare_base
 	if [ -n "$LAYERS_SET" ]; then
 		ensure_layers_image

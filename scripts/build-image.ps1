@@ -158,6 +158,18 @@ No image was built.
     Write-Host "agent-skills at $($script:AgentSkillsCommit)"
   }
 
+  # The agent image bakes .powbox-staging/agent.md.tmpl for both agents: the
+  # core instruction template plus the selected layer set's agent-notes.md (see
+  # scripts/stage-agent-template.ps1). Staged before every agent bake, so it
+  # always describes the set this run builds on, and never for the base or
+  # layers targets, which do not read it.
+  function Invoke-AgentTemplateStaging {
+    $shownSet = if ($script:LayersSet) { $script:LayersSet } else { "none" }
+    Write-Host "Staging the agent instruction template (layer set: $shownSet)..."
+    & (Join-Path $rootDir "scripts/stage-agent-template.ps1") $script:LayersSet $rootDir
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+  }
+
   # Values the bake steps below fill in for the agent and layers targets.
   # BaseImage is the agent's parent: the base, or the layer-set image when a set
   # is selected.
@@ -346,12 +358,14 @@ No image was built.
   switch ($Target) {
     "all" {
       Fetch-AgentSkills
+      Invoke-AgentTemplateStaging
       Invoke-Bake -Targets @("base") -WithPull:$Pull -WithNoCache:$NoCache
       if ($script:LayersSet) { Invoke-LayersBake -WithNoCache:$NoCache }
       Invoke-AgentBake -WithNoCache:$NoCache
     }
     "agent" {
       Fetch-AgentSkills
+      Invoke-AgentTemplateStaging
       Initialize-BaseImage
       if ($script:LayersSet) { Assert-LayersImage }
       Invoke-AgentBake -WithNoCache:$NoCache

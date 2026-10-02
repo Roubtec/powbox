@@ -1220,10 +1220,13 @@ make_build_root() {
 		cp "$ROOT_DIR/scripts/$f.sh" "$ROOT_DIR/scripts/$f.ps1" "$br/scripts/"
 	done
 	cp "$ROOT_DIR/scripts/base-source-files.txt" "$br/scripts/"
+	cp "$ROOT_DIR/scripts/stage-agent-template.sh" "$ROOT_DIR/scripts/stage-agent-template.ps1" "$br/scripts/"
+	mkdir -p "$br/docker/shared"
+	cp "$ROOT_DIR/docker/shared/container-agent.md.tmpl" "$br/docker/shared/"
 	cp "$ROOT_DIR/docker/base/Dockerfile" "$br/docker/base/"
 	cp -r "$ROOT_DIR/docker/layers/full" "$br/docker/layers/"
 	: >"$br/docker/layers/custom/.gitkeep"
-	printf '%s\n' .agent-skills-src/ .powbox-layers 'docker/layers/custom/*' '!docker/layers/custom/.gitkeep' >"$br/.gitignore"
+	printf '%s\n' .agent-skills-src/ .powbox-staging/ .powbox-layers 'docker/layers/custom/*' '!docker/layers/custom/.gitkeep' >"$br/.gitignore"
 	git -C "$br" init -q -b main
 	git -C "$br" add -A
 	fixed_git -C "$br" commit -q -m c0
@@ -1294,6 +1297,8 @@ run_sequence() {
 	assert_contains "[$lang] lean all: agent on the base" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-base:latest"
 	assert_eq "[$lang] lean all: base.commit file matches the label" "$(cat "$st/images/powbox-agent_latest/base.commit")" "$(label "$st" "$AGENT" powbox.commit.base)"
 	assert_eq "[$lang] lean all: no layer-set label on the agent" "$(label "$st" "$AGENT" powbox.layers.set)" ""
+	assert_eq "[$lang] lean all: staged instructions are the core template" \
+		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
 
 	printf 'full\n' >"$br/.powbox-layers"
 	fixed_git -C "$br" commit -q --allow-empty -m c1
@@ -1324,8 +1329,10 @@ run_sequence() {
 	assert_eq "[$lang] edited set: new digest on the agent" "$(label "$st" "$AGENT" powbox.layers.digest)" "$(bash "$DIG_SH" "$br/docker/layers/full")"
 	assert_eq "[$lang] edited set: layers commit moved" "$(label "$st" "$AGENT" powbox.commit.layers)" "$c3"
 
+	rm "$br/.powbox-staging/agent.md.tmpl"
 	build "$lang" "$st" base >/dev/null
 	assert_eq "[$lang] base alone: base only" "$(bakes "$st")" "base"
+	assert_eq "[$lang] base alone: no instructions staged" "$([ -e "$br/.powbox-staging/agent.md.tmpl" ] && echo staged)" ""
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] agent after a base rebuild: layer-set image rebaked" "$(bakes "$st")" "layers,agent"
 	assert_eq "[$lang] agent after a base rebuild: layers image on the new base" "$(label "$st" "$LAYERS" powbox.layers.base.id)" "$(cat "$st/images/powbox-agent-base_latest/id")"
@@ -1344,8 +1351,10 @@ run_sequence() {
 	assert_eq "[$lang] agent --no-cache: layer-set step stays cached" "$(bakes "$st")" "agent no-cache"
 	build "$lang" "$st" all --no-cache "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] all --no-cache: covers all three" "$(bakes "$st")" "base no-cache,layers no-cache,agent no-cache"
+	rm "$br/.powbox-staging/agent.md.tmpl"
 	build "$lang" "$st" layers >/dev/null
 	assert_eq "[$lang] layers: always baked" "$(bakes "$st")" "layers"
+	assert_eq "[$lang] layers: no instructions staged" "$([ -e "$br/.powbox-staging/agent.md.tmpl" ] && echo staged)" ""
 
 	printf 'Bad Name\n' >"$br/.powbox-layers"
 	rc=0
@@ -1363,10 +1372,13 @@ run_sequence() {
 	assert_contains "[$lang] set breaking the contract: names the line" "$out" "docker/layers/custom/Dockerfile:"
 	assert_eq "[$lang] set breaking the contract: nothing baked" "$(bakes "$st")" ""
 	cp "$br/docker/layers/full/Dockerfile" "$br/docker/layers/custom/"
+	printf 'Custom tool notes.\r\n' >"$br/docker/layers/custom/agent-notes.md"
 	assert_eq "[$lang] a copied custom set leaves the tree clean" "$(git -C "$br" status --porcelain)" ""
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] custom set: layers and agent baked" "$(bakes "$st")" "layers,agent"
 	assert_eq "[$lang] custom set: agent carries it" "$(label "$st" "$AGENT" powbox.layers.set)" "custom"
+	assert_eq "[$lang] custom set: its notes are staged under the heading" \
+		"$(tail -n 3 "$br/.powbox-staging/agent.md.tmpl")" $'## Additional tooling from the `custom` layer set\n\nCustom tool notes.'
 
 	# A set whose final stage escapes the Dockerfile scan but starts from another
 	# image: the bake still labels it with the base, so its layers decide.
@@ -1421,6 +1433,8 @@ run_sequence() {
 	build "$lang" "$st" agent "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] back to lean: agent only" "$(bakes "$st")" "agent"
 	assert_contains "[$lang] back to lean: agent on the base" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-base:latest"
+	assert_eq "[$lang] back to lean: staged instructions are the core template again" \
+		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
 	assert_eq "[$lang] back to lean: no layer-set label" "$(label "$st" "$AGENT" powbox.layers.set)" ""
 }
 

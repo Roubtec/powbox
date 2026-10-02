@@ -1350,6 +1350,17 @@ expect() {
 out_has() { grep -qF -- "$1" "$E2E_OUT"; }
 out_lacks() { ! grep -qF -- "$1" "$E2E_OUT"; }
 log_lacks() { ! grep -qF -- "$1" "$E2E_LOG"; }
+# in_na_block <entry>: the entry is listed exactly once, inside the
+# not-applicable block, i.e. after its header and before any PARTIAL header.
+in_na_block() {
+	local entry_line na_line partial_line
+	[ "$(grep -cxF -- "  - $1" "$E2E_OUT")" -eq 1 ] || return 1
+	entry_line="$(grep -nxF -- "  - $1" "$E2E_OUT" | cut -d: -f1)"
+	na_line="$(grep -n "^Not applicable to this image" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	partial_line="$(grep -n "SKIPPED OR PARTIAL" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	[ -n "$na_line" ] && [ "$entry_line" -gt "$na_line" ] || return 1
+	[ -z "$partial_line" ] || [ "$entry_line" -lt "$partial_line" ]
+}
 rc_is() { [ "$E2E_RC" -eq "$1" ]; }
 rc_fail() { [ "$E2E_RC" -ne 0 ]; }
 runs_are() { [ "$(runs_count)" -eq "$1" ]; }
@@ -1393,8 +1404,8 @@ for drv in "${e2e_drivers[@]}"; do
 		e2e "$drv" "$fx" "lean-bare-$sk"
 		w=" (explicit skips $([ "$sk" = 1 ] && echo set || echo unset))"
 		expect "e2e$t tools absent$w: run passes" rc_is 0
-		expect "e2e$t tools absent$w: Stage 2 listed as not applicable" out_has "  - $NA2"
-		expect "e2e$t tools absent$w: Stage 3 listed as not applicable" out_has "  - $NA3"
+		expect "e2e$t tools absent$w: Stage 2 listed once, in the not-applicable block" in_na_block "$NA2"
+		expect "e2e$t tools absent$w: Stage 3 listed once, in the not-applicable block" in_na_block "$NA3"
 		expect "e2e$t tools absent$w: Stage 2 is not recorded as skipped" out_lacks "  - Stage 2: pg-dev-up functional ($skip_prefix"
 		expect "e2e$t tools absent$w: Stage 3 is not recorded as skipped" out_lacks "  - Stage 3: rootless Podman engine ($skip_prefix"
 		expect "e2e$t tools absent$w: neither stage ran" log_lacks "POSTGRES_USER"

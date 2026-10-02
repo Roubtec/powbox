@@ -986,7 +986,9 @@ done
 cp "$ROOT_DIR/scripts/base-source-files.txt" "$CU_ROOT/scripts/"
 cp "$ROOT_DIR/docker/base/Dockerfile" "$CU_ROOT/docker/base/"
 cp -r "$ROOT_DIR/docker/layers/full" "$CU_ROOT/docker/layers/"
-cp "$ROOT_DIR/docker/layers/full/Dockerfile" "$CU_ROOT/docker/layers/custom/"
+# custom starts as a whole copy of full (README's recipe), so the two sets share
+# a digest and the "another set selected" case differs by name alone.
+cp -r "$ROOT_DIR/docker/layers/full/." "$CU_ROOT/docker/layers/custom/"
 FULL_DIGEST="$(bash "$DIG_SH" "$CU_ROOT/docker/layers/full")"
 UPSTREAM=sha256:9999999999999999999999999999999999999999999999999999999999999999
 

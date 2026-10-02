@@ -99,10 +99,11 @@ RUN rm -rf /home/node/.claude/downloads
 # agent.md.tmpl is not docker/shared/container-agent.md.tmpl itself but the
 # gitignored .powbox-staging/agent.md.tmpl, which scripts/build-image.{sh,ps1}
 # compose from it plus the selected layer set's agent-notes.md
-# (scripts/stage-agent-template.{sh,ps1}). These COPYs sit below the
-# build-epoch RUN, so changed notes rerun it and containers re-render the
-# instruction file on their next start. A standalone `docker build` without
-# the staging step fails here, like the .agent-skills-src COPY below.
+# (scripts/stage-agent-template.{sh,ps1}). These COPYs come before the
+# build-epoch RUN further down (an earlier layer, under it in the stack), so
+# changed notes rerun that RUN and containers re-render the instruction file
+# on their next start. A standalone `docker build` without the staging step
+# fails here, like the .agent-skills-src COPY below.
 COPY --chown=node:node .powbox-staging/agent.md.tmpl /home/node/.agent-container/claude/agent.md.tmpl
 COPY --chown=node:node docker/claude/agent-container/ /home/node/.agent-container/claude/
 COPY --chown=node:node .powbox-staging/agent.md.tmpl /home/node/.agent-container/codex/agent.md.tmpl

@@ -28,11 +28,14 @@ set -euo pipefail
 # devices, `off` skips the whole stage, `auto` (default) attaches what the host
 # exposes.
 #
-# A missing podman/podman-compose/etc. IS one of the regressions this stage exists
-# to catch, so it FAILS rather than skipping: a current image must ship the engine.
-# To run the smoke test against a legacy pre-Podman image on purpose, skip the
-# whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1 (or POWBOX_PODMAN=off)
-# rather than let a silent pass hide a real regression.
+# Engine presence is not this stage's job in the umbrella run: a `command -v
+# podman` presence probe (Stage 1's core list, or a layer set's Stage 1b) fails an
+# image that lost the engine, and commands/smoke-test.sh runs this stage only on
+# an image that has podman on its PATH, reporting it as not applicable otherwise.
+# The in-container `command -v podman` check below stays because this script can
+# be run directly, where nothing else asserts presence. A broken engine on an
+# image that has one - a missing podman-compose, a dropped drop-in, a `podman
+# info` that fails - still FAILS this stage rather than skipping, on any host.
 
 IMAGE="${1:-powbox-agent:latest}"
 
@@ -97,8 +100,8 @@ set -eu
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Engine presence is itself one of the regressions this stage exists to catch, so a
-# missing podman FAILS rather than skipping — a current image must ship it.
+# The umbrella runs this stage only on an image with podman on its PATH; this check
+# covers a direct run of the script, where a missing engine must still FAIL.
 command -v podman >/dev/null 2>&1 || fail "podman is not installed in this image"
 
 # Entrypoint prep we bypass with --entrypoint: mirror the two things

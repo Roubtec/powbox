@@ -28,10 +28,14 @@ param(
 # devices, `off` skips the whole stage, `auto` (default) attaches what the host
 # exposes.
 #
-# A missing podman/podman-compose/etc. IS one of the regressions this stage exists
-# to catch, so it FAILS rather than skipping: a current image must ship the engine.
-# To run the smoke test against a legacy pre-Podman image on purpose, skip the
-# whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1 (or POWBOX_PODMAN=off).
+# Engine presence is not this stage's job in the umbrella run: a `command -v
+# podman` presence probe (Stage 1's core list, or a layer set's Stage 1b) fails an
+# image that lost the engine, and commands/smoke-test.ps1 runs this stage only on
+# an image that has podman on its PATH, reporting it as not applicable otherwise.
+# The in-container `command -v podman` check below stays because this script can
+# be run directly, where nothing else asserts presence. A broken engine on an
+# image that has one - a missing podman-compose, a dropped drop-in, a `podman
+# info` that fails - still FAILS this stage rather than skipping, on any host.
 
 $ErrorActionPreference = "Stop"
 
@@ -80,9 +84,10 @@ Write-Host "Podman smoke test against $Image - $tunNote, $fuseNote."
 # The in-container probe, built with explicit LF joins (single-quoted lines so
 # PowerShell leaves the shell $vars alone; a here-string would inherit this file's
 # CRLF endings and the stray ^M would break /bin/sh -lc). A non-zero exit is a
-# failure: there is no skip sentinel - a missing engine is a real regression (use
-# POWBOX_SMOKE_SKIP_PODMAN=1 to skip the stage for a legacy image on purpose). The
-# lines must contain no single quotes.
+# failure: there is no skip sentinel. Its `command -v podman` check covers a direct
+# run of this script, where a missing engine must still fail; the umbrella runs
+# this stage only on an image with podman on its PATH. The lines must contain no
+# single quotes.
 $script = @(
   'set -eu'
   'fail() { echo "FAIL: $*" >&2; exit 1; }'

@@ -1059,20 +1059,28 @@ workflows keep cost proportional to the change:
   using the baked server binaries. Deliberate Stage 0 repeats target baked artifacts; Tier 0
   targets `/repo` source, so those are two-target checks rather than duplicate runs.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
-  builds the agent image and runs `./commands/smoke-test.sh` under
+  builds and smokes **both supported images** in two sequential passes, lean
+  first — the lean image (the agent directly on the base, no `.powbox-layers`)
+  and then lean + the committed `full` layer set (`full` written into the
+  gitignored `.powbox-layers`, then `./build.sh agent`) — so neither can rot
+  while the other stays green. Each pass asserts the built agent image's
+  `powbox.layers.set` label (none for lean, `full` for the second pass), so a
+  pass that built on the wrong parent fails rather than smoking the same image
+  twice. Each pass runs `./commands/smoke-test.sh` under
   `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error instead of a
   run whose image-gated checks self-skip into a false green. That flag reaches
   only the image-dependent skips — the hosted runner still exposes no
   `/dev/net/tun`, so Stage 3's nested half self-skips there and a green Tier 1 is
   a partial smoke (see "What CI covers vs. what stays VPS-only" below). A
-  second, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
-  directly, because the Bash umbrella never invokes the PowerShell mirror and
-  this runner is the only automated configuration where its Stage 6
-  mountpoint-ownership assertions have teeth (see
+  final, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
+  once, against the full image, because the Bash umbrella never invokes the
+  PowerShell mirror and this runner is the only automated configuration where
+  its Stage 6 mountpoint-ownership assertions have teeth (see
   [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). It
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
-  `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image.*` /
-  `scripts/smoke-test*` / `commands/smoke-test.*` entrypoints and the four
+  `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image*` /
+  `scripts/layers-*` / `scripts/smoke-test*` / `commands/smoke-test.*`
+  entrypoints and the four
   `scripts/test-*.sh` suites routed to Tier 1 above; skill/docs PRs run
   Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
   only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
@@ -1081,7 +1089,12 @@ workflows keep cost proportional to the change:
   is not called off (there the gate is belt-and-suspenders anyway: a docs PR
   never matches the paths above). The expensive base image is cached (a `docker
   save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
-  agent layers.
+  agent layers. The `full` layer-set image is cached the same way, under a key
+  that embeds the base key plus `docker/layers/full/**` and the layer-set
+  selector and digest scripts, so a change under `docker/layers/full/` alone
+  misses only the layers cache; a hit on both performs no layer-set bake. That
+  tarball repeats every base layer, so the two together hold the base twice in
+  the repository's Actions cache quota.
 
 ### What CI covers vs. what stays VPS-only
 

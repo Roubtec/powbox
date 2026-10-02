@@ -10,6 +10,16 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost
 # a human a VPS stand-up.
 #
+# Two images are supported, and an image no CI run builds rots: the LEAN image a
+# new user gets (agent directly on the base, no .powbox-layers) and lean + the
+# committed `full` layer set (base -> powbox-agent-layers -> agent), which the
+# maintainer runs. So the job builds and smokes both, in two sequential passes,
+# lean first: powbox-agent:latest is one tag on one parent at a time, so the
+# passes cannot share an agent image, and the agent install layers are built
+# twice because their parent differs. Each pass asserts the
+# powbox.layers.set label of the agent image it built, so a pass that silently
+# built on the wrong parent fails instead of smoking the same image twice.
+#
 # Path-gated: across recent history most PRs are skill/docs/launcher edits, so
 # this runs ONLY when an image-affecting file changes. Tier 0
 # (.github/workflows/native-linux-ci.yml) covers the rest — every PR EXCEPT one
@@ -77,7 +87,12 @@ on:
       - 'docker-bake.hcl'
       - 'build.*'
       - 'scripts/launch-agent.*'
-      - 'scripts/build-image.*'
+      # build-image* also matches build-image-lib.*, the sourced helpers that
+      # decide whether the layer-set image is current.
+      - 'scripts/build-image*'
+      # The layer-set selector and digest decide which set is built and the
+      # labels its image is stamped with.
+      - 'scripts/layers-*'
       - 'scripts/smoke-test*'
       # Source suites routed out of Tier 0 because they need a built/staged
       # helper, the image's /workspace contract, or PostgreSQL server binaries.
@@ -114,6 +129,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # Both cache keys are computed here, once, because the layers key must
+      # embed the base key (see "Restore layers image cache") and actions/cache
+      # exposes no output carrying the key it was given. Spelling the base
+      # hashFiles list out twice would let the two drift apart.
+      #
+      # The base key is conservatively keyed on every input baked into the base
+      # image: any change under docker/shared/**, to
+      # PSScriptAnalyzerSettings.psd1 (also COPY'd into the base), or to
+      # .dockerignore (which filters the build context feeding every base COPY,
+      # so a change there can alter or break a base-only COPY input) busts the
+      # key even for files used only by the agent layer (a harmless extra base
+      # rebuild). It covers every file scripts/base-source-files.txt lists; the
+      # layer-set selector and digest are deliberately absent, since the base
+      # build never reads them.
+      - name: Compute image cache keys
+        id: keys
+        env:
+          BASE_INPUTS: ${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
+          LAYERS_INPUTS: ${{ hashFiles('docker/layers/full/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh') }}
+        run: |
+          base="powbox-base-${RUNNER_OS}-${BASE_INPUTS}"
+          echo "base=${base}" >>"$GITHUB_OUTPUT"
+          echo "layers=powbox-layers-full-${RUNNER_OS}-${BASE_INPUTS}-${LAYERS_INPUTS}" >>"$GITHUB_OUTPUT"
+
       # Cache-awareness, footprint-respecting edition. The cheap, robust win is
       # to cache the EXPENSIVE base image (node:24-trixie-slim + ~12 apt groups,
       # ~13 min cold) as a docker-save tarball keyed on its inputs. On a hit we
@@ -137,21 +176,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/powbox-base-image.tar
-          # Conservatively keyed on every input baked into the base image: any
-          # change under docker/shared/**, to PSScriptAnalyzerSettings.psd1 (also
-          # COPY'd into the base), or to .dockerignore (which filters the build
-          # context feeding every base COPY, so a change there can alter or break
-          # a base-only COPY input) busts the key even for files used only by the
-          # agent layer (a harmless extra base rebuild). No restore-keys on
-          # purpose — a prefix fallback could load a STALE base that build.sh
-          # would reuse without rebuilding.
-          key: powbox-base-${{ runner.os }}-${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
+          # No restore-keys on purpose — a prefix fallback could load a STALE
+          # base that build.sh would reuse without rebuilding.
+          key: ${{ steps.keys.outputs.base }}
 
-      - name: Build image (base + agent)
+      # Lean pass. No .powbox-layers exists in a fresh checkout (it is
+      # gitignored), so the agent is built directly on the base. A loaded
+      # tarball is deleted once loaded: on a hit actions/cache saves nothing, and
+      # the job holds two of them (the layers tarball repeats every base layer).
+      - name: Build lean image (base + agent, no layer set)
+        shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ steps.basecache.outputs.cache-hit }}" = "true" ]; then
             echo "Base cache HIT — loading powbox-agent-base:latest from tarball, rebuilding agent layers only."
             docker load -i /tmp/powbox-base-image.tar
+            rm -f /tmp/powbox-base-image.tar
             # ensure_base_image in build.sh sees the loaded base and skips the
             # base rebuild, so only the agent layers build here.
             ./build.sh agent
@@ -161,7 +201,12 @@ jobs:
             echo "Saving base image tarball for the next run."
             docker save -o /tmp/powbox-base-image.tar powbox-agent-base:latest
           fi
-          docker image inspect powbox-agent:latest >/dev/null
+          set_label="$(docker image inspect powbox-agent:latest --format '{{json .Config.Labels}}' | jq -r '."powbox.layers.set" // empty')"
+          if [ -n "$set_label" ]; then
+            echo "FAIL: the lean pass built powbox-agent:latest on layer set '${set_label}', not directly on the base." >&2
+            exit 1
+          fi
+          echo "Lean pass: powbox-agent:latest carries no powbox.layers.set label."
 
       # POWBOX_SMOKE_REQUIRE_IMAGE=1 turns a missing image into a hard error and
       # makes the IMAGE-gated stages fail instead of self-skipping into a false
@@ -173,14 +218,102 @@ jobs:
       # a PARTIAL smoke, so read the run's skip banner rather than the job status
       # alone. The pg-dev-up and self-hosted stages run in full; task 005's
       # dir-mount stage has since merged as Stage 5 and runs here too, subject to
-      # its own host gates.
-      - name: Smoke test (image required, no image-gated self-skip)
+      # its own host gates. The full pass below runs the same umbrella with the
+      # same flag.
+      - name: Smoke test - lean image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
         run: ./commands/smoke-test.sh
 
-      # The step above runs the BASH umbrella, which never invokes the PowerShell
-      # driver — so before this step nothing in CI executed
+      # Full pass. Selecting the set is a gitignored file, so the tree stays
+      # clean and the stamped commit does not gain -dirty; the check-ignore
+      # guard fails the step if that ever stops being true.
+      - name: Select the full layer set
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'full\n' >.powbox-layers
+          git check-ignore -q .powbox-layers || {
+            echo "FAIL: .powbox-layers is not gitignored, so selecting a set would stamp the full image -dirty." >&2
+            exit 1
+          }
+          [ "$(./scripts/layers-select.sh)" = full ]
+
+      # The layer-set image cached like the base, and for the same reasons. The
+      # key embeds the base key, so a base change re-keys the layers too, plus
+      # the set's own directory and the two scripts that decide the labels the
+      # tarball was stamped with: a changed digest algorithm against an old,
+      # immutable entry would otherwise rebake the set on every run while the
+      # entry stayed stale. No restore-keys, as for the base. Only the committed
+      # `full` set is cached; docker/layers/custom/ is never built here.
+      - name: Restore layers image cache
+        id: layerscache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/powbox-layers-image.tar
+          key: ${{ steps.keys.outputs.layers }}
+
+      # Stays on the `agent` target: `all` always bakes the layer-set image, and
+      # on a runner whose BuildKit cache is empty that reinstalls the whole set
+      # even with both tarballs loaded. `agent` skips the bake when the loaded
+      # image's powbox.layers.{set,digest,base.id} labels match the working tree
+      # and the loaded base, so a hit on both caches must bake nothing; the step
+      # fails if it does, because that means the currency test does not survive
+      # docker save / docker load and scripts/build-image*.sh needs fixing. The
+      # one legitimate rebake on a hit is a base entry evicted and re-created
+      # while the layers entry survived under the same key: the loaded image then
+      # records a different base ID. Entries are immutable, so every run would
+      # rebake until the key changes; the step warns with the remedy instead.
+      - name: Build full image (base + layers + agent, layer set full)
+        shell: bash
+        env:
+          LAYERS_CACHE_KEY: ${{ steps.keys.outputs.layers }}
+        run: |
+          set -euo pipefail
+          expect_reuse=false
+          if [ "${{ steps.layerscache.outputs.cache-hit }}" = "true" ]; then
+            echo "Layers cache HIT — loading powbox-agent-layers:latest from tarball."
+            docker load -i /tmp/powbox-layers-image.tar
+            rm -f /tmp/powbox-layers-image.tar
+            loaded_id="$(docker image inspect powbox-agent-layers:latest --format '{{.Id}}')"
+            recorded_base="$(docker image inspect powbox-agent-layers:latest --format '{{json .Config.Labels}}' | jq -r '."powbox.layers.base.id" // empty')"
+            base_id="$(docker image inspect powbox-agent-base:latest --format '{{.Id}}')"
+            if [ "$recorded_base" = "$base_id" ]; then
+              expect_reuse=true
+            else
+              echo "::warning title=Stale layers cache entry::The cached layer-set image records base ${recorded_base:-<none>}, but the loaded base is ${base_id}: the base entry was evicted and re-created while the layers entry survived, so every run rebakes the set until the entry is deleted. Remedy: gh cache delete ${LAYERS_CACHE_KEY}"
+            fi
+          else
+            echo "Layers cache MISS — build.sh bakes the layer-set image."
+          fi
+          ./build.sh agent
+          if [ "$expect_reuse" = true ] &&
+            [ "$(docker image inspect powbox-agent-layers:latest --format '{{.Id}}')" != "$loaded_id" ]; then
+            echo "FAIL: the cached layer-set image matched the loaded base, yet build.sh baked the set again: the currency test does not survive docker save / docker load. Fix it in scripts/build-image*.sh." >&2
+            exit 1
+          fi
+          if [ "${{ steps.layerscache.outputs.cache-hit }}" != "true" ]; then
+            echo "Saving layers image tarball for the next run."
+            docker save -o /tmp/powbox-layers-image.tar powbox-agent-layers:latest
+          fi
+          set_label="$(docker image inspect powbox-agent:latest --format '{{json .Config.Labels}}' | jq -r '."powbox.layers.set" // empty')"
+          if [ "$set_label" != full ]; then
+            echo "FAIL: the full pass built powbox-agent:latest on layer set '${set_label:-none}', not 'full'." >&2
+            exit 1
+          fi
+          echo "Full pass: powbox-agent:latest carries powbox.layers.set=full."
+
+      - name: Smoke test - full image (image required, no image-gated self-skip)
+        env:
+          POWBOX_SMOKE_REQUIRE_IMAGE: '1'
+        run: ./commands/smoke-test.sh
+
+      # Runs once, against the full image, after both passes: it is a
+      # launcher-level check, and a second run on the lean image would add no
+      # coverage.
+      #
+      # The smoke steps above run the BASH umbrella, which never invokes the
+      # PowerShell driver — so before this step nothing in CI executed
       # scripts/smoke-test-worktree-metadata.ps1 at all. That is the same false
       # green one level up from the one task 053a closed inside the driver: the
       # .ps1 is not a Windows-only file (commands/smoke-test.ps1 runs anywhere

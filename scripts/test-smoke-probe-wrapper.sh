@@ -939,11 +939,14 @@ mkdir -p "$FAKE2_DIR"
 cat >"$FAKE2_DIR/docker" <<'SHIM'
 #!/bin/sh
 # Second fake docker. Logs every call; answers `image inspect --format` label
-# queries from $FAKE_LABELS/<label>; answers the capability check (the
-# `smoke-gate <tool>` positional pair) from $FAKE_TOOLS; records each probe run
-# (the `-lc <runner> smoke-probes <probe>...` shape) NUL-separated as
-# $FAKE_RUNS/<n>, replaying run $FAKE_EXEC_RUN with the host /bin/sh; and
-# exits 0 for every other run, which stands in for Stage 0 and Stage 2.
+# queries from $FAKE_LABELS/<label>, refusing (exit 1) a template that holds a
+# double quote, since Windows PowerShell 5.1 strips such quotes from a native
+# argument and real docker then sees an invalid template; answers the
+# capability check (the `smoke-gate <tool>` positional pair) from $FAKE_TOOLS;
+# records each probe run (the `-lc <runner> smoke-probes <probe>...` shape)
+# NUL-separated as $FAKE_RUNS/<n>, replaying run $FAKE_EXEC_RUN with the host
+# /bin/sh; and exits 0 for every other run, which stands in for Stage 0 and
+# Stage 2.
 printf '%s\n' "$*" >>"${FAKE_DOCKER_LOG:-/dev/null}"
 case "$1" in
 image)
@@ -954,7 +957,12 @@ image)
 		prev="$a"
 	done
 	[ -n "$fmt" ] || exit 0
-	label="$(printf '%s' "$fmt" | sed -n 's/.*Labels "\([^"]*\)".*/\1/p')"
+	case "$fmt" in *'"'*)
+		echo "template parsing error (a double quote reaches docker stripped under Windows PowerShell 5.1): $fmt" >&2
+		exit 1
+		;;
+	esac
+	label="$(printf '%s' "$fmt" | sed -n 's/.*Labels `\([^`]*\)`.*/\1/p')"
 	if [ -n "$label" ] && [ -f "$FAKE_LABELS/$label" ]; then
 		cat "$FAKE_LABELS/$label"
 		echo
@@ -1133,6 +1141,87 @@ if [ "$rc_ordered" -eq 0 ] && [ "$rc_reversed" -ne 0 ] && grep -q "SMOKE PROBE 1
 	ok "probes run in file order: a pair relying on an earlier probe's file passes, its reverse fails at probe 1"
 else
 	bad "file order was not preserved (ordered rc=$rc_ordered, reversed rc=$rc_reversed)" "$(cat "$TMP/m-ordered.out" "$TMP/m-reversed.out")"
+fi
+
+printf 'M2. the image-label reader (and its .sh/.ps1 parity)\n'
+# Both drivers must send docker the same quote-free template - the fake refuses
+# a double quote, as Windows PowerShell 5.1 would leave docker an invalid one -
+# and read the same value back: a missing label and a literal `<no value>` read
+# as empty, an empty label reads as empty, and anything else is kept except
+# trailing line breaks. An image that cannot be inspected is an error in both.
+LBL="$TMP/labels"
+mkdir -p "$LBL"
+printf '' >"$LBL/powbox.empty"
+printf '<no value>' >"$LBL/powbox.novalue"
+printf '  full  ' >"$LBL/powbox.spaced"
+printf 'a\nb\n\n' >"$LBL/powbox.multiline"
+# label_sh <label>: prints [value], or FAIL.
+label_sh() {
+	(
+		# shellcheck source=scripts/smoke-test-lib.sh
+		. "$LIB_SH"
+		v="$(PATH="$FAKE2_DIR:$PATH" smoke_image_label fake-image:latest "$1")" || {
+			echo FAIL
+			exit 0
+		}
+		printf '[%s]\n' "$v"
+	)
+}
+cat >"$TMP/label.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+. "$LIB_PS1"
+try { [Console]::Out.WriteLine('[' + (Get-SmokeImageLabel -Image fake-image:latest -Label \$args[0]) + ']') }
+catch { [Console]::Out.WriteLine('FAIL') }
+PS
+label_ps() {
+	PATH="$FAKE2_DIR:$PATH" pwsh -NoProfile -File "$TMP/label.ps1" "$1" 2>/dev/null
+}
+# label | want
+label_cases=(
+	"powbox.absent|[]"
+	"powbox.empty|[]"
+	"powbox.novalue|[]"
+	"powbox.spaced|[  full  ]"
+	"powbox.multiline|[a
+b]"
+)
+for lc in "${label_cases[@]}"; do
+	l_name="${lc%%|*}" l_want="${lc#*|}"
+	: >"$TMP/label-sh.log"
+	got="$(FAKE_LABELS="$LBL" FAKE_DOCKER_LOG="$TMP/label-sh.log" label_sh "$l_name")"
+	if [ "$got" = "$l_want" ]; then
+		ok "label: $l_name reads as $(printf '%s' "$l_want" | tr '\n' '|')"
+	else
+		bad "label: $l_name read as $(printf '%s' "$got" | tr '\n' '|'), want $(printf '%s' "$l_want" | tr '\n' '|')"
+	fi
+	if [ "$have_pwsh" = 1 ]; then
+		: >"$TMP/label-ps.log"
+		got="$(FAKE_LABELS="$LBL" FAKE_DOCKER_LOG="$TMP/label-ps.log" label_ps "$l_name")"
+		if [ "$got" = "$l_want" ]; then
+			ok "label (.ps1): $l_name reads the same"
+		else
+			bad "label (.ps1): $l_name read as $(printf '%s' "$got" | tr '\n' '|'), want $(printf '%s' "$l_want" | tr '\n' '|')"
+		fi
+		if cmp -s "$TMP/label-sh.log" "$TMP/label-ps.log"; then
+			ok "label (.ps1): $l_name is queried with the .sh's exact docker arguments"
+		else
+			bad "label (.ps1): $l_name is queried differently" "sh: $(cat "$TMP/label-sh.log")" "ps: $(cat "$TMP/label-ps.log")"
+		fi
+	fi
+done
+got="$(FAKE_IMAGE_ABSENT=1 label_sh powbox.layers.set)"
+if [ "$got" = FAIL ]; then
+	ok "label: an image that cannot be inspected is an error"
+else
+	bad "label: an uninspectable image read as '$got'"
+fi
+if [ "$have_pwsh" = 1 ]; then
+	got="$(FAKE_IMAGE_ABSENT=1 label_ps powbox.layers.set)"
+	if [ "$got" = FAIL ]; then
+		ok "label (.ps1): an image that cannot be inspected is an error too"
+	else
+		bad "label (.ps1): an uninspectable image read as '$got'"
+	fi
 fi
 
 printf 'N. the capability gate decides run / skip / not applicable\n'

@@ -22,10 +22,13 @@ SMOKE_LAYER_SET_RE='^[a-z0-9][a-z0-9._-]*$'
 
 # smoke_image_label <image> <label>: print the label's value, empty when the
 # image does not carry it. Returns 1 when the image cannot be inspected, so an
-# unreadable image is never mistaken for an unlabelled (lean) one.
+# unreadable image is never mistaken for an unlabelled (lean) one. The label
+# name is a Go raw string (`...`) so the template matches the .ps1's byte for
+# byte; the .ps1 cannot use "..." (see Get-SmokeImageLabel there).
 smoke_image_label() {
 	local v
-	v="$(docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}" 2>/dev/null)" || return 1
+	[[ $2 =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+	v="$(docker image inspect "$1" --format "{{ index .Config.Labels \`$2\` }}" 2>/dev/null)" || return 1
 	[ "$v" = "<no value>" ] && v=""
 	printf '%s' "$v"
 }

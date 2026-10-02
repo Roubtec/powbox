@@ -24,9 +24,15 @@ $script:SmokeLayerSetPattern = '^[a-z0-9][a-z0-9._-]*\z'
 # image cannot be inspected, so an unreadable image is never mistaken for an
 # unlabelled (lean) one. Only line breaks are trimmed, as the .sh's command
 # substitution does, so a label the .sh would reject is rejected here too.
+#
+# The label name goes into the template as a Go raw string (`...`), not a
+# "..." one: Windows PowerShell 5.1 strips double quotes embedded in a native
+# argument, which would leave docker an invalid template and fail every run.
+# The single-quoted PowerShell strings keep the backticks literal.
 function Get-SmokeImageLabel {
   param([string]$Image, [string]$Label)
-  $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
+  if ($Label -cnotmatch '^[A-Za-z0-9._-]+\z') { throw "invalid label name '$Label'" }
+  $v = docker image inspect $Image --format ('{{ index .Config.Labels `' + $Label + '` }}') 2>$null
   if ($LASTEXITCODE -ne 0) { throw "could not inspect image '$Image'" }
   $v = (@($v) -join "`n").TrimEnd("`r", "`n")
   if ($v -eq '<no value>') { $v = '' }

@@ -55,7 +55,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 - `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 10, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
-- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `custom/` is yours and gitignored apart from its `.gitkeep`
+- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `custom/` is yours and gitignored apart from its `.gitkeep`
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -64,7 +64,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
 - `shell/`: sourceable shell libraries (`powbox.sh`, `powbox.ps1`) that expose the short helpers (`cc`, `cx`, `agent-*`) from a single profile line
 - `scripts/`: shared internal build, launch, and smoke-test helpers
-- `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup)
+- `docker/shared/container-agent.md.tmpl`: shared agent instruction template (rendered per-agent at startup); the build stages it, plus the selected layer set's `agent-notes.md`, into the gitignored `.powbox-staging/` that the agent image copies from (`scripts/stage-agent-template.{sh,ps1}`)
 - `docker/shared/entrypoint-agent.sh`: the unified entrypoint — selects the primary agent, seeds every agent at startup, then hands off to `entrypoint-core.sh`
 - `docker/shared/entrypoint-{claude,codex}-hook.sh`: per-agent config-seeding hooks, run in full for every agent at startup
 - `docker/claude/agent-container/`: Claude-specific seed assets baked into the image at `/home/node/.agent-container/claude/` (statusline script, statusline settings overlay, settings defaults; no skills or workflows — those all arrive via the `dev-skills@roubtec` plugin)
@@ -127,6 +127,7 @@ A layer Dockerfile follows a small contract, which `docker/layers/full/Dockerfil
 - Every `COPY` and `ADD` carries `--chmod=<mode>`, no `RUN` bind-mounts the build context, and the directory holds regular files only (no symlinks and no empty directories; create those in a `RUN`). The set's digest covers file contents, not modes, link targets or empty directories, so these rules keep every build input inside what the digest sees; a violation fails the build with the offending line or path named.
 - A `RUN --mount=` that is a bind mount without `from=` reads the build context, file modes included, so it is rejected. A bind is the default mount type, so `--mount=target=/ctx` counts as well as `--mount=type=bind,target=/ctx`. A bind `from=<stage-or-image>` and a `type=cache`, `tmpfs`, `secret` or `ssh` mount stay allowed; to use a set's file at build time, `COPY --chmod=<mode>` it in, or into a builder stage that a later bind mounts `from=`. The check reads the flags as BuildKit does, and treats a `type=` or `from=` it cannot settle without expanding variables or quotes as a context bind.
 - It uses no `ONBUILD`. A trigger runs when the agent image is built on the layer image, from the agent build's context (the repo root), so it could read files the set's digest never sees; any `ONBUILD` line is rejected before the build, and a layer image that records a trigger anyway is refused right after the bake, before an agent is built on it.
+- An optional `agent-notes.md` beside the Dockerfile tells the agents what the set adds; without it they find the set's tools only by probing `PATH`. See [Updating Agent Instructions](#updating-agent-instructions).
 - It sets no `powbox.*` labels: the bake target stamps `powbox.layers.set`, `powbox.layers.digest` (a sha256 over every file in the set directory, from `scripts/layers-digest.{sh,ps1}`), `powbox.layers.base.id` (the ID of the base it was built on) and `powbox.commit.layers`. The agent image inherits them.
 
 The `agent` target bakes the layer-set image only when it is not current: when it is missing, was built from another set, its recorded digest differs from the working tree's, or it was built on a base other than the present `powbox-agent-base:latest` (by recorded image ID, and by its filesystem layers starting with the base's). So `./build.sh base` followed by `./build.sh agent` (or `./build.sh agent --pull`) rebuilds the set on the new base before the agent, and an unchanged set is reused as is. The `all` and `layers` targets always bake it, from cache unless `--no-cache` is given.
@@ -156,7 +157,13 @@ This is how the self-hosted smoke test exercises `seed-workspace.sh` (`scripts/s
 Container instructions for both agents are generated from a single shared template (`docker/shared/container-agent.md.tmpl`).
 The template is baked into the unified image once per agent (at `/home/node/.agent-container/<agent>/agent.md.tmpl`) and rendered with agent-specific variables at container start.
 
-After editing the template, rebuild the agent image for the changes to take effect:
+The core template describes the lean agent image, `powbox-agent` built with no layer set selected. A [layer set](#layer-sets) documents what it adds in a hand-written `docker/layers/<set>/agent-notes.md`, which is optional and is never derived from the set's Dockerfile. Before every `agent` or `all` build, `scripts/stage-agent-template.{sh,ps1}` writes the template the image bakes to the gitignored `.powbox-staging/agent.md.tmpl`: the core template unchanged, followed, when a set is selected and its notes hold more than whitespace, by a blank line, the heading ``## Additional tooling from the `<set>` layer set``, a blank line and the notes. The notes are normalized to LF (a leading UTF-8 BOM, leading blank lines and trailing whitespace are dropped) and the file ends with exactly one newline, so the same inputs always stage the same bytes and Docker's cache for that `COPY` stays warm. With no set selected, or a set without notes, the staged file is the core template byte for byte; the core template's "Available tooling" section tells the agents to look for the appended section, and to treat its own table as a floor rather than a complete list, since a set without notes can add tools the agents are not told about. The `base` and `layers` targets do not stage anything, and a standalone `docker build` of the agent image fails at the `COPY` without the staging step, as it does without `.agent-skills-src`.
+
+The hooks render the template with `envsubst` limited to `${AGENT_NAME}`, `${AGENT_AUTONOMY_FLAG}`, `${AGENT_CONFIG_DIR}` and `${AGENT_PEERS}`, so the notes can use those four on purpose (in either the `${NAME}` or the `$NAME` form), and any other `$` in them, such as `$HOME` or `${PATH}`, reaches the agents as written.
+
+The notes live in the set directory, so editing them changes the set's digest: `agent-check-updates` reports the set as stale, and `agent-update` rebuilds through the `agent` target. The layer-set image is rebaked on the way, and its steps are expected to come out of the cache, because a set's Dockerfile has no reason to `COPY` its own notes; then only the agent's seed layers and those above them change. The rebuilt image carries a new build epoch, so the next container start re-renders both agents' instruction files.
+
+After editing the template or a selected set's notes, rebuild the agent image for the changes to take effect:
 
 ```bash
 ./build.sh agent
@@ -1030,12 +1037,13 @@ workflows keep cost proportional to the change:
   (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1` —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to Tier 1. The current 14-suite set is `test-claude-hook-skew.sh`,
+  routed to Tier 1. The current 16-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
-  `test-peer-review-run.sh`, `test-podman-compose-healthcheck.sh`,
-  `test-seed-marker-source.sh`, `test-sensitive-host-path.sh`,
-  `test-shadow-mounts-chown.sh`, `test-shadow-refresh-guard.sh`,
-  `test-smoke-probe-wrapper.sh`, `test-sync-codex-skills.sh`,
+  `test-layer-sets.sh`, `test-peer-review-run.sh`,
+  `test-podman-compose-healthcheck.sh`, `test-seed-marker-source.sh`,
+  `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
+  `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
+  `test-stage-agent-template.sh`, `test-sync-codex-skills.sh`,
   `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
   A new suite is selected automatically; a
   suite-named log heading makes any non-zero exit obvious. The detect-shadows

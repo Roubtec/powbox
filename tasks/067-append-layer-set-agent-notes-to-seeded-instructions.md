@@ -13,7 +13,7 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 1. An optional `agent-notes.md` in a layer set directory (`docker/layers/<set>/agent-notes.md`).
 2. A host-side staging step that composes the core template and the selected set's notes into one file.
 3. `docker/agent/Dockerfile` copying the staged file instead of the raw template.
-4. One sentence in the core template pointing at the appended section.
+4. A short pointer in the core template's "Available tooling" section, naming the appended section and calling the table a floor.
 5. Tier 1's `paths:` filter, so a change to the staging script triggers an image build.
 6. Bash and PowerShell parity, a unit suite, and documentation.
 
@@ -37,7 +37,7 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 - New `scripts/stage-agent-template.sh` and `scripts/stage-agent-template.ps1`.
 - `scripts/build-image.sh`, `scripts/build-image.ps1` — call the staging step before every agent bake.
 - `docker/agent/Dockerfile` — the two template `COPY` lines.
-- `docker/shared/container-agent.md.tmpl` — one pointer sentence under "Available tooling".
+- `docker/shared/container-agent.md.tmpl` — a short pointer under "Available tooling".
 - `.gitignore` — the staging directory.
 - `.github/workflows/native-linux-build.yml` — add `scripts/stage-agent-template.*` to the `paths:` filter. No cache key changes: the script feeds the agent image only, which Tier 1 never caches.
 - A new pure-shell suite under `scripts/`.
@@ -47,7 +47,7 @@ This task adds that channel: a hand-written `agent-notes.md` in the layer set, a
 
 - **Staging output.** Write the composed file to a gitignored staging directory at the repo root (for example `.powbox-staging/agent.md.tmpl`). The root `.dockerignore` excludes only named paths, so a new directory is already inside the agent build context; do not add it to `.dockerignore`.
 - **Composition.** The output is the core template's bytes, then, only when a set is selected **and** it has a non-empty `agent-notes.md`: a blank line, a fixed heading naming the set, a blank line, and the notes. Use the heading ``## Additional tooling from the `<set>` layer set``. Normalize the notes to LF and end the file with exactly one newline. The output must be a pure function of its inputs, so an unchanged input produces an identical file and Docker's content-keyed `COPY` cache stays warm.
-- **Pointer sentence.** Add one sentence to the core template's "Available tooling" section, true for every image: tools added by an optional layer set are listed at the end of the file under "Additional tooling from the … layer set", and when that section is absent the image carries only what this table lists.
+- **Pointer.** Add a pointer to the core template's "Available tooling" section, true for every image: tools added by an optional layer set are listed at the end of the file under "Additional tooling from the … layer set" when the set documents them, and the table is the floor every image carries rather than a complete list, because notes are optional and a set without them adds no section (revised in [PR #164 review](https://github.com/Roubtec/powbox/pull/164#discussion_r4173934128): the original "when that section is absent the image carries only what this table lists" was false for such a set).
 - **Variables in notes.** Because the hooks pass an explicit variable list to `envsubst`, a `$` in the notes is left alone, except the four names above, which the notes may use on purpose. State this in the docs.
 - **Re-seeding.** The template `COPY` lines sit below the `build-epoch` `RUN`, so a changed staged file rebuilds that layer and containers re-render on next start. No hook change is needed; verify it rather than assume it.
 - **Staleness.** The notes live in the set directory, so editing them changes the digest from task 063 and `agent-update` rebuilds through the `agent` target. That rebuild should be cheap: the layers image's filesystem layers are all cache hits and only the agent's seed layers change. Confirm that, per the "Cache behaviour to verify" note in task 063.

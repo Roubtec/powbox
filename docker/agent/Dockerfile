@@ -96,9 +96,17 @@ RUN rm -rf /home/node/.claude/downloads
 # so the two never collide. The setup hooks read their assets from there via
 # AGENT_SEED_DIR. Kept above both install layers and keyed only on file content,
 # so editing skills/statusline rebuilds just this cheap layer.
-COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/claude/agent.md.tmpl
+# agent.md.tmpl is not docker/shared/container-agent.md.tmpl itself but the
+# gitignored .powbox-staging/agent.md.tmpl, which scripts/build-image.{sh,ps1}
+# compose from it plus the selected layer set's agent-notes.md
+# (scripts/stage-agent-template.{sh,ps1}). These COPYs come before the
+# build-epoch RUN further down (an earlier layer, under it in the stack), so
+# changed notes rerun that RUN and containers re-render the instruction file
+# on their next start. A standalone `docker build` without the staging step
+# fails here, like the .agent-skills-src COPY below.
+COPY --chown=node:node .powbox-staging/agent.md.tmpl /home/node/.agent-container/claude/agent.md.tmpl
 COPY --chown=node:node docker/claude/agent-container/ /home/node/.agent-container/claude/
-COPY --chown=node:node docker/shared/container-agent.md.tmpl /home/node/.agent-container/codex/agent.md.tmpl
+COPY --chown=node:node .powbox-staging/agent.md.tmpl /home/node/.agent-container/codex/agent.md.tmpl
 
 # The Codex seed dir's skills come ENTIRELY from Roubtec/agent-skills
 # (codex/dev-skills/skills/ — the shared dev-workflow skills plus the relocated

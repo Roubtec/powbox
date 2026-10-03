@@ -369,7 +369,9 @@ bake_layers() {
 
 # Bake the layer-set image only when it is not current for the selected set
 # (see layers_stale_reason). Always from cache, like ensure_base_image: the
-# agent target's --no-cache is about the agent's own layers.
+# agent target's --no-cache is about the agent's own layers. Tier 1's full-image
+# step in .github/workflows/native-linux-build.yml matches both echo lines
+# verbatim to tell a reuse from a bake, so reword them there too.
 ensure_layers_image() {
 	local reason
 	reason="$(layers_stale_reason "$LAYERS_SET" "$LAYERS_DIGEST")"

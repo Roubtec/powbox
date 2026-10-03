@@ -71,7 +71,7 @@ Measured in a current container with `pandoc` 3.1.11.1 and the static `typst` 0.
 - `docker/shared/.zshrc` — it stays in the lean base, and its closing comment ("Note: the shared image store is mounted READ-ONLY in agent containers …") points at `seed-image-store.sh status` and `podman images`. Reword it to say that it applies to an image whose layer set installs Podman. It is a comment only; `docker/shared/.bashrc` has no counterpart.
 - `AGENTS.md` — the "Shell formatting convention" sentence lists the extensionless `docker/shared/` helpers including `pg-dev-up`; update the path.
 - `.editorconfig` — the comment above `[*.sh]` says the same in other words ("the extensionless helpers in docker/shared/ except pg-dev-up"). It does not spell the path out and the sentence wraps across two comment lines, so the grep above misses it; search the file for `pg-dev-up` and reword the comment to name the helper's new location.
-- `README.md` ("Nested Containers (rootless Podman)", "Layout"), the docs above, `.github/workflows/native-linux-build.yml` (cache keys, the `scripts/test-pg-dev-up-scoped.sh` path filter stays valid).
+- `README.md` ("Nested Containers (rootless Podman)", "Layout"), the docs above, `.github/workflows/native-linux-build.yml` (the base cache key's `hashFiles(...)` list; the `browser` layers key already covers `docker/layers/browser/**` since task 065a; the `scripts/test-pg-dev-up-scoped.sh` path filter stays valid).
 
 ## Implementation notes
 

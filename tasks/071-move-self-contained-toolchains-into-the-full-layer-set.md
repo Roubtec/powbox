@@ -24,7 +24,7 @@ The target user of the lean image is someone running unattended agents over a fo
 
 - The matching rows of `docker/shared/container-agent.md.tmpl` move into a new `docker/layers/full/agent-notes.md`.
 - The matching Stage 1 probes move from `commands/smoke-test.{sh,ps1}` into the skeleton `docker/layers/full/smoke-probes.txt` that task 069 committed.
-- `scripts/base-source-files.txt`, the docs, and the CI cache keys follow.
+- `scripts/base-source-files.txt`, the docs, and the CI base cache key follow. After task 065a, Tier 1 does not build `full`, so no layers cache key covers it.
 
 **Stays in the base (decided, do not move):** Node, npm, pnpm and its shadow wrapper; Python 3 and pip; git, gh, ssh; the shell utilities; `build-essential`, `make`, `patch` (native modules for `pip` and `npm` need a compiler); `shellcheck` and `shfmt` (agents write shell scripts constantly); `pandoc`, `poppler-utils`, `sqlite3`; the firewall, sudo and bubblewrap setup; `yq`.
 
@@ -36,7 +36,7 @@ The target user of the lean image is someone running unattended agents over a fo
 
 ## Context and references
 
-- Depends on tasks 063 (layer-set chain), 067 (agent notes), 069 (layer probes) and should land after 065 so both images are built in CI.
+- Depends on tasks 063 (layer-set chain), 067 (agent notes), 069 (layer probes) and should land after 065 and 065a. After 065a, Tier 1 builds lean + `browser` and never the populated `full`; Tier 0 contract-scans `full` without building it.
 - `docker/base/Dockerfile`: each block to move is introduced by its own comment (for example "Install the Go toolchain from the official go.dev tarball", "Install Open Policy Agent", "General-purpose native/CGo/CMake build dependencies", "Install the .NET SDK", "Install Microsoft-repo tooling", "Install PSScriptAnalyzer", "Pre-create the .NET CLI first-use sentinels"). Carry the rationale comments with the blocks; they record decisions that were measured.
 - `docs/architecture.md`: "Bundled Go toolchain", "Bundled .NET SDK".
 - **.NET version.** Commit `6a9768a` moved the image to the .NET 10 LTS SDK because .NET 8 support ends on 2026-11-10 and projects are moving their CI to `10.0`. The moved block must install `dotnet-sdk-10.0`. Do not reintroduce `dotnet-sdk-8.0` while relocating it.
@@ -77,11 +77,11 @@ The target user of the lean image is someone running unattended agents over a fo
 - `scripts/base-source-files.txt` lists exactly the files the base Dockerfile still COPYs.
 - No tracked file outside `tasks/` still references `docker/shared/golangci-lint-wrapper.sh`.
 - `docker/layers/full/Dockerfile` installs `dotnet-sdk-10.0`, and no file reintroduces `dotnet-sdk-8.0`.
-- `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`), `markdownlint-cli2` on changed Markdown and `./scripts/run-pure-shell-tests.sh` pass; Tier 1 is green for both passes.
+- `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`), `markdownlint-cli2` on changed Markdown and `./scripts/run-pure-shell-tests.sh` pass; Tier 1 is green for both passes (lean and `browser`; CI does not build `full`, see task 065a).
 
 ## Validation
 
-Static checks and the pure-shell suites run in-container. The image contents need a host build: ask the maintainer to run `./build.sh all` with and without `.powbox-layers` set to `full`, then `./commands/smoke-test.sh` against each, and to report the two image sizes (`docker image ls`) for the PR description. Tier 1 covers both on the PR.
+Static checks and the pure-shell suites run in-container. The image contents need a host build: ask the maintainer to run `./build.sh all` with and without `.powbox-layers` set to `full`, then `./commands/smoke-test.sh` against each, and to report the two image sizes (`docker image ls`) for the PR description. Tier 1 covers the lean image on the PR; the `full` image is covered only by this host build (task 065a).
 
 ## Review plan
 

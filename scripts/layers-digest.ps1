@@ -123,8 +123,8 @@ function Register-From([int]$LineNo, [string]$Logical, [string[]]$Words) {
     if ($script:fromOnBase -and $name) { [void]$script:baseStages.Add($name) }
 }
 
-# Report an ONBUILD and a COPY or ADD whose flags lack --chmod=<mode>, and
-# pass a FROM to Register-From.
+# Report an ONBUILD, a COPY or ADD whose flags lack --chmod=<mode> and a RUN
+# that bind-mounts the build context, and pass a FROM to Register-From.
 function Test-Instruction([int]$LineNo, [string]$Logical) {
     $words = @($Logical.Split($wordSeparators, [System.StringSplitOptions]::RemoveEmptyEntries))
     if ($words.Count -eq 0) { return }
@@ -137,6 +137,16 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
         Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ONBUILD is not allowed (its trigger runs in the agent build, outside the set's digest): $Logical"
         return
     }
+    if (Test-SameString $keyword 'RUN') {
+        # See check_run_mounts in the .sh.
+        foreach ($flag in @(Get-FlagWord $Logical.Substring($words[0].Length).TrimEnd($lineSpace))) {
+            if ($flag.StartsWith('--mount=', [System.StringComparison]::Ordinal) -and (Test-MountBindsContext $flag.Substring(8))) {
+                Write-DigestError "${SetDir}/Dockerfile:${LineNo}: RUN --mount= binding the build context is not allowed (the set's digest does not cover the modes it exposes; mount from=<stage-or-image>, or COPY with --chmod=<mode>): $Logical"
+                return
+            }
+        }
+        return
+    }
     if (-not (Test-SameString $keyword 'COPY') -and -not (Test-SameString $keyword 'ADD')) { return }
     for ($i = 1; $i -lt $words.Count; $i++) {
         $w = $words[$i]
@@ -144,6 +154,106 @@ function Test-Instruction([int]$LineNo, [string]$Logical) {
         if (-not $w.StartsWith('--', [System.StringComparison]::Ordinal)) { break }
     }
     Write-DigestError "${SetDir}/Dockerfile:${LineNo}: ${keyword} without --chmod=<mode>: $Logical"
+}
+
+# See flag_words in the .sh. The text is walked as its UTF-8 bytes, each read
+# as one Latin-1 character, as BuildKit's extractBuilderFlags reads it, so a
+# 0x85 or 0xA0 byte splits a word here too.
+$latin1 = [System.Text.Encoding]::GetEncoding(28591)
+$flagSpace = [int[]]@(0x20, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0xA0)
+function Get-FlagWord([string]$Text) {
+    $s = $latin1.GetString([System.Text.Encoding]::UTF8.GetBytes($Text))
+    $out = New-Object System.Collections.Generic.List[string]
+    $k = 0
+    while ($true) {
+        while ($k -lt $s.Length -and $flagSpace -contains [int]$s[$k]) { $k++ }
+        if (-not (($k + 1) -lt $s.Length -and [int]$s[$k] -eq 0x2D -and [int]$s[$k + 1] -eq 0x2D)) { break }
+        $word = New-Object System.Text.StringBuilder
+        $quote = 0
+        while ($k -lt $s.Length) {
+            $c = [int]$s[$k]
+            $k++
+            if ($quote -eq 0 -and $flagSpace -contains $c) {
+                break
+            } elseif ($quote -eq 0 -and ($c -eq 0x27 -or $c -eq 0x22)) {
+                $quote = $c
+            } elseif ($quote -ne 0 -and $c -eq $quote) {
+                $quote = 0
+            } elseif ($c -eq 0x5C) {
+                if ($k -lt $s.Length) {
+                    [void]$word.Append($s[$k])
+                    $k++
+                }
+            } else {
+                [void]$word.Append([char]$c)
+            }
+        }
+        $w = $word.ToString()
+        if (Test-SameString $w '--') { break }
+        $out.Add($w)
+    }
+    return $out.ToArray()
+}
+
+# See mount_fields in the .sh: the fields of a --mount= value, or $null where
+# BuildKit's csvvalue fails.
+function Get-MountField([string]$Value) {
+    if ($Value.Length -eq 0) { return $null }
+    $out = New-Object System.Collections.Generic.List[string]
+    $s = $Value
+    while ($true) {
+        if ($s.StartsWith('"', [System.StringComparison]::Ordinal)) {
+            $s = $s.Substring(1)
+            $field = ''
+            while ($true) {
+                $q = $s.IndexOf([char]'"')
+                if ($q -lt 0) { return $null }
+                $field += $s.Substring(0, $q)
+                $s = $s.Substring($q + 1)
+                if ($s.StartsWith('"', [System.StringComparison]::Ordinal)) {
+                    $field += '"'
+                    $s = $s.Substring(1)
+                } elseif ($s.StartsWith(',', [System.StringComparison]::Ordinal)) {
+                    $out.Add($field)
+                    $s = $s.Substring(1)
+                    break
+                } elseif ($s.Length -eq 0) {
+                    $out.Add($field)
+                    return , $out
+                } else {
+                    return $null
+                }
+            }
+            continue
+        }
+        $comma = $s.IndexOf([char]',')
+        $field = if ($comma -ge 0) { $s.Substring(0, $comma) } else { $s }
+        if ($field.Contains('"')) { return $null }
+        $out.Add($field)
+        if ($comma -lt 0) { return , $out }
+        $s = $s.Substring($comma + 1)
+    }
+}
+
+# See mount_binds_context in the .sh for which mounts count as a bind of the
+# build context and why.
+function Test-MountBindsContext([string]$Value) {
+    $fields = Get-MountField $Value
+    if ($null -eq $fields) { return $true }
+    $type = 'bind'
+    $from = ''
+    foreach ($field in $fields) {
+        $eq = $field.IndexOf([char]'=')
+        if ($eq -lt 0) { continue }
+        $key = ConvertTo-AsciiLower $field.Substring(0, $eq)
+        if (Test-SameString $key 'type') {
+            $type = ConvertTo-AsciiLower $field.Substring($eq + 1)
+        } elseif (Test-SameString $key 'from') {
+            $from = $field.Substring($eq + 1)
+        }
+    }
+    if ([Array]::IndexOf([string[]]@('cache', 'tmpfs', 'secret', 'ssh'), $type) -ge 0) { return $false }
+    return ($from.Length -eq 0 -or $from.IndexOfAny([char[]]@('$', "'", '"', '\')) -ge 0)
 }
 
 # See shell_words in the .sh: the words BuildKit's shell lexer sees when it

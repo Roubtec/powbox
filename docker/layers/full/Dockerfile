@@ -16,6 +16,10 @@
 #   - give every COPY and ADD a --chmod=<mode>: the build context is this
 #     directory alone, and its digest (scripts/layers-digest.{sh,ps1}) covers
 #     file contents, not modes, so a mode must come from this file;
+#   - bind-mount no build context in a RUN (a --mount= without type= is a
+#     bind too): it shows this directory's files with their checkout modes.
+#     A bind from=<stage-or-image> and cache, tmpfs, secret and ssh mounts
+#     are fine;
 #   - keep only regular files in the directory (a symlink or an empty
 #     directory is rejected; create those in a RUN);
 #   - use no ONBUILD: a trigger runs in the agent build, from the repo-root

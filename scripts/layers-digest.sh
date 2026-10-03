@@ -27,7 +27,12 @@
 #   - every COPY and ADD in <set>/Dockerfile must carry --chmod=<mode>, so the
 #     mode a copied file gets comes from the Dockerfile, which is hashed, never
 #     from the checkout (a Windows checkout has no Unix modes, and Git tracks
-#     only the executable bit).
+#     only the executable bit);
+#   - no RUN may bind-mount the build context (a --mount= of the default bind
+#     type without from=): the mount shows the set's files with their modes
+#     from the checkout, and `cp -p` would carry them into the image. A bind
+#     with from=<stage-or-image> and a cache, tmpfs, secret or ssh mount do not
+#     read the context and stay allowed.
 # ONBUILD is rejected outright: its trigger runs while the agent image is built
 # on the layer image, from the agent build's context (the repository root), so
 # an ONBUILD COPY, ADD or RUN --mount could read inputs the digest never sees.
@@ -50,10 +55,11 @@
 # them), so a body line that reads as FROM or COPY is neither taken for a stage
 # nor checked; an unterminated heredoc is an error, as it is to Docker. It is a
 # scan, not a parser: it reads no variables and no JSON-form arguments, though
-# it compares FROM's image by its unquoted value, as Docker does. Only the
-# default backslash escape is supported: an `# escape=` parser directive
-# setting any other character is rejected, since it changes how Docker joins
-# lines.
+# it compares FROM's image by its unquoted value, as Docker does, and it reads
+# a RUN's --mount= flags as BuildKit's extractBuilderFlags and parseMount do
+# (see flag_words). Only the default backslash escape is supported: an
+# `# escape=` parser directive setting any other character is rejected, since
+# it changes how Docker joins lines.
 #
 # Exit status: 0 with the digest on stdout; 1 when the set breaks the contract
 # or cannot be read (every offending line or path is named on stderr); 2 on a
@@ -168,6 +174,23 @@ upper() {
 }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Set TRIMMED to $1 without the trailing whitespace Go's strings.TrimSpace
+# trims: the ASCII whitespace bytes and UNICODE_SPACES, in any order.
+rtrim_space() {
+	local s="$1" u again=true
+	while $again; do
+		again=false
+		s="${s%"${s##*[![:space:]]}"}"
+		for u in "${UNICODE_SPACES[@]}"; do
+			if [[ "$s" == *"$u" ]]; then
+				s="${s%"$u"}"
+				again=true
+			fi
+		done
+	done
+	TRIMMED="$s"
+}
+
 is_blank_or_comment() {
 	ltrim_space "$1"
 	case "$TRIMMED" in "" | "#"*) return 0 ;; esac
@@ -211,8 +234,8 @@ note_from() {
 	fi
 }
 
-# Report an ONBUILD and a COPY or ADD whose flags lack --chmod=<mode>, and
-# pass a FROM to note_from.
+# Report an ONBUILD, a COPY or ADD whose flags lack --chmod=<mode> and a RUN
+# that bind-mounts the build context, and pass a FROM to note_from.
 # Flags are the leading --name=value words after the keyword; Docker accepts
 # instruction flags only in that position and only in the = form.
 check_instruction() {
@@ -232,6 +255,10 @@ check_instruction() {
 		report "${SET_DIR}/Dockerfile:${lineno}: ONBUILD is not allowed (its trigger runs in the agent build, outside the set's digest): ${logical}"
 		return 0
 	fi
+	if [ "$keyword" = RUN ]; then
+		check_run_mounts "$lineno" "$logical" "${words[0]}"
+		return 0
+	fi
 	case "$keyword" in COPY | ADD) ;; *) return 0 ;; esac
 	i=1
 	while [ "$i" -lt "${#words[@]}" ]; do
@@ -243,6 +270,133 @@ check_instruction() {
 		i=$((i + 1))
 	done
 	report "${SET_DIR}/Dockerfile:${lineno}: ${keyword} without --chmod=<mode>: ${logical}"
+}
+
+# Report a RUN ($2, its keyword $3) with a --mount= that binds the build
+# context. BuildKit trims the instruction's trailing Unicode whitespace before
+# it reads the flags, which can shorten the last one.
+check_run_mounts() {
+	local flag
+	rtrim_space "${2:${#3}}"
+	flag_words "$TRIMMED"
+	for flag in ${FLAG_WORDS[@]+"${FLAG_WORDS[@]}"}; do
+		case "$flag" in --mount=*) ;; *) continue ;; esac
+		if mount_binds_context "${flag#--mount=}"; then
+			report "${SET_DIR}/Dockerfile:${1}: RUN --mount= binding the build context is not allowed (the set's digest does not cover the modes it exposes; mount from=<stage-or-image>, or COPY with --chmod=<mode>): ${2}"
+			return 0
+		fi
+	done
+}
+
+# The bytes BuildKit's extractBuilderFlags takes for whitespace: it reads the
+# line a byte at a time and tests each as a code point with unicode.IsSpace,
+# so the 0x85 and 0xA0 continuation bytes of a UTF-8 character split a word.
+FLAG_SPACE=$' \t\n\v\f\r\x85\xa0'
+
+# Set FLAG_WORDS to the flags BuildKit reads from $1, an instruction's text
+# after its keyword: the leading words that start with --, up to a bare --,
+# with quotes removed and backslash escapes resolved, whatever follows them
+# (a shell command or a JSON array).
+flag_words() {
+	local s="$1" k=0 c word quote
+	FLAG_WORDS=()
+	while :; do
+		while [ "$k" -lt "${#s}" ] && [[ "${s:k:1}" == [$FLAG_SPACE] ]]; do k=$((k + 1)); done
+		[ "${s:k:2}" = "--" ] || return 0
+		word=""
+		quote=""
+		while [ "$k" -lt "${#s}" ]; do
+			c="${s:k:1}"
+			k=$((k + 1))
+			if [ -z "$quote" ] && [[ "$c" == [$FLAG_SPACE] ]]; then
+				break
+			elif [ -z "$quote" ] && { [ "$c" = "'" ] || [ "$c" = '"' ]; }; then
+				quote="$c"
+			elif [ -n "$quote" ] && [ "$c" = "$quote" ]; then
+				quote=""
+			elif [ "$c" = "\\" ]; then
+				if [ "$k" -lt "${#s}" ]; then
+					word+="${s:k:1}"
+					k=$((k + 1))
+				fi
+			else
+				word+="$c"
+			fi
+		done
+		[ "$word" != "--" ] || return 0
+		FLAG_WORDS+=("$word")
+	done
+}
+
+# Set MOUNT_FIELDS to the comma-separated fields of the --mount= value $1, as
+# BuildKit's csvvalue.Fields splits them: a field opening with " runs to the
+# closing " (a doubled "" is one "). Return 1 where csvvalue fails.
+mount_fields() {
+	local s="$1" field
+	MOUNT_FIELDS=()
+	[ -n "$s" ] || return 1
+	while :; do
+		if [ "${s:0:1}" = '"' ]; then
+			s="${s:1}"
+			field=""
+			while :; do
+				[[ "$s" == *'"'* ]] || return 1
+				field+="${s%%\"*}"
+				s="${s#*\"}"
+				case "$s" in
+				'"'*)
+					field+='"'
+					s="${s:1}"
+					;;
+				,*)
+					MOUNT_FIELDS+=("$field")
+					s="${s:1}"
+					continue 2
+					;;
+				'')
+					MOUNT_FIELDS+=("$field")
+					return 0
+					;;
+				*) return 1 ;;
+				esac
+			done
+		fi
+		field="${s%%,*}"
+		[[ "$field" != *'"'* ]] || return 1
+		MOUNT_FIELDS+=("$field")
+		[[ "$s" == *,* ]] || return 0
+		s="${s#*,}"
+	done
+}
+
+# Whether the --mount= value $1 binds the build context. In BuildKit's
+# parseMount a mount without type= is a bind, the last type= or from= wins and
+# keys and the type fold ASCII case only (extractBuilderFlags turns every
+# non-ASCII byte into a Latin-1 letter first). dispatchRunMounts binds the
+# context for any mount with an empty from= that is not cache, tmpfs, secret
+# or ssh. BuildKit expands each value as a shell word later, so a type= is
+# trusted only as one of those four names, spelled out; a value csvvalue
+# cannot split counts as a context bind. That expansion sees the value after
+# extractBuilderFlags has already removed the flag word's own quotes, which is
+# all this function sees too, so type='cache' is a cache mount. A from= is
+# resolved unexpanded, as a stage or image name, before any mount is set up,
+# and the build fails on one that is not a valid name, such as the single
+# blank of from=' '. No valid name holds a quote, a backslash or a $, so
+# counting such a from= as a context bind only rejects early a build that
+# BuildKit refuses anyway.
+mount_binds_context() {
+	local field type=bind from=""
+	mount_fields "$1" || return 0
+	for field in ${MOUNT_FIELDS[@]+"${MOUNT_FIELDS[@]}"}; do
+		[[ "$field" == *=* ]] || continue
+		case "$(lower "${field%%=*}")" in
+		type) type="$(lower "${field#*=}")" ;;
+		from) from="${field#*=}" ;;
+		esac
+	done
+	case "$type" in cache | tmpfs | secret | ssh) return 1 ;; esac
+	case "$from" in "" | *[\$\'\"\\]*) return 0 ;; esac
+	return 1
 }
 
 # Split $1 into the words BuildKit's shell lexer sees when it looks for

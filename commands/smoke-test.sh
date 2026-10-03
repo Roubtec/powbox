@@ -15,8 +15,13 @@ IMAGE="${1:-powbox-agent:latest}"
 # turns an absent image into a hard error before any stage runs; it is also
 # exported so a sub-script invoked directly (e.g. the self-hosted clone stage)
 # fails instead of self-skipping its image-gated checks into a false "all green".
-# Track every stage we skip so the end-of-run banner can report a partial run.
+# Track every stage we skip so the end-of-run banner can report a partial run,
+# and separately every stage the image has no tool for: those are information,
+# not a partial run (scripts/smoke-test-lib.sh holds the banner and the gates).
 skipped=()
+not_applicable=()
+# shellcheck source=scripts/smoke-test-lib.sh
+. "${ROOT_DIR}/scripts/smoke-test-lib.sh"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	if [ -n "${POWBOX_SMOKE_REQUIRE_IMAGE:-}" ]; then
 		echo "ERROR: image '$IMAGE' not found and POWBOX_SMOKE_REQUIRE_IMAGE is set — refusing to run a partial (image-skipping) smoke test." >&2
@@ -335,6 +340,9 @@ fi
 # installs an ASP.NET HTTPS dev cert). Deliberately no `dotnet new` + build
 # probe: that would pull NuGet packages over the network, the same reason the
 # image is not warmed that way.
+# The `command -v podman` probe is what fails an image that lost the engine:
+# Stage 3 runs only on an image that has podman on its PATH and is reported as
+# not applicable otherwise, so without this probe such an image would pass.
 # shellcheck disable=SC2016  # the probes' $HOME expands in the container shell, NOT the host
 "${ROOT_DIR}/scripts/smoke-test-image.sh" "$IMAGE" \
 	"claude --version >/dev/null" \
@@ -351,6 +359,7 @@ fi
 	"sqlite3 --version >/dev/null" \
 	"psql --version >/dev/null" \
 	"pg-dev-up check >/dev/null" \
+	"command -v podman >/dev/null" \
 	"command -v wt-bootstrap >/dev/null" \
 	"command -v wt-enter >/dev/null" \
 	"command -v wt-remove >/dev/null" \
@@ -419,6 +428,15 @@ fi
 	"wget --version >/dev/null" \
 	"htop --version >/dev/null"
 
+# Stage 1b — layer-set probes. An image built from a layer set carries the
+# set's name in its powbox.layers.set label, and the set may ship its own
+# in-container probes in docker/layers/<set>/smoke-probes.txt, run here through
+# the same driver as Stage 1 (one probe per line; a failure is named by index
+# against the printed manifest). A lean image has no label and no Stage 1b; the
+# committed `full` set must keep its probe file. See smoke_layer_stage in
+# scripts/smoke-test-lib.sh and docs/smoke-tests.md ("Layer-set probes").
+smoke_layer_stage "$IMAGE" "$ROOT_DIR" || exit 1
+
 # Stage 2 — pg-dev-up functional test: stand up a real throwaway cluster and
 # connect through the emitted DATABASE_URL. Unlike `pg-dev-up check` (binary
 # presence only) this exercises role/db creation, URL percent-encoding, the
@@ -426,7 +444,15 @@ fi
 # credentials prove the SQL-quoting and URL-encoding paths. Skip the daemon
 # bring-up with POWBOX_SMOKE_SKIP_DB=1 (Stage 3 below still runs unless
 # POWBOX_SMOKE_SKIP_PODMAN is also set; set both for a Stage 1 presence-only run).
-if [ -n "${POWBOX_SMOKE_SKIP_DB:-}" ]; then
+# The stage, the scoped suite included, runs only when pg-dev-up is on the
+# image's PATH; on an image without it the stage is not applicable whatever
+# POWBOX_SMOKE_SKIP_DB says. A presence probe (in Stage 1 or a layer set's
+# Stage 1b) is what fails an image that should have had it.
+db_gate="$(smoke_gate "$IMAGE" pg-dev-up "${POWBOX_SMOKE_SKIP_DB:-}")" || exit 1
+if [ "$db_gate" = na ]; then
+	echo "Stage 2 does not apply: image '$IMAGE' has no pg-dev-up on its PATH."
+	not_applicable+=("Stage 2: pg-dev-up functional (no pg-dev-up in this image)")
+elif [ "$db_gate" = skip ]; then
 	echo "Skipping pg-dev-up functional test (POWBOX_SMOKE_SKIP_DB is set)."
 	skipped+=("Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)")
 else
@@ -492,7 +518,11 @@ fi
 # cannot expose /dev/net/tun it still validates the static engine wiring and skips
 # only the nested-run checks; a genuinely broken image fails on any host. Skip the
 # whole stage explicitly with POWBOX_SMOKE_SKIP_PODMAN=1; see
-# scripts/smoke-test-podman.sh for what it covers.
+# scripts/smoke-test-podman.sh for what it covers. The stage runs only when
+# podman is on the image's PATH; on an image without it the stage is not
+# applicable whatever POWBOX_SMOKE_SKIP_PODMAN or POWBOX_PODMAN say, and a
+# `command -v podman` presence probe (in Stage 1 or a layer set's Stage 1b) is
+# what fails an image that lost the engine.
 # smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
 # POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
 # under auto (the default) on a host without /dev/net/tun it runs the static
@@ -520,7 +550,11 @@ elif [ "${POWBOX_FUSE:-}" = "off" ]; then
 else
 	podman_gate_off=POWBOX_PODMAN=off
 fi
-if [ -n "${POWBOX_SMOKE_SKIP_PODMAN:-}" ]; then
+podman_stage_gate="$(smoke_gate "$IMAGE" podman "${POWBOX_SMOKE_SKIP_PODMAN:-}")" || exit 1
+if [ "$podman_stage_gate" = na ]; then
+	echo "Stage 3 does not apply: image '$IMAGE' has no podman on its PATH."
+	not_applicable+=("Stage 3: rootless Podman engine (no podman in this image)")
+elif [ "$podman_stage_gate" = skip ]; then
 	echo "Skipping Podman smoke test (POWBOX_SMOKE_SKIP_PODMAN is set)."
 	if [ "$podman_gate" = "off" ]; then
 		skipped+=("Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN and ${podman_gate_off})")
@@ -640,29 +674,7 @@ else
 	rm -f "$wtmeta_marker"
 fi
 
-# Entries reach this banner from two different places — whole stages that never ran,
-# and stages that ran with only a portion self-skipped — so nothing here may assert
-# that a listed stage produced no coverage, or prescribe a variable as the remedy for
-# a host-decided partial that no variable governs (task 002g).
-# commands/smoke-test.ps1 mirrors this banner and must be kept in step, EXCEPT for
-# the punctuation and the platform's control vocabulary. It uses a hyphen where this
-# file uses an em dash, because that file is ASCII-only and a non-ASCII byte would
-# force it to carry a UTF-8 BOM (AGENTS.md → "File Conventions").
-if [ "${#skipped[@]}" -gt 0 ]; then
-	echo
-	echo "============== SMOKE TEST: SKIPPED OR PARTIAL =============="
-	for s in "${skipped[@]}"; do
-		echo "  - $s"
-	done
-	echo "This was a PARTIAL smoke test — each entry above either did not"
-	echo "run at all, or ran only in part."
-	echo "Entries naming an environment variable were skipped on request:"
-	echo "unset it to run them, and set POWBOX_SMOKE_REQUIRE_IMAGE=1 to also"
-	echo "fail on a missing image. The rest were decided by the host at"
-	echo "runtime — nothing was set to skip them, and unsetting a variable"
-	echo "will not recover them: hosted CI has no /dev/net/tun, so Stage 3's"
-	echo "nested half self-skips there. See docs/smoke-tests.md."
-	echo "==========================================================="
-else
-	echo "Smoke test complete (all stages ran)."
-fi
+# commands/smoke-test.ps1 prints the same banner through Write-SmokeBanner in
+# scripts/smoke-test-lib.ps1, EXCEPT for the punctuation and the platform's
+# control vocabulary.
+smoke_print_banner

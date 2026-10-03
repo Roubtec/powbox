@@ -920,6 +920,728 @@ fi
 # ...and no shipped probe uses `!`, `if` or `while` as a shell construct today,
 # which is what makes all of the above documentation rather than a live hole.
 
+# ---------------------------------------------------------------------------
+# Sections M-Q cover scripts/smoke-test-lib.{sh,ps1}, the helpers both smoke
+# umbrellas call for the layer-set probe stage (Stage 1b), the capability gate
+# in front of Stages 2 and 3, and the end-of-run banner. While Stage 1's core
+# list asserts pg-dev-up and podman, an image without them stops at Stage 1, so
+# the not-applicable paths and most layer-set cases are reachable only here,
+# against a second fake `docker` that also answers `image inspect` label
+# queries and the capability check.
+# ---------------------------------------------------------------------------
+LIB_SH="${ROOT_DIR}/scripts/smoke-test-lib.sh"
+LIB_PS1="${ROOT_DIR}/scripts/smoke-test-lib.ps1"
+have_pwsh=0
+command -v pwsh >/dev/null 2>&1 && have_pwsh=1
+
+FAKE2_DIR="$TMP/fake2"
+mkdir -p "$FAKE2_DIR"
+cat >"$FAKE2_DIR/docker" <<'SHIM'
+#!/bin/sh
+# Second fake docker. Logs every call; answers `image inspect --format` label
+# queries from $FAKE_LABELS/<label>, refusing (exit 1) a template that holds a
+# double quote, since Windows PowerShell 5.1 strips such quotes from a native
+# argument and real docker then sees an invalid template; answers the
+# capability check (the `smoke-gate <tool>` positional pair) from $FAKE_TOOLS;
+# records each probe run (the `-lc <runner> smoke-probes <probe>...` shape)
+# NUL-separated as $FAKE_RUNS/<n>, replaying run $FAKE_EXEC_RUN with the host
+# /bin/sh; and exits 0 for every other run, which stands in for Stage 0 and
+# Stage 2.
+printf '%s\n' "$*" >>"${FAKE_DOCKER_LOG:-/dev/null}"
+case "$1" in
+image)
+	[ -z "${FAKE_IMAGE_ABSENT:-}" ] || exit 1
+	fmt="" prev=""
+	for a in "$@"; do
+		[ "$prev" = --format ] && fmt="$a"
+		prev="$a"
+	done
+	[ -n "$fmt" ] || exit 0
+	case "$fmt" in *'"'*)
+		echo "template parsing error (a double quote reaches docker stripped under Windows PowerShell 5.1): $fmt" >&2
+		exit 1
+		;;
+	esac
+	label="$(printf '%s' "$fmt" | sed -n 's/.*Labels `\([^`]*\)`.*/\1/p')"
+	if [ -n "$label" ] && [ -f "$FAKE_LABELS/$label" ]; then
+		cat "$FAKE_LABELS/$label"
+		echo
+	else
+		echo '<no value>'
+	fi
+	exit 0
+	;;
+run)
+	prev=""
+	for a in "$@"; do
+		if [ "$prev" = smoke-gate ]; then
+			[ -z "${FAKE_GATE_BROKEN:-}" ] || exit 125
+			case " ${FAKE_TOOLS:-} " in
+			*" $a "*) echo present ;;
+			*) echo absent ;;
+			esac
+			exit 0
+		fi
+		prev="$a"
+	done
+	while [ "$#" -gt 0 ] && [ "$1" != "-lc" ]; do shift; done
+	if [ "$#" -ge 3 ] && [ "$3" = smoke-probes ]; then
+		runner="$2"
+		shift 3
+		n=$(($(ls "$FAKE_RUNS" | wc -l) + 1))
+		: >"$FAKE_RUNS/$n"
+		for p in "$@"; do printf '%s\0' "$p" >>"$FAKE_RUNS/$n"; done
+		if [ "${FAKE_EXEC_RUN:-}" = "$n" ]; then
+			/bin/sh -c "$runner" smoke-probes "$@"
+			exit $?
+		fi
+	fi
+	exit 0
+	;;
+esac
+exit 0
+SHIM
+chmod +x "$FAKE2_DIR/docker"
+
+# NUL-separated list file from arguments.
+nul_list() {
+	local out="$1" p
+	shift
+	: >"$out"
+	for p in "$@"; do printf '%s\0' "$p" >>"$out"; done
+}
+
+# read_probes_sh <file> <out>: the bash reader's probes, NUL-separated.
+read_probes_sh() {
+	local file="$1" out="$2" err="$2.err"
+	(
+		# shellcheck source=scripts/smoke-test-lib.sh
+		. "$LIB_SH"
+		smoke_read_probe_file "$file" || exit 1
+		for p in ${SMOKE_PROBES[@]+"${SMOKE_PROBES[@]}"}; do printf '%s\0' "$p"; done
+	) >"$out" 2>"$err"
+}
+
+# read_probes_ps <file> <out>: the PowerShell reader's probes, as UTF-8 bytes,
+# NUL-separated.
+cat >"$TMP/read-probes.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+. "$LIB_PS1"
+try { \$p = Read-SmokeProbeFile -Path \$args[0] }
+catch { [Console]::Error.WriteLine(\$_.Exception.Message); exit 1 }
+\$sb = [System.Text.StringBuilder]::new()
+foreach (\$x in \$p) { [void]\$sb.Append(\$x).Append([char]0) }
+[System.IO.File]::WriteAllBytes(\$args[1], [System.Text.UTF8Encoding]::new(\$false).GetBytes(\$sb.ToString()))
+PS
+read_probes_ps() {
+	pwsh -NoProfile -File "$TMP/read-probes.ps1" "$1" "$2" 2>"$2.err"
+}
+
+printf 'M. the layer-set probe-file reader (and its .sh/.ps1 parity)\n'
+RD="$TMP/reader"
+mkdir -p "$RD"
+# name -> fixture bytes, and the probe list it must yield.
+printf '# header\r\n\r\n   # indented comment\r\n\t# tab-indented comment\r\nprobe one\r\n \t\r\n  probe two  \r\nlast without newline' >"$RD/crlf"
+nul_list "$RD/crlf.want" "probe one" "  probe two  " "last without newline"
+printf '\xef\xbb\xbf# comment behind a BOM\nprobe a\n' >"$RD/bom-comment"
+nul_list "$RD/bom-comment.want" "probe a"
+printf '\xef\xbb\xbfprobe behind a BOM\n' >"$RD/bom-probe"
+nul_list "$RD/bom-probe.want" "probe behind a BOM"
+: >"$RD/empty"
+nul_list "$RD/empty.want"
+printf '# only\n\n   # comments\r\n\t\n' >"$RD/comments-only"
+nul_list "$RD/comments-only.want"
+printf 'true\nprintf x \\\n' >"$RD/continuation"
+nul_list "$RD/continuation.want" "true" 'printf x \'
+printf 'a\rb\n' >"$RD/mid-cr"
+nul_list "$RD/mid-cr.want" $'a\rb'
+printf 'x=1 # trailing text is the probe'"'"'s, not a comment\n' >"$RD/inline-hash"
+nul_list "$RD/inline-hash.want" "x=1 # trailing text is the probe's, not a comment"
+printf 'printf "%%s" "\xc3\xa9" >/dev/null\n' >"$RD/non-ascii"
+nul_list "$RD/non-ascii.want" $'printf "%s" "\xc3\xa9" >/dev/null'
+for fx in crlf bom-comment bom-probe empty comments-only continuation mid-cr inline-hash non-ascii; do
+	if read_probes_sh "$RD/$fx" "$RD/$fx.sh"; then
+		if cmp -s "$RD/$fx.sh" "$RD/$fx.want"; then
+			ok "reader: $fx yields the expected probes"
+		else
+			bad "reader: $fx yielded the wrong probes" "want: $(tr '\0' '|' <"$RD/$fx.want")" "got:  $(tr '\0' '|' <"$RD/$fx.sh")"
+		fi
+	else
+		bad "reader: $fx was rejected" "$(cat "$RD/$fx.sh.err")"
+	fi
+	if [ "$have_pwsh" = 1 ]; then
+		if read_probes_ps "$RD/$fx" "$RD/$fx.ps"; then
+			if cmp -s "$RD/$fx.ps" "$RD/$fx.want"; then
+				ok "reader: $fx yields the same probes in .ps1"
+			else
+				bad "reader: .ps1 diverged from .sh on $fx" "want: $(tr '\0' '|' <"$RD/$fx.want")" "got:  $(tr '\0' '|' <"$RD/$fx.ps")"
+			fi
+		else
+			bad "reader: .ps1 rejected $fx" "$(cat "$RD/$fx.ps.err")"
+		fi
+	fi
+done
+printf 'probe \xff\n' >"$RD/bad-utf8"
+printf 'probe\000x\n' >"$RD/nul"
+for fx in bad-utf8 nul; do
+	if read_probes_sh "$RD/$fx" "$RD/$fx.sh"; then
+		bad "reader: $fx was accepted" "got: $(tr '\0' '|' <"$RD/$fx.sh")"
+	else
+		ok "reader: $fx is refused"
+	fi
+	if [ "$have_pwsh" = 1 ]; then
+		if read_probes_ps "$RD/$fx" "$RD/$fx.ps"; then
+			bad "reader: .ps1 accepted $fx" "got: $(tr '\0' '|' <"$RD/$fx.ps")"
+		else
+			ok "reader: .ps1 refuses $fx too"
+		fi
+	fi
+done
+[ "$have_pwsh" = 1 ] || printf '  skip  pwsh unavailable - reader .sh/.ps1 parity not checked here\n'
+
+# What the reader hands on, the driver still judges: a trailing-backslash line
+# reaches it unchanged and is refused before docker runs, rather than run
+# truncated or joined with the next line.
+read_probes_sh "$RD/continuation" "$RD/continuation.sh2"
+cont_probes=()
+while IFS= read -r -d '' p; do cont_probes+=("$p"); done <"$RD/continuation.sh2"
+rm -f "$CAPTURE"
+SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "${cont_probes[@]}" >"$TMP/m-cont.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "line continuation" "$TMP/m-cont.out" && [ ! -e "$CAPTURE" ]; then
+	ok "a probe-file line ending in a backslash is rejected by the driver, docker never runs"
+else
+	bad "a trailing-backslash probe-file line was not rejected (rc=$rc)" "$(cat "$TMP/m-cont.out")"
+fi
+read_probes_sh "$RD/mid-cr" "$RD/mid-cr.sh2"
+mid_probe="$(tr -d '\0' <"$RD/mid-cr.sh2")"
+rm -f "$CAPTURE"
+SMOKE_TEST_EXEC=0 "$DRIVER_SH" fake-image:latest "$mid_probe" >"$TMP/m-cr.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "single-line" "$TMP/m-cr.out"; then
+	ok "a lone CR inside a probe-file line reaches the driver and is rejected there"
+else
+	bad "a mid-line CR was not rejected (rc=$rc)" "$(cat "$TMP/m-cr.out")"
+fi
+
+# Order is preserved: the second probe relies on the file the first created.
+ORD="$TMP/order"
+mkdir -p "$ORD"
+printf 'touch %s/first\n[ -f %s/first ]\n' "$ORD" "$ORD" >"$RD/ordered"
+printf '[ -f %s/second ]\ntouch %s/second\n' "$ORD" "$ORD" >"$RD/reversed"
+for fx in ordered reversed; do
+	read_probes_sh "$RD/$fx" "$RD/$fx.sh"
+	ord_probes=()
+	while IFS= read -r -d '' p; do ord_probes+=("$p"); done <"$RD/$fx.sh"
+	run_driver 1 "$TMP/m-$fx.out" "${ord_probes[@]}"
+	eval "rc_$fx=\$?"
+done
+# shellcheck disable=SC2154 # assigned through eval above
+if [ "$rc_ordered" -eq 0 ] && [ "$rc_reversed" -ne 0 ] && grep -q "SMOKE PROBE 1 FAILED" "$TMP/m-reversed.out"; then
+	ok "probes run in file order: a pair relying on an earlier probe's file passes, its reverse fails at probe 1"
+else
+	bad "file order was not preserved (ordered rc=$rc_ordered, reversed rc=$rc_reversed)" "$(cat "$TMP/m-ordered.out" "$TMP/m-reversed.out")"
+fi
+
+printf 'M2. the image-label reader (and its .sh/.ps1 parity)\n'
+# Both drivers must send docker the same quote-free template - the fake refuses
+# a double quote, as Windows PowerShell 5.1 would leave docker an invalid one -
+# and read the same value back: a missing label and a literal `<no value>` read
+# as empty, an empty label reads as empty, and anything else is kept except
+# trailing line breaks. An image that cannot be inspected is an error in both.
+LBL="$TMP/labels"
+mkdir -p "$LBL"
+printf '' >"$LBL/powbox.empty"
+printf '<no value>' >"$LBL/powbox.novalue"
+printf '  full  ' >"$LBL/powbox.spaced"
+printf 'a\nb\n\n' >"$LBL/powbox.multiline"
+# label_sh <label>: prints [value], or FAIL.
+label_sh() {
+	(
+		# shellcheck source=scripts/smoke-test-lib.sh
+		. "$LIB_SH"
+		v="$(PATH="$FAKE2_DIR:$PATH" smoke_image_label fake-image:latest "$1")" || {
+			echo FAIL
+			exit 0
+		}
+		printf '[%s]\n' "$v"
+	)
+}
+cat >"$TMP/label.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+. "$LIB_PS1"
+try { [Console]::Out.WriteLine('[' + (Get-SmokeImageLabel -Image fake-image:latest -Label \$args[0]) + ']') }
+catch { [Console]::Out.WriteLine('FAIL') }
+PS
+label_ps() {
+	PATH="$FAKE2_DIR:$PATH" pwsh -NoProfile -File "$TMP/label.ps1" "$1" 2>/dev/null
+}
+# label | want
+label_cases=(
+	"powbox.absent|[]"
+	"powbox.empty|[]"
+	"powbox.novalue|[]"
+	"powbox.spaced|[  full  ]"
+	"powbox.multiline|[a
+b]"
+)
+for lc in "${label_cases[@]}"; do
+	l_name="${lc%%|*}" l_want="${lc#*|}"
+	: >"$TMP/label-sh.log"
+	got="$(FAKE_LABELS="$LBL" FAKE_DOCKER_LOG="$TMP/label-sh.log" label_sh "$l_name")"
+	if [ "$got" = "$l_want" ]; then
+		ok "label: $l_name reads as $(printf '%s' "$l_want" | tr '\n' '|')"
+	else
+		bad "label: $l_name read as $(printf '%s' "$got" | tr '\n' '|'), want $(printf '%s' "$l_want" | tr '\n' '|')"
+	fi
+	if [ "$have_pwsh" = 1 ]; then
+		: >"$TMP/label-ps.log"
+		got="$(FAKE_LABELS="$LBL" FAKE_DOCKER_LOG="$TMP/label-ps.log" label_ps "$l_name")"
+		if [ "$got" = "$l_want" ]; then
+			ok "label (.ps1): $l_name reads the same"
+		else
+			bad "label (.ps1): $l_name read as $(printf '%s' "$got" | tr '\n' '|'), want $(printf '%s' "$l_want" | tr '\n' '|')"
+		fi
+		if cmp -s "$TMP/label-sh.log" "$TMP/label-ps.log"; then
+			ok "label (.ps1): $l_name is queried with the .sh's exact docker arguments"
+		else
+			bad "label (.ps1): $l_name is queried differently" "sh: $(cat "$TMP/label-sh.log")" "ps: $(cat "$TMP/label-ps.log")"
+		fi
+	fi
+done
+got="$(FAKE_IMAGE_ABSENT=1 label_sh powbox.layers.set)"
+if [ "$got" = FAIL ]; then
+	ok "label: an image that cannot be inspected is an error"
+else
+	bad "label: an uninspectable image read as '$got'"
+fi
+if [ "$have_pwsh" = 1 ]; then
+	got="$(FAKE_IMAGE_ABSENT=1 label_ps powbox.layers.set)"
+	if [ "$got" = FAIL ]; then
+		ok "label (.ps1): an image that cannot be inspected is an error too"
+	else
+		bad "label (.ps1): an uninspectable image read as '$got'"
+	fi
+fi
+
+printf 'N. the capability gate decides run / skip / not applicable\n'
+# gate_sh <tools> <tool> <skip-request>: prints the decision, or FAIL:<rc>.
+gate_sh() {
+	(
+		# shellcheck source=scripts/smoke-test-lib.sh
+		. "$LIB_SH"
+		FAKE_TOOLS="$1" FAKE_PATH_DIR="$FAKE2_DIR" smoke_gate_with_fake "$2" "$3" 2>/dev/null || echo "FAIL:$?"
+	)
+}
+# The fake docker is put first on PATH only for the gate call, inside the
+# subshell gate_sh opens.
+smoke_gate_with_fake() {
+	local PATH="$FAKE_PATH_DIR:$PATH"
+	smoke_gate fake-image:latest "$1" "$2"
+}
+cat >"$TMP/gate.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+. "$LIB_PS1"
+try { [Console]::Out.WriteLine((Get-SmokeGate -Image fake-image:latest -Tool \$args[0] -SkipRequested:(\$args[1] -ne ''))) }
+catch { [Console]::Out.WriteLine('FAIL:1') }
+PS
+gate_ps() {
+	FAKE_TOOLS="$1" PATH="$FAKE2_DIR:$PATH" pwsh -NoProfile -File "$TMP/gate.ps1" "$2" "$3" 2>/dev/null
+}
+# tools | tool | skip | want
+gate_cases=(
+	"pg-dev-up podman|pg-dev-up||run"
+	"pg-dev-up podman|pg-dev-up|1|skip"
+	"podman|pg-dev-up||na"
+	"podman|pg-dev-up|1|na"
+	"pg-dev-up podman|podman||run"
+	"pg-dev-up podman|podman|1|skip"
+	"pg-dev-up|podman||na"
+	"pg-dev-up|podman|1|na"
+)
+for gc in "${gate_cases[@]}"; do
+	IFS='|' read -r g_tools g_tool g_skip g_want <<<"$gc"
+	got="$(gate_sh "$g_tools" "$g_tool" "$g_skip")"
+	if [ "$got" = "$g_want" ]; then
+		ok "gate: $g_tool ${g_skip:+(skip requested) }with tools [$g_tools] -> $g_want"
+	else
+		bad "gate: $g_tool ${g_skip:+(skip requested) }with tools [$g_tools] -> $got, want $g_want"
+	fi
+	if [ "$have_pwsh" = 1 ]; then
+		got="$(gate_ps "$g_tools" "$g_tool" "$g_skip")"
+		if [ "$got" = "$g_want" ]; then
+			ok "gate (.ps1): $g_tool ${g_skip:+(skip requested) }with tools [$g_tools] -> $g_want"
+		else
+			bad "gate (.ps1): $g_tool ${g_skip:+(skip requested) }with tools [$g_tools] -> $got, want $g_want"
+		fi
+	fi
+done
+# A capability check that does not answer must fail the run, never read as
+# "absent" and turn the stage into a not-applicable one.
+got="$(FAKE_GATE_BROKEN=1 gate_sh "" pg-dev-up "")"
+case "$got" in
+FAIL:*) ok "gate: a docker failure during the check fails instead of reading as not applicable" ;;
+*) bad "gate: a docker failure during the check read as '$got'" ;;
+esac
+if [ "$have_pwsh" = 1 ]; then
+	got="$(FAKE_GATE_BROKEN=1 gate_ps "" pg-dev-up "")"
+	case "$got" in
+	FAIL:*) ok "gate (.ps1): a docker failure during the check fails too" ;;
+	*) bad "gate (.ps1): a docker failure during the check read as '$got'" ;;
+	esac
+fi
+
+printf 'O. the banner keeps "not applicable" and "skipped" apart\n'
+# banner_sh <skipped-entries> <na-entries> (each `;`-separated, may be empty)
+banner_sh() {
+	(
+		# shellcheck source=scripts/smoke-test-lib.sh
+		. "$LIB_SH"
+		skipped=() not_applicable=()
+		[ -z "$1" ] || IFS=';' read -r -a skipped <<<"$1"
+		[ -z "$2" ] || IFS=';' read -r -a not_applicable <<<"$2"
+		smoke_print_banner
+	)
+}
+cat >"$TMP/banner.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+. "$LIB_PS1"
+\$s = [System.Collections.Generic.List[string]]::new()
+\$n = [System.Collections.Generic.List[string]]::new()
+if (\$args[0]) { foreach (\$e in \$args[0].Split(';')) { \$s.Add(\$e) } }
+if (\$args[1]) { foreach (\$e in \$args[1].Split(';')) { \$n.Add(\$e) } }
+Write-SmokeBanner -Skipped \$s -NotApplicable \$n
+PS
+banner_ps() {
+	pwsh -NoProfile -File "$TMP/banner.ps1" "$1" "$2"
+}
+NA2="Stage 2: pg-dev-up functional (no pg-dev-up in this image)"
+NA3="Stage 3: rootless Podman engine (no podman in this image)"
+SK2="Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)"
+SK3="Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)"
+for drv in sh ps; do
+	if [ "$drv" = ps ] && [ "$have_pwsh" != 1 ]; then
+		printf '  skip  pwsh unavailable - .ps1 banner not checked here\n'
+		continue
+	fi
+	tag=""
+	[ "$drv" = ps ] && tag=" (.ps1)"
+	"banner_$drv" "" "" >"$TMP/o-none.$drv"
+	if [ "$(cat "$TMP/o-none.$drv")" = "Smoke test complete (all stages ran)." ]; then
+		ok "banner$tag: nothing skipped, nothing inapplicable -> unchanged 'all stages ran' line, alone"
+	else
+		bad "banner$tag: the full-run banner changed" "$(cat "$TMP/o-none.$drv")"
+	fi
+	"banner_$drv" "" "$NA2;$NA3" >"$TMP/o-na.$drv"
+	if grep -qF "  - $NA2" "$TMP/o-na.$drv" && grep -qF "  - $NA3" "$TMP/o-na.$drv" &&
+		! grep -q "PARTIAL" "$TMP/o-na.$drv" &&
+		[ "$(tail -n 1 "$TMP/o-na.$drv")" = "Smoke test complete (every stage that applies to this image ran)." ]; then
+		ok "banner$tag: not-applicable stages are listed as information and the run is not partial"
+	else
+		bad "banner$tag: not-applicable-only run reported wrongly" "$(cat "$TMP/o-na.$drv")"
+	fi
+	"banner_$drv" "$SK2;$SK3" "" >"$TMP/o-skip.$drv"
+	if grep -q "SKIPPED OR PARTIAL" "$TMP/o-skip.$drv" && grep -qF "  - $SK2" "$TMP/o-skip.$drv" &&
+		! grep -q "Not applicable" "$TMP/o-skip.$drv"; then
+		ok "banner$tag: explicit skips still make the run partial, with no not-applicable block"
+	else
+		bad "banner$tag: skipped-only run reported wrongly" "$(cat "$TMP/o-skip.$drv")"
+	fi
+	"banner_$drv" "$SK3" "$NA2" >"$TMP/o-both.$drv"
+	# Each entry must sit in its own block: the not-applicable one before the
+	# PARTIAL header, the skipped one after it.
+	partial_line="$(grep -n "SKIPPED OR PARTIAL" "$TMP/o-both.$drv" | cut -d: -f1)"
+	na_line="$(grep -nF "  - $NA2" "$TMP/o-both.$drv" | cut -d: -f1)"
+	sk_line="$(grep -nF "  - $SK3" "$TMP/o-both.$drv" | cut -d: -f1)"
+	if [ -n "$partial_line" ] && [ -n "$na_line" ] && [ -n "$sk_line" ] &&
+		[ "$na_line" -lt "$partial_line" ] && [ "$sk_line" -gt "$partial_line" ] &&
+		[ "$(grep -cF "$NA2" "$TMP/o-both.$drv")" -eq 1 ] && [ "$(grep -cF "$SK3" "$TMP/o-both.$drv")" -eq 1 ]; then
+		ok "banner$tag: a not-applicable entry and a skipped entry land in separate blocks, once each"
+	else
+		bad "banner$tag: not-applicable and skipped entries were mixed" "$(cat "$TMP/o-both.$drv")"
+	fi
+done
+if [ "$have_pwsh" = 1 ]; then
+	# The two banners differ only in control vocabulary and punctuation inside
+	# the PARTIAL block, so outside it they must match line for line.
+	if cmp -s "$TMP/o-none.sh" "$TMP/o-none.ps" && cmp -s "$TMP/o-na.sh" "$TMP/o-na.ps"; then
+		ok "banner: .sh and .ps1 print the same text when nothing is skipped"
+	else
+		bad "banner: .sh and .ps1 diverged outside the PARTIAL block" "$(diff "$TMP/o-na.sh" "$TMP/o-na.ps")"
+	fi
+fi
+
+printf 'P. both umbrellas, end to end against the fake docker\n'
+# Each case runs commands/smoke-test.{sh,ps1} from a scratch copy of the repo's
+# commands/ and scripts/ (so a case can delete docker/layers/full without
+# touching the checkout), with Stages 4-6 skipped and the fake docker answering
+# everything else. Labels come from <fixture>/.labels/<label>.
+E2E="$TMP/e2e"
+mkdir -p "$E2E"
+E2E_UNSET=(-u POWBOX_PODMAN -u POWBOX_FUSE -u POWBOX_SMOKE_SKIP_DB -u POWBOX_SMOKE_SKIP_PODMAN
+	-u POWBOX_SMOKE_REQUIRE_IMAGE -u POWBOX_SMOKE_SKIP_SELFHOSTED -u POWBOX_SMOKE_SKIP_SELFHOSTED_CLONE
+	-u POWBOX_SMOKE_SKIP_DIRMOUNT -u POWBOX_SMOKE_SKIP_WORKTREE_META -u SMOKE_TEST_EXEC)
+# new_fixture <name>: prints its path.
+new_fixture() {
+	local fx="$E2E/$1"
+	mkdir -p "$fx/docker/layers" "$fx/.labels"
+	cp -R "$ROOT_DIR/commands" "$ROOT_DIR/scripts" "$fx/"
+	cp -R "$ROOT_DIR/docker/layers/full" "$fx/docker/layers/"
+	printf '%s' "$fx"
+}
+# set_label <fixture> <label> <value>
+set_label() { printf '%s' "$3" >"$1/.labels/$2"; }
+# e2e <sh|ps> <fixture> <tag>, configured by CASE_TOOLS, CASE_SKIP_DB,
+# CASE_SKIP_PODMAN, CASE_REQUIRE, CASE_EXEC_RUN, CASE_GATE_BROKEN. Sets E2E_RC,
+# E2E_OUT (combined output) and E2E_RUNS (the recorded probe runs).
+e2e() {
+	local drv="$1" fx="$2" tag="$3" sw envs
+	E2E_RUNS="$E2E/$tag.$drv.runs"
+	E2E_OUT="$E2E/$tag.$drv.out"
+	E2E_LOG="$E2E/$tag.$drv.log"
+	mkdir -p "$E2E_RUNS"
+	envs=(FAKE_DOCKER_LOG="$E2E_LOG" FAKE_RUNS="$E2E_RUNS" FAKE_LABELS="$fx/.labels"
+		FAKE_TOOLS="${CASE_TOOLS:-}" FAKE_EXEC_RUN="${CASE_EXEC_RUN:-}" FAKE_GATE_BROKEN="${CASE_GATE_BROKEN:-}"
+		PATH="$FAKE2_DIR:$PATH")
+	[ "${CASE_REQUIRE:-0}" = 1 ] && envs+=(POWBOX_SMOKE_REQUIRE_IMAGE=1)
+	if [ "$drv" = sh ]; then
+		envs+=(POWBOX_SMOKE_SKIP_SELFHOSTED=1 POWBOX_SMOKE_SKIP_DIRMOUNT=1 POWBOX_SMOKE_SKIP_WORKTREE_META=1)
+		[ "${CASE_SKIP_DB:-0}" = 1 ] && envs+=(POWBOX_SMOKE_SKIP_DB=1)
+		[ "${CASE_SKIP_PODMAN:-0}" = 1 ] && envs+=(POWBOX_SMOKE_SKIP_PODMAN=1)
+		env "${E2E_UNSET[@]}" "${envs[@]}" bash "$fx/commands/smoke-test.sh" fake-image:latest >"$E2E_OUT" 2>&1
+		E2E_RC=$?
+	else
+		# A wrapper prints a thrown error's own message on one line: pwsh's
+		# error view word-wraps and colours what it prints for an uncaught one.
+		sw="-SkipSelfHosted -SkipDirMount -SkipWorktreeMeta"
+		[ "${CASE_SKIP_DB:-0}" = 1 ] && sw="$sw -SkipDb"
+		[ "${CASE_SKIP_PODMAN:-0}" = 1 ] && sw="$sw -SkipPodman"
+		cat >"$E2E/$tag.ps1" <<PS
+\$ErrorActionPreference = "Stop"
+try { & "$fx/commands/smoke-test.ps1" -Image fake-image:latest $sw }
+catch { [Console]::Out.WriteLine("THROWN: " + \$_.Exception.Message); exit 1 }
+PS
+		env "${E2E_UNSET[@]}" "${envs[@]}" pwsh -NoProfile -File "$E2E/$tag.ps1" >"$E2E_OUT" 2>&1
+		E2E_RC=$?
+	fi
+}
+runs_count() { find "$E2E_RUNS" -type f | wc -l | tr -d ' '; }
+# expect <description> <condition...>: one check, output dumped on failure.
+expect() {
+	local what="$1"
+	shift
+	if "$@"; then
+		ok "$what"
+	else
+		bad "$what" "$(cat "$E2E_OUT")"
+	fi
+}
+out_has() { grep -qF -- "$1" "$E2E_OUT"; }
+out_lacks() { ! grep -qF -- "$1" "$E2E_OUT"; }
+log_lacks() { ! grep -qF -- "$1" "$E2E_LOG"; }
+# out_before <first> <second>: both occur, and the first line holding <first>
+# precedes the first line holding <second>.
+out_before() {
+	local a b
+	a="$(grep -nF -- "$1" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	b="$(grep -nF -- "$2" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	[ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+# in_na_block <entry>: the entry is listed exactly once, inside the
+# not-applicable block, i.e. after its header and before any PARTIAL header.
+in_na_block() {
+	local entry_line na_line partial_line
+	[ "$(grep -cxF -- "  - $1" "$E2E_OUT")" -eq 1 ] || return 1
+	entry_line="$(grep -nxF -- "  - $1" "$E2E_OUT" | cut -d: -f1)"
+	na_line="$(grep -n "^Not applicable to this image" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	partial_line="$(grep -n "SKIPPED OR PARTIAL" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	[ -n "$na_line" ] && [ "$entry_line" -gt "$na_line" ] || return 1
+	[ -z "$partial_line" ] || [ "$entry_line" -lt "$partial_line" ]
+}
+rc_is() { [ "$E2E_RC" -eq "$1" ]; }
+rc_fail() { [ "$E2E_RC" -ne 0 ]; }
+runs_are() { [ "$(runs_count)" -eq "$1" ]; }
+
+e2e_drivers=(sh)
+if [ "$have_pwsh" = 1 ]; then
+	e2e_drivers+=(ps)
+else
+	printf '  skip  pwsh unavailable - commands/smoke-test.ps1 end-to-end cases not checked here\n'
+fi
+for drv in "${e2e_drivers[@]}"; do
+	t=""
+	[ "$drv" = ps ] && t=" (.ps1)"
+	if [ "$drv" = sh ]; then
+		skip_db_entry="Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)"
+		skip_podman_entry="Stage 3: rootless Podman engine (POWBOX_SMOKE_SKIP_PODMAN)"
+		skip_prefix=POWBOX
+	else
+		skip_prefix=-Skip
+		skip_db_entry="Stage 2: pg-dev-up functional (-SkipDb)"
+		skip_podman_entry="Stage 3: rootless Podman engine (-SkipPodman)"
+	fi
+
+	# Lean image with every tool, both explicit skips set: today's image.
+	fx="$(new_fixture "lean-skips.$drv")"
+	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
+	e2e "$drv" "$fx" lean-skips
+	expect "e2e$t lean image with both explicit skips: run passes" rc_is 0
+	expect "e2e$t lean image: only Stage 1 ran probes (no Stage 1b)" runs_are 1
+	expect "e2e$t lean image: Stage 1 carries the podman presence probe" grep -qaF "command -v podman >/dev/null" "$E2E_RUNS/1"
+	expect "e2e$t tool present + explicit skip: Stage 2 is recorded as skipped" out_has "  - $skip_db_entry"
+	expect "e2e$t tool present + explicit skip: Stage 3 is recorded as skipped" out_has "  - $skip_podman_entry"
+	expect "e2e$t tool present + explicit skip: the run is partial" out_has "SKIPPED OR PARTIAL"
+	expect "e2e$t tool present: nothing is reported not applicable" out_lacks "Not applicable"
+
+	# Lean image without pg-dev-up or podman: Stages 2 and 3 are not
+	# applicable, whether or not their explicit skip is set.
+	for sk in 0 1; do
+		fx="$(new_fixture "lean-bare-$sk.$drv")"
+		CASE_TOOLS="" CASE_SKIP_DB=$sk CASE_SKIP_PODMAN=$sk
+		e2e "$drv" "$fx" "lean-bare-$sk"
+		w=" (explicit skips $([ "$sk" = 1 ] && echo set || echo unset))"
+		expect "e2e$t tools absent$w: run passes" rc_is 0
+		expect "e2e$t tools absent$w: Stage 2 listed once, in the not-applicable block" in_na_block "$NA2"
+		expect "e2e$t tools absent$w: Stage 3 listed once, in the not-applicable block" in_na_block "$NA3"
+		expect "e2e$t tools absent$w: Stage 2 is not recorded as skipped" out_lacks "  - Stage 2: pg-dev-up functional ($skip_prefix"
+		expect "e2e$t tools absent$w: Stage 3 is not recorded as skipped" out_lacks "  - Stage 3: rootless Podman engine ($skip_prefix"
+		expect "e2e$t tools absent$w: neither stage ran" log_lacks "POSTGRES_USER"
+		expect "e2e$t tools absent$w: the Podman stage never started" log_lacks "NET_ADMIN"
+	done
+
+	# full image with the committed skeleton: a note, no Stage 1b, not partial
+	# on its account.
+	fx="$(new_fixture "full-skeleton.$drv")"
+	set_label "$fx" powbox.layers.set full
+	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/full")"
+	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
+	e2e "$drv" "$fx" full-skeleton
+	expect "e2e$t full + skeleton probe file: run passes" rc_is 0
+	expect "e2e$t full + skeleton: the note names the file" out_has "docker/layers/full/smoke-probes.txt holds no probe line"
+	expect "e2e$t full + skeleton: no Stage 1b run" runs_are 1
+	expect "e2e$t full + skeleton: no Stage 1b skip entry" out_lacks "  - Stage 1b"
+	expect "e2e$t full + skeleton: later stages still reached" out_has "  - $skip_db_entry"
+	expect "e2e$t full + skeleton with a current digest: no staleness warning" out_lacks "stale relative to this set"
+	# Emptying a set's probe file changes its digest: the image is still
+	# reported stale although there is nothing to run.
+	set_label "$fx" powbox.layers.digest "sha256:0000"
+	e2e "$drv" "$fx" full-skeleton-stale
+	expect "e2e$t full + skeleton with a different digest: run passes" rc_is 0
+	expect "e2e$t full + skeleton with a different digest: warns the image is stale" out_has "the image is stale relative to this set."
+	expect "e2e$t full + skeleton with a different digest: the note still follows the warning" out_before "the image is stale relative to this set." "docker/layers/full/smoke-probes.txt holds no probe line"
+	expect "e2e$t full + skeleton with a different digest: no claim that probes run" out_lacks "Running its probes anyway"
+	expect "e2e$t full + skeleton with a different digest: no Stage 1b run" runs_are 1
+	expect "e2e$t full + skeleton with a different digest: not partial on its account" out_lacks "  - Stage 1b"
+
+	# full image, probe file deleted / whole set directory deleted: hard
+	# failure naming the path, before any later stage.
+	fx="$(new_fixture "full-nofile.$drv")"
+	rm -f "$fx/docker/layers/full/smoke-probes.txt"
+	set_label "$fx" powbox.layers.set full
+	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=0 CASE_SKIP_PODMAN=0
+	e2e "$drv" "$fx" full-nofile
+	expect "e2e$t full without smoke-probes.txt: run fails" rc_fail
+	expect "e2e$t full without smoke-probes.txt: the message names the file" out_has "docker/layers/full/smoke-probes.txt is missing"
+	expect "e2e$t full without smoke-probes.txt: no later stage ran" log_lacks "smoke-gate"
+	fx="$(new_fixture "full-nodir.$drv")"
+	rm -r "$fx/docker/layers/full"
+	set_label "$fx" powbox.layers.set full
+	e2e "$drv" "$fx" full-nodir
+	expect "e2e$t full without docker/layers/full/: run fails" rc_fail
+	expect "e2e$t full without docker/layers/full/: the message names the directory" out_has "docker/layers/full/ is missing"
+
+	# Another set: no probe file is a note; no directory is a skip, or a
+	# failure under POWBOX_SMOKE_REQUIRE_IMAGE.
+	fx="$(new_fixture "custom-nofile.$drv")"
+	mkdir -p "$fx/docker/layers/custom"
+	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
+	set_label "$fx" powbox.layers.set custom
+	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
+	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/custom")"
+	e2e "$drv" "$fx" custom-nofile
+	expect "e2e$t custom set without a probe file: run passes" rc_is 0
+	expect "e2e$t custom set without a probe file: one note line" out_has "layer set 'custom' ships no docker/layers/custom/smoke-probes.txt"
+	expect "e2e$t custom set without a probe file: no Stage 1b run or skip" runs_are 1
+	expect "e2e$t custom set without a probe file, current digest: no staleness warning" out_lacks "stale relative to this set"
+	set_label "$fx" powbox.layers.digest "sha256:0000"
+	e2e "$drv" "$fx" custom-nofile-stale
+	expect "e2e$t custom set without a probe file, different digest: run passes" rc_is 0
+	expect "e2e$t custom set without a probe file, different digest: warns the image is stale" out_has "the image is stale relative to this set."
+	expect "e2e$t custom set without a probe file, different digest: the note still follows the warning" out_before "the image is stale relative to this set." "layer set 'custom' ships no docker/layers/custom/smoke-probes.txt"
+	expect "e2e$t custom set without a probe file, different digest: no claim that probes run" out_lacks "Running its probes anyway"
+	expect "e2e$t custom set without a probe file, different digest: no Stage 1b run" runs_are 1
+	fx="$(new_fixture "custom-nodir.$drv")"
+	set_label "$fx" powbox.layers.set custom
+	e2e "$drv" "$fx" custom-nodir
+	expect "e2e$t custom set missing from the tree: run passes" rc_is 0
+	expect "e2e$t custom set missing from the tree: recorded as a skip" out_has "  - Stage 1b: layer-set probes for set custom (docker/layers/custom/ is not in this working tree)"
+	CASE_REQUIRE=1
+	e2e "$drv" "$fx" custom-nodir-require
+	CASE_REQUIRE=0
+	expect "e2e$t custom set missing under POWBOX_SMOKE_REQUIRE_IMAGE: run fails" rc_fail
+	expect "e2e$t custom set missing under POWBOX_SMOKE_REQUIRE_IMAGE: names the directory" out_has "docker/layers/custom/ is not in this working tree, and POWBOX_SMOKE_REQUIRE_IMAGE is set"
+
+	# A set with probes: Stage 1b runs them in file order; a current digest
+	# label gives no staleness warning, a different one warns and still runs.
+	fx="$(new_fixture "custom-probes.$drv")"
+	mkdir -p "$fx/docker/layers/custom"
+	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
+	printf '# custom probes\r\n\r\ncommand -v first >/dev/null\r\n  # indented comment\r\nsecond --version | grep -q "2"\r\n' >"$fx/docker/layers/custom/smoke-probes.txt"
+	nul_list "$E2E/custom-probes.want" "command -v first >/dev/null" 'second --version | grep -q "2"'
+	set_label "$fx" powbox.layers.set custom
+	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/custom")"
+	e2e "$drv" "$fx" custom-probes
+	expect "e2e$t custom set with probes: run passes" rc_is 0
+	expect "e2e$t custom set with probes: Stage 1b ran after Stage 1" runs_are 2
+	expect "e2e$t custom set with probes: Stage 1b got exactly the file's probes, in order" cmp -s "$E2E_RUNS/2" "$E2E/custom-probes.want"
+	expect "e2e$t custom set with probes: the stage is labelled" out_has "Stage 1b $([ "$drv" = sh ] && printf '\342\200\224' || printf -- -) layer-set probes (custom)"
+	expect "e2e$t custom set with a current digest: no staleness warning" out_lacks "stale relative to this set"
+	set_label "$fx" powbox.layers.digest "sha256:0000"
+	e2e "$drv" "$fx" custom-stale
+	expect "e2e$t custom set with a different digest: run passes" rc_is 0
+	expect "e2e$t custom set with a different digest: warns the image is stale" out_has "the image is stale relative to this set. Running its probes anyway"
+	expect "e2e$t custom set with a different digest: still runs the probes" runs_are 2
+
+	# A failing layer-set probe fails the run, named by index with the manifest.
+	fx="$(new_fixture "custom-fail.$drv")"
+	mkdir -p "$fx/docker/layers/custom"
+	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
+	printf 'true\nfalse\n' >"$fx/docker/layers/custom/smoke-probes.txt"
+	set_label "$fx" powbox.layers.set custom
+	CASE_EXEC_RUN=2
+	e2e "$drv" "$fx" custom-fail
+	CASE_EXEC_RUN=""
+	expect "e2e$t failing layer-set probe: run fails" rc_fail
+	expect "e2e$t failing layer-set probe: named by index" out_has "SMOKE PROBE 2 FAILED"
+	expect "e2e$t failing layer-set probe: manifest printed" out_has "    2  false"
+
+	# A trailing backslash in the file is the driver's to reject.
+	fx="$(new_fixture "custom-cont.$drv")"
+	mkdir -p "$fx/docker/layers/custom"
+	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
+	printf 'true\nprintf x \\\nprintf y\n' >"$fx/docker/layers/custom/smoke-probes.txt"
+	set_label "$fx" powbox.layers.set custom
+	e2e "$drv" "$fx" custom-cont
+	expect "e2e$t trailing-backslash probe line: run fails" rc_fail
+	expect "e2e$t trailing-backslash probe line: rejected as a line continuation" out_has "line continuation"
+	expect "e2e$t trailing-backslash probe line: docker never ran Stage 1b" runs_are 1
+
+	# A label that is not a set name is never turned into a path.
+	fx="$(new_fixture "bad-label.$drv")"
+	set_label "$fx" powbox.layers.set "../../etc"
+	e2e "$drv" "$fx" bad-label
+	expect "e2e$t invalid layer-set label: run fails" rc_fail
+	expect "e2e$t invalid layer-set label: says so" out_has "invalid layer set '../../etc'"
+
+	# A capability check that cannot answer fails the run.
+	fx="$(new_fixture "gate-broken.$drv")"
+	CASE_GATE_BROKEN=1
+	e2e "$drv" "$fx" gate-broken
+	CASE_GATE_BROKEN=""
+	expect "e2e$t unanswered capability check: run fails" rc_fail
+	expect "e2e$t unanswered capability check: says so" out_has "could not tell whether image 'fake-image:latest' has pg-dev-up"
+done
+
 printf '\n%d check(s), %d failure(s)\n' "$checks" "$failures"
 [ "$failures" -eq 0 ] || exit 1
 printf 'smoke probe wrapper test: PASS\n'

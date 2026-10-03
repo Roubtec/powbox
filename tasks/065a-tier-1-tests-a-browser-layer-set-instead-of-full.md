@@ -63,7 +63,7 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 
   The build step's currency check sources `scripts/build-image-lib.sh` and calls `layers_stale_reason`. That check works for any set, given the selected set and its digest, so only its inputs change.
 - `paths:` semantics: GitHub evaluates the patterns in order, and a later positive pattern can include a path again after an earlier `!` pattern excluded it. The list already has `**/Dockerfile` after `docker/**`, and it matches `docker/layers/full/Dockerfile`. That is why the exclusion must come last.
-- `scripts/smoke-test-lib.sh`, function `smoke_layer_stage`. It is the Stage 1b entry point both umbrellas call. It reads `docker/layers/<set>/smoke-probes.txt` from the working tree, keyed by the image's `powbox.layers.set` label. It appends to the caller's `skipped` and `not_applicable` arrays, so a caller running under `set -u` must declare both first. A failing probe is reported as `SMOKE PROBE <n> FAILED` with the index → probe manifest, by `scripts/smoke-test-image.sh`.
+- `scripts/smoke-test-lib.sh`, function `smoke_layer_stage`. It is the Stage 1b entry point both umbrellas call. It reads `docker/layers/<set>/smoke-probes.txt` from the working tree, keyed by the image's `powbox.layers.set` label. It takes the image and the repository root (`smoke_layer_stage <image> <repo-root>`), and it appends to the caller's `skipped` array, so a caller running under `set -u` must declare that array first. A failing probe is reported as `SMOKE PROBE <n> FAILED` with the index → probe manifest, by `scripts/smoke-test-image.sh`.
 - `docker/agent/Dockerfile`, section "Per-agent seed assets": the two `COPY .powbox-staging/agent.md.tmpl …/agent.md.tmpl` lines.
 - `scripts/layers-digest.sh` header: the contract. Exit status 1 means a contract violation, and every offending line or path is named on stderr.
 - `docker/layers/custom/` is user-owned. `.gitignore` keeps only its `.gitkeep`, so in a CI checkout it has no Dockerfile and the scan would reject it.
@@ -82,13 +82,13 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 - **Failing-probe check, decided route.** In one `bash` step:
   1. Set a `trap` that restores the committed file with `git checkout -- docker/layers/browser/smoke-probes.txt` on `EXIT`.
   2. Overwrite that file with exactly the two probe lines.
-  3. Declare `skipped=()` and `not_applicable=()`, source `scripts/smoke-test-lib.sh`, and call `smoke_layer_stage` against `powbox-agent:latest`, capturing its status and output.
+  3. Declare `skipped=()`, source `scripts/smoke-test-lib.sh`, and call `smoke_layer_stage powbox-agent:latest "$GITHUB_WORKSPACE"`, capturing its status and output.
   4. Assert on those.
 
   Do not rerun the umbrella. Do not use a temporary set copy: Stage 1b keys the set off the image's label, so a copy under another name is never read. The overwrite changes the working tree's digest, so Stage 1b's stale-image warning is expected in this step's output and is not a failure. The trap is what keeps the probe file from leaking into the PowerShell Stage 6 step.
 - **The seeded-template check reads files out of the image**, for example with `docker run --rm --entrypoint cat powbox-agent:latest <path>`. It does not start the entrypoint. The hooks' `envsubst` render is unchanged by the layer-set work and is pinned by `scripts/test-stage-agent-template.sh`. So this check covers what the hook tests cannot: that the staged file reached both agents' images.
 - **Tier 0 scan.** Put the step next to the other static guards, before the pure-shell suites. Loop over `docker/layers/*/`, skip `custom` by name, and print each set's name as it is scanned, so a failure points at the set. Do not skip a directory just because it has no Dockerfile: a committed set that loses its Dockerfile must fail.
-- Keep the workflow's comment style, where each step explains why it exists. Replace the comments that justify building `full` rather than appending to them.
+- Keep the workflow's comment style, where each step explains why it exists. Replace the comments that justify building `full` rather than appending to them. That includes the workflow header, the cache-key comments, and the PowerShell Stage 6 step's comment ("Runs once, against the full image"), which now runs against the `browser` image.
 - `browser`'s Dockerfile must pass the Tier 0 scan, and its digest must be stable across checkouts. Use LF line endings and keep the set to regular files only.
 
 ## Effect on tasks 071 and 073
@@ -117,7 +117,7 @@ Both were amended in the same commit that wrote this task:
   - `actionlint` on both workflows;
   - `./scripts/layers-digest.sh docker/layers/browser` and `… docker/layers/full` both exit 0;
   - `bash scripts/test-smoke-probe-wrapper.sh`, `bash scripts/test-layer-sets.sh` and `./scripts/run-pure-shell-tests.sh` pass.
-- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a temporary directory outside the worktree, as task 065's round-3 fixer did for the currency check. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
+- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a temporary directory outside the worktree. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
 - On the PR:
   - check the run log for both passes' label assertions and template checks;
   - run the two one-off negative demonstrations from the acceptance criteria;

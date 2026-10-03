@@ -38,7 +38,7 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
    - the label assertion (`powbox.layers.set=browser`);
    - the layers cache key: `docker/layers/browser/**`, the `browser` digest, and a `powbox-layers-browser-` prefix;
    - the `paths:` filter, which gains `!docker/layers/full/**` as its **last** entry, with a comment telling later editors to keep it last. That way a PR that changes only `full` does not start Tier 1.
-5. Two mechanism checks:
+5. Two mechanism checks. Together with the `browser` pass's smoke step, they cover the three checks named under "Why this task exists". Stage 1b running the set's probes is shown by the failing-probe check, which runs probe 1 from the file the `browser` label selects before probe 2 fails. Do not add a probe assertion to the normal smoke step: against the skeleton, Stage 1b only prints a note.
    - **Seeded template.** In each pass, after its smoke step, the template baked into the agent image must equal the expected source byte for byte, for both agents. Write each extracted file to disk and compare it with `cmp`. A `$(...)` capture drops trailing newlines and would hide a difference at the end of the file. The template paths are `/home/node/.agent-container/claude/agent.md.tmpl` and `/home/node/.agent-container/codex/agent.md.tmpl`. The expected source is `docker/shared/container-agent.md.tmpl` in the lean pass and `.powbox-staging/agent.md.tmpl` in the `browser` pass. In the `browser` pass, also check the notes heading, ``## Additional tooling from the `browser` layer set``:
      - it must be present when the staged `.powbox-staging/agent.md.tmpl` differs from the core template, which is the staging script's own decision about whether the notes count;
      - it must be absent otherwise.
@@ -112,7 +112,7 @@ Both were amended alongside this task:
 - The failing-probe check fails its own assertion if Stage 1b exits zero or does not name probe 2. Show this once on the PR with a perturbed copy of the check, then revert. After the step, `docker/layers/browser/smoke-probes.txt` matches the committed file, whether the step passed or failed.
 - A `browser` image whose working tree lacks `docker/layers/browser/smoke-probes.txt`, or the whole `docker/layers/browser/` directory, fails Stage 1b in both drivers, exactly as `full` does. The unit suite covers both cases. No doc or comment still limits the keep-the-probe-file rule to `full`.
 - Tier 0 fails, naming the set, when any committed set other than `custom` violates the layer-set contract or has no Dockerfile. Show this once with a deliberate violation in a scratch commit on the PR, for example a `COPY` without `--chmod` in `browser`, then revert it. Tier 0 passes on a checkout whose `custom/` holds only `.gitkeep`.
-- A run that hits both caches performs no layers bake in the `browser` pass, as the currency check already enforces.
+- A run that hits both caches performs no layers bake in the `browser` pass, as the currency check already enforces. A change under `docker/layers/browser/` alone misses only the layers cache, not the base cache.
 - `.powbox-layers.example`, README "Layer sets" and `docs/architecture.md` list `browser` as a selectable committed set.
 - `README.md`, `docs/smoke-tests.md` and `AGENTS.md` say that Tier 1 builds lean + `browser`, that `full` is the maintainer's set built by hand, and that Tier 0 contract-scans every committed set. No claim is left that CI builds `full`.
 - `actionlint` passes on both workflows. `shellcheck`, `shfmt -d`, PSScriptAnalyzer (`-Recurse`) and `./scripts/run-pure-shell-tests.sh` pass. `markdownlint-cli2` reports no new findings on the changed Markdown.
@@ -123,7 +123,7 @@ Both were amended alongside this task:
   - `actionlint` on both workflows;
   - `./scripts/layers-digest.sh docker/layers/browser` and `… docker/layers/full` both exit 0;
   - `bash scripts/test-smoke-probe-wrapper.sh`, `bash scripts/test-layer-sets.sh` and `./scripts/run-pure-shell-tests.sh` pass.
-- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a disposable clone (`dc-enter`), not the worktree: the trap's `git checkout --` needs a repository. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
+- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a disposable clone (`dc-enter`), not the worktree: the trap's `git checkout --` needs a repository. `dc-enter` clones the committed HEAD, so commit the snippets first or copy them into the clone. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
 - On the PR:
   - check the run log for both passes' label assertions and template checks;
   - run the two one-off negative demonstrations from the acceptance criteria;

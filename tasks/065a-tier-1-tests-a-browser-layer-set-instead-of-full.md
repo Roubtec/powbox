@@ -26,9 +26,9 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 
 **In scope:**
 
-1. A committed `docker/layers/browser/` set. Its `Dockerfile` has the same contract-compliant header shape as `docker/layers/full/Dockerfile`. Its `smoke-probes.txt` is a skeleton: header comments, no probe lines. The header carries the same "keep this file even with no probe line" sentence as `docker/layers/full/smoke-probes.txt`. It has **no** `agent-notes.md`. It installs nothing yet; task 073 fills it.
+1. A committed `docker/layers/browser/` set. Its `Dockerfile` has the same contract-compliant header shape as `docker/layers/full/Dockerfile`, including any contract bullet task 063a has added to that header by then. Its `smoke-probes.txt` is a skeleton: header comments, no probe lines. The header carries the same "keep this file even with no probe line" sentence as `docker/layers/full/smoke-probes.txt`. It has **no** `agent-notes.md`. It installs nothing yet; task 073 fills it.
 2. `browser` becomes a documented, user-selectable committed set alongside `full`. That touches the set list and comment in `.powbox-layers.example`, the layer-set bullet in `docs/architecture.md` ("Rules the file map does not state"), and README "Layer sets". Each says that `browser` ships no tools yet.
-3. `scripts/smoke-test-lib.sh` and `scripts/smoke-test-lib.ps1` (`smoke_layer_stage` / `Invoke-SmokeLayerStage`). The rule that makes a missing probe file or a missing set directory a hard failure currently covers only `full`. It must cover `browser` too. Otherwise, after this task, deleting `docker/layers/browser/smoke-probes.txt` would quietly turn Tier 1's Stage 1b into a note. Keep the set names in one list per driver rather than repeating string comparisons, and keep the two drivers' output identical. Extend `scripts/test-smoke-probe-wrapper.sh` with the `browser` cases. Also reword every text that limits the keep-the-probe-file rule to `full`:
+3. `scripts/smoke-test-lib.sh` and `scripts/smoke-test-lib.ps1` (`smoke_layer_stage` / `Invoke-SmokeLayerStage`). The rule that makes a missing probe file or a missing set directory a hard failure currently covers only `full`. It must cover `browser` too. Otherwise, after this task, deleting `docker/layers/browser/smoke-probes.txt` would quietly turn Tier 1's Stage 1b into a note. Keep the set names in one list per driver rather than repeating string comparisons, and keep the two drivers' output identical. Extend `scripts/test-smoke-probe-wrapper.sh` with the `browser` cases. Its fixture builder (`new_fixture`) copies only `docker/layers/full` today, so it must copy `browser` too. Also reword every text that limits the keep-the-probe-file rule to `full`:
    - the comments in `smoke_layer_stage` / `Invoke-SmokeLayerStage`;
    - the comment above that call in `commands/smoke-test.sh` and `commands/smoke-test.ps1`;
    - README "Host Validation";
@@ -39,12 +39,12 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
    - the layers cache key: `docker/layers/browser/**`, the `browser` digest, and a `powbox-layers-browser-` prefix;
    - the `paths:` filter, which gains `!docker/layers/full/**` as its **last** entry, with a comment telling later editors to keep it last. That way a PR that changes only `full` does not start Tier 1.
 5. Two mechanism checks:
-   - **Seeded template.** In each pass, after its smoke step, the template baked into the agent image must equal the expected source byte for byte, for both agents. The template paths are `/home/node/.agent-container/claude/agent.md.tmpl` and `/home/node/.agent-container/codex/agent.md.tmpl`. The expected source is `docker/shared/container-agent.md.tmpl` in the lean pass and `.powbox-staging/agent.md.tmpl` in the `browser` pass. In the `browser` pass, also check the notes heading, ``## Additional tooling from the `browser` layer set``:
+   - **Seeded template.** In each pass, after its smoke step, the template baked into the agent image must equal the expected source byte for byte, for both agents. Write each extracted file to disk and compare it with `cmp`. A `$(...)` capture drops trailing newlines and would hide a difference at the end of the file. The template paths are `/home/node/.agent-container/claude/agent.md.tmpl` and `/home/node/.agent-container/codex/agent.md.tmpl`. The expected source is `docker/shared/container-agent.md.tmpl` in the lean pass and `.powbox-staging/agent.md.tmpl` in the `browser` pass. In the `browser` pass, also check the notes heading, ``## Additional tooling from the `browser` layer set``:
      - it must be present when `docker/layers/browser/agent-notes.md` has non-whitespace content;
      - it must be absent otherwise.
 
      The absent direction has teeth from the day this task lands, and the present direction once task 073 adds the notes.
-   - **Failing probe.** In the `browser` pass, after its smoke step, run Stage 1b against the built image with a probe file of exactly two lines: one passing probe, then one failing probe. The passing probe prints nothing. Assert three things on the combined output (`2>&1`): the stage exits non-zero, the output contains the exact line `SMOKE PROBE 2 FAILED`, and it prints the index → probe manifest.
+   - **Failing probe.** In the `browser` pass, after its smoke step, run Stage 1b against the built image with a probe file of exactly two lines: one passing probe, then one failing probe. The passing probe prints nothing. Assert three things on the combined output (`2>&1`): the stage exits non-zero, the output contains the exact line `SMOKE PROBE 2 FAILED`, and it contains the manifest header `scripts/smoke-test-image.sh` prints.
 6. `.github/workflows/native-linux-ci.yml` (Tier 0): a step that runs `./scripts/layers-digest.sh docker/layers/<set>` for every committed set. That is every directory under `docker/layers/` except `custom`. The step fails on any non-zero exit. It needs no Docker.
 7. Docs that say what Tier 1 builds and how `full` is covered: `README.md` ("Continuous Integration"), `docs/smoke-tests.md` ("CI gating", and the Stage 1b section where it names `full` as the set whose probe file is required), and `AGENTS.md` ("Validating Changes").
 
@@ -97,10 +97,12 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 
 ## Effect on tasks 071 and 073
 
-Both were amended in the same commit that wrote this task:
+Both were amended alongside this task:
 
 - **071** no longer expects Tier 1 to build `full`. Its "both passes" are lean + `browser`. The `full` image is verified by the maintainer's host build, which its Validation section already asks for. Its CI cache-key note now refers only to the base key.
 - **073** installs the browser stack (Chromium and its env, Marp CLI, Mermaid CLI, Playwright CLI) in **both** `docker/layers/browser/Dockerfile` and `docker/layers/full/Dockerfile`, as verbatim copies of the same blocks. It writes the browser rows into both sets' `agent-notes.md`. It adds the browser probes to both sets' `smoke-probes.txt`, with at least one functional probe per tool: a Marp deck to PDF, a Mermaid diagram to SVG, and a headless Chromium print-to-PDF of an HTML file. The Podman and PostgreSQL moves go to `full` only.
+- **073** also records the maintainer's decision that Stages 2 and 3 leave CI. The Stage 2 and Stage 3 code and `scripts/test-pg-dev-up-scoped.sh` stay, and only that suite's Tier 1 `paths:` entry is removed.
+- **073** also replaces the "`browser` ships no tools yet" wording this task writes into `.powbox-layers.example`, README "Layer sets", `docs/architecture.md` and the `browser` Dockerfile header.
 
 ## Acceptance criteria
 
@@ -121,7 +123,7 @@ Both were amended in the same commit that wrote this task:
   - `actionlint` on both workflows;
   - `./scripts/layers-digest.sh docker/layers/browser` and `… docker/layers/full` both exit 0;
   - `bash scripts/test-smoke-probe-wrapper.sh`, `bash scripts/test-layer-sets.sh` and `./scripts/run-pure-shell-tests.sh` pass.
-- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a temporary directory outside the worktree. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
+- Extract the failing-probe and seeded-template snippets from the YAML and run them against a stub `docker` on `PATH`. Do this in a disposable clone (`dc-enter`), not the worktree: the trap's `git checkout --` needs a repository. Cover the pass, fail, notes-present and notes-absent cases, and confirm the trap restores the probe file when the assertion fails.
 - On the PR:
   - check the run log for both passes' label assertions and template checks;
   - run the two one-off negative demonstrations from the acceptance criteria;

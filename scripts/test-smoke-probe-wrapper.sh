@@ -1505,6 +1505,7 @@ for drv in "${e2e_drivers[@]}"; do
 	# on its account.
 	fx="$(new_fixture "full-skeleton.$drv")"
 	set_label "$fx" powbox.layers.set full
+	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/full")"
 	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
 	e2e "$drv" "$fx" full-skeleton
 	expect "e2e$t full + skeleton probe file: run passes" rc_is 0
@@ -1512,6 +1513,16 @@ for drv in "${e2e_drivers[@]}"; do
 	expect "e2e$t full + skeleton: no Stage 1b run" runs_are 1
 	expect "e2e$t full + skeleton: no Stage 1b skip entry" out_lacks "  - Stage 1b"
 	expect "e2e$t full + skeleton: later stages still reached" out_has "  - $skip_db_entry"
+	expect "e2e$t full + skeleton with a current digest: no staleness warning" out_lacks "stale relative to this set"
+	# Emptying a set's probe file changes its digest: the image is still
+	# reported stale although there is nothing to run.
+	set_label "$fx" powbox.layers.digest "sha256:0000"
+	e2e "$drv" "$fx" full-skeleton-stale
+	expect "e2e$t full + skeleton with a different digest: run passes" rc_is 0
+	expect "e2e$t full + skeleton with a different digest: warns the image is stale" out_has "the image is stale relative to this set."
+	expect "e2e$t full + skeleton with a different digest: the note still follows" out_has "docker/layers/full/smoke-probes.txt holds no probe line"
+	expect "e2e$t full + skeleton with a different digest: no Stage 1b run" runs_are 1
+	expect "e2e$t full + skeleton with a different digest: not partial on its account" out_lacks "  - Stage 1b"
 
 	# full image, probe file deleted / whole set directory deleted: hard
 	# failure naming the path, before any later stage.
@@ -1537,10 +1548,17 @@ for drv in "${e2e_drivers[@]}"; do
 	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
 	set_label "$fx" powbox.layers.set custom
 	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
+	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/custom")"
 	e2e "$drv" "$fx" custom-nofile
 	expect "e2e$t custom set without a probe file: run passes" rc_is 0
 	expect "e2e$t custom set without a probe file: one note line" out_has "layer set 'custom' ships no docker/layers/custom/smoke-probes.txt"
 	expect "e2e$t custom set without a probe file: no Stage 1b run or skip" runs_are 1
+	expect "e2e$t custom set without a probe file, current digest: no staleness warning" out_lacks "stale relative to this set"
+	set_label "$fx" powbox.layers.digest "sha256:0000"
+	e2e "$drv" "$fx" custom-nofile-stale
+	expect "e2e$t custom set without a probe file, different digest: run passes" rc_is 0
+	expect "e2e$t custom set without a probe file, different digest: warns the image is stale" out_has "the image is stale relative to this set."
+	expect "e2e$t custom set without a probe file, different digest: no Stage 1b run" runs_are 1
 	fx="$(new_fixture "custom-nodir.$drv")"
 	set_label "$fx" powbox.layers.set custom
 	e2e "$drv" "$fx" custom-nodir
@@ -1566,11 +1584,11 @@ for drv in "${e2e_drivers[@]}"; do
 	expect "e2e$t custom set with probes: Stage 1b ran after Stage 1" runs_are 2
 	expect "e2e$t custom set with probes: Stage 1b got exactly the file's probes, in order" cmp -s "$E2E_RUNS/2" "$E2E/custom-probes.want"
 	expect "e2e$t custom set with probes: the stage is labelled" out_has "Stage 1b $([ "$drv" = sh ] && printf '\342\200\224' || printf -- -) layer-set probes (custom)"
-	expect "e2e$t custom set with a current digest: no staleness warning" out_lacks "stale relative to these probes"
+	expect "e2e$t custom set with a current digest: no staleness warning" out_lacks "stale relative to this set"
 	set_label "$fx" powbox.layers.digest "sha256:0000"
 	e2e "$drv" "$fx" custom-stale
 	expect "e2e$t custom set with a different digest: run passes" rc_is 0
-	expect "e2e$t custom set with a different digest: warns the image is stale" out_has "the image is stale relative to these probes"
+	expect "e2e$t custom set with a different digest: warns the image is stale" out_has "the image is stale relative to this set. Running its probes anyway"
 	expect "e2e$t custom set with a different digest: still runs the probes" runs_are 2
 
 	# A failing layer-set probe fails the run, named by index with the manifest.

@@ -125,6 +125,22 @@ smoke_gate() {
 	esac
 }
 
+# smoke_layer_stale_check <image> <repo-root> <rel> [<then>]: warn when the
+# image's powbox.layers.digest label differs from the working tree's digest of
+# <rel>, the set directory; <then>, when given, ends the warning. An image
+# whose set lost every probe, or its probe file, since the build is stale too,
+# so this runs before the stage returns with nothing to run.
+smoke_layer_stale_check() {
+	local image="$1" root="$2" rel="$3" then="${4:-}" baked_digest tree_digest rc=0
+	baked_digest="$(smoke_image_label "$image" powbox.layers.digest)" || baked_digest=""
+	tree_digest="$("$root/scripts/layers-digest.sh" "$root/$rel")" || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		echo "WARNING: could not compute the digest of $rel/ (layers-digest exit $rc), so whether image '$image' is stale relative to this set is unknown.${then:+ $then}"
+	elif [ "$tree_digest" != "$baked_digest" ]; then
+		echo "WARNING: image '$image' was built from $rel/ at ${baked_digest:-<no digest label>}, but the working tree is at $tree_digest: the image is stale relative to this set.${then:+ $then}"
+	fi
+}
+
 # smoke_layer_stage <image> <repo-root>: Stage 1b. Reads the layer set the
 # IMAGE was built from (its powbox.layers.set label, not .powbox-layers: the
 # smoke test describes the image it was given) and runs
@@ -133,7 +149,7 @@ smoke_gate() {
 # `skipped` when the stage cannot run. docs/smoke-tests.md ("Layer-set probes")
 # lists the cases.
 smoke_layer_stage() {
-	local image="$1" root="$2" layer_set rel dir file baked_digest tree_digest rc
+	local image="$1" root="$2" layer_set rel dir file
 	if ! layer_set="$(smoke_image_label "$image" powbox.layers.set)"; then
 		echo "ERROR: could not read the labels of image '$image' to find its layer set." >&2
 		return 1
@@ -170,6 +186,7 @@ smoke_layer_stage() {
 			echo "ERROR: image '$image' was built from the 'full' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a full image that lost a tool." >&2
 			return 1
 		fi
+		smoke_layer_stale_check "$image" "$root" "$rel"
 		echo "Note: layer set '$layer_set' ships no $rel/smoke-probes.txt; Stage 1b has nothing to run."
 		return 0
 	fi
@@ -179,17 +196,11 @@ smoke_layer_stage() {
 	fi
 	smoke_read_probe_file "$file" || return 1
 	if [ "${#SMOKE_PROBES[@]}" -eq 0 ]; then
+		smoke_layer_stale_check "$image" "$root" "$rel"
 		echo "Note: $rel/smoke-probes.txt holds no probe line; Stage 1b has nothing to run."
 		return 0
 	fi
-	baked_digest="$(smoke_image_label "$image" powbox.layers.digest)" || baked_digest=""
-	rc=0
-	tree_digest="$("$root/scripts/layers-digest.sh" "$dir")" || rc=$?
-	if [ "$rc" -ne 0 ]; then
-		echo "WARNING: could not compute the digest of $rel/ (layers-digest exit $rc), so whether image '$image' is stale relative to these probes is unknown. Running them anyway."
-	elif [ "$tree_digest" != "$baked_digest" ]; then
-		echo "WARNING: image '$image' was built from $rel/ at ${baked_digest:-<no digest label>}, but the working tree is at $tree_digest: the image is stale relative to these probes. Running them anyway; rebuild it if a probe fails for that reason."
-	fi
+	smoke_layer_stale_check "$image" "$root" "$rel" "Running its probes anyway; rebuild it if a probe fails for that reason."
 	echo "Running Stage 1b — layer-set probes ($layer_set): ${#SMOKE_PROBES[@]} probe(s) from $rel/smoke-probes.txt ..."
 	"$root/scripts/smoke-test-image.sh" "$image" "${SMOKE_PROBES[@]}" || return 1
 }

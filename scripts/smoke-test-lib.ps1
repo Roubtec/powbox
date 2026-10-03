@@ -105,6 +105,35 @@ function Get-SmokeGate {
   return 'run'
 }
 
+# Warns when the image's powbox.layers.digest label differs from the working
+# tree's digest of $Rel, the set directory; -Then, when given, ends the
+# warning. An image whose set lost every probe, or its probe file, since the
+# build is stale too, so this runs before the stage returns with nothing to
+# run.
+function Write-SmokeLayerStaleWarning {
+  param([string]$Image, [string]$Root, [string]$Rel, [string]$Then = '')
+  $tail = if ($Then) { " $Then" } else { '' }
+  $bakedDigest = ''
+  try { $bakedDigest = Get-SmokeImageLabel -Image $Image -Label 'powbox.layers.digest' } catch { $bakedDigest = '' }
+  $treeDigest = ''
+  $rc = 0
+  try {
+    $treeDigest = & (Join-Path $Root 'scripts/layers-digest.ps1') (Join-Path $Root $Rel)
+    $rc = $LASTEXITCODE
+  }
+  catch {
+    $rc = 1
+  }
+  $treeDigest = (@($treeDigest) -join "`n").Trim()
+  if ($rc -ne 0) {
+    Write-Warning "could not compute the digest of $Rel/ (layers-digest exit $rc), so whether image '$Image' is stale relative to this set is unknown.$tail"
+  }
+  elseif ($treeDigest -cne $bakedDigest) {
+    $shown = if ($bakedDigest) { $bakedDigest } else { '<no digest label>' }
+    Write-Warning "image '$Image' was built from $Rel/ at $shown, but the working tree is at ${treeDigest}: the image is stale relative to this set.$tail"
+  }
+}
+
 # Stage 1b. Reads the layer set the IMAGE was built from (its powbox.layers.set
 # label, not .powbox-layers: the smoke test describes the image it was given)
 # and runs docker/layers/<set>/smoke-probes.txt from the working tree through
@@ -148,6 +177,7 @@ function Invoke-SmokeLayerStage {
     if ($set -ceq 'full') {
       throw "image '$Image' was built from the 'full' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a full image that lost a tool."
     }
+    Write-SmokeLayerStaleWarning -Image $Image -Root $Root -Rel $rel
     Write-Host "Note: layer set '$set' ships no $rel/smoke-probes.txt; Stage 1b has nothing to run."
     return
   }
@@ -156,28 +186,11 @@ function Invoke-SmokeLayerStage {
   }
   $probes = Read-SmokeProbeFile -Path $file
   if ($probes.Count -eq 0) {
+    Write-SmokeLayerStaleWarning -Image $Image -Root $Root -Rel $rel
     Write-Host "Note: $rel/smoke-probes.txt holds no probe line; Stage 1b has nothing to run."
     return
   }
-  $bakedDigest = ''
-  try { $bakedDigest = Get-SmokeImageLabel -Image $Image -Label 'powbox.layers.digest' } catch { $bakedDigest = '' }
-  $treeDigest = ''
-  $rc = 0
-  try {
-    $treeDigest = & (Join-Path $Root 'scripts/layers-digest.ps1') $dir
-    $rc = $LASTEXITCODE
-  }
-  catch {
-    $rc = 1
-  }
-  $treeDigest = (@($treeDigest) -join "`n").Trim()
-  if ($rc -ne 0) {
-    Write-Warning "could not compute the digest of $rel/ (layers-digest exit $rc), so whether image '$Image' is stale relative to these probes is unknown. Running them anyway."
-  }
-  elseif ($treeDigest -cne $bakedDigest) {
-    $shown = if ($bakedDigest) { $bakedDigest } else { '<no digest label>' }
-    Write-Warning "image '$Image' was built from $rel/ at $shown, but the working tree is at ${treeDigest}: the image is stale relative to these probes. Running them anyway; rebuild it if a probe fails for that reason."
-  }
+  Write-SmokeLayerStaleWarning -Image $Image -Root $Root -Rel $rel -Then 'Running its probes anyway; rebuild it if a probe fails for that reason.'
   Write-Host "Running Stage 1b - layer-set probes ($set): $($probes.Count) probe(s) from $rel/smoke-probes.txt ..."
   & (Join-Path $Root 'scripts/smoke-test-image.ps1') -Image $Image -Commands $probes
 }

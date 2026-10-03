@@ -26,21 +26,25 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 
 **In scope:**
 
-1. A committed `docker/layers/browser/` set. Its `Dockerfile` has the same contract-compliant header shape as `docker/layers/full/Dockerfile`. Its `smoke-probes.txt` is a skeleton: header comments, no probe lines. It has **no** `agent-notes.md`. It installs nothing yet; task 073 fills it.
+1. A committed `docker/layers/browser/` set. Its `Dockerfile` has the same contract-compliant header shape as `docker/layers/full/Dockerfile`. Its `smoke-probes.txt` is a skeleton: header comments, no probe lines. The header carries the same "keep this file even with no probe line" sentence as `docker/layers/full/smoke-probes.txt`. It has **no** `agent-notes.md`. It installs nothing yet; task 073 fills it.
 2. `browser` becomes a documented, user-selectable committed set alongside `full`. That touches the set list and comment in `.powbox-layers.example`, the layer-set bullet in `docs/architecture.md` ("Rules the file map does not state"), and README "Layer sets". Each says that `browser` ships no tools yet.
-3. `scripts/smoke-test-lib.sh` and `scripts/smoke-test-lib.ps1` (`smoke_layer_stage` / `Invoke-SmokeLayerStage`). The rule that makes a missing probe file or a missing set directory a hard failure currently covers only `full`. It must cover `browser` too. Otherwise, after this task, deleting `docker/layers/browser/smoke-probes.txt` would quietly turn Tier 1's Stage 1b into a note. Keep the set names in one list per driver rather than repeating string comparisons, and keep the two drivers' output identical. Extend `scripts/test-smoke-probe-wrapper.sh` with the `browser` cases.
+3. `scripts/smoke-test-lib.sh` and `scripts/smoke-test-lib.ps1` (`smoke_layer_stage` / `Invoke-SmokeLayerStage`). The rule that makes a missing probe file or a missing set directory a hard failure currently covers only `full`. It must cover `browser` too. Otherwise, after this task, deleting `docker/layers/browser/smoke-probes.txt` would quietly turn Tier 1's Stage 1b into a note. Keep the set names in one list per driver rather than repeating string comparisons, and keep the two drivers' output identical. Extend `scripts/test-smoke-probe-wrapper.sh` with the `browser` cases. Also reword every text that limits the keep-the-probe-file rule to `full`:
+   - the comments in `smoke_layer_stage` / `Invoke-SmokeLayerStage`;
+   - the comment above that call in `commands/smoke-test.sh` and `commands/smoke-test.ps1`;
+   - README "Host Validation";
+   - `docs/smoke-tests.md` "Layer-set probes (Stage 1b)": its label/file cases and the paragraph on why the `full` guard cannot be lost.
 4. `.github/workflows/native-linux-build.yml`. The second pass selects `browser` instead of `full`, and every part of it follows:
    - step names and messages;
    - the label assertion (`powbox.layers.set=browser`);
    - the layers cache key: `docker/layers/browser/**`, the `browser` digest, and a `powbox-layers-browser-` prefix;
-   - the `paths:` filter, which gains `!docker/layers/full/**` as its **last** entry. That way a PR that changes only `full` does not start Tier 1.
+   - the `paths:` filter, which gains `!docker/layers/full/**` as its **last** entry, with a comment telling later editors to keep it last. That way a PR that changes only `full` does not start Tier 1.
 5. Two mechanism checks:
    - **Seeded template.** In each pass, after its smoke step, the template baked into the agent image must equal the expected source byte for byte, for both agents. The template paths are `/home/node/.agent-container/claude/agent.md.tmpl` and `/home/node/.agent-container/codex/agent.md.tmpl`. The expected source is `docker/shared/container-agent.md.tmpl` in the lean pass and `.powbox-staging/agent.md.tmpl` in the `browser` pass. In the `browser` pass, also check the notes heading, ``## Additional tooling from the `browser` layer set``:
      - it must be present when `docker/layers/browser/agent-notes.md` has non-whitespace content;
      - it must be absent otherwise.
 
      The absent direction has teeth from the day this task lands, and the present direction once task 073 adds the notes.
-   - **Failing probe.** In the `browser` pass, after its smoke step, run Stage 1b against the built image with a probe file of exactly two lines: one passing probe, then one failing probe. Assert that the stage exits non-zero, that its output names probe 2, and that it prints the index → probe manifest.
+   - **Failing probe.** In the `browser` pass, after its smoke step, run Stage 1b against the built image with a probe file of exactly two lines: one passing probe, then one failing probe. The passing probe prints nothing. Assert three things on the combined output (`2>&1`): the stage exits non-zero, the output contains the exact line `SMOKE PROBE 2 FAILED`, and it prints the index → probe manifest.
 6. `.github/workflows/native-linux-ci.yml` (Tier 0): a step that runs `./scripts/layers-digest.sh docker/layers/<set>` for every committed set. That is every directory under `docker/layers/` except `custom`. The step fails on any non-zero exit. It needs no Docker.
 7. Docs that say what Tier 1 builds and how `full` is covered: `README.md` ("Continuous Integration"), `docs/smoke-tests.md` ("CI gating", and the Stage 1b section where it names `full` as the set whose probe file is required), and `AGENTS.md` ("Validating Changes").
 
@@ -67,12 +71,12 @@ This supersedes task 065's acceptance criterion that a change under `docker/laye
 - `docker/agent/Dockerfile`, section "Per-agent seed assets": the two `COPY .powbox-staging/agent.md.tmpl …/agent.md.tmpl` lines.
 - `scripts/layers-digest.sh` header: the contract. Exit status 1 means a contract violation, and every offending line or path is named on stderr.
 - `docker/layers/custom/` is user-owned. `.gitignore` keeps only its `.gitkeep`, so in a CI checkout it has no Dockerfile and the scan would reject it.
-- `docker/layers/full/Dockerfile` header: the shape a new set's Dockerfile follows. Every `COPY`/`ADD` carries `--chmod`, there is no `ONBUILD`, and no `RUN --mount` binds the build context.
+- `docker/layers/full/Dockerfile` header: the shape a new set's Dockerfile follows. Every `COPY`/`ADD` carries `--chmod`, and there is no `ONBUILD`. Once task 063a (PR #163) lands, no `RUN` may bind-mount the build context either. The skeleton has no `RUN`, so it complies either way.
 
 ## Target files or areas
 
 - New: `docker/layers/browser/Dockerfile`, `docker/layers/browser/smoke-probes.txt`.
-- `scripts/smoke-test-lib.sh`, `scripts/smoke-test-lib.ps1` (CRLF, ASCII only), `scripts/test-smoke-probe-wrapper.sh`.
+- `scripts/smoke-test-lib.sh`, `scripts/smoke-test-lib.ps1` (CRLF, ASCII only), `scripts/test-smoke-probe-wrapper.sh`, and the comments in `commands/smoke-test.sh` and `commands/smoke-test.ps1`.
 - `.github/workflows/native-linux-build.yml`, `.github/workflows/native-linux-ci.yml`.
 - `.powbox-layers.example`, `README.md`, `docs/architecture.md`, `docs/smoke-tests.md`, `AGENTS.md`.
 - `tasks/071-move-self-contained-toolchains-into-the-full-layer-set.md` and `tasks/073-move-podman-postgresql-and-browser-stack-add-typst.md` were amended when this task was written (see "Effect on tasks 071 and 073"). Check that they still match what lands.
@@ -101,10 +105,10 @@ Both were amended in the same commit that wrote this task:
 ## Acceptance criteria
 
 - A Tier 1 run on a PR that touches `docker/**` shows the lean pass and then the `browser` pass, and no step builds or selects `full`. The `browser` pass fails unless the agent image carries `powbox.layers.set=browser`.
-- A PR that changes only files under `docker/layers/full/` triggers Tier 0, including the new contract scan, but not Tier 1. This includes a PR that changes only `docker/layers/full/Dockerfile`.
+- A PR that changes only files under `docker/layers/full/` triggers Tier 0, including the new contract scan, but not Tier 1. This includes a PR that changes only `docker/layers/full/Dockerfile`. This criterion rests on GitHub's documented `paths:` semantics and the entry's position, which a reviewer checks by reading. It needs no throwaway PR.
 - In both passes, the two seeded `agent.md.tmpl` files equal the expected source byte for byte: the core template for lean, `.powbox-staging/agent.md.tmpl` for `browser`. With no `docker/layers/browser/agent-notes.md`, the notes heading is absent, and the check would fail if it appeared.
 - The failing-probe check fails its own assertion if Stage 1b exits zero or does not name probe 2. Show this once on the PR with a perturbed copy of the check, then revert. After the step, `docker/layers/browser/smoke-probes.txt` matches the committed file, whether the step passed or failed.
-- A `browser` image whose working tree lacks `docker/layers/browser/smoke-probes.txt`, or the whole `docker/layers/browser/` directory, fails Stage 1b in both drivers, exactly as `full` does. The unit suite covers both cases.
+- A `browser` image whose working tree lacks `docker/layers/browser/smoke-probes.txt`, or the whole `docker/layers/browser/` directory, fails Stage 1b in both drivers, exactly as `full` does. The unit suite covers both cases. No doc or comment still limits the keep-the-probe-file rule to `full`.
 - Tier 0 fails, naming the set, when any committed set other than `custom` violates the layer-set contract or has no Dockerfile. Show this once with a deliberate violation in a scratch commit on the PR, for example a `COPY` without `--chmod` in `browser`, then revert it. Tier 0 passes on a checkout whose `custom/` holds only `.gitkeep`.
 - A run that hits both caches performs no layers bake in the `browser` pass, as the currency check already enforces.
 - `.powbox-layers.example`, README "Layer sets" and `docs/architecture.md` list `browser` as a selectable committed set.

@@ -22,8 +22,9 @@
 # keep that layer cached, and changed notes must change them so the build-epoch
 # layer above reruns and containers re-render the instruction file. The COPY
 # key includes the file mode too, so the result is always mode 0644, an
-# existing file's mode included. The file is rewritten only when its content
-# changes or its mode cannot be fixed in place, and a directory in its place is
+# existing file's mode included. The file is rewritten only when it cannot be
+# confirmed unchanged and set to 0644 in place (its content changed, or it
+# cannot be read or belongs to another user), and a directory in its place is
 # refused. scripts/stage-agent-template.ps1 must produce the same bytes and mode
 # for the same inputs.
 set -euo pipefail

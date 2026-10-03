@@ -1439,6 +1439,14 @@ expect() {
 out_has() { grep -qF -- "$1" "$E2E_OUT"; }
 out_lacks() { ! grep -qF -- "$1" "$E2E_OUT"; }
 log_lacks() { ! grep -qF -- "$1" "$E2E_LOG"; }
+# out_before <first> <second>: both occur, and the first line holding <first>
+# precedes the first line holding <second>.
+out_before() {
+	local a b
+	a="$(grep -nF -- "$1" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	b="$(grep -nF -- "$2" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	[ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
 # in_na_block <entry>: the entry is listed exactly once, inside the
 # not-applicable block, i.e. after its header and before any PARTIAL header.
 in_na_block() {
@@ -1520,7 +1528,8 @@ for drv in "${e2e_drivers[@]}"; do
 	e2e "$drv" "$fx" full-skeleton-stale
 	expect "e2e$t full + skeleton with a different digest: run passes" rc_is 0
 	expect "e2e$t full + skeleton with a different digest: warns the image is stale" out_has "the image is stale relative to this set."
-	expect "e2e$t full + skeleton with a different digest: the note still follows" out_has "docker/layers/full/smoke-probes.txt holds no probe line"
+	expect "e2e$t full + skeleton with a different digest: the note still follows the warning" out_before "the image is stale relative to this set." "docker/layers/full/smoke-probes.txt holds no probe line"
+	expect "e2e$t full + skeleton with a different digest: no claim that probes run" out_lacks "Running its probes anyway"
 	expect "e2e$t full + skeleton with a different digest: no Stage 1b run" runs_are 1
 	expect "e2e$t full + skeleton with a different digest: not partial on its account" out_lacks "  - Stage 1b"
 
@@ -1558,6 +1567,8 @@ for drv in "${e2e_drivers[@]}"; do
 	e2e "$drv" "$fx" custom-nofile-stale
 	expect "e2e$t custom set without a probe file, different digest: run passes" rc_is 0
 	expect "e2e$t custom set without a probe file, different digest: warns the image is stale" out_has "the image is stale relative to this set."
+	expect "e2e$t custom set without a probe file, different digest: the note still follows the warning" out_before "the image is stale relative to this set." "layer set 'custom' ships no docker/layers/custom/smoke-probes.txt"
+	expect "e2e$t custom set without a probe file, different digest: no claim that probes run" out_lacks "Running its probes anyway"
 	expect "e2e$t custom set without a probe file, different digest: no Stage 1b run" runs_are 1
 	fx="$(new_fixture "custom-nodir.$drv")"
 	set_label "$fx" powbox.layers.set custom

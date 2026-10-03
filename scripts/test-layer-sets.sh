@@ -498,12 +498,16 @@ dockerfile_case "a from= expanding to nothing" $'FROM ${BASE_IMAGE}\nRUN --mount
 dockerfile_case "a type= from a variable" $'FROM ${BASE_IMAGE}\nARG MT=bind\nRUN --mount=type=$MT,target=/ctx true\n' reject "Dockerfile:3: $RUN_BIND_MSG"
 dockerfile_case "a quoted flag" $'FROM ${BASE_IMAGE}\nRUN --mo"unt=type=bind,target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "a CSV-quoted type field" $'FROM ${BASE_IMAGE}\nRUN --mount=\'"type=bind",target=/ctx\' true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a quote left in the type= value" $'FROM ${BASE_IMAGE}\nRUN --mount=type="\'cache\'",target=/c true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a quote left in a blank from= value" $'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,from="\' \'",target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "a 0xA0 byte splits a flag word" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,id=\xc3\xa0--mount=target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "two bind RUNs, both named" $'FROM ${BASE_IMAGE}\nRUN --mount=target=/a true\nRUN --mount=target=/b true\n' reject "Dockerfile:2: $RUN_BIND_MSG" "Dockerfile:3: $RUN_BIND_MSG"
 dockerfile_case "bind with from=<stage>" $'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=build,source=/out,target=/in cp /in/x /x\n' ok
 dockerfile_case "bind with FROM=<image>" $'FROM ${BASE_IMAGE}\nRUN --mount=FROM=busybox,target=/in ["true"]\n' ok
 dockerfile_case "cache, tmpfs, secret and ssh mounts" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c --mount=type=tmpfs,target=/t true\nRUN --mount=type=secret,id=tok --mount=TYPE=SSH true\n' ok
 dockerfile_case "a cache mount with an empty from=" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,from=,target=/c true\n' ok
+dockerfile_case "a flag-quoted type= is read unquoted" $'FROM ${BASE_IMAGE}\nRUN --mount=type=\'cache\',target=/c true\n' ok
+dockerfile_case "a flag-quoted blank from= is an image name" $'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=\' \',target=/ctx true\n' ok
 dockerfile_case "--mount= after -- belongs to the command" $'FROM ${BASE_IMAGE}\nRUN -- --mount=target=/ctx true\n' ok
 dockerfile_case "--mount= in a RUN's command" $'FROM ${BASE_IMAGE}\nRUN echo --mount=target=/ctx\n' ok
 dockerfile_case "a quoted 0xA0 byte splits nothing" $'FROM ${BASE_IMAGE}\nRUN --mount="type=cache,id=\xc3\xa0--mount=target=/ctx" true\n' ok
@@ -732,6 +736,8 @@ if $HAVE_PWSH; then
 		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,from=,id=a\xc2\xa0\n' \
 		$'FROM ${BASE_IMAGE}\nRUN --mount=\'type=ca"che,target=/ctx\' true\nRUN --mount=\'"type=c""ache",target=/ctx\' true\n' \
 		$'FROM ${BASE_IMAGE}\nRUN --mount= true\nRUN --mount=type=bind,from=a$,target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type="\'cache\'",target=/c true\nRUN --mount=type=bind,from="\' \'",target=/ctx true\n' \
+		$'FROM ${BASE_IMAGE}\nRUN --mount=type=\'cache\',target=/c true\nRUN --mount=type=bind,from=\' \',target=/ctx true\n' \
 		$'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=build,source=/out,target=/in cp /in/x /x\nRUN --mount=FROM=busybox,target=/in ["true"]\n' \
 		$'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,target=/c --mount=type=tmpfs,target=/t true\nRUN --mount=type=secret,id=tok --mount=TYPE=SSH true\n' \
 		$'FROM ${BASE_IMAGE}\nRUN -- --mount=target=/ctx true\nRUN echo --mount=target=/ctx\nRUN --mount=type=cache,target=/c \\\n' \

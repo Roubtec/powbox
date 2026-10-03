@@ -377,7 +377,10 @@ mount_fields() {
 # or ssh. BuildKit expands each value as a shell word later, so a type= is
 # trusted only as one of those four names, and a from= only when no quote,
 # escape or $ could expand it to nothing; anything else, and a value csvvalue
-# cannot split, counts as a context bind.
+# cannot split, counts as a context bind. That expansion sees the value after
+# extractBuilderFlags has already removed the flag word's own quotes, which is
+# all this function sees too: type='cache' is a cache mount, and from=' ' an
+# image name of one blank that the build refuses, never the context.
 mount_binds_context() {
 	local field type=bind from=""
 	mount_fields "$1" || return 0

@@ -23,7 +23,8 @@
 # layer above reruns and containers re-render the instruction file. The COPY
 # key includes the file mode too, so the result is always mode 0644, an
 # existing file's mode included. The file is rewritten only when its content
-# changes. scripts/stage-agent-template.ps1 must produce the same bytes and mode
+# changes or its mode cannot be fixed in place, and a directory in its place is
+# refused. scripts/stage-agent-template.ps1 must produce the same bytes and mode
 # for the same inputs.
 set -euo pipefail
 # Byte-wise string operations, whatever the notes' encoding.
@@ -71,6 +72,8 @@ if [ -n "$SET" ]; then
 fi
 
 mkdir -p "$STAGING_DIR"
+# mv would move the temp file into a directory rather than replace it.
+[ ! -d "$OUT" ] || fail "$OUT is a directory"
 tmp="$(mktemp "${STAGING_DIR}/.agent.md.tmpl.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 {
@@ -86,8 +89,9 @@ trap 'rm -f "$tmp"' EXIT
 } >"$tmp"
 chmod 0644 "$tmp"
 
-if [ -f "$OUT" ] && cmp -s "$tmp" "$OUT"; then
-	chmod 0644 "$OUT"
+# chmod fails on a file another user owns (a sudo build's leftover); replacing
+# the file is then the way to the mode.
+if [ -f "$OUT" ] && cmp -s "$tmp" "$OUT" && chmod 0644 "$OUT" 2>/dev/null; then
 	exit 0
 fi
 mv -f "$tmp" "$OUT"

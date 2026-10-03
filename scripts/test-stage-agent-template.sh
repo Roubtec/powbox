@@ -240,6 +240,33 @@ for driver in sh ps1; do
 	assert_eq "$driver over an unchanged 0600 file: mode restored to 0644" "$(stat -c %a "$(staged "$umask_root")")" "644"
 	assert_eq "$driver over an unchanged 0600 file: not rewritten" "$(stat -c %Y "$(staged "$umask_root")")" "$before"
 done
+# A chmod that fails on the staged file stands in for one another user owns.
+shim="$(mktemp -d "$WORK_ROOT/shim.XXXXXX")"
+real_chmod="$(command -v chmod)"
+printf '#!/bin/sh\ncase "$2" in */agent.md.tmpl) exit 1 ;; esac\nexec %s "$@"\n' "$real_chmod" >"$shim/chmod"
+"$real_chmod" 0755 "$shim/chmod"
+owned_root="$(new_root)"
+bash "$STAGE_SH" "" "$owned_root"
+chmod 0600 "$(staged "$owned_root")"
+PATH="$shim:$PATH" bash "$STAGE_SH" "" "$owned_root"
+assert_eq "sh over an unchanged file whose mode cannot be set: replaced at 0644" "$(stat -c %a "$(staged "$owned_root")")" "644"
+assert_same_file "sh over an unchanged file whose mode cannot be set: same bytes" "$(staged "$owned_root")" "$CORE"
+for driver in sh ps1; do
+	if [ "$driver" = ps1 ] && ! $HAVE_PWSH; then
+		skipped "PowerShell over an unreadable file (pwsh not installed)"
+		continue
+	fi
+	locked_root="$(new_root)"
+	bash "$STAGE_SH" "" "$locked_root"
+	chmod 0000 "$(staged "$locked_root")"
+	if [ "$driver" = sh ]; then
+		bash "$STAGE_SH" "" "$locked_root"
+	else
+		pwsh -NoProfile -File "$STAGE_PS" "" "$locked_root"
+	fi
+	assert_eq "$driver over an unreadable file: replaced at 0644" "$(stat -c %a "$(staged "$locked_root")")" "644"
+	assert_same_file "$driver over an unreadable file: same bytes" "$(staged "$locked_root")" "$CORE"
+done
 assert_eq "no temp file left in the staging directory" "$(find "$root/.powbox-staging" -mindepth 1 | wc -l)" "1"
 printf 'changed\n' >"$root/docker/layers/demo/agent-notes.md"
 bash "$STAGE_SH" demo "$root"
@@ -273,6 +300,24 @@ mkdir "$root/docker/layers/demo/agent-notes.md"
 rc=0
 stage_both "agent-notes.md is a directory" "$root" demo || rc=$?
 assert_eq "agent-notes.md is a directory: fails" "$rc" "1"
+
+root="$(new_root)"
+mkdir -p "$(staged "$root")"
+for driver in sh ps1; do
+	if [ "$driver" = ps1 ] && ! $HAVE_PWSH; then
+		skipped "PowerShell over a directory at the output (pwsh not installed)"
+		continue
+	fi
+	rc=0
+	if [ "$driver" = sh ]; then
+		bash "$STAGE_SH" "" "$root" 2>"$root.err" || rc=$?
+	else
+		pwsh -NoProfile -File "$STAGE_PS" "" "$root" 2>"$root.err" || rc=$?
+	fi
+	assert_eq "$driver over a directory at the output: fails" "$rc" "1"
+	assert_eq "$driver over a directory at the output: says so" "$(cat "$root.err")" "stage-agent-template: $(staged "$root") is a directory"
+	assert_eq "$driver over a directory at the output: nothing moved into it or left behind" "$(find "$root/.powbox-staging" -mindepth 1 | wc -l)" "1"
+done
 
 root="$(new_root)"
 rm "$root/docker/shared/container-agent.md.tmpl"

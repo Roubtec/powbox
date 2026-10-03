@@ -27,8 +27,9 @@ $latin1 = [System.Text.Encoding]::GetEncoding(28591)
 
 # Mode 0644 whatever the umask or an existing file's mode, as the .sh sets it:
 # BuildKit's COPY cache key includes the file mode, so the two drivers must agree
-# on it too.
-function Set-StagedMode([string]$Path) {
+# on it too. Not a Set- verb: the ShouldProcess rule would want -WhatIf support
+# for a helper that only ever touches this script's own output.
+function Ensure-StagedMode([string]$Path) {
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]'UserRead, UserWrite, GroupRead, OtherRead')
     }
@@ -59,17 +60,23 @@ if ($notes) {
 }
 
 if (-not (Test-Path -LiteralPath $stagingDir)) { New-Item -ItemType Directory -Path $stagingDir | Out-Null }
+# Move-Item would move the temp file into a directory rather than replace it.
+if (Test-Path -LiteralPath $out -PathType Container) { Exit-Stage "$out is a directory" }
 if (Test-Path -LiteralPath $out -PathType Leaf) {
-    $current = [System.IO.File]::ReadAllBytes($out)
-    if ([Convert]::ToBase64String($current) -ceq [Convert]::ToBase64String($bytes)) {
-        Set-StagedMode $out
-        exit 0
+    # A file we cannot read (another user's) counts as changed, as it does for cmp.
+    try { $current = [System.IO.File]::ReadAllBytes($out) } catch { $current = $null }
+    if ($null -ne $current -and [Convert]::ToBase64String($current) -ceq [Convert]::ToBase64String($bytes)) {
+        # Setting the mode fails on a file another user owns (a sudo build's
+        # leftover); replacing the file is then the way to the mode.
+        $modeSet = $true
+        try { Ensure-StagedMode $out } catch { $modeSet = $false }
+        if ($modeSet) { exit 0 }
     }
 }
 $tmp = Join-Path $stagingDir ".agent.md.tmpl.$([System.Guid]::NewGuid().ToString('N'))"
 try {
     [System.IO.File]::WriteAllBytes($tmp, $bytes)
-    Set-StagedMode $tmp
+    Ensure-StagedMode $tmp
     Move-Item -LiteralPath $tmp -Destination $out -Force
 } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }

@@ -25,6 +25,15 @@ $stagingDir = Join-Path $Root '.powbox-staging'
 $out = Join-Path $stagingDir 'agent.md.tmpl'
 $latin1 = [System.Text.Encoding]::GetEncoding(28591)
 
+# Mode 0644 whatever the umask or an existing file's mode, as the .sh sets it:
+# BuildKit's COPY cache key includes the file mode, so the two drivers must agree
+# on it too.
+function Set-StagedMode([string]$Path) {
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]'UserRead, UserWrite, GroupRead, OtherRead')
+    }
+}
+
 if (-not (Test-Path -LiteralPath $template -PathType Leaf)) { Exit-Stage "$template not found" }
 
 $notes = ''
@@ -52,16 +61,15 @@ if ($notes) {
 if (-not (Test-Path -LiteralPath $stagingDir)) { New-Item -ItemType Directory -Path $stagingDir | Out-Null }
 if (Test-Path -LiteralPath $out -PathType Leaf) {
     $current = [System.IO.File]::ReadAllBytes($out)
-    if ([Convert]::ToBase64String($current) -ceq [Convert]::ToBase64String($bytes)) { exit 0 }
+    if ([Convert]::ToBase64String($current) -ceq [Convert]::ToBase64String($bytes)) {
+        Set-StagedMode $out
+        exit 0
+    }
 }
 $tmp = Join-Path $stagingDir ".agent.md.tmpl.$([System.Guid]::NewGuid().ToString('N'))"
 try {
     [System.IO.File]::WriteAllBytes($tmp, $bytes)
-    # Mode 0644 whatever the umask, as the .sh sets it: BuildKit's COPY cache key
-    # includes the file mode, so the two drivers must agree on it too.
-    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
-        [System.IO.File]::SetUnixFileMode($tmp, [System.IO.UnixFileMode]'UserRead, UserWrite, GroupRead, OtherRead')
-    }
+    Set-StagedMode $tmp
     Move-Item -LiteralPath $tmp -Destination $out -Force
 } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }

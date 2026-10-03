@@ -229,6 +229,16 @@ for driver in sh ps1; do
 		(umask 077 && pwsh -NoProfile -File "$STAGE_PS" "" "$umask_root")
 	fi
 	assert_eq "$driver under umask 077: staged file is still mode 0644" "$(stat -c %a "$(staged "$umask_root")")" "644"
+	chmod 0600 "$(staged "$umask_root")"
+	touch -d '2001-01-01 00:00:00' "$(staged "$umask_root")"
+	before="$(stat -c %Y "$(staged "$umask_root")")"
+	if [ "$driver" = sh ]; then
+		bash "$STAGE_SH" "" "$umask_root"
+	else
+		pwsh -NoProfile -File "$STAGE_PS" "" "$umask_root"
+	fi
+	assert_eq "$driver over an unchanged 0600 file: mode restored to 0644" "$(stat -c %a "$(staged "$umask_root")")" "644"
+	assert_eq "$driver over an unchanged 0600 file: not rewritten" "$(stat -c %Y "$(staged "$umask_root")")" "$before"
 done
 assert_eq "no temp file left in the staging directory" "$(find "$root/.powbox-staging" -mindepth 1 | wc -l)" "1"
 printf 'changed\n' >"$root/docker/layers/demo/agent-notes.md"

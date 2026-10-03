@@ -20,9 +20,11 @@
 # The output must be a pure function of those inputs: Docker keys the COPY of
 # this file on its content, so identical inputs must give identical bytes to
 # keep that layer cached, and changed notes must change them so the build-epoch
-# layer above reruns and containers re-render the instruction file. The file is
-# rewritten only when its content changes. scripts/stage-agent-template.ps1 must
-# produce the same bytes for the same inputs.
+# layer above reruns and containers re-render the instruction file. The COPY
+# key includes the file mode too, so the result is always mode 0644, an
+# existing file's mode included. The file is rewritten only when its content
+# changes. scripts/stage-agent-template.ps1 must produce the same bytes and mode
+# for the same inputs.
 set -euo pipefail
 # Byte-wise string operations, whatever the notes' encoding.
 export LC_ALL=C
@@ -85,6 +87,7 @@ trap 'rm -f "$tmp"' EXIT
 chmod 0644 "$tmp"
 
 if [ -f "$OUT" ] && cmp -s "$tmp" "$OUT"; then
+	chmod 0644 "$OUT"
 	exit 0
 fi
 mv -f "$tmp" "$OUT"

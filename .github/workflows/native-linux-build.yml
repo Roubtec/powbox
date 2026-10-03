@@ -277,6 +277,8 @@ jobs:
       # and each drift turns a stale entry into a false failure that the
       # immutable entry repeats on every push. When the test calls the loaded
       # image current, build.sh must bake nothing, and the step fails if it does.
+      # Whether it baked is read from build.sh's own reuse report, not from the
+      # image ID: an ID is content-addressed, so a bake can reproduce it.
       # When it calls it stale, every run rebakes until the entry goes, and the
       # step warns with the test's reason and the remedy instead of failing.
       # Most often the entry is simply stale: a base entry evicted and
@@ -297,7 +299,6 @@ jobs:
             echo "Layers cache HIT — loading powbox-agent-layers:latest from tarball."
             docker load -i /tmp/powbox-layers-image.tar
             rm -f /tmp/powbox-layers-image.tar
-            loaded_id="$(docker image inspect powbox-agent-layers:latest --format '{{.Id}}')"
             # shellcheck disable=SC1091 # build.sh's own currency test
             . ./scripts/build-image-lib.sh
             # The base build.sh compares against is the one loaded in the lean
@@ -316,10 +317,15 @@ jobs:
           else
             echo "Layers cache MISS — build.sh bakes the layer-set image."
           fi
-          ./build.sh agent
+          build_log="${RUNNER_TEMP}/powbox-build-full.log"
+          ./build.sh agent | tee "$build_log"
           if [ "$expect_reuse" = true ] &&
-            [ "$(docker image inspect powbox-agent-layers:latest --format '{{.Id}}')" != "$loaded_id" ]; then
-            echo "FAIL: build.sh's currency test called the cached layer-set image current, yet build.sh baked the set again: its decision depends on more than the loaded images and the working tree. Fix it in scripts/build-image*.sh." >&2
+            ! grep -qxF "Layer-set image ${POWBOX_LAYERS_TAG} is current for set '${layers_set}'; reusing it." "$build_log"; then
+            if grep -q "^Baking ${POWBOX_LAYERS_TAG}: " "$build_log"; then
+              echo "FAIL: build.sh's currency test called the cached layer-set image current, yet build.sh baked the set again: its decision depends on more than the loaded images and the working tree. Fix it in scripts/build-image*.sh." >&2
+            else
+              echo "FAIL: build.sh reported neither reusing nor baking ${POWBOX_LAYERS_TAG}, so this step cannot tell whether it baked the set: the messages ensure_layers_image prints in scripts/build-image.sh no longer match the ones this step reads. Update one to match the other." >&2
+            fi
             exit 1
           fi
           if [ "${{ steps.layerscache.outputs.cache-hit }}" != "true" ]; then

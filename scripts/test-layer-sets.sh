@@ -494,7 +494,7 @@ dockerfile_case "bind in a builder stage" $'FROM busybox AS build\nRUN --mount=t
 dockerfile_case "an empty from= is the context" $'FROM ${BASE_IMAGE}\nRUN --mount=type=bind,from=,target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "the last from= wins" $'FROM busybox AS build\nFROM ${BASE_IMAGE}\nRUN --mount=from=build,from=,target=/ctx true\n' reject "Dockerfile:3: $RUN_BIND_MSG"
 dockerfile_case "the last type= wins" $'FROM ${BASE_IMAGE}\nRUN --mount=type=cache,type=bind,target=/ctx true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
-dockerfile_case "a from= expanding to nothing" $'FROM ${BASE_IMAGE}\nRUN --mount="type=bind,from=\'\',target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
+dockerfile_case "a quote left in an empty from= value" $'FROM ${BASE_IMAGE}\nRUN --mount="type=bind,from=\'\',target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "a type= from a variable" $'FROM ${BASE_IMAGE}\nARG MT=bind\nRUN --mount=type=$MT,target=/ctx true\n' reject "Dockerfile:3: $RUN_BIND_MSG"
 dockerfile_case "a quoted flag" $'FROM ${BASE_IMAGE}\nRUN --mo"unt=type=bind,target=/ctx" true\n' reject "Dockerfile:2: $RUN_BIND_MSG"
 dockerfile_case "a CSV-quoted type field" $'FROM ${BASE_IMAGE}\nRUN --mount=\'"type=bind",target=/ctx\' true\n' reject "Dockerfile:2: $RUN_BIND_MSG"

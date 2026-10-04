@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-Task 073 added `Test-PowboxImageStoreWriterWanted` to `scripts/launch-agent.ps1`. It reads the `powbox.podman` label through a Go raw string (`` `powbox.podman` `` inside the template), because Windows PowerShell 5.1 strips double quotes embedded in a native-command argument. The task 073 review (rounds 2 and 3, 2026-10-04) found that older templates in the launcher and in four other scripts still embed double quotes, so they hit exactly that bug. The fix was out of scope for 073, which is about moving tools into layer sets, so it is recorded here.
+Task 073 added `Test-PowboxImageStoreWriterWanted` to `scripts/launch-agent.ps1`. It reads the `powbox.podman` label through a Go raw string (`` `powbox.podman` `` inside the template), because Windows PowerShell 5.1 strips double quotes embedded in a native-command argument. The task 073 review (rounds 2 and 3, 2026-10-04) found that older templates in the launcher and in three other scripts still embed double quotes, so they hit exactly that bug. The fix was out of scope for 073, which is about moving tools into layer sets, so it is recorded here.
 
 The bug was confirmed, not just inferred. It was checked on pwsh 7.6 with `$PSNativeCommandArgumentPassing = 'Legacy'`, which is the argument passing Windows PowerShell 5.1 uses, and a fake `docker` that prints its argv:
 
@@ -25,7 +25,7 @@ There are twelve sites in four scripts. Line numbers are as of task 073's branch
 
 `scripts/launch-agent.ps1`, double-quoted templates (`` `" `` inside a PowerShell `"…"` string):
 
-- **Lines 1203 and 1206, the `.worktrees` and `node_modules` mount-name checks** (`.Destination` compared with `$workspaceMount/.worktrees` and `$workspaceMount/node_modules`). Both names read as empty, so whenever the launch expects a workspace volume, a stopped container is recreated on every launch as using "outdated workspace volumes", and a running one gets a warning.
+- **Lines 1203 and 1206, the `.worktrees` and `node_modules` mount-name checks** (`.Destination` compared with `$workspaceMount/.worktrees` and `$workspaceMount/node_modules`). Both names read as empty, so whenever the launch expects a workspace volume, a stopped container is recreated on every launch and a running one gets a warning. The message is "outdated workspace volumes" when the launch expects both volumes (a JS project); a worktrees-only project (Go or .NET) gets the "does not match … expected mounts" message instead, with the same effect.
 - **Line 1311, the Podman storage-mount check** (`.Destination` compared with `/home/node/.local/share/containers`). `$hasPodmanMount` reads as empty, so every stopped container is recreated on every launch as "predates the per-container Podman storage volume", and a running one gets a warning. This is the widest-reaching site: it fires for every non-`-Volatile` launch of an existing container, whatever the project type or flags.
 
 Two `Get-ImageLabel` helpers, double-quoted templates with the label name interpolated from `$Label`:
@@ -62,14 +62,14 @@ Two `Get-ImageLabel` helpers, double-quoted templates with the label name interp
 
    A Go raw string cannot contain a backtick. The interpolated values here (label names and `/workspace/<slug>` mount paths) never do, but a helper that takes a label name from its caller may validate it, as `Get-SmokeImageLabel` does with `^[A-Za-z0-9._-]+\z`.
 
-2. A regression guard in a pure-shell `scripts/test-*.sh` suite (a new suite is auto-discovered by `scripts/run-pure-shell-tests.sh`, or an existing one can host it). It fails when any tracked `*.ps1` has a double quote, bare or backtick-escaped, inside a `{{ … }}` template action, for example by matching each line against `\{\{[^}]*"`. That rule is deliberately about the template text, not about the `--format` argument:
+2. A regression guard in a pure-shell `scripts/test-*.sh` suite (a new suite is auto-discovered by `scripts/run-pure-shell-tests.sh`, or an existing one can host it). It fails when any tracked `*.ps1` has a double quote, bare or backtick-escaped, inside a `{{ … }}` template action, for example by matching each line against the extended regex `\{\{[^}]*"` with `grep -E` or `git grep -E` (in basic regex syntax `\{` starts an interval, so the pattern fails there). That rule is deliberately about the template text, not about the `--format` argument:
 
    - It catches templates built in variables, because the `$fmt` literals in `shell/powbox.ps1` hold the quoted label names themselves.
    - It does not flag `--format "{{.Names}}"`, where the double quotes are PowerShell's own and are removed before the call.
    - It does not flag the `podman inspect --format "{{…}}"` lines in `scripts/smoke-test-podman.ps1` (lines 110, 199, 200, 216, 238 and 239). Those quotes are Bash quotes inside the probe script's text, outside the braces, and the template bodies contain none.
-   - Its blind spots are a template whose `"` is assembled at run time (from a variable or `[char]34`) and one that spans lines. Neither exists today. The suite's comment should say so rather than try to cover them.
+   - Its blind spots are a template whose `"` is assembled at run time (from a variable or `[char]34`), one that spans lines, and one whose action holds a `}` before the offending quote, which ends the `[^}]*` run early (such as ``{{if eq .Y `}` "a"}}``, where the `}` sits in a raw string). None exists today. The suite's comment should say so rather than try to cover them.
 
-   Optionally, also run representative templates through pwsh with `$PSNativeCommandArgumentPassing = 'Legacy'` and a fake `docker`, as `scripts/test-image-store-writer-gate.sh` does for the writer gate.
+   Optionally, also run representative templates through pwsh with `$PSNativeCommandArgumentPassing = 'Legacy'` and a fake `docker`. `scripts/test-image-store-writer-gate.sh` is a fake-`docker` harness to build on, but it runs under pwsh's default passing; setting `Legacy` passing would be new.
 
 3. Note the behavior change in the PR. On 5.1, the ctx, continue, device and mount checks stop misfiring or start working, `-Isolated`, `cci`/`cxi` and the list markers start working, and the build and update check read their labels again.
 

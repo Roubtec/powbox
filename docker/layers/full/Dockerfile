@@ -462,7 +462,7 @@ ENV CHROME_NO_SANDBOX=true
 # NuGet package and compile with only this SDK present.
 #
 # Placed low, beside the other late tool layers, so an SDK bump never busts the
-# expensive mssql / pwsh / Go / OPA / Podman layers above it.
+# expensive mssql / pwsh / Go / OPA / Podman / browser-stack layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dotnet-sdk-10.0 \
     && rm -rf /var/lib/apt/lists/*

@@ -215,28 +215,9 @@ fi
 
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
-# worktree installs can hardlink from a co-located store. The GOBIN probe
-# plants a stub tool in ~/go/bin and runs it by bare name: the container shell
-# is a login shell (`sh -lc`), which resets PATH from /etc/profile, and each
-# probe's own shell inherits that environment, so the probe passing proves the
-# baked profile.d snippet restores $HOME/go/bin —
-# the documented "`go install` and it's runnable" contract. The golangci-lint
-# probes pin the cache-scoping wrapper contract: the PATH name resolves to the
-# wrapper (real binary off PATH in /usr/local/libexec), a fixture worktree under
-# .worktrees/<container>/<slug> gets its cache scoped to
-# .worktrees/.golangci-cache/<container>/<slug>, the main checkout scopes to
-# .root only in self-hosted mode when .worktrees is not a mountpoint (no host
-# litter otherwise), and a caller-set GOLANGCI_LINT_CACHE always wins. The
-# GOMODCACHE/GOCACHE probes prove go honors the plain env the launcher exports.
-# The ccache probes prove the binary is baked, that it honors a CCACHE_DIR env
-# (so the launcher's .worktrees/.ccache wiring lands) and — the functional check —
-# that two identical `ccache gcc` compiles into a fresh cache produce a hit —
-# direct or preprocessed, since either counter proves caching works — asserted via
-# the machine-parsable `--print-stats` counters (stable since ccache 4.4; trixie
-# bakes 4.11) instead of the version-dependent human-readable `-s` text.
-# The opa probe goes past a bare version check: it writes a tiny Rego policy +
-# test and runs `opa test`, exercising the exact `opa test policy/…` contract a
-# policy-repo's CI runs (and that motivated baking opa in).
+# worktree installs can hardlink from a co-located store. Probes for the
+# tools a layer set installs live in that set's smoke-probes.txt and run as
+# Stage 1b below.
 # The actionlint probe captures the whole multi-line version output successfully
 # before comparing its first line exactly. markdownlint-cli2 has no dedicated
 # `--version` option: it treats that token as an input glob while its human-facing
@@ -286,9 +267,9 @@ fi
 #     supplies one, and a second is redundant;
 #   * make every probe SELF-CONTAINED. Each runs in its own shell, so `cd`,
 #     `export` and plain variables do NOT carry to the next probe; only
-#     filesystem effects do, which is how the golangci fixture probe hands the
-#     three probes after it a worktree. `cd` to an absolute path in the probe
-#     that needs it;
+#     filesystem effects do, which is how the `full` set's golangci fixture
+#     probe hands the three probes after it a worktree. `cd` to an absolute
+#     path in the probe that needs it;
 #   * keep every probe single-line and free of a trailing line continuation —
 #     the driver rejects both, so the manifest stays one line per probe and the
 #     .ps1 mirror never hands `docker` a multi-line argument;
@@ -313,33 +294,6 @@ fi
 # producer emits and so could flip a probe green→141 with no code change.
 # scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
-# The dotnet probes pin the SDK layer pieces that can regress silently, including
-# an offline `dotnet nuget locals` check that the NUGET_PACKAGES override resolves
-# to the exact requested path after tolerating the command's label and trailing
-# separator formatting.
-# The sentinel probe re-derives the SDK version the way the Dockerfile's warm-up
-# RUN does and asserts both marker files exist under $HOME/.dotnet, are owned by
-# the runtime user, and that $HOME/.dotnet is writable by it — which pins that
-# the warm-up ran at all, and that it ran as `node` into the HOME the container
-# actually uses (moving the RUN above `USER node` leaves root-owned markers, and
-# a root-created dir `node` cannot write, so it fails here; so does changing
-# HOME), and that the build-time and runtime versions agree (a bumped SDK against
-# a cached sentinel layer leaves stale names and fails). Bare existence checks
-# would not catch the `USER node` case at all — the Dockerfile touches the
-# absolute /home/node/.dotnet path, so the files land there either way.
-# Re-deriving on its own would be a tautology — whatever `dotnet --version`
-# prints, both sides build the same string — so the probe also asserts the
-# derived value is one well-formed version token. Without that assertion, a
-# `dotnet --version` that grew a second stdout line would make the build `touch`
-# a newline-bearing garbage filename, still succeed, quietly restore the
-# first-build "issue was encountered verifying workloads" warning, and the probe
-# would find that same garbage name and pass. The Dockerfile's RUN applies the
-# identical guard, so such a build now fails outright; this probe is what keeps a
-# stale cached sentinel layer honest. The env probe pins the four documented
-# opt-outs (notably DOTNET_GENERATE_ASPNET_CERTIFICATE, whose loss silently
-# installs an ASP.NET HTTPS dev cert). Deliberately no `dotnet new` + build
-# probe: that would pull NuGet packages over the network, the same reason the
-# image is not warmed that way.
 # The `command -v podman` probe is what fails an image that lost the engine:
 # Stage 3 runs only on an image that has podman on its PATH and is reported as
 # not applicable otherwise, so without this probe such an image would pass.
@@ -355,7 +309,6 @@ fi
 	"pnpm config get package-import-method | grep -qx auto" \
 	"pip3 --version >/dev/null" \
 	"python3 --version >/dev/null" \
-	"sqlcmd -? >/dev/null" \
 	"sqlite3 --version >/dev/null" \
 	"psql --version >/dev/null" \
 	"pg-dev-up check >/dev/null" \
@@ -389,32 +342,6 @@ fi
 	"strace -V >/dev/null" \
 	"gpg --version >/dev/null" \
 	"gcc --version >/dev/null" \
-	"cmake --version >/dev/null" \
-	"ninja --version >/dev/null" \
-	"pkg-config --version >/dev/null" \
-	"pkg-config --exists openssl zlib" \
-	"ccache --version >/dev/null" \
-	'CCACHE_DIR=/tmp/powbox-ccache-cfg-probe ccache --show-config | grep -q /tmp/powbox-ccache-cfg-probe' \
-	'd=/tmp/powbox-ccache-fn-probe && rm -rf "$d" && mkdir -p "$d" && printf "int main(void){return 0;}\n" > "$d/t.c" && export CCACHE_DIR="$d/cache" && ccache -z >/dev/null && ccache gcc -c "$d/t.c" -o "$d/a.o" && ccache gcc -c "$d/t.c" -o "$d/b.o" && ccache --print-stats | grep -Eq "^(direct|preprocessed)_cache_hit[[:space:]]+[1-9]"' \
-	"go version >/dev/null" \
-	"command -v gofmt >/dev/null" \
-	"golangci-lint version >/dev/null" \
-	"readlink /usr/local/bin/golangci-lint | grep -q golangci-lint-wrapper" \
-	"[ -x /usr/local/libexec/golangci-lint ]" \
-	'GOMODCACHE=/tmp/powbox-gomod-probe go env GOMODCACHE | grep -qx /tmp/powbox-gomod-probe' \
-	'GOCACHE=/tmp/powbox-gocache-probe go env GOCACHE | grep -qx /tmp/powbox-gocache-probe' \
-	'GOLANGCI_LINT_CACHE=/tmp/powbox-golangci-custom golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-custom"' \
-	'mkdir -p /tmp/powbox-golangci-probe/repo && cd /tmp/powbox-golangci-probe/repo && git init -q && git -c user.email=smoke@powbox.local -c user.name=smoke commit -q --allow-empty -m init && git worktree add -q .worktrees/probe-cont/task-a -b probe-a' \
-	'cd /tmp/powbox-golangci-probe/repo/.worktrees/probe-cont/task-a && golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/probe-cont/task-a"' \
-	'cd /tmp/powbox-golangci-probe/repo && golangci-lint cache status | grep -q "Dir: $HOME/.cache/golangci-lint"' \
-	'cd /tmp/powbox-golangci-probe/repo && POWBOX_SELF_HOSTED=1 golangci-lint cache status | grep -q "Dir: /tmp/powbox-golangci-probe/repo/.worktrees/.golangci-cache/.root"' \
-	'mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go/bin/powbox-gobin-probe" && chmod +x "$HOME/go/bin/powbox-gobin-probe" && powbox-gobin-probe | grep -qx gobin-ok' \
-	"opa version >/dev/null" \
-	'p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"' \
-	"dotnet --version >/dev/null" \
-	'NUGET_PACKAGES=/tmp/powbox-nuget-packages-probe dotnet nuget locals global-packages --list | sed "s/^[^:]*:[[:space:]]*//; s:/*$::" | grep -Fqx /tmp/powbox-nuget-packages-probe' \
-	'sdk="$(dotnet --version)" && [ -n "$sdk" ] && [ "$sdk" = "${sdk%%[!0-9A-Za-z.-]*}" ] && [ -f "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -O "$HOME/.dotnet/${sdk}.dotnetFirstUseSentinel" ] && [ -f "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -O "$HOME/.dotnet/${sdk}.toolpath.sentinel" ] && [ -w "$HOME/.dotnet" ]' \
-	'[ "$DOTNET_CLI_TELEMETRY_OPTOUT" = 1 ] && [ "$DOTNET_NOLOGO" = 1 ] && [ "$DOTNET_GENERATE_ASPNET_CERTIFICATE" = false ] && [ "$DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE" = 1 ]' \
 	"playwright --version >/dev/null" \
 	'PLAYWRIGHT_BROWSERS_PATH=/tmp/powbox-playwright-probe playwright install --dry-run chromium | grep -Eq "Install location:[[:space:]]+/tmp/powbox-playwright-probe/chromium-[0-9]+$"' \
 	'[ ! -d "$HOME/.cache/ms-playwright" ]' \

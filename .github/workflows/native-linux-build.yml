@@ -10,13 +10,19 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost
 # a human a VPS stand-up.
 #
-# Two images are supported, and an image no CI run builds rots: the LEAN image a
-# new user gets (agent directly on the base, no .powbox-layers) and lean + the
-# committed `full` layer set (base -> powbox-agent-layers -> agent), which the
-# maintainer runs. So the job builds and smokes both, in two sequential passes,
-# lean first: powbox-agent:latest is one tag on one parent at a time, so the
-# passes cannot share an agent image, and the agent install layers are built
-# twice because their parent differs. Each pass asserts the
+# Two images are built and smoked, because an image no CI run builds rots: the
+# LEAN image a new user gets (agent directly on the base, no .powbox-layers)
+# and lean + the committed `browser` layer set (base -> powbox-agent-layers ->
+# agent). The second pass is there to test the layer-set MECHANISM, not every
+# tool install: the layers bake and its cache, the set's agent notes reaching
+# both agents' seeded instruction templates, and Stage 1b running the set's
+# probes and naming a failing one by index. The maintainer's larger `full` set
+# is never built here: the maintainer builds it by hand and fixes it when an
+# upstream installer breaks, and Tier 0 contract-scans it without a build (the
+# last `paths:` entry below keeps a full-only PR out of Tier 1). The passes run
+# sequentially, lean first: powbox-agent:latest is one tag on one parent at a
+# time, so the passes cannot share an agent image, and the agent install
+# layers are built twice because their parent differs. Each pass asserts the
 # powbox.layers.set label of the agent image it built, so a pass that silently
 # built on the wrong parent fails instead of smoking the same image twice.
 #
@@ -103,6 +109,13 @@ on:
       - 'scripts/test-pnpm-shadow-wrapper.sh'
       - 'commands/smoke-test.*'
       - '.github/workflows/native-linux-build.yml'
+      # Keep this exclusion LAST. CI never builds the maintainer's `full` set
+      # (see the header), so a PR that changes only docker/layers/full/ runs
+      # Tier 0, which contract-scans it, and not Tier 1. GitHub applies these
+      # patterns in order and a later positive one wins, so anything after this
+      # line that matches those paths (docker/** and **/Dockerfile above both
+      # do) would bring them back.
+      - '!docker/layers/full/**'
 
 permissions:
   contents: read
@@ -145,24 +158,25 @@ jobs:
       # layer-set selector and digest are deliberately absent, since the base
       # build never reads them.
       #
-      # The layers key also carries the set's own digest, the value build.sh
-      # stamps as powbox.layers.digest: hashFiles() hashes file contents only,
-      # so a rename-only edit under docker/layers/full/ would otherwise keep the
+      # The layers key covers the `browser` set, the one Tier 1 builds, and
+      # also carries its digest, the value build.sh stamps as
+      # powbox.layers.digest: hashFiles() hashes file contents only, so a
+      # rename-only edit under docker/layers/browser/ would otherwise keep the
       # key while changing the digest. A set the digest script rejects gets a
-      # placeholder here, so the lean pass still runs and the full build reports
-      # the contract error.
+      # placeholder here, so the lean pass still runs and the browser build
+      # reports the contract error.
       - name: Compute image cache keys
         id: keys
         shell: bash
         env:
           BASE_INPUTS: ${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
-          LAYERS_INPUTS: ${{ hashFiles('docker/layers/full/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh', 'scripts/build-image-lib.sh') }}
+          LAYERS_INPUTS: ${{ hashFiles('docker/layers/browser/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh', 'scripts/build-image-lib.sh') }}
         run: |
           set -euo pipefail
           base="powbox-base-${RUNNER_OS}-${BASE_INPUTS}"
           echo "base=${base}" >>"$GITHUB_OUTPUT"
-          digest="$(./scripts/layers-digest.sh docker/layers/full)" || digest=undigested
-          echo "layers=powbox-layers-full-${RUNNER_OS}-${BASE_INPUTS}-${LAYERS_INPUTS}-${digest#sha256:}" >>"$GITHUB_OUTPUT"
+          digest="$(./scripts/layers-digest.sh docker/layers/browser)" || digest=undigested
+          echo "layers=powbox-layers-browser-${RUNNER_OS}-${BASE_INPUTS}-${LAYERS_INPUTS}-${digest#sha256:}" >>"$GITHUB_OUTPUT"
 
       # Cache-awareness, footprint-respecting edition. The cheap, robust win is
       # to cache the EXPENSIVE base image (node:24-trixie-slim + ~12 apt groups,
@@ -229,26 +243,50 @@ jobs:
       # a PARTIAL smoke, so read the run's skip banner rather than the job status
       # alone. The pg-dev-up and self-hosted stages run in full; task 005's
       # dir-mount stage has since merged as Stage 5 and runs here too, subject to
-      # its own host gates. The full pass below runs the same umbrella with the
-      # same flag.
+      # its own host gates. The browser pass below runs the same umbrella with
+      # the same flag.
       - name: Smoke test - lean image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
         run: ./commands/smoke-test.sh
 
-      # Full pass. Selecting the set is a gitignored file, so the tree stays
-      # clean and the stamped commit does not gain -dirty; the check-ignore
-      # guard fails the step if that ever stops being true.
-      - name: Select the full layer set
+      # The agent hooks render each agent's instruction file from the template
+      # baked into its seed directory. scripts/test-stage-agent-template.sh pins
+      # the staging and the render; what only a built image shows is that the
+      # template reached both agents' images. With no layer set it is the core
+      # template byte for byte. Each copy is written to a file and compared
+      # with cmp, because a $(...) capture drops trailing newlines and would
+      # hide a difference at the end of the file. `cat` runs as the entrypoint,
+      # so nothing renders or rewrites the file first.
+      - name: Seeded instruction templates - lean image
         shell: bash
         run: |
           set -euo pipefail
-          printf 'full\n' >.powbox-layers
+          expected=docker/shared/container-agent.md.tmpl
+          out="${RUNNER_TEMP}/seeded-lean"
+          mkdir -p "$out"
+          for agent in claude codex; do
+            docker run --rm --entrypoint cat powbox-agent:latest "/home/node/.agent-container/${agent}/agent.md.tmpl" >"$out/${agent}.tmpl"
+            if ! cmp "$expected" "$out/${agent}.tmpl"; then
+              echo "FAIL: the ${agent} template baked into the lean image differs from ${expected}." >&2
+              exit 1
+            fi
+          done
+          echo "Lean pass: both agents' seeded templates equal ${expected}."
+
+      # Browser pass. Selecting the set is a gitignored file, so the tree stays
+      # clean and the stamped commit does not gain -dirty; the check-ignore
+      # guard fails the step if that ever stops being true.
+      - name: Select the browser layer set
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'browser\n' >.powbox-layers
           git check-ignore -q .powbox-layers || {
-            echo "FAIL: .powbox-layers is not gitignored, so selecting a set would stamp the full image -dirty." >&2
+            echo "FAIL: .powbox-layers is not gitignored, so selecting a set would stamp the browser image -dirty." >&2
             exit 1
           }
-          [ "$(./scripts/layers-select.sh)" = full ]
+          [ "$(./scripts/layers-select.sh)" = browser ]
 
       # The layer-set image cached like the base, and for the same reasons. The
       # key embeds the base key, so a base change re-keys the layers too, plus
@@ -259,8 +297,8 @@ jobs:
       # these that the key missed would leave a stale entry the set is rebaked
       # past on every run; the next step only warns about that, so the key's
       # coverage is a cost question, not a correctness one. No restore-keys, as
-      # for the base. Only the committed `full` set is cached;
-      # docker/layers/custom/ is never built here.
+      # for the base. Only the committed `browser` set is built and cached
+      # here; neither `full` nor docker/layers/custom/ is ever built in CI.
       - name: Restore layers image cache
         id: layerscache
         uses: actions/cache@v4
@@ -289,7 +327,7 @@ jobs:
       # test does not survive docker save / docker load, or the set and digest
       # this step derives no longer match what build.sh derives. The warning
       # names both.
-      - name: Build full image (base + layers + agent, layer set full)
+      - name: Build browser image (base + layers + agent, layer set browser)
         shell: bash
         env:
           LAYERS_CACHE_KEY: ${{ steps.keys.outputs.layers }}
@@ -318,7 +356,7 @@ jobs:
           else
             echo "Layers cache MISS — build.sh bakes the layer-set image."
           fi
-          build_log="${RUNNER_TEMP}/powbox-build-full.log"
+          build_log="${RUNNER_TEMP}/powbox-build-browser.log"
           ./build.sh agent | tee "$build_log"
           if [ "$expect_reuse" = true ]; then
             # The bake line is checked first and on its own: a build.sh that
@@ -337,18 +375,94 @@ jobs:
             docker save -o /tmp/powbox-layers-image.tar powbox-agent-layers:latest
           fi
           set_label="$(docker image inspect powbox-agent:latest --format '{{json .Config.Labels}}' | jq -r '."powbox.layers.set" // empty')"
-          if [ "$set_label" != full ]; then
-            echo "FAIL: the full pass built powbox-agent:latest on layer set '${set_label:-none}', not 'full'." >&2
+          if [ "$set_label" != browser ]; then
+            echo "FAIL: the browser pass built powbox-agent:latest on layer set '${set_label:-none}', not 'browser'." >&2
             exit 1
           fi
-          echo "Full pass: powbox-agent:latest carries powbox.layers.set=full."
+          echo "Browser pass: powbox-agent:latest carries powbox.layers.set=browser."
 
-      - name: Smoke test - full image (image required, no image-gated self-skip)
+      # Against the committed skeleton, Stage 1b here only prints a note; the
+      # failing-probe step below is what shows it running the set's probes.
+      - name: Smoke test - browser image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
         run: ./commands/smoke-test.sh
 
-      # Runs once, against the full image, after both passes: it is a
+      # The same check as the lean pass, against the template build.sh staged
+      # for this set: .powbox-staging/agent.md.tmpl, the core template plus the
+      # set's agent notes when it has any. The notes heading must be present
+      # exactly when the staged file differs from the core template, which is
+      # the staging script's own decision about whether the notes count, so a
+      # heading without notes fails as surely as notes that never arrived.
+      - name: Seeded instruction templates - browser image
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=.powbox-staging/agent.md.tmpl
+          core=docker/shared/container-agent.md.tmpl
+          # shellcheck disable=SC2016 # the backticks are part of the heading
+          heading='## Additional tooling from the `browser` layer set'
+          if cmp -s "$core" "$expected"; then
+            want=absent
+          else
+            want=present
+          fi
+          out="${RUNNER_TEMP}/seeded-browser"
+          mkdir -p "$out"
+          for agent in claude codex; do
+            docker run --rm --entrypoint cat powbox-agent:latest "/home/node/.agent-container/${agent}/agent.md.tmpl" >"$out/${agent}.tmpl"
+            if ! cmp "$expected" "$out/${agent}.tmpl"; then
+              echo "FAIL: the ${agent} template baked into the browser image differs from ${expected}." >&2
+              exit 1
+            fi
+            if grep -qxF "$heading" "$out/${agent}.tmpl"; then
+              have=present
+            else
+              have=absent
+            fi
+            if [ "$have" != "$want" ]; then
+              echo "FAIL: the ${agent} template baked into the browser image has the notes heading ${have}, but it must be ${want}: the staged ${expected} $([ "$want" = present ] && echo differs from || echo equals) ${core}." >&2
+              exit 1
+            fi
+          done
+          echo "Browser pass: both agents' seeded templates equal ${expected}; the notes heading is ${want}, as expected."
+
+      # Stage 1b against the built image with a probe file whose second probe
+      # fails, read from the file the image's `browser` label selects: it shows
+      # that Stage 1b runs the set's probes (probe 1 passes first) and that a
+      # failure is named by index with the manifest. The umbrella is not rerun,
+      # and a copy of the set under another name would never be read, so the
+      # committed file is overwritten and the trap restores it on every exit,
+      # keeping the tree clean for later steps. The overwrite changes the set's
+      # digest, so Stage 1b's stale-image warning in this output is expected.
+      - name: Stage 1b names a failing probe - browser image
+        shell: bash
+        run: |
+          set -euo pipefail
+          probes=docker/layers/browser/smoke-probes.txt
+          trap 'git checkout -- docker/layers/browser/smoke-probes.txt' EXIT
+          printf '%s\n' 'true' 'false' >"$probes"
+          skipped=()
+          # shellcheck disable=SC1091 # the umbrella's own Stage 1b
+          . ./scripts/smoke-test-lib.sh
+          rc=0
+          out="$(smoke_layer_stage powbox-agent:latest "$GITHUB_WORKSPACE" 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: Stage 1b exited 0 although probe 2 of ${probes} fails." >&2
+            exit 1
+          fi
+          if ! grep -qxF 'SMOKE PROBE 2 FAILED' <<<"$out"; then
+            echo "FAIL: Stage 1b failed (exit ${rc}) but did not name probe 2 with the line 'SMOKE PROBE 2 FAILED'." >&2
+            exit 1
+          fi
+          if ! grep -qF 'Probe manifest - match the index' <<<"$out"; then
+            echo "FAIL: Stage 1b named probe 2 but printed no probe manifest." >&2
+            exit 1
+          fi
+          echo "Stage 1b ran the browser set's probes and named the failing one by index."
+
+      # Runs once, against the browser image, after both passes: it is a
       # launcher-level check, and a second run on the lean image would add no
       # coverage.
       #

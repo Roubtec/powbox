@@ -20,15 +20,12 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Workflow debugging | `wf-check <script.js>` validates Claude Workflow metadata and async-body syntax without running it; `wf-status <runId-or-transcript-dir>` summarizes a run best-effort from its snapshot, journal, and agent transcripts. |
 | Archives/transfer | `wget`, `curl`, `zip`, `unzip`, `rsync`, `bzip2`, `xz`, `zstd` |
 | Data | `envsubst`, `bc`, `xxd` |
-| Databases | `sqlite3`, `psql` + a bundled **PostgreSQL 16** server — run `pg-dev-up` to start a throwaway local cluster (see "Local PostgreSQL" below) |
+| Databases | `sqlite3` |
 | Network | `ping`, `nc` |
 | File search | `fd`, `bat` |
-| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo`, `pandoc`, `marp` (Markdown → slide decks), `mmdc` (Mermaid diagram source → SVG/PNG/PDF) |
-| Headless browser | `chromium` — used by `marp` and `mmdc`, but also available for web automation: E2E/visual tests, smoke-testing a local dev server, screenshots, Lighthouse audits, HTML→PDF/PNG. Puppeteer-based tools work out of the box (`PUPPETEER_EXECUTABLE_PATH` and `CHROME_NO_SANDBOX` are pre-set). |
-| Playwright | The `playwright` **CLI** is baked and on `PATH` (`playwright screenshot`, `playwright pdf`, `playwright codegen`, `playwright install`), but **browsers are not** — run `playwright install chromium` once per container (`playwright install --only-shell chromium` is enough for headless runs and is well under half the size). In a repo with its own pinned `playwright`/`@playwright/test`, use that repo's `npx playwright …` so its version wins; the bare `playwright` binary is the no-repo fallback. On a JS/powbox, Go, or detected .NET project the browser download lands in persistent `.worktrees/.ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`), so it survives container recreation and is shared by every worktree; elsewhere it falls back to container-lifetime `~/.cache/ms-playwright`. The global package is **CLI-only**: `require('playwright')` / `import … from 'playwright'` does not resolve from a folder without a local install (global npm packages are not on Node's module path, and powbox deliberately sets no `NODE_PATH` — it would mask undeclared dependencies), so a programmatic script needs a local `npm i playwright` (~19 MB, seconds; the browsers it then finds are the shared ones). The system `chromium` above is **not** a substitute: Playwright has no browser-executable env override (`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` does not exist), and a headless launch wants a `chrome-headless-shell` binary the distro package does not ship. Only an explicit `launch({ executablePath: '/usr/bin/chromium' })` reuses it. |
+| Document processing | `pdftotext`, `pdftoppm`, `pdfinfo`, `pandoc`, `typst`. `pandoc` converts Markdown to Word, PowerPoint, HTML and EPUB, and to PDF through the baked Typst engine: `pandoc in.md -o out.pdf --pdf-engine=typst` (US Letter by default; add `-V papersize=a4` for A4, and `--extract-media=<dir>` when the input is a `.docx` that contains images, or Typst cannot find them). No headless browser and no LaTeX are part of this base image, so turning HTML or a slide deck into PDF needs a browser: use one the layer-set section at the end of this file documents when it is there, and otherwise install what you need for the session. |
 | Editors | `nano`, `vim` |
 | Sandbox | `bubblewrap` (`bwrap`) |
-| Containers | `podman`, `podman compose`, and a `docker` shim (→ `podman`) run **rootless** here — build images and spin up multi-service stacks (databases, Adminer, etc.) with `docker compose` / `podman compose`, no privileged daemon and no host Docker socket. Common dev images (`postgres`, `redis`, `mariadb`, `adminer`) are pre-cached in a shared read-only store, so they start without a pull. Storage is otherwise per-agent and persistent: pulled images and `podman volume`s (e.g. a database's data) survive container restarts, and each agent (Claude, Codex) keeps its own store for the same repo so concurrent agents never clobber each other. Reach a nested service from here via its **published port on `localhost`**; within a compose stack, containers reach each other by **service name**. Nested containers inherit this container's egress firewall. Uses `/dev/fuse` when the host exposes it, else the slower `vfs` driver. |
 
 Tools that an optional layer set adds to this image are listed at the end of this file, under "Additional tooling from the … layer set", when the set documents them. The table above is the floor every image carries, not a complete list: a layer set can add tools without documenting them, so check with `command -v` before concluding that a tool is missing.
 
@@ -85,49 +82,17 @@ Parallel, worktree-isolated work uses three baked helpers on `PATH`. Skills and 
 | `/workspace/<project-slug>/node_modules` | Per-container Docker volume (Linux packages, separate from host); dir-mounted JS/powbox projects only |
 | `/workspace/<project-slug>/<subpackage>/node_modules` | Ephemeral tmpfs shadow (auto-detected for monorepo workspaces; the `pnpm`/`pn` wrapper re-shadows before installs, so a package added mid-session is covered automatically — in dir-mounted mode, run `shadow-refresh.sh` by hand only if you populate `node_modules` another way) |
 | `/workspace/<project-slug>/<dotnet-project>/{bin,obj}` | Ephemeral tmpfs shadow (auto-detected beside every `*.csproj`/`*.fsproj`/`*.vbproj`, matched case-insensitively so a Windows-authored `Legacy.CSPROJ` counts too, ensuring a container `dotnet build` never writes container-absolute paths into `obj/` on the host bind mount where a host build would trip over them). Build output does not survive container recreation; in dir-mounted mode, run `shadow-refresh.sh` after adding a project mid-session. An existing `bin`/`obj` that is a symlink, or that holds Git-tracked files (a project redirecting output via `ArtifactsPath` may keep real content there), is left un-shadowed so nothing real is masked |
-| `/workspace/<project-slug>/.worktrees` | Per-container Docker volume for git worktrees (dir-mounted JS/powbox, `go.mod`, or boundedly detected .NET projects); also holds durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`) and the shared Playwright browsers cache at `.worktrees/.ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`). It also reserves cache locations for toolchains the tooling table above does not list, which stay unused unless a layer set (see the end of this file) or your own install adds the tool: Go module/build caches (`.gomodcache`, `.gocache`, and per-worktree `.golangci-cache/…`), the NuGet packages folder `.worktrees/.nuget` (`NUGET_PACKAGES`), and the ccache directory `.worktrees/.ccache` (`CCACHE_DIR`) |
+| `/workspace/<project-slug>/.worktrees` | Per-container Docker volume for git worktrees (dir-mounted JS/powbox, `go.mod`, or boundedly detected .NET projects); also holds durable per-worktree git metadata at `.worktrees/.gitworktrees` (bind-mounted over `.git/worktrees`). It also reserves cache locations for tools the tooling table above does not list, which stay unused unless a layer set (see the end of this file) or your own install adds the tool: Go module/build caches (`.gomodcache`, `.gocache`, and per-worktree `.golangci-cache/…`), the NuGet packages folder `.worktrees/.nuget` (`NUGET_PACKAGES`), the ccache directory `.worktrees/.ccache` (`CCACHE_DIR`), and the shared Playwright browsers cache `.worktrees/.ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`) |
 | `/ctx` | Optional context mount root; external folders are mounted under `/ctx/<name>` via `--ctx` or `ctx:` config |
 | `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
 | `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-container pnpm store, dir-mounted JS/powbox gate only (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
-| `/home/node/.local/share/containers` | Per-container rootless Podman storage, keyed by agent + project (Claude and Codex get separate stores for the same repo) — images and named volumes persist here (Docker volume) |
 
 Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — running `shadow-refresh.sh` there is a harmless no-op, because the script skips itself under `POWBOX_SELF_HOSTED=1` and exits 0 without mounting.
 
 ## Network
 
 Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
-
-Containers you start with Podman route their outbound traffic through this container, so they inherit the same firewall: they can pull images and reach the public internet, but not your LAN or host. Talk to a nested service from this container (or from a sibling container) via its **published port on `localhost`** rather than its in-container IP.
-
-## Local PostgreSQL
-
-The PostgreSQL 16 server binaries are baked in, but no daemon runs by default (it would clash with a project's own docker-compose Postgres). When a suite needs a live database (`prisma migrate`, a `test:db` integration run, etc.), stand one up on demand:
-
-```bash
-pg-dev-up                      # initdb + start + create db, prints DATABASE_URL
-eval "$(pg-dev-up url --export)"   # export DATABASE_URL into the current shell
-```
-
-The emitted URL ends in `?sslmode=disable` — the cluster has no SSL and Go's `lib/pq` refuses to connect when the parameter is absent — so keep it, and append any extra parameter with `&`.
-
-The cluster runs as the unprivileged `node` user with trust auth on a loopback socket (the container is the security boundary), so no `sudo -u postgres` dance is needed. Defaults are `postgres`/`postgres`/`postgres` on port `5432`; override per project to match its `.env` before the first call:
-
-```bash
-POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
-```
-
-Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up help`.
-
-For parallel worktrees that each run database tests, opt into a worktree-scoped cluster so they do not share one data dir or port. Put the flag before the subcommand; it derives an isolated data directory and a free loopback port from the current Git worktree (recorded so later `status`/`url`/`down` resolve the same server):
-
-```bash
-pg-dev-up --worktree up                        # isolated cluster on an allocated port
-eval "$(pg-dev-up --worktree url --export)"     # export this worktree's DATABASE_URL
-pg-dev-up --worktree down                       # stops only this worktree's cluster
-```
-
-Outside a Git repo, pass an explicit identifier instead: `pg-dev-up --profile <id> up`. Explicit `PGDATA`/`PGPORT` still override the scoped defaults (`POWBOX_PG_SCOPED_ROOT` overrides the scoped temp root).
 
 ## Installing additional packages
 

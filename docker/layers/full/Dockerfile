@@ -3,13 +3,16 @@
 # .powbox-layers.example); scripts/build-image.{sh,ps1} then bake this file into
 # powbox-agent-layers:latest and build the agent image on it.
 #
-# It adds the language toolchains the lean base leaves out. Each sits in its
-# own delimited block below, so a copy can be trimmed by deleting a block
-# together with that tool's probes in smoke-probes.txt and its notes in
-# agent-notes.md. CI never builds it: Tier 1 exercises the layer-set chain
-# through the smaller `browser` set, Tier 0 only checks this directory against
-# the contract below, and the maintainer builds this set by hand and fixes it
-# when an install breaks.
+# It adds the language toolchains the lean base leaves out, PostgreSQL 16 with
+# pg-dev-up, rootless Podman, and the headless browser stack (Chromium, Marp
+# CLI, Mermaid CLI, Playwright CLI) that the `browser` set installs too. Each
+# sits in its own delimited block below, so a copy can be trimmed by deleting a
+# block together with that tool's probes in smoke-probes.txt and its notes in
+# agent-notes.md (and, for Podman or PostgreSQL, the file the block copies).
+# CI never builds it: Tier 1 exercises the layer-set chain through the smaller
+# `browser` set, Tier 0 only checks this directory against the contract below,
+# and the maintainer builds this set by hand and fixes it when an install
+# breaks.
 #
 # The contract every layer Dockerfile follows (README "Layer sets"):
 #   - start with the two lines below, so the build scripts can pass the base,
@@ -29,7 +32,10 @@
 #     directory is rejected; create those in a RUN);
 #   - use no ONBUILD: a trigger runs in the agent build, from the repo-root
 #     context, where it could read files the digest does not cover;
-#   - set no powbox.* labels: the bake target stamps them;
+#   - set no powbox.* labels: the bake target and the base stamp them. The
+#     one exception is a capability label for a tool the set installs (such
+#     as powbox.podman, which full's Podman block declares): declare it in
+#     that tool's block, so deleting the block deletes the label;
 #   - keep the default backslash escape (no `# escape=` naming another).
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
@@ -147,7 +153,7 @@ ENV PATH="/opt/mssql-tools18/bin:${PATH}"
 # /home/node, so it also holds for root); the harnesses' non-login shells get
 # it from the ENV PATH below, and zsh logins inherit that ENV PATH untouched
 # (Debian's zprofile never sources /etc/profile). Placed low in the file so a
-# Go bump never busts the expensive gh / mssql / pwsh / npm layers above.
+# Go bump never busts the expensive mssql / pwsh layers above.
 #
 # The tarball fetches carry --retry ... --retry-all-errors --http1.1: go.dev (and
 # occasionally github.com) intermittently reset the HTTP/2 stream mid-download on
@@ -216,8 +222,7 @@ ENV PATH="/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # the baked binary is for running the test suites, not certifying that a policy
 # loads byte-for-byte in a particular deployed engine version.
 #
-# Placed low so an OPA bump never busts the expensive apt/gh/mssql/pwsh/npm
-# layers above.
+# Placed low so an OPA bump never busts the expensive apt/mssql/pwsh/Go layers.
 RUN OPA_VERSION=1.18.2 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
@@ -246,8 +251,7 @@ RUN OPA_VERSION=1.18.2 \
 # build (no global CC/CXX or masquerade-PATH interposition here) — projects
 # activate it with `CC="ccache gcc"` or `cmake -DCMAKE_C_COMPILER_LAUNCHER=ccache`.
 # Pure build-time packages: no entrypoint, sudoers, or firewall interaction.
-# Placed low so it never busts the expensive gh / mssql / pwsh / npm / Podman /
-# Go / OPA layers above it.
+# Placed low so it never busts the expensive mssql / pwsh / Go / OPA layers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
@@ -256,6 +260,164 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     ccache \
     && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# PostgreSQL 16 and pg-dev-up
+# ---------------------------------------------------------------------------
+# Install PostgreSQL 16 (server + client) from the official PGDG apt repo so the
+# major version matches what projects pin (e.g. postgres:16.x) and avoids the
+# silent behavior drift Debian trixie's stock 17 would introduce. The contrib
+# modules (pg_stat_statements, uuid-ossp, hstore, pgcrypto, …) ship inside the
+# `postgresql-16` package on PGDG trixie — there is no separate
+# `postgresql-contrib-16` anymore. No daemon is started at build or runtime; the
+# baked `pg-dev-up` helper stands up a throwaway loopback cluster on demand for
+# integration suites (prisma migrate, `test:db`, etc.) — see ./pg-dev-up.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-16 \
+        postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=755 pg-dev-up /usr/local/bin/pg-dev-up
+
+# ---------------------------------------------------------------------------
+# Rootless Podman
+# ---------------------------------------------------------------------------
+# Rootless container engine (Podman) so an in-sandbox agent can build, run, and
+# orchestrate its own containers — databases, Adminer, whole service stacks —
+# without Docker-in-Docker. Podman runs as the unprivileged `node` user through
+# a user namespace, so the blast radius stays inside this container: no
+# privileged daemon, no host Docker socket. `podman-docker` provides a `docker`
+# command shim; on Debian 13's Podman 5.x the `podman compose` subcommand exists
+# and delegates to `podman-compose`, so `podman compose …` and `docker compose …`
+# (via the shim) both work — unlike bookworm's Podman 4.3.1, which had no
+# `compose` subcommand at all (only the standalone `podman-compose` binary).
+# fuse-overlayfs is the rootless storage driver (needs /dev/fuse, passed through
+# by launch-agent.sh; entrypoint-core.sh falls back to vfs when it is absent);
+# slirp4netns/passt give rootless networking and netavark + aardvark-dns provide
+# inter-container DNS. The /etc/subuid + /etc/subgid ranges are what newuidmap
+# (from uidmap) maps into the user namespace.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    podman \
+    podman-docker \
+    podman-compose \
+    uidmap \
+    fuse-overlayfs \
+    slirp4netns \
+    passt \
+    crun \
+    netavark \
+    aardvark-dns \
+    catatonit \
+    && rm -rf /var/lib/apt/lists/* \
+    && { grep -q '^node:' /etc/subuid 2>/dev/null || echo 'node:100000:65536' >> /etc/subuid; } \
+    && { grep -q '^node:' /etc/subgid 2>/dev/null || echo 'node:100000:65536' >> /etc/subgid; } \
+    && touch /etc/containers/nodocker \
+    && mkdir -p -m 0755 /etc/containers/containers.conf.d
+
+# Engine defaults for running Podman inside a container without systemd:
+# cgroupfs (no systemd cgroup delegation available), the file event logger
+# (no journald), and the netavark backend + aardvark-dns for container DNS.
+#
+# The drop-in dir is pre-created 0755 in the RUN above on purpose: if this COPY
+# were left to auto-create it, BuildKit would apply its own --chmod=644 to the
+# new directory too, dropping the search bit and making Podman fail to read its
+# system config ("open .../10-powbox.conf: permission denied").
+COPY --chmod=644 containers.conf /etc/containers/containers.conf.d/10-powbox.conf
+
+# The shared image-store seeder. The launcher (scripts/launch-agent.{sh,ps1})
+# runs `seed-image-store.sh seed` in a short-lived writer container; see
+# docs/podman-shared-image-store.md.
+COPY --chmod=755 seed-image-store.sh /usr/local/bin/seed-image-store.sh
+
+# Rootless Podman keeps its transient runtime state (sockets, runroot) under
+# XDG_RUNTIME_DIR. A home-dir path avoids depending on systemd-logind to create
+# /run/user/<uid>; entrypoint-core.sh creates it mode 700 at startup.
+ENV XDG_RUNTIME_DIR=/home/node/.local/run
+
+# Capability flag for the launcher: scripts/launch-agent.{sh,ps1} start the
+# image-store writer, which runs the seeder above, only for an agent image that
+# carries this label, so an image without Podman does not start a container on
+# every launch just to find no seeder. It lives in this block so that deleting
+# the block from a copy of this set deletes the label with it. The smoke test's
+# Stage 3 fails an image whose label and podman binary disagree.
+LABEL powbox.podman="1"
+
+# >>> browser stack. Two committed sets install it, `browser` and `full`, from
+# identical copies of the blocks down to the closing marker: a build selects
+# one set, so they cannot share a layer. scripts/test-layer-sets.sh fails when
+# the two copies differ, so edit both together.
+# ---------------------------------------------------------------------------
+# Chromium
+# ---------------------------------------------------------------------------
+# The system Chromium: Marp CLI and Mermaid CLI below drive it through
+# Puppeteer, and it is a headless browser in its own right (screenshots, HTML
+# printed to PDF, smoke-testing a local dev server).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Marp CLI and Mermaid CLI
+# ---------------------------------------------------------------------------
+# Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram
+# source -> SVG/PNG/PDF). Both drive Chromium via puppeteer; skip Puppeteer's
+# bundled-Chromium download since the apt-installed system chromium is used at
+# runtime (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
+    @marp-team/marp-cli \
+    @mermaid-js/mermaid-cli
+
+# ---------------------------------------------------------------------------
+# Playwright CLI
+# ---------------------------------------------------------------------------
+# Install Playwright (browser automation) globally so an agent has the
+# `playwright` CLI (screenshot / pdf / codegen / install) without an install
+# step. This is CLI-only on purpose: global npm packages are not on Node's
+# module path and no NODE_PATH is set (it would make every global package
+# resolvable from any repo and mask undeclared dependencies), so programmatic
+# `require('playwright')` still needs a local install, which then finds the
+# shared browsers. Only the ~19 MB npm package is baked:
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops the postinstall from pulling ~656 MB of
+# browser builds, which would go stale almost immediately -- Playwright keys its
+# browsers by revision and bumps that revision nearly every minor release (1.52
+# -> 1169, 1.55 -> 1187, 1.58 -> 1208, 1.60 -> 1223, 1.62 -> 1234), so a baked
+# revision only ever serves repos pinned to that one minor. Browsers are instead
+# downloaded on demand into the PERSISTENT PLAYWRIGHT_BROWSERS_PATH the launcher
+# points at .worktrees, so each version is fetched once per container and then
+# survives recreation. A repo with its own pinned playwright/@playwright/test
+# dependency still resolves its local copy first; this global one is the
+# no-repo fallback.
+#
+# Note the system chromium above CANNOT stand in for Playwright's browsers:
+# Playwright exposes no browser-executable env override (there is no
+# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH), and a headless launch resolves to a
+# chrome-headless-shell binary the distro package does not ship at all. Only an
+# explicit executablePath in launch() reuses it, which is a per-repo code change.
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright
+
+# ---------------------------------------------------------------------------
+# Browser environment
+# ---------------------------------------------------------------------------
+# Point Marp / Puppeteer at the system Chromium (PDF, PPTX, PNG output).
+# CHROME_NO_SANDBOX=true is appropriate here: the container itself is the
+# isolation boundary, and Chromium's user-namespace sandbox is unreliable
+# under our default Docker seccomp/AppArmor profile.
+ENV CHROME_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV CHROME_NO_SANDBOX=true
+
+# Playwright deliberately gets NO baked PLAYWRIGHT_BROWSERS_PATH: unset means
+# its own default (~/.cache/ms-playwright), which is the right container-
+# ephemeral fallback for a non-dev folder that mounts no .worktrees volume. The
+# launcher supplies the persistent path per project, exactly as it does for
+# NUGET_PACKAGES / GOMODCACHE / CCACHE_DIR.
+# <<< browser stack
 
 # ---------------------------------------------------------------------------
 # .NET SDK (needs the Microsoft apt repo the sqlcmd/PowerShell block adds)
@@ -300,7 +462,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # NuGet package and compile with only this SDK present.
 #
 # Placed low, beside the other late tool layers, so an SDK bump never busts the
-# expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers above it.
+# expensive mssql / pwsh / Go / OPA / Podman / browser-stack layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dotnet-sdk-10.0 \
     && rm -rf /var/lib/apt/lists/*

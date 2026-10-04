@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bzip2 \
     build-essential \
     ca-certificates \
-    chromium \
     curl \
     dnsutils \
     fd-find \
@@ -63,70 +62,19 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PostgreSQL 16 (server + client) from the official PGDG apt repo so the
-# major version matches what projects pin (e.g. postgres:16.x) and avoids the
-# silent behavior drift Debian trixie's stock 17 would introduce. The contrib
-# modules (pg_stat_statements, uuid-ossp, hstore, pgcrypto, …) ship inside the
-# `postgresql-16` package on PGDG trixie — there is no separate
-# `postgresql-contrib-16` anymore. No daemon is started at build or runtime; the
-# baked `pg-dev-up` helper stands up a throwaway loopback cluster on demand for
-# integration suites (prisma migrate, `test:db`, etc.) — see docker/shared/pg-dev-up.
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
-    > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        postgresql-16 \
-        postgresql-client-16 \
-    && rm -rf /var/lib/apt/lists/*
-
 # Silence npm's "New major version of npm available!" notice, image-wide. npm is
 # whatever the node:24 base bundles (it moves with Node, not independently), so
 # the notice is unactionable noise at the end of every `npm install -g` in the
-# base and agent builds and in every in-session npm call. Declared here, right
-# before the first npm install, so it covers those layers without busting the
-# apt layers above. An ENV (not a baked npmrc) so a session can still opt back
-# in by overriding it.
+# base, layer-set and agent builds and in every in-session npm call. Declared
+# here, right before the first npm install, so it covers those layers without
+# busting the apt layers above. An ENV (not a baked npmrc) so a session can
+# still opt back in by overriding it.
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
 # Install pnpm. Unpinned: pnpm v10+ honors a project's `packageManager` field
 # and transparently runs that pinned version (e.g. pnpm@11.x under this global
 # 12.x), so the global one only matters for repos without a pin.
 RUN npm install -g pnpm
-
-# Install Marp CLI (Markdown -> slide decks) and Mermaid CLI (`mmdc`, diagram
-# source -> SVG/PNG/PDF). Both drive Chromium via puppeteer; skip Puppeteer's
-# bundled-Chromium download since the apt-installed system chromium is used at
-# runtime (wired up via CHROME_PATH / PUPPETEER_EXECUTABLE_PATH below).
-RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
-    @marp-team/marp-cli \
-    @mermaid-js/mermaid-cli
-
-# Install Playwright (browser automation) globally so an agent has the
-# `playwright` CLI (screenshot / pdf / codegen / install) without an install
-# step. This is CLI-only on purpose: global npm packages are not on Node's
-# module path and no NODE_PATH is set (it would make every global package
-# resolvable from any repo and mask undeclared dependencies), so programmatic
-# `require('playwright')` still needs a local install, which then finds the
-# shared browsers. Only the ~19 MB npm package is baked:
-# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD stops the postinstall from pulling ~656 MB of
-# browser builds, which would go stale almost immediately -- Playwright keys its
-# browsers by revision and bumps that revision nearly every minor release (1.52
-# -> 1169, 1.55 -> 1187, 1.58 -> 1208, 1.60 -> 1223, 1.62 -> 1234), so a baked
-# revision only ever serves repos pinned to that one minor. Browsers are instead
-# downloaded on demand into the PERSISTENT PLAYWRIGHT_BROWSERS_PATH the launcher
-# points at .worktrees, so each version is fetched once per container and then
-# survives recreation. A repo with its own pinned playwright/@playwright/test
-# dependency still resolves its local copy first; this global one is the
-# no-repo fallback.
-#
-# Note the system chromium below CANNOT stand in for Playwright's browsers:
-# Playwright exposes no browser-executable env override (there is no
-# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH), and a headless launch resolves to a
-# chrome-headless-shell binary the distro package does not ship at all. Only an
-# explicit executablePath in launch() reuses it, which is a per-repo code change.
-RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright
 
 # Install YAML tooling.
 RUN pip3 install --no-cache-dir --break-system-packages yq
@@ -216,48 +164,39 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
     && mkdir -m 700 -p /home/node/.claude /home/node/.codex \
     && chown -R node:node /home/node/.claude /home/node/.codex /home/node/.config /home/node/.local /home/node/.zsh_history_dir /run/powbox /workspace /ctx
 
-# Rootless container engine (Podman) so an in-sandbox agent can build, run, and
-# orchestrate its own containers — databases, Adminer, whole service stacks —
-# without Docker-in-Docker. Podman runs as the unprivileged `node` user through
-# a user namespace, so the blast radius stays inside this container: no
-# privileged daemon, no host Docker socket. `podman-docker` provides a `docker`
-# command shim; on Debian 13's Podman 5.x the `podman compose` subcommand exists
-# and delegates to `podman-compose`, so `podman compose …` and `docker compose …`
-# (via the shim) both work — unlike bookworm's Podman 4.3.1, which had no
-# `compose` subcommand at all (only the standalone `podman-compose` binary).
-# fuse-overlayfs is the rootless storage driver (needs /dev/fuse, passed through
-# by launch-agent.sh; entrypoint-core.sh falls back to vfs when it is absent);
-# slirp4netns/passt give rootless networking and netavark + aardvark-dns provide
-# inter-container DNS. The /etc/subuid + /etc/subgid ranges are what newuidmap
-# (from uidmap) maps into the user namespace. Placed low in the file so it never
-# busts the expensive gh / npm layers above it.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    podman \
-    podman-docker \
-    podman-compose \
-    uidmap \
-    fuse-overlayfs \
-    slirp4netns \
-    passt \
-    crun \
-    netavark \
-    aardvark-dns \
-    catatonit \
-    && rm -rf /var/lib/apt/lists/* \
-    && { grep -q '^node:' /etc/subuid 2>/dev/null || echo 'node:100000:65536' >> /etc/subuid; } \
-    && { grep -q '^node:' /etc/subgid 2>/dev/null || echo 'node:100000:65536' >> /etc/subgid; } \
-    && touch /etc/containers/nodocker \
-    && mkdir -p -m 0755 /etc/containers/containers.conf.d
-
-# Engine defaults for running Podman inside a container without systemd:
-# cgroupfs (no systemd cgroup delegation available), the file event logger
-# (no journald), and the netavark backend + aardvark-dns for container DNS.
+# Install Typst, the PDF engine for pandoc (`pandoc in.md -o out.pdf
+# --pdf-engine=typst`), so the lean image can produce PDFs with no headless
+# browser and no LaTeX. A minimal TeX set that serves pandoc was measured at
+# 189 MB (402 MB with XeTeX for Unicode text) against Typst's single 40 MB
+# binary, whose fonts are embedded, so it needs no font package and no HOME.
 #
-# The drop-in dir is pre-created 0755 in the RUN above on purpose: if this COPY
-# were left to auto-create it, BuildKit would apply its own --chmod=644 to the
-# new directory too, dropping the search bit and making Podman fail to read its
-# system config ("open .../10-powbox.conf: permission denied").
-COPY --chmod=644 docker/shared/containers.conf /etc/containers/containers.conf.d/10-powbox.conf
+# Pinned to 0.13.1 on purpose, not the latest: Debian trixie's pandoc
+# (3.1.11.1) writes a default Typst template that Typst 0.14 and 0.15 reject
+# with `error: font fallback list must not be empty`, while 0.13.1 renders it
+# out of the box. Re-test pandoc's PDF output before bumping either tool; the
+# Stage 1 smoke probe builds a PDF through this engine, so a bump that breaks
+# the template fails there. Fetched as the statically linked musl release
+# tarball from GitHub and sha256-pinned per arch, like the OPA binary in the
+# `full` layer set; bump the version and both sums together
+# (https://github.com/typst/typst/releases). Only the binary is extracted. The
+# fetch carries the same --retry ... --retry-all-errors --http1.1 flags as
+# the other release downloads, which ride out the HTTP/2 stream resets hosted
+# CI runners see; the sha256 check keeps a retried download honest.
+RUN TYPST_VERSION=0.13.1 \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) typst_arch=x86_64 \
+               typst_sha256=7d214bfeffc2e585dc422d1a09d2b144969421281e8c7f5d784b65fc69b5673f ;; \
+        arm64) typst_arch=aarch64 \
+               typst_sha256=4f5b7ee6e57fb639019ee0f6bffcf940edad228ede6ff5269a9f05a1544ceed4 ;; \
+        *) echo "no pinned Typst checksum for architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/typst.tar.xz \
+        "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${typst_arch}-unknown-linux-musl.tar.xz" \
+    && echo "${typst_sha256}  /tmp/typst.tar.xz" | sha256sum -c - \
+    && tar -C /usr/local/bin --strip-components=1 --no-same-owner \
+        -xJf /tmp/typst.tar.xz "typst-${typst_arch}-unknown-linux-musl/typst" \
+    && rm /tmp/typst.tar.xz \
+    && chmod 0755 /usr/local/bin/typst
 
 # Copy the substrate startup scripts shared by every agent while still root.
 # The unified entrypoint, the per-agent setup hooks, and the wt-* worktree
@@ -280,9 +219,7 @@ COPY --chmod=755 \
     docker/shared/shadow-refresh.sh \
     docker/shared/pnpm-shadow-wrapper.sh \
     docker/shared/pnpm-shadow-doctor \
-    docker/shared/pg-dev-up \
     docker/shared/entrypoint-core.sh \
-    docker/shared/seed-image-store.sh \
     docker/shared/seed-workspace.sh \
     docker/shared/fix-workspace-perms.sh \
     docker/shared/heal-workspace-perms.sh \
@@ -312,26 +249,6 @@ ENV PATH="/home/node/.local/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${PATH}"
 ENV SHELL=/bin/bash
 ENV EDITOR=nano
 ENV GIT_CONFIG_GLOBAL=/home/node/.config/git/config
-
-# Rootless Podman keeps its transient runtime state (sockets, runroot) under
-# XDG_RUNTIME_DIR. A home-dir path avoids depending on systemd-logind to create
-# /run/user/<uid>; entrypoint-core.sh creates it mode 700 at startup.
-ENV XDG_RUNTIME_DIR=/home/node/.local/run
-
-# Point Marp / Puppeteer at the system Chromium (PDF, PPTX, PNG output).
-# CHROME_NO_SANDBOX=true is appropriate here: the container itself is the
-# isolation boundary, and Chromium's user-namespace sandbox is unreliable
-# under our default Docker seccomp/AppArmor profile.
-ENV CHROME_PATH=/usr/bin/chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV CHROME_NO_SANDBOX=true
-
-# Playwright deliberately gets NO baked PLAYWRIGHT_BROWSERS_PATH: unset means
-# its own default (~/.cache/ms-playwright), which is the right container-
-# ephemeral fallback for a non-dev folder that mounts no .worktrees volume. The
-# launcher supplies the persistent path per project, exactly as it does for
-# NUGET_PACKAGES / GOMODCACHE / CCACHE_DIR.
 
 # Default pnpm store location and import method. `auto` lets pnpm hardlink (or
 # reflink-clone) package files from the store into node_modules when the store

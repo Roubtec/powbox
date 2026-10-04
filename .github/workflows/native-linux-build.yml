@@ -3,12 +3,14 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # Tier 1: the heavy native-Linux check — build the real agent image with real
 # Docker on a hosted ubuntu-latest runner (a native-Linux VM running a
 # first-class Docker daemon, not Docker Desktop on Windows/WSL), then run the
-# smoke test. Green here is a PARTIAL smoke, not a full one: the hosted runner
-# exposes no /dev/net/tun, so Stage 3's nested half self-skips (see the smoke
-# step's comment at the bottom of this file, and docs/smoke-tests.md). What it
-# does reproduce is the build / mount / identity / exec-bit defect class that
-# only surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost
-# a human a VPS stand-up.
+# smoke test. Neither image built here has PostgreSQL or Podman, which only the
+# maintainer's `full` set installs, so the smoke run reports Stage 2 (pg-dev-up)
+# and Stage 3 (rootless Podman) as not applicable on both: those stages, and
+# scripts/test-pg-dev-up-scoped.sh, run only in the maintainer's host smoke run
+# against a `full` image (docs/smoke-tests.md). What this workflow does
+# reproduce is the build / mount / identity / exec-bit defect class that only
+# surfaces on a native-Linux host (PRs #51/#52/#54/#55) and previously cost a
+# human a VPS stand-up.
 #
 # Two images are built and smoked, because an image no CI run builds rots: the
 # LEAN image a new user gets (agent directly on the base, no .powbox-layers)
@@ -102,10 +104,9 @@ on:
       - 'scripts/smoke-test*'
       - 'scripts/stage-agent-template.*'
       # Source suites routed out of Tier 0 because they need a built/staged
-      # helper, the image's /workspace contract, or PostgreSQL server binaries.
+      # helper or the image's /workspace contract.
       - 'scripts/test-gh-review-threads.sh'
       - 'scripts/test-dc-helpers.sh'
-      - 'scripts/test-pg-dev-up-scoped.sh'
       - 'scripts/test-pnpm-shadow-wrapper.sh'
       - 'commands/smoke-test.*'
       - '.github/workflows/native-linux-build.yml'
@@ -235,15 +236,13 @@ jobs:
       # POWBOX_SMOKE_REQUIRE_IMAGE=1 turns a missing image into a hard error and
       # makes the IMAGE-gated stages fail instead of self-skipping into a false
       # "all green" — so a missing image can never be reported here as a pass. It
-      # does not suppress the self-skips that have other causes: the Podman stage's
-      # nested-run checks still self-skip when /dev/net/tun is absent (the hosted
-      # runner has none), leaving only its static engine wiring validated. That is
-      # acceptable, not a failure — but it does mean a green run here can still be
-      # a PARTIAL smoke, so read the run's skip banner rather than the job status
-      # alone. The pg-dev-up and self-hosted stages run in full; task 005's
-      # dir-mount stage has since merged as Stage 5 and runs here too, subject to
-      # its own host gates. The browser pass below runs the same umbrella with
-      # the same flag.
+      # does not suppress the self-skips that have other causes, so read the
+      # run's banner rather than the job status alone. Stages 2 and 3 are listed
+      # there as not applicable, which does not make the run partial: this image
+      # has neither pg-dev-up nor podman. The self-hosted stage runs in full; task
+      # 005's dir-mount stage has since merged as Stage 5 and runs here too,
+      # subject to its own host gates. The browser pass below runs the same
+      # umbrella with the same flag.
       - name: Smoke test - lean image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
@@ -380,9 +379,11 @@ jobs:
           fi
           echo "Browser pass: powbox-agent:latest carries powbox.layers.set=browser."
 
-      # While the set's probe file holds no probe line, Stage 1b here only
-      # prints a note; the failing-probe step below shows it running the set's
-      # probes whatever the committed file holds.
+      # Stage 1b runs the probes the set commits in
+      # docker/layers/browser/smoke-probes.txt, the functional Marp, Mermaid and
+      # headless Chromium ones included, and Stages 2 and 3 are reported as not
+      # applicable, as on the lean image. The failing-probe step below shows
+      # Stage 1b naming a failing probe by index.
       - name: Smoke test - browser image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'

@@ -23,16 +23,13 @@ docker/base/Dockerfile
 docker/shared/.bashrc
 docker/shared/.zshrc
 docker/shared/cid
-docker/shared/containers.conf
 docker/shared/detect-shadows.sh
 docker/shared/entrypoint-core.sh
 docker/shared/fix-workspace-perms.sh
 docker/shared/heal-workspace-perms.sh
 docker/shared/init-firewall.sh
-docker/shared/pg-dev-up
 docker/shared/pnpm-shadow-doctor
 docker/shared/pnpm-shadow-wrapper.sh
-docker/shared/seed-image-store.sh
 docker/shared/seed-workspace.sh
 docker/shared/sensitive-host-path.sh
 docker/shared/shadow-mounts.sh

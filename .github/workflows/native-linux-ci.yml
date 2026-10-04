@@ -64,10 +64,11 @@ jobs:
           # Tracked *.sh files, PLUS extensionless/other tracked files whose
           # shebang names a shellcheck-supported shell (sh/bash/dash/ksh). Many
           # baked helpers ship without a .sh suffix (docker/shared/wt-enter,
-          # wt-bootstrap, pg-dev-up, powbox-provenance, …), so a quoting/syntax
-          # regression in one would otherwise slip past Tier 0 — the smoke test
-          # only checks they are on PATH, not that they parse. zsh/pwsh shebangs
-          # are intentionally excluded (shellcheck does not support them).
+          # wt-bootstrap, powbox-provenance, docker/layers/full/pg-dev-up, …),
+          # so a quoting/syntax regression in one would otherwise slip past
+          # Tier 0 — the smoke test only checks they are on PATH, not that they
+          # parse. zsh/pwsh shebangs are intentionally excluded (shellcheck
+          # does not support them).
           mapfile -t files < <(git ls-files -- '*.sh')
           while IFS= read -r f; do
             case "$f" in *.sh) continue ;; esac
@@ -259,8 +260,8 @@ jobs:
       # yq on PATH is the wrong implementation, so a runner-image change that
       # reorders PATH fails legibly rather than as 22 mystery assertion failures.
       # scripts/run-pure-shell-tests.sh auto-discovers every scripts/test-*.sh
-      # source suite except four explicitly routed to Tier 1 because they need
-      # a build-staged helper, a writable /workspace, or PostgreSQL daemons.
+      # source suite except four routed to the smoke test because they need a
+      # build-staged helper, a writable /workspace, or PostgreSQL daemons.
       # It runs the independent suites in parallel, captures their logs
       # separately, and prints a loud suite-named heading for every failure.
       # A newly added suite therefore runs automatically without another

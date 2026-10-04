@@ -7,20 +7,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# These suites are still automatic, but their real home is Tier 1:
+# These suites need a built image, so their real home is the smoke test:
 #
 # - test-gh-review-threads.sh needs the helper fetched from the separately
 #   versioned agent-skills repository (or its baked /usr/local/bin copy).
 # - test-dc-helpers.sh needs the dc-enter/dc-remove pair from that same
 #   separately versioned repository (or their baked /usr/local/bin copies).
 # - test-pg-dev-up-scoped.sh starts real PostgreSQL daemons and needs the server
-#   binaries baked into the agent image.
+#   binaries baked into an image built from a layer set that installs them
+#   (full).
 # - test-pnpm-shadow-wrapper.sh must create its fixture below the production
 #   /workspace root, which an arbitrary host checkout does not provide.
 #
-# commands/smoke-test.sh runs all four with the built image. Keep this list in
-# step with that routing; everything not listed here is selected by the glob.
-routed_to_tier1=(
+# commands/smoke-test.sh runs all four with the built image, which Tier 1 does
+# for every one but test-pg-dev-up-scoped.sh: CI builds no image with
+# PostgreSQL, so only a host smoke run against a full image runs that one.
+# Keep this list in step with that routing; everything not listed here is
+# selected by the glob.
+routed_to_smoke=(
 	test-gh-review-threads.sh
 	test-dc-helpers.sh
 	test-pg-dev-up-scoped.sh
@@ -28,10 +32,10 @@ routed_to_tier1=(
 )
 
 declare -A routed=()
-for name in "${routed_to_tier1[@]}"; do
+for name in "${routed_to_smoke[@]}"; do
 	routed["$name"]=1
 	if [ ! -f "$SCRIPT_DIR/$name" ]; then
-		echo "FATAL: routed Tier 1 suite is missing: scripts/$name" >&2
+		echo "FATAL: suite routed to the smoke test is missing: scripts/$name" >&2
 		exit 1
 	fi
 done
@@ -90,6 +94,6 @@ for i in "${!pids[@]}"; do
 	cat "$work_root/$name.log"
 done
 
-printf '\nPure-shell Tier 0 suites: %s completed, %s failed; %s routed to Tier 1.\n' \
-	"${#suites[@]}" "$failures" "${#routed_to_tier1[@]}"
+printf '\nPure-shell Tier 0 suites: %s completed, %s failed; %s routed to the smoke test.\n' \
+	"${#suites[@]}" "$failures" "${#routed_to_smoke[@]}"
 [ "$failures" -eq 0 ]

@@ -294,10 +294,16 @@ fi
 # producer emits and so could flip a probe green→141 with no code change.
 # scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
-# The `command -v podman` probe is what fails an image that lost the engine:
-# Stage 3 runs only on an image that has podman on its PATH and is reported as
-# not applicable otherwise, so without this probe such an image would pass.
-# shellcheck disable=SC2016  # the probes' $HOME expands in the container shell, NOT the host
+# The two Typst probes pin the PDF engine the base bakes for pandoc: the exact
+# version (pinned on purpose, see docker/base/Dockerfile), and a Markdown file
+# with a table, non-ASCII text and a 1x1 PNG decoded from base64 built into a
+# PDF through `--pdf-engine=typst`, checked with pdfinfo and with pdfimages so
+# a dropped image fails it. The probe runs in its scratch directory because
+# pandoc resolves the image path and writes its intermediate .typ file in the
+# working directory. A bare `typst --version` would
+# not catch the pandoc template incompatibility that motivated the pin. A Typst
+# bump must update the version probe and its PowerShell mirror.
+# shellcheck disable=SC2016  # the probes' $HOME and $d expand in the container shell, NOT the host
 "${ROOT_DIR}/scripts/smoke-test-image.sh" "$IMAGE" \
 	"claude --version >/dev/null" \
 	"codex --version >/dev/null" \
@@ -310,9 +316,6 @@ fi
 	"pip3 --version >/dev/null" \
 	"python3 --version >/dev/null" \
 	"sqlite3 --version >/dev/null" \
-	"psql --version >/dev/null" \
-	"pg-dev-up check >/dev/null" \
-	"command -v podman >/dev/null" \
 	"command -v wt-bootstrap >/dev/null" \
 	"command -v wt-enter >/dev/null" \
 	"command -v wt-remove >/dev/null" \
@@ -342,9 +345,8 @@ fi
 	"strace -V >/dev/null" \
 	"gpg --version >/dev/null" \
 	"gcc --version >/dev/null" \
-	"playwright --version >/dev/null" \
-	'PLAYWRIGHT_BROWSERS_PATH=/tmp/powbox-playwright-probe playwright install --dry-run chromium | grep -Eq "Install location:[[:space:]]+/tmp/powbox-playwright-probe/chromium-[0-9]+$"' \
-	'[ ! -d "$HOME/.cache/ms-playwright" ]' \
+	'typst --version | grep -q "^typst 0\.13\.1 "' \
+	'd=/tmp/powbox-typst-probe && rm -rf "$d" && mkdir -p "$d" && cd "$d" && printf "%s" "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > dot.png && printf "# Typst\n\nNon-ASCII: \303\251\303\241\305\276\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![dot](dot.png)\n" > in.md && pandoc in.md -o out.pdf --pdf-engine=typst && pdfinfo out.pdf | grep -Eq "^Creator:[[:space:]]+Typst" && pdfimages -list out.pdf | grep -Eq "^[[:space:]]+1[[:space:]]+[0-9]+[[:space:]]+image[[:space:]]"' \
 	"file --version >/dev/null" \
 	"printf test | xxd >/dev/null" \
 	"envsubst --version >/dev/null" \
@@ -374,8 +376,8 @@ smoke_layer_stage "$IMAGE" "$ROOT_DIR" || exit 1
 # POWBOX_SMOKE_SKIP_PODMAN is also set; set both for a Stage 1 presence-only run).
 # The stage, the scoped suite included, runs only when pg-dev-up is on the
 # image's PATH; on an image without it the stage is not applicable whatever
-# POWBOX_SMOKE_SKIP_DB says. A presence probe (in Stage 1 or a layer set's
-# Stage 1b) is what fails an image that should have had it.
+# POWBOX_SMOKE_SKIP_DB says. A presence probe in the Stage 1b list of a layer
+# set that installs it (full's) is what fails an image that should have had it.
 db_gate="$(smoke_gate "$IMAGE" pg-dev-up "${POWBOX_SMOKE_SKIP_DB:-}")" || exit 1
 if [ "$db_gate" = na ]; then
 	echo "Stage 2 does not apply: image '$IMAGE' has no pg-dev-up on its PATH."
@@ -436,8 +438,9 @@ echo "scoped isolation OK ($pa vs $pb)"
 		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-pg-dev-up-scoped.sh
 fi
 
-# Stage 3 — rootless Podman engine: the agent image bakes podman + a docker shim
-# (docs/rootless-podman.md). This is the automated guard that follow-up asked for —
+# Stage 3 — rootless Podman engine: an image built from a layer set that
+# installs Podman (full) carries podman + a docker shim (docs/rootless-podman.md).
+# This is the automated guard that follow-up asked for —
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in,
 # a Podman without the `compose` subcommand, a nested run that no longer starts, or
 # a Compose exec-form health check that no longer reaches healthy) is
@@ -449,13 +452,16 @@ fi
 # scripts/smoke-test-podman.sh for what it covers. The stage runs only when
 # podman is on the image's PATH; on an image without it the stage is not
 # applicable whatever POWBOX_SMOKE_SKIP_PODMAN or POWBOX_PODMAN say, and a
-# `command -v podman` presence probe (in Stage 1 or a layer set's Stage 1b) is
-# what fails an image that lost the engine.
+# `command -v podman` presence probe in the Stage 1b list of a set that installs
+# Podman (full's) is what fails an image that lost the engine. Before any of
+# that, smoke_podman_label_check fails an image whose powbox.podman label
+# disagrees with its podman binary, whatever the skip controls say: the
+# launcher reads that label to decide whether to seed the shared image store.
 # smoke-test-podman.sh also treats POWBOX_PODMAN=off (deprecated alias
 # POWBOX_FUSE=off) as a whole-stage skip and exits 0 with its own notice; and
 # under auto (the default) on a host without /dev/net/tun it runs the static
 # engine checks but exits 0 after self-skipping the nested-run + published-port
-# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+# checks (e.g. Docker Desktop's VM, which exposes no tun device). Mirror both
 # gates so the banner records the partial run instead of claiming all stages ran
 # — the child evaluates the same host /dev/net/tun condition before its docker
 # run, so the two agree. Where the child runs at all it still prints its own skip
@@ -479,6 +485,7 @@ else
 	podman_gate_off=POWBOX_PODMAN=off
 fi
 podman_stage_gate="$(smoke_gate "$IMAGE" podman "${POWBOX_SMOKE_SKIP_PODMAN:-}")" || exit 1
+smoke_podman_label_check "$IMAGE" "$podman_stage_gate" || exit 1
 if [ "$podman_stage_gate" = na ]; then
 	echo "Stage 3 does not apply: image '$IMAGE' has no podman on its PATH."
 	not_applicable+=("Stage 3: rootless Podman engine (no podman in this image)")

@@ -6,8 +6,9 @@
 # Codex-commit resolution), the update check's layers row
 # (commands/check-updates.{sh,ps1}), agent-update's routing of a stale set and
 # agent-image-info (shell/powbox.{sh,ps1}), both build drivers' dispatch
-# (scripts/build-image.{sh,ps1}), and that a committed set's copy of a repo
-# file matches the original. Docker, npm and the build are fakes on PATH, so no
+# (scripts/build-image.{sh,ps1}), that a committed set's copy of a repo file
+# matches the original, and that the browser and full sets carry the same
+# browser stack. Docker, npm and the build are fakes on PATH, so no
 # daemon or image is needed. Every PowerShell twin is run against the same
 # fixture and must agree with the bash one; without pwsh those halves report an
 # honest skip.
@@ -1467,6 +1468,47 @@ if cmp -s "$ROOT_DIR/PSScriptAnalyzerSettings.psd1" "$ROOT_DIR/docker/layers/ful
 else
 	ko "docker/layers/full/PSScriptAnalyzerSettings.psd1 differs from the repo-root file" \
 		"copy it again: cp PSScriptAnalyzerSettings.psd1 docker/layers/full/"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. The browser stack is the same in the browser and full sets
+# ---------------------------------------------------------------------------
+
+echo "Test: the browser and full sets install, document and probe the same browser stack"
+
+# A build selects one set, so the two sets each carry their own copy of the
+# browser stack's Dockerfile blocks, agent notes and probes; these checks keep
+# the copies from drifting apart.
+BROWSER_DIR="$ROOT_DIR/docker/layers/browser"
+FULL_DIR="$ROOT_DIR/docker/layers/full"
+stack_of() { sed -n '/^# >>> browser stack/,/^# <<< browser stack$/p' "$1"; }
+browser_stack="$(stack_of "$BROWSER_DIR/Dockerfile")"
+full_stack="$(stack_of "$FULL_DIR/Dockerfile")"
+if [ -z "$browser_stack" ] || [ -z "$full_stack" ]; then
+	ko "browser stack: the '# >>> browser stack' .. '# <<< browser stack' block is missing from a set's Dockerfile" \
+		"browser: $(printf '%s' "$browser_stack" | wc -l) lines, full: $(printf '%s' "$full_stack" | wc -l) lines"
+elif [ "$browser_stack" = "$full_stack" ]; then
+	ok "browser stack: the Dockerfile blocks are identical in both sets, comments included"
+else
+	ko "browser stack: the Dockerfile blocks differ between the sets" \
+		"$(diff <(printf '%s\n' "$browser_stack") <(printf '%s\n' "$full_stack") | head -n 20)"
+fi
+
+missing=""
+while IFS= read -r line; do
+	[ -n "$line" ] || continue
+	grep -qxF -- "$line" "$FULL_DIR/agent-notes.md" || missing="${missing}${line:0:80}... "
+done <"$BROWSER_DIR/agent-notes.md"
+assert_eq "browser stack: every line of browser's agent notes is in full's" "$missing" ""
+
+# probe_lines <file>: the probe lines, as smoke_read_probe_file reads them.
+probe_lines() { grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$1" || true; }
+browser_probes="$(probe_lines "$BROWSER_DIR/smoke-probes.txt")"
+full_subset="$(probe_lines "$FULL_DIR/smoke-probes.txt" | grep -xF -f <(printf '%s\n' "$browser_probes") || true)"
+if [ -z "$browser_probes" ]; then
+	ko "browser stack: docker/layers/browser/smoke-probes.txt holds no probe"
+else
+	assert_eq "browser stack: full runs every browser probe, in the same order" "$full_subset" "$browser_probes"
 fi
 
 echo

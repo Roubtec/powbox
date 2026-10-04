@@ -590,7 +590,10 @@ try {
       -v "${wsBranch}:/ws" --entrypoint /usr/local/bin/seed-workspace.sh $Image 2>&1 | Out-String
     if ($branchOut -notmatch ("checked out ref '" + [regex]::Escape($refBranch) + "'")) { Fail "a valid non-default branch -Ref was not checked out (origin/ tracking form rejected?)" }
     if ($branchOut -match "POWBOX --ref WARNING") { Fail "a valid non-default branch -Ref printed the fallback warning instead of checking out" }
-    $branchHead = (docker run --rm -v "${wsBranch}:/ws" --entrypoint git $Image -C /ws rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
+    # --user root: seed-workspace.sh ran as root above and does not chown (the entrypoint this
+    # test bypasses does), so git as the default `node` user refuses the root-owned tree as
+    # "dubious ownership" and prints nothing - which would read as a HEAD mismatch.
+    $branchHead = (docker run --rm --user root -v "${wsBranch}:/ws" --entrypoint git $Image -C /ws rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
     if ($branchHead -ne $refBranch) { Fail "a valid non-default branch -Ref did not leave HEAD on that branch" }
     Ok "a valid non-default branch -Ref checks out (remote-tracking ref is resolved, not rejected)"
   }

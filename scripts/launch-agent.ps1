@@ -1579,6 +1579,27 @@ switch -Wildcard (",$podmanDevices,") {
 
 $continueLabel = if ($Continue) { "true" } else { "false" }
 
+# True when $Image carries the powbox.podman label, false when it does not or
+# cannot be inspected. The layer set that installs Podman declares the label in
+# the same block (docker/layers/full/Dockerfile), so an image without Podman,
+# and so without seed-image-store.sh, is never asked to start a writer. Read the
+# way the powbox.base.selfhosted guard above reads its label: an empty value or
+# `<no value>` means absent. The label name is a Go raw string (`...`) because
+# Windows PowerShell 5.1 strips double quotes embedded in a native argument;
+# scripts/launch-agent.sh uses the same template. scripts/test-image-store-writer-gate.sh
+# tests this function and its .sh twin against a fake docker.
+function Test-PowboxImageStoreWriterWanted {
+  param([string]$Image)
+  $cap = docker image inspect $Image --format '{{ index .Config.Labels `powbox.podman` }}' 2>$null
+  $inspected = ($LASTEXITCODE -eq 0)
+  # A failed inspect is an answer here (no writer), not an error to leak.
+  $global:LASTEXITCODE = 0
+  if (-not $inspected) { return $false }
+  $cap = (@($cap) -join "`n").Trim()
+  if ($cap -eq '' -or $cap -eq '<no value>') { return $false }
+  return $true
+}
+
 # Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED
 # writer — the ONLY container that mounts agent-podman-imagestore read-write. The
 # agent container below mounts the same volume read-only, so a runaway process in
@@ -1588,8 +1609,18 @@ $continueLabel = if ($Continue) { "true" } else { "false" }
 # serializes concurrent writers). Only meaningful on the overlay path — an
 # additionalimagestores entry must match the consumer's driver, and consumers
 # only enable overlay when /dev/fuse is present — so gate it on the resolved fuse
-# device. Best-effort: a writer that can't start must never abort the agent launch.
-if (",$podmanDevices," -like "*,fuse,*") {
+# device. Only meaningful for an image with Podman, too, so it is also gated on
+# the agent image's powbox.podman label (Test-PowboxImageStoreWriterWanted
+# above); the devices themselves are passed whatever the image holds.
+# Best-effort: a writer that can't start must never abort the agent launch.
+#
+# The writer carries the container label powbox.image-store-role=writer, named
+# after the POWBOX_IMAGE_STORE_ROLE it runs with, so `docker events` or
+# `docker ps` can tell it apart from the volume-prep container, the other
+# anonymous compose one-off this launch starts from the same image. It is a
+# container label on purpose: a container inherits its image's labels, so a
+# filter on powbox.podman would match every container of a Podman image.
+if ((",$podmanDevices," -like "*,fuse,*") -and (Test-PowboxImageStoreWriterWanted -Image 'powbox-agent:latest')) {
   try {
     # Go straight to entrypoint-core.sh (firewall + XDG + the writer-role Podman
     # setup) instead of the default entrypoint-agent.sh, so the writer skips the
@@ -1597,6 +1628,7 @@ if (",$podmanDevices," -like "*,fuse,*") {
     # Podman that can pull. AGENT_CONFIG_DIR is required by core but unused here, so
     # point it at a throwaway path; AGENT_SETUP_HOOK is cleared so no agent hook runs.
     docker compose @composeArgs run --rm -d --no-deps `
+      --label powbox.image-store-role=writer `
       --entrypoint /usr/local/bin/entrypoint-core.sh `
       -e POWBOX_IMAGE_STORE_ROLE=writer `
       -e AGENT_CONFIG_DIR=/tmp/powbox-imgstore-writer `

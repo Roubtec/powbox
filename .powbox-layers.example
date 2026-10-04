@@ -4,12 +4,13 @@
 #
 #   - no .powbox-layers, or one holding only blank and # lines: no layer set;
 #     the agent image is built directly on the lean base.
-#   - full: the maintainer's bundle in docker/layers/full/, the language
-#     toolchains the lean base leaves out (Go, .NET, PowerShell, PHP, OPA,
-#     sqlcmd/bcp, CMake/Ninja/ccache).
-#   - browser: a headless browser stack in docker/layers/browser/, for turning
-#     decks, diagrams and HTML into PDF or SVG; smaller than full, and the set
-#     CI builds. It ships no tools yet.
+#   - full: the maintainer's bundle in docker/layers/full/, the tools the lean
+#     base leaves out: the language toolchains (Go, .NET, PowerShell, PHP, OPA,
+#     sqlcmd/bcp, CMake/Ninja/ccache), PostgreSQL 16 with pg-dev-up, rootless
+#     Podman, and the browser set's stack.
+#   - browser: a headless browser stack in docker/layers/browser/ (Chromium,
+#     Marp CLI, Mermaid CLI, the Playwright CLI), for turning decks, diagrams
+#     and HTML into PDF or SVG; smaller than full, and the set CI builds.
 #   - custom: your own set in docker/layers/custom/ (gitignored apart from its
 #     .gitkeep). Start from a copy of a committed set; browser is the smaller
 #     starting point: cp -r docker/layers/browser/. docker/layers/custom/

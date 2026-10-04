@@ -2009,6 +2009,26 @@ if [ "$CONTINUE" = true ]; then
 	CONTINUE_LABEL="true"
 fi
 
+# powbox_image_store_writer_wanted <image>: 0 when <image> carries the
+# powbox.podman label, 1 when it does not or cannot be inspected. The layer set
+# that installs Podman declares the label in the same block
+# (docker/layers/full/Dockerfile), so an image without Podman, and so without
+# seed-image-store.sh, is never asked to start a writer. Read the way the
+# powbox.base.selfhosted guard above reads its label: an empty value or
+# `<no value>` means absent. The label name is a Go raw string (`...`) to
+# match scripts/launch-agent.ps1, where Windows PowerShell 5.1 would strip a
+# "..." one. scripts/test-image-store-writer-gate.sh tests this function and
+# its .ps1 twin against a fake docker.
+powbox_image_store_writer_wanted() {
+	local cap
+	# shellcheck disable=SC2016 # the backticks quote the label name for Go's template parser
+	cap="$(docker image inspect "$1" --format '{{ index .Config.Labels `powbox.podman` }}' 2>/dev/null || true)"
+	case "$cap" in
+	"" | "<no value>") return 1 ;;
+	esac
+	return 0
+}
+
 # Seed the GLOBAL shared image store from a dedicated, short-lived, DETACHED
 # writer — the ONLY container that mounts agent-podman-imagestore read-write. The
 # agent container below mounts the same volume read-only, so a runaway process in
@@ -2018,22 +2038,35 @@ fi
 # serializes concurrent writers). Only meaningful on the overlay path — an
 # additionalimagestores entry must match the consumer's driver, and consumers
 # only enable overlay when /dev/fuse is present — so gate it on the resolved fuse
-# device. Best-effort: a writer that can't start must never abort the agent launch.
+# device. Only meaningful for an image with Podman, too, so it is also gated on
+# the agent image's powbox.podman label (powbox_image_store_writer_wanted above);
+# the devices themselves are passed whatever the image holds. Best-effort: a
+# writer that can't start must never abort the agent launch.
+#
+# The writer carries the container label powbox.image-store-role=writer, named
+# after the POWBOX_IMAGE_STORE_ROLE it runs with, so `docker events` or
+# `docker ps` can tell it apart from the volume-prep container, the other
+# anonymous compose one-off this launch starts from the same image. It is a
+# container label on purpose: a container inherits its image's labels, so a
+# filter on powbox.podman would match every container of a Podman image.
 case ",${PODMAN_DEVICE_MODE}," in
 *,fuse,*)
-	# Go straight to entrypoint-core.sh (firewall + XDG + the writer-role Podman
-	# setup) instead of the default entrypoint-agent.sh, so the writer skips the
-	# per-agent skill/config seeding and stays lean — it only needs egress and a
-	# Podman that can pull. AGENT_CONFIG_DIR is required by core but unused here, so
-	# point it at a throwaway path; AGENT_SETUP_HOOK is cleared so no agent hook runs.
-	docker compose "${COMPOSE_ARGS[@]}" run --rm -d --no-deps \
-		--entrypoint /usr/local/bin/entrypoint-core.sh \
-		-e POWBOX_IMAGE_STORE_ROLE=writer \
-		-e AGENT_CONFIG_DIR=/tmp/powbox-imgstore-writer \
-		-e AGENT_SETUP_HOOK= \
-		-v "agent-podman-imagestore:/mnt/podman-imagestore" \
-		agent \
-		seed-image-store.sh seed >/dev/null 2>&1 || true
+	if powbox_image_store_writer_wanted powbox-agent:latest; then
+		# Go straight to entrypoint-core.sh (firewall + XDG + the writer-role Podman
+		# setup) instead of the default entrypoint-agent.sh, so the writer skips the
+		# per-agent skill/config seeding and stays lean — it only needs egress and a
+		# Podman that can pull. AGENT_CONFIG_DIR is required by core but unused here, so
+		# point it at a throwaway path; AGENT_SETUP_HOOK is cleared so no agent hook runs.
+		docker compose "${COMPOSE_ARGS[@]}" run --rm -d --no-deps \
+			--label powbox.image-store-role=writer \
+			--entrypoint /usr/local/bin/entrypoint-core.sh \
+			-e POWBOX_IMAGE_STORE_ROLE=writer \
+			-e AGENT_CONFIG_DIR=/tmp/powbox-imgstore-writer \
+			-e AGENT_SETUP_HOOK= \
+			-v "agent-podman-imagestore:/mnt/podman-imagestore" \
+			agent \
+			seed-image-store.sh seed >/dev/null 2>&1 || true
+	fi
 	;;
 esac
 

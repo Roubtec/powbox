@@ -308,9 +308,15 @@ else {
 # producer emits and so could flip a probe green->141 with no code change.
 # scripts/test-smoke-probe-wrapper.sh unit-tests the runner, its
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
-# The `command -v podman` probe is what fails an image that lost the engine:
-# Stage 3 runs only on an image that has podman on its PATH and is reported as
-# not applicable otherwise, so without this probe such an image would pass.
+# The two Typst probes pin the PDF engine the base bakes for pandoc: the exact
+# version (pinned on purpose, see docker/base/Dockerfile), and a Markdown file
+# with a table, non-ASCII text and a 1x1 PNG decoded from base64 built into a
+# PDF through `--pdf-engine=typst`, checked with pdfinfo and with pdfimages so
+# a dropped image fails it. The probe runs in its scratch directory because
+# pandoc resolves the image path and writes its intermediate .typ file in the
+# working directory. A bare `typst --version` would
+# not catch the pandoc template incompatibility that motivated the pin. A Typst
+# bump must update the version probe and its Bash mirror.
 & (Join-Path $rootDir "scripts/smoke-test-image.ps1") `
   -Image $Image `
   -Commands @(
@@ -325,9 +331,6 @@ else {
     'pip3 --version >/dev/null'
     'python3 --version >/dev/null'
     'sqlite3 --version >/dev/null'
-    'psql --version >/dev/null'
-    'pg-dev-up check >/dev/null'
-    'command -v podman >/dev/null'
     'command -v wt-bootstrap >/dev/null'
     'command -v wt-enter >/dev/null'
     'command -v wt-remove >/dev/null'
@@ -357,9 +360,8 @@ else {
     'strace -V >/dev/null'
     'gpg --version >/dev/null'
     'gcc --version >/dev/null'
-    'playwright --version >/dev/null'
-    'PLAYWRIGHT_BROWSERS_PATH=/tmp/powbox-playwright-probe playwright install --dry-run chromium | grep -Eq "Install location:[[:space:]]+/tmp/powbox-playwright-probe/chromium-[0-9]+$"'
-    '[ ! -d "$HOME/.cache/ms-playwright" ]'
+    'typst --version | grep -q "^typst 0\.13\.1 "'
+    'd=/tmp/powbox-typst-probe && rm -rf "$d" && mkdir -p "$d" && cd "$d" && printf "%s" "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > dot.png && printf "# Typst\n\nNon-ASCII: \303\251\303\241\305\276\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![dot](dot.png)\n" > in.md && pandoc in.md -o out.pdf --pdf-engine=typst && pdfinfo out.pdf | grep -Eq "^Creator:[[:space:]]+Typst" && pdfimages -list out.pdf | grep -Eq "^[[:space:]]+1[[:space:]]+[0-9]+[[:space:]]+image[[:space:]]"'
     'file --version >/dev/null'
     'printf test | xxd >/dev/null'
     'envsubst --version >/dev/null'
@@ -390,8 +392,8 @@ Invoke-SmokeLayerStage -Image $Image -Root $rootDir -Skipped $skipped
 # also supplied; pass both for a Stage 1 presence-only run).
 # The stage, the scoped suite included, runs only when pg-dev-up is on the
 # image's PATH; on an image without it the stage is not applicable whatever
-# -SkipDb says. A presence probe (in Stage 1 or a layer set's Stage 1b) is what
-# fails an image that should have had it.
+# -SkipDb says. A presence probe in the Stage 1b list of a layer set that
+# installs it (full's) is what fails an image that should have had it.
 $dbGate = Get-SmokeGate -Image $Image -Tool 'pg-dev-up' -SkipRequested:$SkipDb
 if ($dbGate -eq 'na') {
   Write-Host "Stage 2 does not apply: image '$Image' has no pg-dev-up on its PATH."
@@ -457,7 +459,7 @@ if ($LASTEXITCODE -ne 0) {
   Write-Host "pg-dev-up functional test passed."
 
   # The scoped suite starts real PostgreSQL daemons on loopback and needs the
-  # server binaries baked into the image, so Tier 1's database stage owns it.
+  # server binaries baked into the image, so this database stage owns it.
   Write-Host "Running pg-dev-up scoped unit/integration suite in $Image ..."
   docker run --rm -v "${rootDir}:/repo:ro" --entrypoint /bin/bash $Image /repo/scripts/test-pg-dev-up-scoped.sh
   if ($LASTEXITCODE -ne 0) {
@@ -465,8 +467,9 @@ if ($LASTEXITCODE -ne 0) {
   }
 }
 
-# Stage 3 - rootless Podman engine: the agent image bakes podman + a docker shim
-# (docs/rootless-podman.md). This is the automated guard that follow-up asked for -
+# Stage 3 - rootless Podman engine: an image built from a layer set that
+# installs Podman (full) carries podman + a docker shim (docs/rootless-podman.md).
+# This is the automated guard that follow-up asked for -
 # a base/Podman bump that regresses the engine (a dropped containers.conf drop-in, a
 # Podman without the `compose` subcommand, a nested run that no longer starts) is
 # caught here. The helper runs the image with the launch-time device + security
@@ -477,13 +480,17 @@ if ($LASTEXITCODE -ne 0) {
 # what it covers. The helper throws on failure, so $ErrorActionPreference = "Stop"
 # propagates that up. The stage runs only when podman is on the image's PATH; on
 # an image without it the stage is not applicable whatever -SkipPodman or
-# POWBOX_PODMAN say, and a `command -v podman` presence probe (in Stage 1 or a
-# layer set's Stage 1b) is what fails an image that lost the engine.
+# POWBOX_PODMAN say, and a `command -v podman` presence probe in the Stage 1b
+# list of a set that installs Podman (full's) is what fails an image that lost
+# the engine. Before any of that, Assert-SmokePodmanLabel fails an image whose
+# powbox.podman label disagrees with its podman binary, whatever the skip
+# controls say: the launcher reads that label to decide whether to seed the
+# shared image store.
 # smoke-test-podman.ps1 also treats POWBOX_PODMAN=off (deprecated alias
 # POWBOX_FUSE=off) as a whole-stage skip and returns with its own notice; and
 # under auto (the default) on a host without /dev/net/tun it runs the static
 # engine checks but returns after self-skipping the nested-run + published-port
-# checks (e.g. Docker Desktop / a hosted runner with no tun device). Mirror both
+# checks (e.g. Docker Desktop's VM, which exposes no tun device). Mirror both
 # gates so the banner records the partial run instead of claiming all stages ran -
 # the child evaluates the same host /dev/net/tun condition before its docker run,
 # so the two agree. Where the child runs at all it still prints its own skip
@@ -503,6 +510,7 @@ $podmanGateOff = if (-not $env:POWBOX_PODMAN) { "POWBOX_FUSE=off" }
 elseif ($env:POWBOX_FUSE -eq "off") { "POWBOX_PODMAN=off and POWBOX_FUSE=off" }
 else { "POWBOX_PODMAN=off" }
 $podmanStageGate = Get-SmokeGate -Image $Image -Tool 'podman' -SkipRequested:$SkipPodman
+Assert-SmokePodmanLabel -Image $Image -Gate $podmanStageGate
 if ($podmanStageGate -eq 'na') {
   Write-Host "Stage 3 does not apply: image '$Image' has no podman on its PATH."
   $notApplicable.Add("Stage 3: rootless Podman engine (no podman in this image)")

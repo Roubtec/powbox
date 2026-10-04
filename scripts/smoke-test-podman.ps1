@@ -2,11 +2,12 @@ param(
   [string]$Image = "powbox-agent:latest"
 )
 
-# Smoke-test the rootless-Podman support baked into the agent image. This is the
-# automated guard docs/rootless-podman.md's manual validation prompt asked for:
-# run it after a base/Podman bump so engine regressions (a dropped containers.conf
-# drop-in, a Podman that lost the `compose` subcommand, a nested run that no longer
-# starts) surface here instead of the next time someone needs a nested container.
+# Smoke-test the rootless-Podman support a layer set bakes into the agent image
+# (the full set's Podman block). This is the automated guard
+# docs/rootless-podman.md's manual validation prompt asked for: run it after a
+# Podman bump so engine regressions (a dropped containers.conf drop-in, a
+# Podman that lost the `compose` subcommand, a nested run that no longer starts)
+# surface here instead of the next time someone needs a nested container.
 #
 # The image is exercised as a throwaway `docker run`. The agent entrypoint is
 # bypassed (--entrypoint /bin/sh, like the other smoke stages), so the launch-time
@@ -28,14 +29,16 @@ param(
 # devices, `off` skips the whole stage, `auto` (default) attaches what the host
 # exposes.
 #
-# Engine presence is not this stage's job in the umbrella run: a `command -v
-# podman` presence probe (Stage 1's core list, or a layer set's Stage 1b) fails an
-# image that lost the engine, and commands/smoke-test.ps1 runs this stage only on
-# an image that has podman on its PATH, reporting it as not applicable otherwise.
-# The in-container `command -v podman` check below stays because this script can
-# be run directly, where nothing else asserts presence. A broken engine on an
-# image that has one - a missing podman-compose, a dropped drop-in, a `podman
-# info` that fails - still FAILS this stage rather than skipping, on any host.
+# Engine presence is not this stage's job in the umbrella run. On an image built
+# from a layer set that installs Podman (full), a missing engine fails Stage 1b
+# through the set's `command -v podman` presence probe; on the lean image and the
+# `browser` image Podman is absent by design, and commands/smoke-test.ps1
+# reports this stage as not applicable, running it only on an image that has
+# podman on its PATH. The in-container `command -v podman` check below stays
+# because this script can be run directly, where nothing else asserts presence.
+# A broken engine on an image that has one - a missing podman-compose, a dropped
+# drop-in, a `podman info` that fails - still FAILS this stage rather than
+# skipping, on any host.
 
 $ErrorActionPreference = "Stop"
 

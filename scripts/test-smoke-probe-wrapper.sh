@@ -923,11 +923,11 @@ fi
 # ---------------------------------------------------------------------------
 # Sections M-Q cover scripts/smoke-test-lib.{sh,ps1}, the helpers both smoke
 # umbrellas call for the layer-set probe stage (Stage 1b), the capability gate
-# in front of Stages 2 and 3, and the end-of-run banner. While Stage 1's core
-# list asserts pg-dev-up and podman, an image without them stops at Stage 1, so
-# the not-applicable paths and most layer-set cases are reachable only here,
-# against a second fake `docker` that also answers `image inspect` label
-# queries and the capability check.
+# in front of Stages 2 and 3, Stage 3's powbox.podman label check, and the
+# end-of-run banner. Most layer-set cases, and every case of an image that has
+# pg-dev-up or podman, need an image CI never builds, so they are reachable
+# here only, against a second fake `docker` that also answers `image inspect`
+# label queries and the capability check.
 # ---------------------------------------------------------------------------
 LIB_SH="${ROOT_DIR}/scripts/smoke-test-lib.sh"
 LIB_PS1="${ROOT_DIR}/scripts/smoke-test-lib.ps1"
@@ -1429,10 +1429,24 @@ new_fixture() {
 # set_label <fixture> <label> <value>
 set_label() { printf '%s' "$3" >"$1/.labels/$2"; }
 # e2e <sh|ps> <fixture> <tag>, configured by CASE_TOOLS, CASE_SKIP_DB,
-# CASE_SKIP_PODMAN, CASE_REQUIRE, CASE_EXEC_RUN, CASE_GATE_BROKEN. Sets E2E_RC,
-# E2E_OUT (combined output) and E2E_RUNS (the recorded probe runs).
+# CASE_SKIP_PODMAN, CASE_REQUIRE, CASE_EXEC_RUN, CASE_GATE_BROKEN and
+# CASE_PODMAN_LABEL. Sets E2E_RC, E2E_OUT (combined output) and E2E_RUNS (the
+# recorded probe runs). CASE_PODMAN_LABEL sets the image's powbox.podman label:
+# unset, the label matches CASE_TOOLS as on a correctly built image ("1" when
+# podman is among the tools, absent otherwise); `none` leaves it absent and any
+# other value is written as the label.
 e2e() {
 	local drv="$1" fx="$2" tag="$3" sw envs
+	case "${CASE_PODMAN_LABEL:-}" in
+	"")
+		case " ${CASE_TOOLS:-} " in
+		*" podman "*) set_label "$fx" powbox.podman 1 ;;
+		*) rm -f "$fx/.labels/powbox.podman" ;;
+		esac
+		;;
+	none) rm -f "$fx/.labels/powbox.podman" ;;
+	*) set_label "$fx" powbox.podman "$CASE_PODMAN_LABEL" ;;
+	esac
 	E2E_RUNS="$E2E/$tag.$drv.runs"
 	E2E_OUT="$E2E/$tag.$drv.out"
 	E2E_LOG="$E2E/$tag.$drv.log"
@@ -1476,6 +1490,8 @@ expect() {
 out_has() { grep -qF -- "$1" "$E2E_OUT"; }
 out_lacks() { ! grep -qF -- "$1" "$E2E_OUT"; }
 log_lacks() { ! grep -qF -- "$1" "$E2E_LOG"; }
+# not <command...>: succeeds when the command fails.
+not() { ! "$@"; }
 # out_before <first> <second>: both occur, and the first line holding <first>
 # precedes the first line holding <second>.
 out_before() {
@@ -1524,7 +1540,12 @@ for drv in "${e2e_drivers[@]}"; do
 	e2e "$drv" "$fx" lean-skips
 	expect "e2e$t lean image with both explicit skips: run passes" rc_is 0
 	expect "e2e$t lean image: only Stage 1 ran probes (no Stage 1b)" runs_are 1
-	expect "e2e$t lean image: Stage 1 carries the podman presence probe" grep -qaF "command -v podman >/dev/null" "$E2E_RUNS/1"
+	for moved in "command -v podman" "pg-dev-up check" "psql --version" "playwright"; do
+		expect "e2e$t lean image: Stage 1 carries no probe for $moved, which a layer set installs" not grep -qaF "$moved" "$E2E_RUNS/1"
+	done
+	expect "e2e$t lean image: Stage 1 builds a PDF through pandoc's Typst engine" grep -qaF -- "--pdf-engine=typst" "$E2E_RUNS/1"
+	expect "e2e$t lean image: Stage 1's Typst PDF must carry the fixture's image" grep -qaF -- "pdfimages -list out.pdf" "$E2E_RUNS/1"
+	expect "e2e$t podman with its label: the label check passes" out_has "Stage 3 label check: image 'fake-image:latest' has podman and the powbox.podman label."
 	expect "e2e$t tool present + explicit skip: Stage 2 is recorded as skipped" out_has "  - $skip_db_entry"
 	expect "e2e$t tool present + explicit skip: Stage 3 is recorded as skipped" out_has "  - $skip_podman_entry"
 	expect "e2e$t tool present + explicit skip: the run is partial" out_has "SKIPPED OR PARTIAL"
@@ -1544,7 +1565,27 @@ for drv in "${e2e_drivers[@]}"; do
 		expect "e2e$t tools absent$w: Stage 3 is not recorded as skipped" out_lacks "  - Stage 3: rootless Podman engine ($skip_prefix"
 		expect "e2e$t tools absent$w: neither stage ran" log_lacks "POSTGRES_USER"
 		expect "e2e$t tools absent$w: the Podman stage never started" log_lacks "NET_ADMIN"
+		expect "e2e$t tools absent$w: the label check passes" out_has "Stage 3 label check: image 'fake-image:latest' has neither podman nor the powbox.podman label."
 	done
+
+	# Stage 3's label check: the powbox.podman label and the podman binary must
+	# agree, whatever the stage's explicit skip says, and a mismatch fails the
+	# run before the Podman stage starts.
+	for sk in 0 1; do
+		w=" (explicit skip $([ "$sk" = 1 ] && echo set || echo unset))"
+		fx="$(new_fixture "podman-nolabel-$sk.$drv")"
+		CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=$sk CASE_PODMAN_LABEL=none
+		e2e "$drv" "$fx" "podman-nolabel-$sk"
+		expect "e2e$t podman without the powbox.podman label$w: run fails" rc_fail
+		expect "e2e$t podman without the powbox.podman label$w: says so" out_has "image 'fake-image:latest' has podman on its PATH but no powbox.podman label"
+		expect "e2e$t podman without the powbox.podman label$w: the Podman stage never started" log_lacks "NET_ADMIN"
+		fx="$(new_fixture "label-nopodman-$sk.$drv")"
+		CASE_TOOLS="pg-dev-up" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=$sk CASE_PODMAN_LABEL=1
+		e2e "$drv" "$fx" "label-nopodman-$sk"
+		expect "e2e$t powbox.podman label without podman$w: run fails" rc_fail
+		expect "e2e$t powbox.podman label without podman$w: says so" out_has "image 'fake-image:latest' carries the powbox.podman label but has no podman on its PATH"
+	done
+	CASE_PODMAN_LABEL=""
 
 	# Each committed set: a probe file with no probe line gives a note, no
 	# Stage 1b, and nothing partial on its account; deleting the file or the

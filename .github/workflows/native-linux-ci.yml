@@ -260,9 +260,8 @@ jobs:
       # yq on PATH is the wrong implementation, so a runner-image change that
       # reorders PATH fails legibly rather than as 22 mystery assertion failures.
       # scripts/run-pure-shell-tests.sh auto-discovers every scripts/test-*.sh
-      # source suite except four explicitly routed to the smoke test because
-      # they need a build-staged helper, a writable /workspace, or PostgreSQL
-      # daemons.
+      # source suite except four routed to the smoke test because they need a
+      # build-staged helper, a writable /workspace, or PostgreSQL daemons.
       # It runs the independent suites in parallel, captures their logs
       # separately, and prints a loud suite-named heading for every failure.
       # A newly added suite therefore runs automatically without another

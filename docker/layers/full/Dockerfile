@@ -153,7 +153,7 @@ ENV PATH="/opt/mssql-tools18/bin:${PATH}"
 # /home/node, so it also holds for root); the harnesses' non-login shells get
 # it from the ENV PATH below, and zsh logins inherit that ENV PATH untouched
 # (Debian's zprofile never sources /etc/profile). Placed low in the file so a
-# Go bump never busts the expensive gh / mssql / pwsh / npm layers above.
+# Go bump never busts the expensive mssql / pwsh layers above.
 #
 # The tarball fetches carry --retry ... --retry-all-errors --http1.1: go.dev (and
 # occasionally github.com) intermittently reset the HTTP/2 stream mid-download on
@@ -222,8 +222,7 @@ ENV PATH="/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # the baked binary is for running the test suites, not certifying that a policy
 # loads byte-for-byte in a particular deployed engine version.
 #
-# Placed low so an OPA bump never busts the expensive apt/gh/mssql/pwsh/npm
-# layers above.
+# Placed low so an OPA bump never busts the expensive apt/mssql/pwsh/Go layers.
 RUN OPA_VERSION=1.18.2 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
@@ -252,8 +251,7 @@ RUN OPA_VERSION=1.18.2 \
 # build (no global CC/CXX or masquerade-PATH interposition here) — projects
 # activate it with `CC="ccache gcc"` or `cmake -DCMAKE_C_COMPILER_LAUNCHER=ccache`.
 # Pure build-time packages: no entrypoint, sudoers, or firewall interaction.
-# Placed low so it never busts the expensive gh / mssql / pwsh / npm / Go / OPA
-# layers above it.
+# Placed low so it never busts the expensive mssql / pwsh / Go / OPA layers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
@@ -273,7 +271,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `postgresql-16` package on PGDG trixie — there is no separate
 # `postgresql-contrib-16` anymore. No daemon is started at build or runtime; the
 # baked `pg-dev-up` helper stands up a throwaway loopback cluster on demand for
-# integration suites (prisma migrate, `test:db`, etc.) — see pg-dev-up in this directory.
+# integration suites (prisma migrate, `test:db`, etc.) — see ./pg-dev-up.
 RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
@@ -464,7 +462,7 @@ ENV CHROME_NO_SANDBOX=true
 # NuGet package and compile with only this SDK present.
 #
 # Placed low, beside the other late tool layers, so an SDK bump never busts the
-# expensive gh / mssql / pwsh / npm / Podman / Go / OPA layers above it.
+# expensive mssql / pwsh / Go / OPA / Podman layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dotnet-sdk-10.0 \
     && rm -rf /var/lib/apt/lists/*

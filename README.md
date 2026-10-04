@@ -108,6 +108,8 @@ The base image is kept to what every user needs; heavier toolchains can live in 
 - `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of a committed set; `browser` is the smaller starting point.
 - Any other directory under `docker/layers/` with a `Dockerfile` can be named the same way.
 
+Upgrading from an older checkout: tools that used to ship in the base image now live in `full`. With no set selected, the next `agent-update` or build produces the lean image without them, so if you rely on them, select `full` as shown below before you update.
+
 ```bash
 # Select the maintainer's bundle (the template's one uncommented line is `full`)
 cp .powbox-layers.example .powbox-layers

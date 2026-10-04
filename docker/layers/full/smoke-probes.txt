@@ -36,13 +36,13 @@ pwsh --version >/dev/null
 pwsh -NoProfile -NonInteractive -Command "Import-Module PSScriptAnalyzer -ErrorAction Stop"
 pwsh -NoProfile -NonInteractive -Command "if (Invoke-ScriptAnalyzer -ScriptDefinition 'Write-Host hi' -Settings /usr/local/share/powershell/PSScriptAnalyzerSettings.psd1) { exit 1 }"
 
-# Native build tools. The ccache probes prove the binary is baked, that it
-# honors a CCACHE_DIR env (so the launcher's .worktrees/.ccache wiring lands)
-# and - the functional check - that two identical `ccache gcc` compiles into a
-# fresh cache produce a hit - direct or preprocessed, since either counter
-# proves caching works - asserted via the machine-parsable `--print-stats`
-# counters (stable since ccache 4.4; trixie bakes 4.11) instead of the
-# version-dependent human-readable `-s` text.
+# Native build tools. The ccache probes prove three things: the binary is
+# baked; it honors a CCACHE_DIR env, so the launcher's .worktrees/.ccache
+# wiring lands; and caching works, because two identical `ccache gcc` compiles
+# into a fresh cache produce a hit. Either a direct or a preprocessed hit
+# counts. The hit is read from the machine-parsable `--print-stats` counters
+# (stable since ccache 4.4; trixie bakes 4.11), not from the human-readable
+# `-s` text, whose wording varies by version.
 cmake --version >/dev/null
 ninja --version >/dev/null
 pkg-config --version >/dev/null

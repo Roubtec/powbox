@@ -186,7 +186,7 @@ since later independent steps still inform us. Clean up at the end.
    - Write data: `podman exec probe-pg psql -U postgres -c \
         "create table probe(x int); insert into probe values (42);"`
    - Reach it from THIS container over the published port (validates the loopback path
-     through the firewall; php8.4-pgsql is preinstalled):
+     through the firewall; php8.4-pgsql ships in the `full` layer set):
      `php -r '$c=@pg_connect("host=127.0.0.1 port=5432 user=postgres password=secret dbname=postgres");
         if(!$c){fwrite(STDERR,"connect failed\n");exit(1);}
         echo pg_fetch_result(pg_query($c,"select x from probe"),0,0),"\n";'`

@@ -4,7 +4,9 @@
 #
 #   - no .powbox-layers, or one holding only blank and # lines: no layer set;
 #     the agent image is built directly on the lean base.
-#   - full: the maintainer's bundle in docker/layers/full/.
+#   - full: the maintainer's bundle in docker/layers/full/, the language
+#     toolchains the lean base leaves out (Go, .NET, PowerShell, PHP, OPA,
+#     sqlcmd/bcp, CMake/Ninja/ccache).
 #   - browser: a headless browser stack in docker/layers/browser/, for turning
 #     decks, diagrams and HTML into PDF or SVG; smaller than full, and the set
 #     CI builds. It ships no tools yet.

@@ -65,10 +65,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Silence npm's "New major version of npm available!" notice, image-wide. npm is
 # whatever the node:24 base bundles (it moves with Node, not independently), so
 # the notice is unactionable noise at the end of every `npm install -g` in the
-# base, layer-set and agent builds and in every in-session npm call. Declared here, right
-# before the first npm install, so it covers those layers without busting the
-# apt layers above. An ENV (not a baked npmrc) so a session can still opt back
-# in by overriding it.
+# base, layer-set and agent builds and in every in-session npm call. Declared
+# here, right before the first npm install, so it covers those layers without
+# busting the apt layers above. An ENV (not a baked npmrc) so a session can
+# still opt back in by overriding it.
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
 # Install pnpm. Unpinned: pnpm v10+ honors a project's `packageManager` field

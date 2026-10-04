@@ -67,8 +67,8 @@ jobs:
           # wt-bootstrap, powbox-provenance, docker/layers/full/pg-dev-up, …),
           # so a quoting/syntax regression in one would otherwise slip past
           # Tier 0 — the smoke test only checks they are on PATH, not that they
-          # parse. zsh/pwsh shebangs
-          # are intentionally excluded (shellcheck does not support them).
+          # parse. zsh/pwsh shebangs are intentionally excluded (shellcheck
+          # does not support them).
           mapfile -t files < <(git ls-files -- '*.sh')
           while IFS= read -r f; do
             case "$f" in *.sh) continue ;; esac

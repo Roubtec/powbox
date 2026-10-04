@@ -302,8 +302,7 @@ COPY --chmod=755 pg-dev-up /usr/local/bin/pg-dev-up
 # by launch-agent.sh; entrypoint-core.sh falls back to vfs when it is absent);
 # slirp4netns/passt give rootless networking and netavark + aardvark-dns provide
 # inter-container DNS. The /etc/subuid + /etc/subgid ranges are what newuidmap
-# (from uidmap) maps into the user namespace. Placed low in the file so it never
-# busts the expensive gh / npm layers above it.
+# (from uidmap) maps into the user namespace.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     podman \
     podman-docker \
@@ -396,7 +395,7 @@ RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g \
 # dependency still resolves its local copy first; this global one is the
 # no-repo fallback.
 #
-# Note the system chromium below CANNOT stand in for Playwright's browsers:
+# Note the system chromium above CANNOT stand in for Playwright's browsers:
 # Playwright exposes no browser-executable env override (there is no
 # PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH), and a headless launch resolves to a
 # chrome-headless-shell binary the distro package does not ship at all. Only an

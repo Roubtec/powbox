@@ -14,3 +14,34 @@
 # This file is what fails a browser image that lost a tool. Keep the file even
 # when it holds no probe line: a browser image whose working tree lacks it
 # fails the smoke run.
+
+# Browser stack. This group is identical in the `browser` and `full` sets'
+# probe files (scripts/test-layer-sets.sh compares their probe lines), as the
+# blocks that install it are in the two Dockerfiles. Presence probes for
+# Chromium, Marp CLI, Mermaid CLI and the Playwright CLI and for the
+# environment that points Marp and Puppeteer at the system Chromium come first,
+# then one functional probe per tool, each offline and self-contained:
+#   - Playwright: the CLI honors PLAYWRIGHT_BROWSERS_PATH, the variable the
+#     launcher points at .worktrees/.ms-playwright, and the image carries no
+#     baked browser download in the default cache;
+#   - Marp: a two-slide deck rendered to PDF has two pages (Marp reads
+#     CHROME_NO_SANDBOX and launches Chromium without its sandbox);
+#   - Mermaid: a diagram rendered to SVG is an SVG. mmdc does not read
+#     CHROME_NO_SANDBOX, so the probe hands it a Puppeteer config with
+#     --no-sandbox: the smoke container runs under Docker's default seccomp
+#     profile, which denies the user namespaces Chromium's sandbox needs (an
+#     agent container's relaxed profile allows them, so mmdc needs no config
+#     there);
+#   - Chromium: pandoc turns Markdown into standalone HTML and headless
+#     Chromium prints it to a one-page PDF, the browser path from pandoc output
+#     to PDF.
+chromium --version >/dev/null
+marp --version >/dev/null
+mmdc --version >/dev/null
+playwright --version >/dev/null
+[ "$CHROME_PATH" = /usr/bin/chromium ] && [ "$PUPPETEER_EXECUTABLE_PATH" = /usr/bin/chromium ] && [ "$PUPPETEER_SKIP_DOWNLOAD" = true ] && [ "$CHROME_NO_SANDBOX" = true ]
+PLAYWRIGHT_BROWSERS_PATH=/tmp/powbox-playwright-probe playwright install --dry-run chromium | grep -Eq "Install location:[[:space:]]+/tmp/powbox-playwright-probe/chromium-[0-9]+$"
+[ ! -d "$HOME/.cache/ms-playwright" ]
+d=/tmp/powbox-marp-probe && rm -rf "$d" && mkdir -p "$d" && printf "%s\n" "---" "marp: true" "---" "" "# Slide one" "" "---" "" "# Slide two" > "$d/deck.md" && marp --no-stdin --pdf "$d/deck.md" -o "$d/deck.pdf" && pdfinfo "$d/deck.pdf" | grep -Eq "^Pages:[[:space:]]+2$"
+d=/tmp/powbox-mmdc-probe && rm -rf "$d" && mkdir -p "$d" && printf "%s\n" "graph TD" "  A[Start] --> B[End]" > "$d/g.mmd" && printf "%s\n" "{\"args\": [\"--no-sandbox\"]}" > "$d/puppeteer.json" && mmdc -p "$d/puppeteer.json" -i "$d/g.mmd" -o "$d/g.svg" && grep -q "<svg" "$d/g.svg"
+d=/tmp/powbox-chromium-probe && rm -rf "$d" && mkdir -p "$d" && printf "# Printed\n\nBy headless Chromium.\n" > "$d/in.md" && pandoc -s --metadata title=probe "$d/in.md" -o "$d/in.html" && chromium --headless --no-sandbox --disable-gpu --no-pdf-header-footer --print-to-pdf="$d/out.pdf" "file://$d/in.html" && pdfinfo "$d/out.pdf" | grep -Eq "^Pages:[[:space:]]+1$"

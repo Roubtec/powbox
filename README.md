@@ -55,7 +55,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 - `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 10, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
-- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `custom/` is yours and gitignored apart from its `.gitkeep`
+- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -103,8 +103,9 @@ Examples:
 The base image is kept to what every user needs; heavier toolchains can live in an optional **layer set**, a Dockerfile under `docker/layers/<set>/` that is baked into `powbox-agent-layers:latest` between the base and the agent image. Exactly one set is selected, or none:
 
 - No `.powbox-layers` file, or one holding only blank and `#` lines: no set. The agent image is built directly on the lean base, and no layer-set image is built.
-- `full`: the maintainer's bundle in `docker/layers/full/`. It installs nothing yet; tools move into it later.
-- `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of `full`.
+- `full`: the maintainer's bundle in `docker/layers/full/`. It installs nothing yet; tools move into it later. CI never builds it: the maintainer builds it by hand, and CI only checks it against the contract below.
+- `browser`: a headless browser stack in `docker/layers/browser/`, for turning Marp decks, Mermaid diagrams and HTML pages into PDF or SVG. It is a separate, smaller set, not a layer under `full`, and it is the set CI builds and smoke-tests. It ships no tools yet.
+- `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of a committed set; `browser` is the smaller starting point.
 - Any other directory under `docker/layers/` with a `Dockerfile` can be named the same way.
 
 ```bash
@@ -112,15 +113,15 @@ The base image is kept to what every user needs; heavier toolchains can live in 
 cp .powbox-layers.example .powbox-layers
 ./build.sh agent
 
-# Or start your own set from a copy of it, and select that
-cp -r docker/layers/full/. docker/layers/custom/
+# Or start your own set from a copy of a committed one, and select that
+cp -r docker/layers/browser/. docker/layers/custom/
 echo custom > .powbox-layers
 ./build.sh agent
 ```
 
 The selector is the first line of `.powbox-layers` that is neither blank nor a `#` comment, trimmed of whitespace; CRLF line endings and a UTF-8 BOM are accepted (in Windows PowerShell 5.1 write it with `Set-Content .powbox-layers full`, since a `>` redirect writes UTF-16). The name must match `^[a-z0-9][a-z0-9._-]*$` and `docker/layers/<name>/Dockerfile` must exist; otherwise the build and the update check fail with a message naming the value or path, rather than quietly building the lean image. The build and the update check both read the selector through `scripts/layers-select.{sh,ps1}`, so a bash shell and a PowerShell one always agree on the set.
 
-A layer Dockerfile follows a small contract, which `docker/layers/full/Dockerfile` spells out in its header:
+A layer Dockerfile follows a small contract, which each committed set's Dockerfile (`docker/layers/full/Dockerfile`, `docker/layers/browser/Dockerfile`) spells out in its header:
 
 - It declares `ARG BASE_IMAGE=powbox-agent-base:latest` before its first `FROM`, builds its final stage `FROM ${BASE_IMAGE}` (directly, or through an earlier stage that is; builder stages from other images are fine), switches to `USER root` for installs, and ends with `USER node`, the user the base ends with and the agent Dockerfile assumes. A final stage started from any other image is rejected before the build when the Dockerfile shows it plainly, and in any case right after the layer-set bake: the build checks that the image's filesystem layers start with the base's before it builds the agent on it, since the bake labels the image with the base's ID whatever it was built on. It keeps Docker's default backslash escape: an `# escape=` directive naming another character is rejected, since the check reads lines the way the default escape joins them.
 - Its build context is its own directory, not the repo root, so a copied set works unchanged; a set that needs a file from the repo keeps its own copy.
@@ -931,7 +932,7 @@ Smoke test the built image with:
 ```
 
 The run is layered: a hermetic tier of eight unit-suite entries (Stages 0a, 0b, 0d and 0f–0j, over eight distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — seven entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
-An image built from a [layer set](#layer-sets) also runs the probes that set ships in `docker/layers/<set>/smoke-probes.txt` (Stage 1b), picked by the image's `powbox.layers.set` label; the committed `full` set must keep that file, and a set of your own may delete it to opt out. The `pg-dev-up` and Podman stages run only when the image has `pg-dev-up` or `podman` on its `PATH` and are otherwise reported as not applicable, which is listed apart from skips and does not make the run partial; a presence probe, in the core list or in a set's probe file, is what fails an image that lost a tool it should have.
+An image built from a [layer set](#layer-sets) also runs the probes that set ships in `docker/layers/<set>/smoke-probes.txt` (Stage 1b), picked by the image's `powbox.layers.set` label; each committed set (`full`, `browser`) must keep that file, and a set of your own may delete it to opt out. The `pg-dev-up` and Podman stages run only when the image has `pg-dev-up` or `podman` on its `PATH` and are otherwise reported as not applicable, which is listed apart from skips and does not make the run partial; a presence probe, in the core list or in a set's probe file, is what fails an image that lost a tool it should have.
 Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with a narrow exception the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the orientation the scripts do not give you: what each stage is for, which entries run the `/repo` source and which the baked artifact, which stages reach the network and what a failed pull or clone costs, and which self-skips the banner cannot see. For what an individual stage asserts, read that stage's script.
 
 After launching each agent at least once, `docker volume ls` should show one copy of the shared volumes `agent-gh-config` and `agent-zsh-history`, the per-container `agent-nm-<agent>-<project>` and `agent-wt-<agent>-<project>` volumes (for a dir-mounted JS/powbox project; a Go- or boundedly detected .NET-only repo gets only the latter, a non-dev folder neither, and `--isolated` an `agent-ws-<container>` volume instead), a per-container `agent-podman-<agent>-<project>` Podman store, plus separate `claude-config` and `codex-config` volumes.
@@ -1034,7 +1035,11 @@ workflows keep cost proportional to the change:
   Docker): static guards — an exec-bit check (`scripts/check-exec-bits.sh`, the
   PR #51 class), `shellcheck` (error severity) over all `*.sh`, an advisory
   `shfmt` on the scripts a PR changes, and `Invoke-ScriptAnalyzer`
-  (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1` —
+  (PSScriptAnalyzer, using `PSScriptAnalyzerSettings.psd1`) over all `*.ps1`,
+  and a layer-set contract scan (`scripts/layers-digest.sh`) over every
+  committed set under `docker/layers/` except the user-owned `custom/`, which
+  fails naming the set when one breaks the contract or has no `Dockerfile` and
+  is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
   routed to Tier 1. The current 16-suite set is `test-claude-hook-skew.sh`,
@@ -1067,21 +1072,30 @@ workflows keep cost proportional to the change:
   using the baked server binaries. Deliberate Stage 0 repeats target baked artifacts; Tier 0
   targets `/repo` source, so those are two-target checks rather than duplicate runs.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
-  builds and smokes **both supported images** in two sequential passes, lean
-  first — the lean image (the agent directly on the base, no `.powbox-layers`)
-  and then lean + the committed `full` layer set (`full` written into the
-  gitignored `.powbox-layers`, then `./build.sh agent`) — so neither can rot
-  while the other stays green. Each pass asserts the built agent image's
-  `powbox.layers.set` label (none for lean, `full` for the second pass), so a
-  pass that built on the wrong parent fails rather than smoking the same image
-  twice. Each pass runs `./commands/smoke-test.sh` under
+  builds and smokes two images in two sequential passes, lean first — the lean
+  image (the agent directly on the base, no `.powbox-layers`) and then lean +
+  the committed `browser` layer set (`browser` written into the gitignored
+  `.powbox-layers`, then `./build.sh agent`). The second pass tests the
+  layer-set mechanism rather than every tool install: the layer-set bake and
+  its cache, both agents' seeded instruction templates (each pass compares the
+  template baked for Claude and for Codex with the expected source byte for
+  byte, and the `browser` pass checks that the set's notes heading appears
+  exactly when the staged template carries notes), and Stage 1b, by running it
+  against the built image with a two-probe file whose second probe fails and
+  asserting that it fails naming probe 2 with the manifest. The maintainer's
+  `full` set is never built in CI: the maintainer builds it by hand and fixes it
+  when an upstream installer breaks, and Tier 0's contract scan is its CI
+  guard. Each pass asserts the built agent image's `powbox.layers.set` label
+  (none for lean, `browser` for the second pass), so a pass that built on the
+  wrong parent fails rather than smoking the same image twice. Each pass runs
+  `./commands/smoke-test.sh` under
   `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error instead of a
   run whose image-gated checks self-skip into a false green. That flag reaches
   only the image-dependent skips — the hosted runner still exposes no
   `/dev/net/tun`, so Stage 3's nested half self-skips there and a green Tier 1 is
   a partial smoke (see "What CI covers vs. what stays VPS-only" below). A
   final, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
-  once, against the full image, because the Bash umbrella never invokes the
+  once, against the `browser` image, because the Bash umbrella never invokes the
   PowerShell mirror and this runner is the only automated configuration where
   its Stage 6 mountpoint-ownership assertions have teeth (see
   [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). It
@@ -1089,7 +1103,9 @@ workflows keep cost proportional to the change:
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image*` /
   `scripts/layers-*` / `scripts/smoke-test*` / `commands/smoke-test.*`
   entrypoints and the four
-  `scripts/test-*.sh` suites routed to Tier 1 above; skill/docs PRs run
+  `scripts/test-*.sh` suites routed to Tier 1 above, except anything under
+  `docker/layers/full/**`, which the last `paths:` entry excludes (a PR that
+  changes only `full` runs Tier 0 alone); skill/docs PRs run
   Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
   only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
   re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next
@@ -1097,12 +1113,12 @@ workflows keep cost proportional to the change:
   is not called off (there the gate is belt-and-suspenders anyway: a docs PR
   never matches the paths above). The expensive base image is cached (a `docker
   save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
-  agent layers. The `full` layer-set image is cached the same way, under a key
-  that embeds the base key plus `docker/layers/full/**`, the set's digest, the
+  agent layers. The `browser` layer-set image is cached the same way, under a key
+  that embeds the base key plus `docker/layers/browser/**`, the set's digest, the
   layer-set selector and digest scripts, and `scripts/build-image-lib.sh`, so a
-  change under `docker/layers/full/` alone misses only the layers cache. On a
+  change under `docker/layers/browser/` alone misses only the layers cache. On a
   hit the job asks `build.sh`'s own currency test whether the loaded image is
-  current: if it is, the full pass must perform no layer-set bake, and if it is
+  current: if it is, the `browser` pass must perform no layer-set bake, and if it is
   not, the job warns that the cache entry is stale rather than failing. That
   tarball repeats every base layer, so the two together hold the base twice in
   the repository's Actions cache quota.

@@ -5,8 +5,12 @@
 #   - no .powbox-layers, or one holding only blank and # lines: no layer set;
 #     the agent image is built directly on the lean base.
 #   - full: the maintainer's bundle in docker/layers/full/.
+#   - browser: a headless browser stack in docker/layers/browser/, for turning
+#     decks, diagrams and HTML into PDF or SVG; smaller than full, and the set
+#     CI builds. It ships no tools yet.
 #   - custom: your own set in docker/layers/custom/ (gitignored apart from its
-#     .gitkeep). Start from a copy: cp -r docker/layers/full/. docker/layers/custom/
+#     .gitkeep). Start from a copy of a committed set; browser is the smaller
+#     starting point: cp -r docker/layers/browser/. docker/layers/custom/
 #
 # The first line that is neither blank nor a comment names the set. It must
 # match ^[a-z0-9][a-z0-9._-]*$ and docker/layers/<name>/Dockerfile must exist.

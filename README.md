@@ -1098,10 +1098,12 @@ workflows keep cost proportional to the change:
   run whose image-gated checks self-skip into a false green. Neither image has
   PostgreSQL or Podman, which only `full` installs, so both passes report
   Stage 2 (`pg-dev-up`) and Stage 3 (rootless Podman) as not applicable, which
-  does not make a run partial: those stages, `scripts/test-pg-dev-up-scoped.sh`
-  and Stage 3's `powbox.podman` label check run only in the maintainer's host
-  smoke run against a `full` image (see "What CI covers vs. what stays
-  VPS-only" below). A
+  does not make a run partial. Stage 3's `powbox.podman` label check still
+  runs on both and asserts that the image has neither Podman nor the label;
+  Stages 2 and 3, `scripts/test-pg-dev-up-scoped.sh` and the label check's
+  other direction (Podman together with the label) run only in the
+  maintainer's host smoke run against a `full` image (see "What CI covers vs.
+  what stays VPS-only" below). A
   final, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
   once, against the `browser` image, because the Bash umbrella never invokes the
   PowerShell mirror and this runner is the only automated configuration where

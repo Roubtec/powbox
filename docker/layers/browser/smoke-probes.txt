@@ -1,0 +1,16 @@
+# In-container smoke probes for the "browser" layer set. commands/smoke-test.sh
+# (and its .ps1 mirror) runs them as Stage 1b against an image whose
+# powbox.layers.set label is "browser", through scripts/smoke-test-image.sh, the
+# same driver as Stage 1. See docs/smoke-tests.md -> "Layer-set probes".
+#
+# Format: one probe per line, run in file order, each in its own `sh -ec`
+# inside the image. Filesystem effects carry to later probes; `cd`, `export`
+# and shell variables do not. Blank lines and lines whose first non-space
+# character is # are ignored; every other line is handed to the driver
+# unchanged, so a probe must fit on one line and must not end in a backslash.
+#
+# Every tool this set installs needs a presence probe here, for example
+#   command -v chromium >/dev/null
+# This file is what fails a browser image that lost a tool. Keep the file even
+# when it holds no probe line: a browser image whose working tree lacks it
+# fails the smoke run.

@@ -1,13 +1,15 @@
-# The "full" layer set: the maintainer's bundle of toolchains on top of the lean
-# base. Select it by writing `full` into .powbox-layers (see
-# .powbox-layers.example); scripts/build-image.{sh,ps1} then bake this file into
-# powbox-agent-layers:latest and build the agent image on it.
+# The "browser" layer set: a headless browser stack on top of the lean base,
+# for document and diagram work such as a Marp deck to PDF, a Mermaid diagram
+# to SVG, or an HTML page printed to PDF. Select it by writing `browser` into
+# .powbox-layers (see .powbox-layers.example); scripts/build-image.{sh,ps1}
+# then bake this file into powbox-agent-layers:latest and build the agent image
+# on it. It is a set of its own, not a layer under `full`: a build selects
+# exactly one set.
 #
-# It installs nothing yet; tools move here from the base later. CI never
-# builds it: Tier 1 exercises the layer-set chain through the smaller
-# `browser` set, Tier 0 only checks this directory against the contract below,
-# and the maintainer builds this set by hand and fixes it when an install
-# breaks.
+# It ships no tools yet; the browser stack moves here from the base later. It
+# is also the set Tier 1 CI builds and smokes, so it is what exercises the
+# base -> layers -> agent chain there (the maintainer's `full` set is never
+# built in CI).
 #
 # The contract every layer Dockerfile follows (README "Layer sets"):
 #   - start with the two lines below, so the build scripts can pass the base,

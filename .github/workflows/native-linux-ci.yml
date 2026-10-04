@@ -7,8 +7,9 @@ name: Native Linux CI - Tier 0 (static guards)
 # build. Tier 0 alone would have caught PR #51 (a shell script committed without
 # its exec bit). Alongside the static linters it runs the hermetic
 # source-level pure-shell suites, which need no image and guard behavior that
-# static analysis cannot prove (see the step). The
-# heavier image build + smoke test lives in the path-gated Tier 1 workflow
+# static analysis cannot prove (see the step), and a layer-set contract scan
+# over every committed set, the only CI check on the sets Tier 1 never builds.
+# The heavier image build + smoke test lives in the path-gated Tier 1 workflow
 # (.github/workflows/native-linux-build.yml).
 #
 # What stays out of CI (VPS-only) is documented in README.md under
@@ -154,6 +155,42 @@ jobs:
           if ($errors.Count -gt 0) {
             throw "PSScriptAnalyzer found $($errors.Count) error/parse-severity finding(s) (see ::error annotations above)."
           }
+
+      # Tier 1 builds only the `browser` layer set, so this scan is the one CI
+      # guard on every other committed set, the maintainer's `full` above all:
+      # scripts/layers-digest.sh checks a set against the layer-set contract
+      # (README "Layer sets") without Docker and exits non-zero, naming each
+      # offending line or path, on a violation or a missing Dockerfile. Every
+      # directory under docker/layers/ is a committed set except the
+      # user-owned custom/, whose checkout holds only .gitkeep. A directory is
+      # never skipped for lacking a Dockerfile: a set that lost it must fail.
+      - name: Layer-set contract scan (every committed set)
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=()
+          scanned=0
+          for dir in docker/layers/*/; do
+            set_name="$(basename "$dir")"
+            [ "$set_name" = custom ] && continue
+            echo "Scanning layer set '${set_name}' (docker/layers/${set_name}) ..."
+            scanned=$((scanned + 1))
+            if digest="$(./scripts/layers-digest.sh "docker/layers/${set_name}")"; then
+              echo "  ok: ${digest}"
+            else
+              echo "::error::layer set '${set_name}' fails the layer-set contract scan (see the layers-digest message above)."
+              failed+=("$set_name")
+            fi
+          done
+          if [ "$scanned" -eq 0 ]; then
+            echo "FAIL: found no committed layer set under docker/layers/." >&2
+            exit 1
+          fi
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "FAIL: ${#failed[@]} committed layer set(s) fail the contract scan: ${failed[*]}" >&2
+            exit 1
+          fi
+          echo "Layer-set contract scan: all ${scanned} committed set(s) pass."
 
       # Two auto-discovered pure-shell suites parse YAML with yq, but only
       # scripts/test-detect-shadows.sh specifically requires jq-compatible

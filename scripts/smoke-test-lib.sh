@@ -20,6 +20,21 @@
 # before it is used to build a path into the working tree.
 SMOKE_LAYER_SET_RE='^[a-z0-9][a-z0-9._-]*$'
 
+# The committed layer sets. Their probe file is what fails an image of the set
+# that lost a tool, so for these sets neither a missing directory nor a missing
+# smoke-probes.txt may soften into a note or a skip. The .ps1 mirror keeps the
+# same list.
+SMOKE_COMMITTED_LAYER_SETS=(full browser)
+
+# smoke_is_committed_set <set>: 0 when <set> is in SMOKE_COMMITTED_LAYER_SETS.
+smoke_is_committed_set() {
+	local s
+	for s in "${SMOKE_COMMITTED_LAYER_SETS[@]}"; do
+		[ "$s" = "$1" ] && return 0
+	done
+	return 1
+}
+
 # smoke_image_label <image> <label>: print the label's value, empty when the
 # image does not carry it. Returns 1 when the image cannot be inspected, so an
 # unreadable image is never mistaken for an unlabelled (lean) one. The label
@@ -165,12 +180,9 @@ smoke_layer_stage() {
 	rel="docker/layers/$layer_set"
 	dir="$root/$rel"
 	file="$dir/smoke-probes.txt"
-	# `full` is the committed set: its probe file is what makes a lost tool a
-	# failure, so neither a missing directory nor a missing file may soften into
-	# a note or a skip.
 	if [ ! -d "$dir" ]; then
-		if [ "$layer_set" = full ]; then
-			echo "ERROR: image '$image' was built from the 'full' layer set, but $rel/ is missing from this working tree; its smoke-probes.txt is what fails a full image that lost a tool." >&2
+		if smoke_is_committed_set "$layer_set"; then
+			echo "ERROR: image '$image' was built from the committed '$layer_set' layer set, but $rel/ is missing from this working tree; its smoke-probes.txt is what fails a $layer_set image that lost a tool." >&2
 			return 1
 		fi
 		if [ -n "${POWBOX_SMOKE_REQUIRE_IMAGE:-}" ]; then
@@ -182,8 +194,8 @@ smoke_layer_stage() {
 		return 0
 	fi
 	if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-		if [ "$layer_set" = full ]; then
-			echo "ERROR: image '$image' was built from the 'full' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a full image that lost a tool." >&2
+		if smoke_is_committed_set "$layer_set"; then
+			echo "ERROR: image '$image' was built from the committed '$layer_set' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a $layer_set image that lost a tool." >&2
 			return 1
 		fi
 		smoke_layer_stale_check "$image" "$root" "$rel"

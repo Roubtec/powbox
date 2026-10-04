@@ -1544,6 +1544,7 @@ for drv in "${e2e_drivers[@]}"; do
 		expect "e2e$t lean image: Stage 1 carries no probe for $moved, which a layer set installs" not grep -qaF "$moved" "$E2E_RUNS/1"
 	done
 	expect "e2e$t lean image: Stage 1 builds a PDF through pandoc's Typst engine" grep -qaF -- "--pdf-engine=typst" "$E2E_RUNS/1"
+	expect "e2e$t lean image: Stage 1's Typst PDF must carry the fixture's image" grep -qaF -- "pdfimages -list out.pdf" "$E2E_RUNS/1"
 	expect "e2e$t podman with its label: the label check passes" out_has "Stage 3 label check: image 'fake-image:latest' has podman and the powbox.podman label."
 	expect "e2e$t tool present + explicit skip: Stage 2 is recorded as skipped" out_has "  - $skip_db_entry"
 	expect "e2e$t tool present + explicit skip: Stage 3 is recorded as skipped" out_has "  - $skip_podman_entry"

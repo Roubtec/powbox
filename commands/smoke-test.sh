@@ -296,8 +296,11 @@ fi
 # injection-proofness, the per-probe isolation, and .sh/.ps1 argv parity.
 # The two Typst probes pin the PDF engine the base bakes for pandoc: the exact
 # version (pinned on purpose, see docker/base/Dockerfile), and a Markdown file
-# with a table and non-ASCII text built into a PDF through
-# `--pdf-engine=typst` and checked with pdfinfo. A bare `typst --version` would
+# with a table, non-ASCII text and a 1x1 PNG decoded from base64 built into a
+# PDF through `--pdf-engine=typst`, checked with pdfinfo and with pdfimages so
+# a dropped image fails it. The probe runs in its scratch directory because
+# pandoc resolves the image path and writes its intermediate .typ file in the
+# working directory. A bare `typst --version` would
 # not catch the pandoc template incompatibility that motivated the pin. A Typst
 # bump must update the version probe and its PowerShell mirror.
 # shellcheck disable=SC2016  # the probes' $HOME and $d expand in the container shell, NOT the host
@@ -343,7 +346,7 @@ fi
 	"gpg --version >/dev/null" \
 	"gcc --version >/dev/null" \
 	'typst --version | grep -q "^typst 0\.13\.1 "' \
-	'd=/tmp/powbox-typst-probe && rm -rf "$d" && mkdir -p "$d" && printf "# Typst\n\nNon-ASCII: \303\251\303\241\305\276\n\n| a | b |\n|---|---|\n| 1 | 2 |\n" > "$d/in.md" && pandoc "$d/in.md" -o "$d/out.pdf" --pdf-engine=typst && pdfinfo "$d/out.pdf" | grep -Eq "^Creator:[[:space:]]+Typst"' \
+	'd=/tmp/powbox-typst-probe && rm -rf "$d" && mkdir -p "$d" && cd "$d" && printf "%s" "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > dot.png && printf "# Typst\n\nNon-ASCII: \303\251\303\241\305\276\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![dot](dot.png)\n" > in.md && pandoc in.md -o out.pdf --pdf-engine=typst && pdfinfo out.pdf | grep -Eq "^Creator:[[:space:]]+Typst" && pdfimages -list out.pdf | grep -Eq "^[[:space:]]+1[[:space:]]+[0-9]+[[:space:]]+image[[:space:]]"' \
 	"file --version >/dev/null" \
 	"printf test | xxd >/dev/null" \
 	"envsubst --version >/dev/null" \

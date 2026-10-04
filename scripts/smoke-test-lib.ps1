@@ -20,6 +20,12 @@
 # before it is used to build a path into the working tree.
 $script:SmokeLayerSetPattern = '^[a-z0-9][a-z0-9._-]*\z'
 
+# The committed layer sets. Their probe file is what fails an image of the set
+# that lost a tool, so for these sets neither a missing directory nor a missing
+# smoke-probes.txt may soften into a note or a skip. The .sh mirror keeps the
+# same list.
+$script:SmokeCommittedLayerSets = @('full', 'browser')
+
 # The label's value, empty when the image does not carry it. Throws when the
 # image cannot be inspected, so an unreadable image is never mistaken for an
 # unlabelled (lean) one. Only line breaks are trimmed, as the .sh's command
@@ -158,12 +164,9 @@ function Invoke-SmokeLayerStage {
   $rel = "docker/layers/$set"
   $dir = Join-Path $Root $rel
   $file = Join-Path $dir 'smoke-probes.txt'
-  # `full` is the committed set: its probe file is what makes a lost tool a
-  # failure, so neither a missing directory nor a missing file may soften into
-  # a note or a skip.
   if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-    if ($set -ceq 'full') {
-      throw "image '$Image' was built from the 'full' layer set, but $rel/ is missing from this working tree; its smoke-probes.txt is what fails a full image that lost a tool."
+    if ($script:SmokeCommittedLayerSets -ccontains $set) {
+      throw "image '$Image' was built from the committed '$set' layer set, but $rel/ is missing from this working tree; its smoke-probes.txt is what fails a $set image that lost a tool."
     }
     if ($env:POWBOX_SMOKE_REQUIRE_IMAGE) {
       throw "image '$Image' was built from layer set '$set', but $rel/ is not in this working tree, and POWBOX_SMOKE_REQUIRE_IMAGE is set - refusing to skip its probes."
@@ -174,8 +177,8 @@ function Invoke-SmokeLayerStage {
   }
   $item = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
   if ($null -eq $item) {
-    if ($set -ceq 'full') {
-      throw "image '$Image' was built from the 'full' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a full image that lost a tool."
+    if ($script:SmokeCommittedLayerSets -ccontains $set) {
+      throw "image '$Image' was built from the committed '$set' layer set, but $rel/smoke-probes.txt is missing from this working tree; it is what fails a $set image that lost a tool."
     }
     Write-SmokeLayerStaleWarning -Image $Image -Root $Root -Rel $rel
     Write-Host "Note: layer set '$set' ships no $rel/smoke-probes.txt; Stage 1b has nothing to run."

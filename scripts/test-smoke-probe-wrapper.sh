@@ -1373,8 +1373,8 @@ fi
 
 printf 'P. both umbrellas, end to end against the fake docker\n'
 # Each case runs commands/smoke-test.{sh,ps1} from a scratch copy of the repo's
-# commands/ and scripts/ (so a case can delete docker/layers/full without
-# touching the checkout), with Stages 4-6 skipped and the fake docker answering
+# commands/ and scripts/ and of the committed sets (so a case can delete
+# docker/layers/<set> without touching the checkout), with Stages 4-6 skipped and the fake docker answering
 # everything else. Labels come from <fixture>/.labels/<label>.
 E2E="$TMP/e2e"
 mkdir -p "$E2E"
@@ -1386,7 +1386,7 @@ new_fixture() {
 	local fx="$E2E/$1"
 	mkdir -p "$fx/docker/layers" "$fx/.labels"
 	cp -R "$ROOT_DIR/commands" "$ROOT_DIR/scripts" "$fx/"
-	cp -R "$ROOT_DIR/docker/layers/full" "$fx/docker/layers/"
+	cp -R "$ROOT_DIR/docker/layers/full" "$ROOT_DIR/docker/layers/browser" "$fx/docker/layers/"
 	printf '%s' "$fx"
 }
 # set_label <fixture> <label> <value>
@@ -1509,46 +1509,49 @@ for drv in "${e2e_drivers[@]}"; do
 		expect "e2e$t tools absent$w: the Podman stage never started" log_lacks "NET_ADMIN"
 	done
 
-	# full image with the committed skeleton: a note, no Stage 1b, not partial
-	# on its account.
-	fx="$(new_fixture "full-skeleton.$drv")"
-	set_label "$fx" powbox.layers.set full
-	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/full")"
-	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
-	e2e "$drv" "$fx" full-skeleton
-	expect "e2e$t full + skeleton probe file: run passes" rc_is 0
-	expect "e2e$t full + skeleton: the note names the file" out_has "docker/layers/full/smoke-probes.txt holds no probe line"
-	expect "e2e$t full + skeleton: no Stage 1b run" runs_are 1
-	expect "e2e$t full + skeleton: no Stage 1b skip entry" out_lacks "  - Stage 1b"
-	expect "e2e$t full + skeleton: later stages still reached" out_has "  - $skip_db_entry"
-	expect "e2e$t full + skeleton with a current digest: no staleness warning" out_lacks "stale relative to this set"
-	# Emptying a set's probe file changes its digest: the image is still
-	# reported stale although there is nothing to run.
-	set_label "$fx" powbox.layers.digest "sha256:0000"
-	e2e "$drv" "$fx" full-skeleton-stale
-	expect "e2e$t full + skeleton with a different digest: run passes" rc_is 0
-	expect "e2e$t full + skeleton with a different digest: warns the image is stale" out_has "the image is stale relative to this set."
-	expect "e2e$t full + skeleton with a different digest: the note still follows the warning" out_before "the image is stale relative to this set." "docker/layers/full/smoke-probes.txt holds no probe line"
-	expect "e2e$t full + skeleton with a different digest: no claim that probes run" out_lacks "Running its probes anyway"
-	expect "e2e$t full + skeleton with a different digest: no Stage 1b run" runs_are 1
-	expect "e2e$t full + skeleton with a different digest: not partial on its account" out_lacks "  - Stage 1b"
+	# Each committed set, as checked in: its skeleton probe file gives a note,
+	# no Stage 1b, and nothing partial on its account; deleting the file or the
+	# whole set directory is a hard failure naming the path, before any later
+	# stage.
+	for cs in full browser; do
+		fx="$(new_fixture "$cs-skeleton.$drv")"
+		set_label "$fx" powbox.layers.set "$cs"
+		set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/$cs")"
+		CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1
+		e2e "$drv" "$fx" "$cs-skeleton"
+		expect "e2e$t $cs + skeleton probe file: run passes" rc_is 0
+		expect "e2e$t $cs + skeleton: the note names the file" out_has "docker/layers/$cs/smoke-probes.txt holds no probe line"
+		expect "e2e$t $cs + skeleton: no Stage 1b run" runs_are 1
+		expect "e2e$t $cs + skeleton: no Stage 1b skip entry" out_lacks "  - Stage 1b"
+		expect "e2e$t $cs + skeleton: later stages still reached" out_has "  - $skip_db_entry"
+		expect "e2e$t $cs + skeleton with a current digest: no staleness warning" out_lacks "stale relative to this set"
+		# Emptying a set's probe file changes its digest: the image is still
+		# reported stale although there is nothing to run.
+		set_label "$fx" powbox.layers.digest "sha256:0000"
+		e2e "$drv" "$fx" "$cs-skeleton-stale"
+		expect "e2e$t $cs + skeleton with a different digest: run passes" rc_is 0
+		expect "e2e$t $cs + skeleton with a different digest: warns the image is stale" out_has "the image is stale relative to this set."
+		expect "e2e$t $cs + skeleton with a different digest: the note still follows the warning" out_before "the image is stale relative to this set." "docker/layers/$cs/smoke-probes.txt holds no probe line"
+		expect "e2e$t $cs + skeleton with a different digest: no claim that probes run" out_lacks "Running its probes anyway"
+		expect "e2e$t $cs + skeleton with a different digest: no Stage 1b run" runs_are 1
+		expect "e2e$t $cs + skeleton with a different digest: not partial on its account" out_lacks "  - Stage 1b"
 
-	# full image, probe file deleted / whole set directory deleted: hard
-	# failure naming the path, before any later stage.
-	fx="$(new_fixture "full-nofile.$drv")"
-	rm -f "$fx/docker/layers/full/smoke-probes.txt"
-	set_label "$fx" powbox.layers.set full
-	CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=0 CASE_SKIP_PODMAN=0
-	e2e "$drv" "$fx" full-nofile
-	expect "e2e$t full without smoke-probes.txt: run fails" rc_fail
-	expect "e2e$t full without smoke-probes.txt: the message names the file" out_has "docker/layers/full/smoke-probes.txt is missing"
-	expect "e2e$t full without smoke-probes.txt: no later stage ran" log_lacks "smoke-gate"
-	fx="$(new_fixture "full-nodir.$drv")"
-	rm -r "$fx/docker/layers/full"
-	set_label "$fx" powbox.layers.set full
-	e2e "$drv" "$fx" full-nodir
-	expect "e2e$t full without docker/layers/full/: run fails" rc_fail
-	expect "e2e$t full without docker/layers/full/: the message names the directory" out_has "docker/layers/full/ is missing"
+		fx="$(new_fixture "$cs-nofile.$drv")"
+		rm -f "$fx/docker/layers/$cs/smoke-probes.txt"
+		set_label "$fx" powbox.layers.set "$cs"
+		CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=0 CASE_SKIP_PODMAN=0
+		e2e "$drv" "$fx" "$cs-nofile"
+		expect "e2e$t $cs without smoke-probes.txt: run fails" rc_fail
+		expect "e2e$t $cs without smoke-probes.txt: the message names the file" out_has "docker/layers/$cs/smoke-probes.txt is missing"
+		expect "e2e$t $cs without smoke-probes.txt: no later stage ran" log_lacks "smoke-gate"
+		fx="$(new_fixture "$cs-nodir.$drv")"
+		rm -r "$fx/docker/layers/$cs"
+		set_label "$fx" powbox.layers.set "$cs"
+		e2e "$drv" "$fx" "$cs-nodir"
+		expect "e2e$t $cs without docker/layers/$cs/: run fails" rc_fail
+		expect "e2e$t $cs without docker/layers/$cs/: the message names the directory" out_has "docker/layers/$cs/ is missing"
+		expect "e2e$t $cs without docker/layers/$cs/: no later stage ran" log_lacks "smoke-gate"
+	done
 
 	# Another set: no probe file is a note; no directory is a skip, or a
 	# failure under POWBOX_SMOKE_REQUIRE_IMAGE.

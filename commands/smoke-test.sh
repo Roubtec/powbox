@@ -432,9 +432,10 @@ fi
 # set's name in its powbox.layers.set label, and the set may ship its own
 # in-container probes in docker/layers/<set>/smoke-probes.txt, run here through
 # the same driver as Stage 1 (one probe per line; a failure is named by index
-# against the printed manifest). A lean image has no label and no Stage 1b; the
-# committed `full` set must keep its probe file. See smoke_layer_stage in
-# scripts/smoke-test-lib.sh and docs/smoke-tests.md ("Layer-set probes").
+# against the printed manifest). A lean image has no label and no Stage 1b;
+# each committed set (`full`, `browser`) must keep its probe file. See
+# smoke_layer_stage in scripts/smoke-test-lib.sh and docs/smoke-tests.md
+# ("Layer-set probes").
 smoke_layer_stage "$IMAGE" "$ROOT_DIR" || exit 1
 
 # Stage 2 — pg-dev-up functional test: stand up a real throwaway cluster and

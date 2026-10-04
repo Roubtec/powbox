@@ -8,9 +8,12 @@ $script:PowboxBaseTag = 'powbox-agent-base:latest'
 $script:PowboxLayersTag = 'powbox-agent-layers:latest'
 $script:PowboxAgentTag = 'powbox-agent:latest'
 
+# The label name is a Go raw string (`...`), not a "..." one: Windows PowerShell
+# 5.1 strips double quotes embedded in a native argument, which would leave docker
+# an invalid template.
 function Get-ImageLabel {
     param([string]$Image, [string]$Label)
-    $v = docker image inspect $Image --format "{{ index .Config.Labels `"$Label`" }}" 2>$null
+    $v = docker image inspect $Image --format ('{{ index .Config.Labels `' + $Label + '` }}') 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $v -or $v -eq '<no value>') { return "" }
     return ([string]$v).Trim()
 }

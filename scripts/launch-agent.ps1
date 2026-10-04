@@ -1075,8 +1075,10 @@ if (-not $Volatile -and $containerExists) {
   # explicit desired set (CLI -Ctx, ctx: in config, or explicit ctx: []), compare
   # the canonical mount-set hash label and recreate stopped mismatches. When there
   # is no desired set, keep whatever ctx mounts the container already has.
+  # Like every --format template in this script, it spells label names and mount
+  # paths as Go raw strings (`...`); Test-PowboxImageStoreWriterWanted says why.
   if ($ctxDesiredPresent) {
-    $existingCtxHash = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.ctx-hash")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
+    $existingCtxHash = (docker inspect --format '{{with .Config.Labels}}{{with (index . `powbox.ctx-hash`)}}{{.}}{{end}}{{end}}' $containerName 2>$null)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingCtxHash)) { $existingCtxHash = "" }
     else { $existingCtxHash = $existingCtxHash.Trim() }
     if ($existingCtxHash -ne $ctxHash) {
@@ -1138,7 +1140,7 @@ $podmanDevices = switch ($podmanRequest) {
 # auto-resume default remains in effect for reused containers until the user explicitly opts out,
 # at which point this branch recycles the container to honour the new intent.
 if (-not $Volatile -and $containerExists) {
-  $existingContinue = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.continue")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
+  $existingContinue = (docker inspect --format '{{with .Config.Labels}}{{with (index . `powbox.continue`)}}{{.}}{{end}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingContinue)) {
     $existingContinue = "true"
   }
@@ -1200,10 +1202,10 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
   if ($mountWorktreesVolume) {
     $expectedWtMount = $worktreesVolume
   }
-  $wtMountName = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/.worktrees`"}}{{.Name}}{{end}}{{end}}" $containerName 2>$null)
+  $wtMountName = (docker inspect --format ('{{range .Mounts}}{{if eq .Destination `' + $workspaceMount + '/.worktrees`}}{{.Name}}{{end}}{{end}}') $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $wtMountName = "" }
   $wtMountName = "$wtMountName".Trim()
-  $nmMountName = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"$workspaceMount/node_modules`"}}{{.Name}}{{end}}{{end}}" $containerName 2>$null)
+  $nmMountName = (docker inspect --format ('{{range .Mounts}}{{if eq .Destination `' + $workspaceMount + '/node_modules`}}{{.Name}}{{end}}{{end}}') $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $nmMountName = "" }
   $nmMountName = "$nmMountName".Trim()
   if ($wtMountName -ne $expectedWtMount -or $nmMountName -ne $expectedNmMount) {
@@ -1308,7 +1310,7 @@ if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExi
 # lacks the mount so the new volume + device attach; warn (don't disrupt) if it
 # is currently running.
 if (-not $Volatile -and $containerExists) {
-  $hasPodmanMount = (docker inspect --format "{{range .Mounts}}{{if eq .Destination `"/home/node/.local/share/containers`"}}yes{{end}}{{end}}" $containerName 2>$null)
+  $hasPodmanMount = (docker inspect --format '{{range .Mounts}}{{if eq .Destination `/home/node/.local/share/containers`}}yes{{end}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0) { $hasPodmanMount = "" }
   if ([string]::IsNullOrWhiteSpace($hasPodmanMount)) {
     if ($containerRunning) {
@@ -1340,7 +1342,7 @@ if (-not $Volatile -and $containerExists) {
 # we can't know what it was created with and the storage-mount check above already
 # recreates truly pre-Podman containers.
 if (-not $Volatile -and $containerExists) {
-  $existingPodmanDevices = (docker inspect --format '{{with .Config.Labels}}{{with (index . "powbox.podman-devices")}}{{.}}{{end}}{{end}}' $containerName 2>$null)
+  $existingPodmanDevices = (docker inspect --format '{{with .Config.Labels}}{{with (index . `powbox.podman-devices`)}}{{.}}{{end}}{{end}}' $containerName 2>$null)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($existingPodmanDevices)) {
     $existingPodmanDevices = ""
   }
@@ -1400,8 +1402,11 @@ if (-not $Volatile -and $containerExists) {
 if ($Isolated) {
   docker image inspect powbox-agent:latest *> $null
   if ($LASTEXITCODE -eq 0) {
-    $selfhostedCap = docker image inspect powbox-agent:latest --format '{{ index .Config.Labels "powbox.base.selfhosted" }}' 2>$null
-    if (-not $selfhostedCap -or $selfhostedCap.Trim() -eq '' -or $selfhostedCap.Trim() -eq '<no value>') {
+    $selfhostedCap = docker image inspect powbox-agent:latest --format '{{ index .Config.Labels `powbox.base.selfhosted` }}' 2>$null
+    # Only line breaks are trimmed, as the .sh's command substitution does, so a
+    # whitespace-only value is present on both launchers.
+    $selfhostedCap = (@($selfhostedCap) -join "`n").TrimEnd("`r", "`n")
+    if ($selfhostedCap -eq '' -or $selfhostedCap -eq '<no value>') {
       Write-Error ("This agent image's base predates self-hosted mode, so -Isolated would create the workspace " +
         "volume but start you in an EMPTY checkout (the clone step lives in the base layer). Rebuild the base + " +
         "agent, then relaunch: agent-full-rebuild  (or: build.ps1 all; build.sh all on Linux/macOS).")
@@ -1584,10 +1589,11 @@ $continueLabel = if ($Continue) { "true" } else { "false" }
 # the same block (docker/layers/full/Dockerfile), so an image without Podman,
 # and so without seed-image-store.sh, is never asked to start a writer. Read the
 # way the powbox.base.selfhosted guard above reads its label: an empty value or
-# `<no value>` means absent. The label name is a Go raw string (`...`) because
-# Windows PowerShell 5.1 strips double quotes embedded in a native argument;
-# scripts/launch-agent.sh uses the same template. scripts/test-image-store-writer-gate.sh
-# tests this function and its .sh twin against a fake docker.
+# `<no value>` means absent, and only line breaks are trimmed. The label name is
+# a Go raw string (`...`) because Windows PowerShell 5.1 strips double quotes
+# embedded in a native argument; scripts/launch-agent.sh uses the same template.
+# scripts/test-image-store-writer-gate.sh tests this function and its .sh twin
+# against a fake docker.
 function Test-PowboxImageStoreWriterWanted {
   param([string]$Image)
   $cap = docker image inspect $Image --format '{{ index .Config.Labels `powbox.podman` }}' 2>$null
@@ -1595,7 +1601,7 @@ function Test-PowboxImageStoreWriterWanted {
   # A failed inspect is an answer here (no writer), not an error to leak.
   $global:LASTEXITCODE = 0
   if (-not $inspected) { return $false }
-  $cap = (@($cap) -join "`n").Trim()
+  $cap = (@($cap) -join "`n").TrimEnd("`r", "`n")
   if ($cap -eq '' -or $cap -eq '<no value>') { return $false }
   return $true
 }

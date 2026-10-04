@@ -91,9 +91,11 @@ function Get-LatestNpmVersion([string]$Package) {
 # Docker renders a missing label as the literal "<no value>" when the image
 # carries no labels map at all; normalize that to $null so unlabeled images fall
 # through to the default-source fallback and staleness logic instead of looking
-# like a set-but-bogus value.
+# like a set-but-bogus value. The label name is a Go raw string (`...`), not a
+# "..." one: Windows PowerShell 5.1 strips double quotes embedded in a native
+# argument, which would leave docker an invalid template.
 function Get-ImageLabel([string]$Image, [string]$Label) {
-    $val = docker image inspect $Image --format "{{index .Config.Labels `"$Label`"}}" 2>$null
+    $val = docker image inspect $Image --format ('{{index .Config.Labels `' + $Label + '`}}') 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $val) { return $null }
     $val = $val.Trim()
     if ($val -eq '<no value>') { return $null }

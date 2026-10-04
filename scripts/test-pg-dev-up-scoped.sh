@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit/integration tests for docker/shared/pg-dev-up scoped mode (task 027).
+# Unit/integration tests for docker/layers/full/pg-dev-up scoped mode (task 027).
 #
 # Focus: the opt-in worktree/profile isolation. Two different Git worktrees must
 # run `pg-dev-up --worktree` CONCURRENTLY and receive distinct data directories
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PG="$SCRIPT_DIR/../docker/shared/pg-dev-up"
+PG="$SCRIPT_DIR/../docker/layers/full/pg-dev-up"
 
 if [ ! -f "$PG" ]; then
 	echo "FATAL: pg-dev-up not found at $PG" >&2

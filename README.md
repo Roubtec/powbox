@@ -1119,12 +1119,12 @@ workflows keep cost proportional to the change:
   `test-pg-dev-up-scoped.sh`, which no Tier 1 image can run), and the workflow
   itself, but not anything under `docker/layers/full/**`, which the last
   `paths:` entry excludes (a PR that changes only `full` runs Tier 0 alone);
-  skill/docs PRs run Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
-  only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
-  re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next
-  `opened`/`synchronize`/`reopened` event and an already-queued or running Tier 1
-  is not called off (there the gate is belt-and-suspenders anyway: a docs PR
-  never matches the paths above). The expensive base image is cached (a `docker
+  skill/docs PRs run Tier 0 only, and Tier 1 carries the same `non-code` label
+  gate as Tier 0 — though only Tier 0 subscribes to `labeled`/`unlabeled`, so
+  toggling the label re-evaluates Tier 0 at once, while Tier 1 reads its gate
+  only on the next `opened`/`synchronize`/`reopened` event and an already-queued
+  or running Tier 1 is not called off (there the gate is belt-and-suspenders
+  anyway: a docs PR never matches the paths above). The expensive base image is cached (a `docker
   save` tarball keyed on its inputs) so the common Tier-1 run rebuilds only the
   agent layers. The `browser` layer-set image is cached the same way, under a key
   that embeds the base key plus `docker/layers/browser/**`, the set's digest, the

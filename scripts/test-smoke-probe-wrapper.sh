@@ -1527,12 +1527,14 @@ for drv in "${e2e_drivers[@]}"; do
 		expect "e2e$t tools absent$w: the Podman stage never started" log_lacks "NET_ADMIN"
 	done
 
-	# Each committed set, as checked in: its skeleton probe file gives a note,
-	# no Stage 1b, and nothing partial on its account; deleting the file or the
+	# Each committed set: a probe file with no probe line gives a note, no
+	# Stage 1b, and nothing partial on its account; deleting the file or the
 	# whole set directory is a hard failure naming the path, before any later
-	# stage.
+	# stage. The skeleton file is written here rather than taken from the
+	# checkout, so these cases still hold once a set commits real probes.
 	for cs in $committed_sets; do
 		fx="$(new_fixture "$cs-skeleton.$drv")"
+		printf '# skeleton: comments only\n\n  # indented comment\n' >"$fx/docker/layers/$cs/smoke-probes.txt"
 		set_label "$fx" powbox.layers.set "$cs"
 		set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/$cs")"
 		CASE_TOOLS="pg-dev-up podman" CASE_SKIP_DB=1 CASE_SKIP_PODMAN=1

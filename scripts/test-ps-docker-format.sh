@@ -20,19 +20,22 @@
 # lines, and an action holding a `}` before the offending quote (which ends the
 # `[^}]*` run early, as in {{if eq .Y `}` "a"}}). None exists today.
 #
-# With pwsh available, every docker call in a tracked *.ps1 that passes a
-# template as `--format <expr>`, `--format=<text>` or `-f <expr>` (the last only
-# when the expression holds `{{`, since `docker rm -f $name` is no template) is
-# also found through the PowerShell parser, its template (or the `$fmt`
-# assignment it names) evaluated with sample values, and the result handed to a
-# fake docker under both $PSNativeCommandArgumentPassing = 'Legacy' (the passing
-# Windows PowerShell 5.1 uses) and 'Standard'. The walk misses a docker call it
-# cannot name statically (such as `& $docker`) and an `-f` template whose `{{`
-# is in neither the expression nor the assignment it names; the regex guard
-# still covers both. On Linux, Legacy passing builds one Windows-style command
-# line that .NET splits back into argv by the Windows rules, so it reproduces
-# the quote stripping; a control template with an embedded `"` must come out
-# changed, or the check skips honestly instead of passing vacuously.
+# With pwsh available, every `docker` or `docker.exe` call in a tracked *.ps1
+# that passes a template as `--format <expr>`, `--format=<text>` or `-f <expr>`
+# (the last only when the expression holds `{{` outside any command nested in
+# it, since `docker rm -f $name` is no template) is also found through the PowerShell
+# parser, its template (or the `$fmt` assignment it names) evaluated with sample
+# values, and the result handed to a fake docker under both
+# $PSNativeCommandArgumentPassing = 'Legacy' (the passing Windows PowerShell 5.1
+# uses) and 'Standard'. A template may use only string literals, operators,
+# parentheses and the variables given a sample value; any other variable or
+# shape fails loudly. The walk misses a docker call it cannot name statically
+# (such as `& $docker`), a splatted one (`docker @a`), and an `-f` template whose
+# `{{` is in neither the expression nor the assignment it names; the regex guard
+# still scans the template text of all three. On Linux, Legacy passing builds one Windows-style
+# command line that .NET splits back into argv by the Windows rules, so it
+# reproduces the quote stripping; a control template with an embedded `"` must
+# come out changed, or the check skips honestly instead of passing vacuously.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -166,11 +169,19 @@ if ((Get-FormatArg 'Legacy' $control) -ceq $control) {
 }
 "OK`tcontrol: a template with an embedded double quote is changed under Legacy passing"
 
-# The only expression shapes a template may take here: string literals, the
-# variables bound below, `+` and parentheses. Anything else is reported, not run.
+# The only expression shapes a template may take here: string literals,
+# variables, binary operators and parentheses. Command, subexpression, member
+# and script-block nodes are reported, not run, so evaluating one runs nothing.
 $allowed = @('StringConstantExpressionAst', 'ExpandableStringExpressionAst', 'VariableExpressionAst',
   'BinaryExpressionAst', 'ParenExpressionAst', 'PipelineAst', 'CommandExpressionAst')
+# Every variable a template names must be one of these sample values. The check
+# is explicit because the evaluation scope below can still see this script's
+# own variables ($value, $name, $path, ...), which StrictMode cannot tell apart
+# from a binding.
 $bindings = @{ Label = 'powbox.example-label'; workspaceMount = '/workspace/example-0123abcd'; sep = [string][char]31 }
+$S = [System.Management.Automation.Language.StringConstantExpressionAst]
+$X = [System.Management.Automation.Language.ExpandableStringExpressionAst]
+$C = [System.Management.Automation.Language.CommandAst]
 
 $rawSiteFiles = @{}
 $formFiles = @{}
@@ -179,7 +190,7 @@ foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
   $tokens = $null; $errors = $null
   $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
   if ($errors.Count -gt 0) { "FAIL`t${rel}: does not parse: $($errors[0].Message)"; continue }
-  $cmds = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'docker' }, $true)
+  $cmds = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and @('docker', 'docker.exe') -contains $n.GetCommandName() }, $true)
   foreach ($cmd in $cmds) {
     $els = $cmd.CommandElements
     for ($i = 1; $i -lt $els.Count; $i++) {
@@ -219,9 +230,27 @@ foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
         }
         $expr = $assign.Right
       }
-      if ($form -eq 'short' -and -not $expr.Extent.Text.Contains('{{')) { continue }
+      if ($form -eq 'short') {
+        # `-f` passes a template only when a string in the expression holds `{{`
+        # and is its own text, not an argument to a command inside it (as in
+        # `$ids = docker ps --format '{{.ID}}'` before `docker rm -f $ids`).
+        $top = $expr
+        $own = @($expr.FindAll({ param($n) ($n -is $S -or $n -is $X) -and $n.Value.Contains('{{') }, $true) | Where-Object {
+            $p = $_.Parent; $inCmd = $false
+            while ($p -and -not [object]::ReferenceEquals($p, $top.Parent)) {
+              if ($p -is $C) { $inCmd = $true; break }
+              $p = $p.Parent
+            }
+            -not $inCmd })
+        if ($own.Count -eq 0) { continue }
+      }
       $bad = @($expr.FindAll({ param($n) $true }, $true) | Where-Object { $allowed -notcontains $_.GetType().Name })
       if ($bad.Count -gt 0) { "FAIL`t${site}: unsupported template expression ($($bad[0].GetType().Name)): $($expr.Extent.Text)"; continue }
+      $unbound = @($expr.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true) |
+          ForEach-Object { $_.VariablePath.UserPath } | Where-Object { -not $bindings.ContainsKey($_) } | Select-Object -Unique)
+      if ($unbound.Count -gt 0) {
+        "FAIL`t${site}: unbound variable `$$($unbound[0]) in $($expr.Extent.Text) (add a sample value to the bindings)"; continue
+      }
       # A bareword is an argument, not an expression, so it is evaluated as one.
       $code = if ($form -eq 'equals') { 'Write-Output ' + $expr.Extent.Text } else { $expr.Extent.Text }
       try {
@@ -299,19 +328,31 @@ PS
 
 		echo "Test: the parser walk finds every spelling of the flag and flags a quoted template"
 		# A fixture with each spelling clean and quoted, plus `-f` uses that are not
-		# templates. No tracked script spells `--format=` today, so this is the only
-		# place that spelling is exercised.
+		# templates. No tracked script spells `--format=` or `docker.exe` today, so
+		# this is the only place those are exercised. Lines 13-19 build a quoted
+		# template from variables named like the walk's own ($value, $path), which
+		# must fail as unbound rather than evaluate to the walk's values and pass.
 		mkdir -p "$WORK_ROOT/forms"
 		cat >"$WORK_ROOT/forms/forms.ps1" <<'FIXTURE'
 $name = 'probe'
 docker inspect --format '{{.A}}' $name
 docker inspect --format='{{.B}}' $name
 & docker info -f '{{.C}}'
+docker.exe info -f '{{.D}}'
 docker rm -f $name
 docker compose -f compose.yml up
+$ids = docker ps -q --format '{{.ID}}'
+docker rm -f $ids
 docker inspect --format '{{ index .Config.Labels "x" }}' $name
-docker inspect --format="{{ index .Config.Labels `"$name`" }}" $name
+docker inspect --format="{{ index .Config.Labels `"$Label`" }}" $name
 docker info -f '{{ index .Config.Labels "y" }}'
+function Get-M([string]$name) { $value = '"' + $name + '"'; docker inspect --format ('{{ index .Config.Labels ' + $value + ' }}') c }
+function Get-N([string]$label) {
+  $path = '"' + $label + '"'
+  docker inspect --format ('{{ index .Config.Labels ' + $path + ' }}') c
+}
+$fmt = '{{.Name}}' + $sep + '{{ index .Config.Labels ' + $value + ' }}'
+docker inspect --format $fmt c
 FIXTURE
 		printf 'forms.ps1\n' >"$WORK_ROOT/forms/files.txt"
 		fixture_out="$(PATH="$FAKE_DIR:$PATH" pwsh -NoProfile -NonInteractive -File "$WORK_ROOT/legacy.ps1" \
@@ -319,10 +360,12 @@ FIXTURE
 		got="$(printf '%s\n' "$fixture_out" | sed -n \
 			-e 's/^OK	\(forms\.ps1:[0-9]*\):.*/OK \1/p' \
 			-e 's/^FAIL	\(forms\.ps1:[0-9]*\): Legacy argv differs .*/FAIL \1/p' \
+			-e 's/^FAIL	\(forms\.ps1:[0-9]*\): unbound variable .*/UNBOUND \1/p' \
 			-e 's/^FAIL	\(forms\.ps1:[0-9]*\):.*/ERROR \1/p' | tr '\n' ' ')"
-		want="OK forms.ps1:2 OK forms.ps1:3 OK forms.ps1:4 FAIL forms.ps1:7 FAIL forms.ps1:8 FAIL forms.ps1:9 "
+		want="OK forms.ps1:2 OK forms.ps1:3 OK forms.ps1:4 OK forms.ps1:5 OK forms.ps1:8 FAIL forms.ps1:10 FAIL forms.ps1:11 FAIL forms.ps1:12 "
+		want+="UNBOUND forms.ps1:13 UNBOUND forms.ps1:16 UNBOUND forms.ps1:19 "
 		if [ "$got" = "$want" ]; then
-			ok "long, = and -f spellings checked; quoted ones flagged; non-template -f skipped"
+			ok "long, =, -f and docker.exe spellings checked; quoted ones flagged; non-template -f skipped; unbound variables fail"
 		else
 			ko "unexpected parser walk verdicts on the spelling fixture" "want: $want" "got:  $got" "$fixture_out"
 		fi

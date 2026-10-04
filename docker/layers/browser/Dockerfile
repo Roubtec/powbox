@@ -30,9 +30,10 @@
 #     directory is rejected; create those in a RUN);
 #   - use no ONBUILD: a trigger runs in the agent build, from the repo-root
 #     context, where it could read files the digest does not cover;
-#   - set none of the labels the bake target stamps (powbox.layers.* and
-#     powbox.commit.layers); a capability label the launcher reads, such
-#     as powbox.podman, belongs in the block that installs its tool;
+#   - set no powbox.* labels: the bake target and the base stamp them. The
+#     one exception is a capability label for a tool the set installs (such
+#     as powbox.podman, which full's Podman block declares): declare it in
+#     that tool's block, so deleting the block deletes the label;
 #   - keep the default backslash escape (no `# escape=` naming another).
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}

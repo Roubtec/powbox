@@ -9,10 +9,10 @@
 # sits in its own delimited block below, so a copy can be trimmed by deleting a
 # block together with that tool's probes in smoke-probes.txt and its notes in
 # agent-notes.md (and, for Podman or PostgreSQL, the file the block copies).
-# CI never builds it: Tier 1 exercises the layer-set chain
-# through the smaller `browser` set, Tier 0 only checks this directory against
-# the contract below, and the maintainer builds this set by hand and fixes it
-# when an install breaks.
+# CI never builds it: Tier 1 exercises the layer-set chain through the smaller
+# `browser` set, Tier 0 only checks this directory against the contract below,
+# and the maintainer builds this set by hand and fixes it when an install
+# breaks.
 #
 # The contract every layer Dockerfile follows (README "Layer sets"):
 #   - start with the two lines below, so the build scripts can pass the base,
@@ -32,9 +32,10 @@
 #     directory is rejected; create those in a RUN);
 #   - use no ONBUILD: a trigger runs in the agent build, from the repo-root
 #     context, where it could read files the digest does not cover;
-#   - set none of the labels the bake target stamps (powbox.layers.* and
-#     powbox.commit.layers); a capability label the launcher reads, such
-#     as powbox.podman, belongs in the block that installs its tool;
+#   - set no powbox.* labels: the bake target and the base stamp them. The
+#     one exception is a capability label for a tool the set installs (such
+#     as powbox.podman, which full's Podman block declares): declare it in
+#     that tool's block, so deleting the block deletes the label;
 #   - keep the default backslash escape (no `# escape=` naming another).
 ARG BASE_IMAGE=powbox-agent-base:latest
 FROM ${BASE_IMAGE}
@@ -251,8 +252,8 @@ RUN OPA_VERSION=1.18.2 \
 # build (no global CC/CXX or masquerade-PATH interposition here) — projects
 # activate it with `CC="ccache gcc"` or `cmake -DCMAKE_C_COMPILER_LAUNCHER=ccache`.
 # Pure build-time packages: no entrypoint, sudoers, or firewall interaction.
-# Placed low so it never busts the expensive gh / mssql / pwsh / npm / Podman /
-# Go / OPA layers above it.
+# Placed low so it never busts the expensive gh / mssql / pwsh / npm / Go / OPA
+# layers above it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
@@ -344,9 +345,9 @@ ENV XDG_RUNTIME_DIR=/home/node/.local/run
 # Capability flag for the launcher: scripts/launch-agent.{sh,ps1} start the
 # image-store writer, which runs the seeder above, only for an agent image that
 # carries this label, so an image without Podman does not start a container on
-# every launch just to find no seeder. It lives in this block so that deleting the block from a
-# copy of this set deletes the label with it. The smoke test's Stage 3 fails
-# an image whose label and podman binary disagree.
+# every launch just to find no seeder. It lives in this block so that deleting
+# the block from a copy of this set deletes the label with it. The smoke test's
+# Stage 3 fails an image whose label and podman binary disagree.
 LABEL powbox.podman="1"
 
 # >>> browser stack. Two committed sets install it, `browser` and `full`, from

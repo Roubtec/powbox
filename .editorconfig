@@ -14,8 +14,9 @@ root = true
 # Shell scripts follow shfmt's own defaults — tab indentation, normalized
 # arithmetic spacing, single-space comment separation. That is not an arbitrary
 # pick: 53 of the 57 tracked *.sh files already match it, as do all the
-# extensionless helpers in docker/shared/ except pg-dev-up, whose indented `case`
-# bodies AGENTS.md records as accepted house style.
+# extensionless helpers in docker/shared/. The extensionless
+# docker/layers/full/pg-dev-up does not: its indented `case` bodies are what
+# AGENTS.md records as accepted house style.
 #
 # The remaining outliers (entrypoint-claude-hook.sh, entrypoint-codex-hook.sh,
 # pnpm-shadow-wrapper.sh, shell/powbox.sh) predate this file and are left alone;

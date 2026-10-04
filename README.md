@@ -53,9 +53,9 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: the lean base image (Node.js, Python, Git, the shell utilities, PostgreSQL 16, and more) used by the unified agent image
+- `docker/base/Dockerfile`: the lean base image (Node.js, Python, Git, the shell utilities, pandoc with the Typst PDF engine, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
-- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle of language toolchains, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
+- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle of language toolchains, PostgreSQL, rootless Podman and the browser stack, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -103,8 +103,8 @@ Examples:
 The base image is kept to what every user needs; heavier toolchains can live in an optional **layer set**, a Dockerfile under `docker/layers/<set>/` that is baked into `powbox-agent-layers:latest` between the base and the agent image. Exactly one set is selected, or none:
 
 - No `.powbox-layers` file, or one holding only blank and `#` lines: no set. The agent image is built directly on the lean base, and no layer-set image is built.
-- `full`: the maintainer's bundle in `docker/layers/full/`, the language toolchains the lean base leaves out: Go with `golangci-lint`, the .NET SDK 10, PowerShell with PSScriptAnalyzer, PHP 8.4 with composer, OPA, `sqlcmd`/`bcp`, and the CMake/Ninja/ccache native-build tools. CI never builds it: the maintainer builds it by hand, and CI only checks it against the contract below.
-- `browser`: a headless browser stack in `docker/layers/browser/`, for turning Marp decks, Mermaid diagrams and HTML pages into PDF or SVG. It is a separate, smaller set, not a layer under `full`, and it is the set CI builds and smoke-tests. It ships no tools yet.
+- `full`: the maintainer's bundle in `docker/layers/full/`, the tools the lean base leaves out: the language toolchains (Go with `golangci-lint`, the .NET SDK 10, PowerShell with PSScriptAnalyzer, PHP 8.4 with composer, OPA, `sqlcmd`/`bcp`, and the CMake/Ninja/ccache native-build tools), PostgreSQL 16 with `pg-dev-up`, rootless Podman (see [Nested Containers](#nested-containers-rootless-podman)), and the same browser stack as `browser`. CI never builds it: the maintainer builds it by hand, and CI only checks it against the contract below.
+- `browser`: a headless browser stack in `docker/layers/browser/`, for turning Marp decks, Mermaid diagrams and HTML pages into PDF or SVG: Chromium, Marp CLI, Mermaid CLI and the Playwright CLI, installed from blocks the `full` set carries identical copies of (`scripts/test-layer-sets.sh` fails when they drift), and nothing for Podman or PostgreSQL. It is a separate, smaller set, not a layer under `full`, and it is the set CI builds and smoke-tests.
 - `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of a committed set; `browser` is the smaller starting point.
 - Any other directory under `docker/layers/` with a `Dockerfile` can be named the same way.
 
@@ -131,7 +131,7 @@ A layer Dockerfile follows a small contract, which each committed set's Dockerfi
 - A `RUN --mount=` that is a bind mount without `from=` reads the build context, file modes included, so it is rejected. A bind is the default mount type, so `--mount=target=/ctx` counts as well as `--mount=type=bind,target=/ctx`. A bind `from=<stage-or-image>` and a `type=cache`, `tmpfs`, `secret` or `ssh` mount stay allowed; to use a set's file at build time, `COPY --chmod=<mode>` it in, or into a builder stage that a later bind mounts `from=`. The check reads the flags as BuildKit does, and treats a `type=` or `from=` it cannot settle without expanding variables or quotes as a context bind.
 - It uses no `ONBUILD`. A trigger runs when the agent image is built on the layer image, from the agent build's context (the repo root), so it could read files the set's digest never sees; any `ONBUILD` line is rejected before the build, and a layer image that records a trigger anyway is refused right after the bake, before an agent is built on it.
 - An optional `agent-notes.md` beside the Dockerfile tells the agents what the set adds; without it they find the set's tools only by probing `PATH`. See [Updating Agent Instructions](#updating-agent-instructions).
-- It sets no `powbox.*` labels: the bake target stamps `powbox.layers.set`, `powbox.layers.digest` (a sha256 over every file in the set directory, from `scripts/layers-digest.{sh,ps1}`), `powbox.layers.base.id` (the ID of the base it was built on) and `powbox.commit.layers`. The agent image inherits them.
+- It sets none of the labels the bake target stamps: `powbox.layers.set`, `powbox.layers.digest` (a sha256 over every file in the set directory, from `scripts/layers-digest.{sh,ps1}`), `powbox.layers.base.id` (the ID of the base it was built on) and `powbox.commit.layers`. The agent image inherits them. A capability label the launcher reads belongs in the block that installs its tool, so deleting the block deletes the label: `full`'s Podman block declares `powbox.podman`, without which the launcher starts no image-store writer (see [Nested Containers](#nested-containers-rootless-podman)).
 
 The `agent` target bakes the layer-set image only when it is not current: when it is missing, was built from another set, its recorded digest differs from the working tree's, or it was built on a base other than the present `powbox-agent-base:latest` (by recorded image ID, and by its filesystem layers starting with the base's). So `./build.sh base` followed by `./build.sh agent` (or `./build.sh agent --pull`) rebuilds the set on the new base before the agent, and an unchanged set is reused as is. The `all` and `layers` targets always bake it, from cache unless `--no-cache` is given.
 
@@ -346,16 +346,16 @@ For the specific case of a **delegated peer review**, the baked `peer-review-run
 
 ## Nested Containers (rootless Podman)
 
-The image ships **rootless [Podman](https://podman.io/)** so an in-sandbox agent can build, run, and orchestrate its own containers — databases, Adminer, whole service stacks — for projects whose dev workflow depends on them. A `docker` shim and `podman compose` mean `docker` / `docker compose` commands and project scripts work unchanged.
+An image built with the `full` [layer set](#layer-sets) ships **rootless [Podman](https://podman.io/)** so an in-sandbox agent can build, run, and orchestrate its own containers — databases, Adminer, whole service stacks — for projects whose dev workflow depends on them. A `docker` shim and `podman compose` mean `docker` / `docker compose` commands and project scripts work unchanged. The lean base and the `browser` set do not ship Podman; the engine config drop-in (`docker/layers/full/containers.conf`) and the image-store seeder (`docker/layers/full/seed-image-store.sh`) live in the `full` set beside its Podman block.
 
 This is deliberately **not** Docker-in-Docker or a mounted host socket — both of which would hand a runaway agent the keys to the host. Podman runs as the unprivileged `node` user through a user namespace, so the blast radius stays inside the container: no privileged daemon, no host socket. As a bonus, rootless Podman NATs nested containers' outbound traffic through this container's network namespace, so they **inherit the egress firewall** — nested containers reach the public internet but not your LAN or host, just like the agent.
 
 - **Persistence:** a per-container `agent-podman-<agent>-<project>` volume backs Podman's storage at `/home/node/.local/share/containers`, so pulled images and `podman volume`s (e.g. a database's data) survive container restarts. It's keyed per outer container (agent + project), not just per project, so a project's Claude and Codex containers can run concurrently without two Podman instances sharing — and corrupting — one graphroot.
-- **Shared image cache:** a single global `agent-podman-imagestore` volume (layered under every per-container graphroot via Podman's `additionalimagestores`) holds a small curated set of common dev images — `postgres`, `redis`, `mariadb`, `adminer` — so they resolve instantly without a per-container pull. Agent containers mount it **read-only**; it is populated by a dedicated, short-lived writer the launcher spawns on each launch (the only context that mounts it read-write), so a runaway agent in one project can't poison the cache every other project reads. Seeding is idempotent and quick once populated. Override the curated set with `POWBOX_IMAGE_STORE_IMAGES`; to force a refresh, remove the `agent-podman-imagestore` volume and relaunch.
+- **Shared image cache:** a single global `agent-podman-imagestore` volume (layered under every per-container graphroot via Podman's `additionalimagestores`) holds a small curated set of common dev images — `postgres`, `redis`, `mariadb`, `adminer` — so they resolve instantly without a per-container pull. Agent containers mount it **read-only**; it is populated by a dedicated, short-lived writer the launcher spawns on each launch that creates a container (the only context that mounts it read-write), so a runaway agent in one project can't poison the cache every other project reads. The launcher starts that writer only when the host passes `/dev/fuse` and the agent image carries the `powbox.podman` label, which `full`'s Podman block declares; the writer runs with the container label `powbox.image-store-role=writer`, so `docker events --filter label=powbox.image-store-role=writer` shows whether one started. Seeding is idempotent and quick once populated. Override the curated set with `POWBOX_IMAGE_STORE_IMAGES`; to force a refresh, remove the `agent-podman-imagestore` volume and relaunch.
 - **Access pattern:** reach a nested service from the agent via its **published port on `localhost`**; container-to-container (e.g. within a compose stack) uses service names over netavark/aardvark-dns.
 - **Container health checks:** Compose/`podman run` health checks are supported, but the sandbox has **no systemd**, so Podman never fires the *periodic* check on its own — a service's health status stays at `starting` until the check is run explicitly (`podman healthcheck run <container>`). Also, `podman-compose` shell-wraps exec-form checks (`["CMD", …]` → `/bin/sh -c …`), so a **distroless** service needs a shell-reachable check binary. See [docs/rootless-podman.md](docs/rootless-podman.md) "Compose health-check behavior" for the validated scope; the Podman smoke stage guards it.
 - **Storage driver:** fuse-overlayfs when `/dev/fuse` is available, otherwise the slower `vfs` driver. The driver is **pinned per `agent-podman-*` volume on first init** (recorded on the volume) and honoured on every later launch — it is not re-chosen each start, so a store first initialised on `vfs` (or moved to a host without `/dev/fuse`) won't silently flip; switching needs a clean store (`podman system reset` or dropping the volume).
-- **Devices:** rootless Podman needs two host devices — `/dev/fuse` (overlay storage driver) and `/dev/net/tun` (nested-container networking; without it default `podman run` can't bring up its network). Both are passed through under the single `POWBOX_PODMAN` gate: `auto` attaches each when the host exposes it, `on` forces both (Docker Desktop), `off` skips both.
+- **Devices:** rootless Podman needs two host devices — `/dev/fuse` (overlay storage driver) and `/dev/net/tun` (nested-container networking; without it default `podman run` can't bring up its network). Both are passed through under the single `POWBOX_PODMAN` gate: `auto` attaches each when the host exposes it, `on` forces both (Docker Desktop), `off` skips both. The launcher passes them whatever the image holds, an image without Podman included: the device set is frozen when a container is created, so gating it on the image would recreate containers on every switch of layer set, and the devices keep a session-time `apt-get install podman` workable.
 
 If `auto` cannot see devices that the Docker daemon or VM can still expose, force the Podman device overlays from your PowerShell profile before sourcing the PowBox helpers:
 
@@ -1045,9 +1045,9 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to Tier 1. The current 16-suite set is `test-claude-hook-skew.sh`,
+  routed to the smoke test. The current 17-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
-  `test-layer-sets.sh`, `test-peer-review-run.sh`,
+  `test-image-store-writer-gate.sh`, `test-layer-sets.sh`, `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-seed-marker-source.sh`,
   `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
   `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
@@ -1067,12 +1067,14 @@ workflows keep cost proportional to the change:
   The source `wf-check` suite needs the helper's exact Acorn 8.15.0 and
   acorn-walk 8.3.4 pins, so the job installs them without lifecycle scripts in a
   throwaway npm prefix and exposes only those private module paths to the test.
-  Four suites are explicitly routed to Tier 1 instead: `test-gh-review-threads.sh`
+  Four suites are explicitly routed to the smoke test instead: `test-gh-review-threads.sh`
   and `test-dc-helpers.sh` need their separately fetched/baked helpers
   (`gh-review-threads`, and the `dc-enter`/`dc-remove` pair),
   `test-pnpm-shadow-wrapper.sh` needs the image's writable `/workspace`
   production root, and `test-pg-dev-up-scoped.sh` starts real PostgreSQL daemons
-  using the baked server binaries. Deliberate Stage 0 repeats target baked artifacts; Tier 0
+  using the server binaries only the `full` set bakes. Tier 1's smoke runs the
+  first three; it builds no image with PostgreSQL, so only the maintainer's host
+  smoke run against a `full` image runs the fourth. Deliberate Stage 0 repeats target baked artifacts; Tier 0
   targets `/repo` source, so those are two-target checks rather than duplicate runs.
 - **Tier 1 — only on image-affecting paths** (`.github/workflows/native-linux-build.yml`):
   builds and smokes two images in two sequential passes, lean first — the lean
@@ -1093,10 +1095,13 @@ workflows keep cost proportional to the change:
   wrong parent fails rather than smoking the same image twice. Each pass runs
   `./commands/smoke-test.sh` under
   `POWBOX_SMOKE_REQUIRE_IMAGE=1`, so an absent image is a hard error instead of a
-  run whose image-gated checks self-skip into a false green. That flag reaches
-  only the image-dependent skips — the hosted runner still exposes no
-  `/dev/net/tun`, so Stage 3's nested half self-skips there and a green Tier 1 is
-  a partial smoke (see "What CI covers vs. what stays VPS-only" below). A
+  run whose image-gated checks self-skip into a false green. Neither image has
+  PostgreSQL or Podman, which only `full` installs, so both passes report
+  Stage 2 (`pg-dev-up`) and Stage 3 (rootless Podman) as not applicable, which
+  does not make a run partial: those stages, `scripts/test-pg-dev-up-scoped.sh`
+  and Stage 3's `powbox.podman` label check run only in the maintainer's host
+  smoke run against a `full` image (see "What CI covers vs. what stays
+  VPS-only" below). A
   final, stricter smoke step then runs `scripts/smoke-test-worktree-metadata.ps1`
   once, against the `browser` image, because the Bash umbrella never invokes the
   PowerShell mirror and this runner is the only automated configuration where
@@ -1105,8 +1110,9 @@ workflows keep cost proportional to the change:
   triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
   `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image*` /
   `scripts/layers-*` / `scripts/smoke-test*` / `commands/smoke-test.*`
-  entrypoints and the four
-  `scripts/test-*.sh` suites routed to Tier 1 above, except anything under
+  entrypoints and three of the four `scripts/test-*.sh` suites routed to the
+  smoke test above (not `test-pg-dev-up-scoped.sh`, which no Tier 1 image can
+  run), except anything under
   `docker/layers/full/**`, which the last `paths:` entry excludes (a PR that
   changes only `full` runs Tier 0 alone); skill/docs PRs run
   Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
@@ -1136,15 +1142,17 @@ VPS-validated (the VPS remains the backstop either way):
 - **Egress firewall against real CGNAT ranges** and the netcup cloud-firewall
   interplay (PR #52's class) — hosted-runner networking differs.
 - **FUSE / overlay storage performance** characteristics.
-- **Nested rootless Podman that needs `/dev/net/tun` + `/dev/fuse`** — unreliable
-  on hosted runners, so the smoke test's Podman stage self-skips its nested-run
-  checks there and validates only the static engine wiring.
+- **Rootless Podman and PostgreSQL** — only the `full` set installs them, and CI
+  never builds it, so the smoke test's Stage 2 (`pg-dev-up`) and Stage 3 (the
+  Podman engine, whose nested half also needs `/dev/net/tun` + `/dev/fuse`)
+  run only in the maintainer's host smoke run against a `full` image.
 - **Long-lived-host behavior** (a persistent VPS over time).
 
-Fuller coverage of the first and third items is possible later by pointing the
-same Tier-1 workflow at a **self-hosted runner** (which can expose
-`/dev/net/tun` + `/dev/fuse` and, with `NET_ADMIN`, exercise the firewall) — more
-setup and a maintained runner, but the workflow itself runs there unchanged.
+Fuller coverage of the first item is possible later by pointing the same Tier-1
+workflow at a **self-hosted runner** (which, with `NET_ADMIN`, can exercise the
+firewall) — more setup and a maintained runner, but the workflow itself runs
+there unchanged. Covering the third would also need the workflow to build
+`full`, on a runner that can expose `/dev/net/tun` + `/dev/fuse`.
 
 ## License
 

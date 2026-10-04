@@ -1,5 +1,7 @@
 # Hand-off: shared read-only Podman image store (`additionalimagestores`)
 
+> **Where the files live now.** The seeder is `docker/layers/full/seed-image-store.sh` and the engine drop-in `docker/layers/full/containers.conf`; the `full` layer set's "Rootless Podman" block (`docker/layers/full/Dockerfile`) bakes both, and `pg-dev-up` moved to `docker/layers/full/pg-dev-up`. The lean base and the `browser` set carry no Podman, so the launcher starts the writer only for an agent image carrying the `powbox.podman` label that block declares. The dated state and prerequisite notes, the applied wiring checklist with its diff blocks and the validation records below keep the paths of their time (`docker/shared/…`, `docker/base/Dockerfile`).
+
 **Status:** image-store wiring **APPLIED** (steps 1–5 below) and **VALIDATED on the
 trixie/Podman-5.4.2 base** (2026-06-07 post-rebuild). On the rebuilt container the
 store is overlay, seeded (`.powbox-image-store-seeded` present), and all four curated
@@ -117,9 +119,17 @@ Writable stays per-container; only cached base layers are shared.
   everywhere → max dedup). Writable graphroots remain per-container.
 - **Seeded by a dedicated writer, consumed read-only** (REVISED — see the
   callout under "Wiring checklist"). A single bash worker
-  (`docker/shared/seed-image-store.sh`) does the seeding, but it runs in a
+  (`docker/layers/full/seed-image-store.sh`) does the seeding, but it runs in a
   short-lived, detached **writer container** the launcher spawns — the only
-  context that mounts the store read-write. Agent containers mount it read-only,
+  context that mounts the store read-write. The launcher starts it only when the
+  host passes `/dev/fuse` and the agent image carries the `powbox.podman` label,
+  and runs it with the container label `powbox.image-store-role=writer` (named
+  after its `POWBOX_IMAGE_STORE_ROLE=writer`), which tells it apart from the
+  volume-prep container, the other anonymous compose one-off the launch starts
+  from the same image: `docker events --filter type=container --filter
+  event=create --filter label=powbox.image-store-role=writer` shows whether a
+  launch started one. It is a container label rather than an image one, because
+  a container inherits its image's labels. Agent containers mount it read-only,
   so nothing in a normal agent can mutate the shared store. (The earlier plan ran
   the seed in-agent in the background with a `reseed-images` zsh alias; both were
   dropped once the consumer mount became read-only — an in-agent process can no
@@ -139,7 +149,7 @@ Writable stays per-container; only cached base layers are shared.
   PowerShell launcher mirrors the bash one; `docker/shared/entrypoint-core.sh`
   records the chosen storage driver per volume (no silent overlay↔vfs flips); and
   `commands/prune-volumes.{sh,ps1}` discover and prune the `agent-podman-*` family.
-- **`docker/shared/seed-image-store.sh`** — the in-container seeder worker
+- **`docker/layers/full/seed-image-store.sh`** — the in-container seeder worker
   (`seed` / `update` / `list` / `status`). Inert until baked + invoked. Its
   non-podman paths are tested; the `podman --root` calls are marked `VALIDATE`.
 

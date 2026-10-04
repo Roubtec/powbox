@@ -23,19 +23,24 @@
 # With pwsh available, every `docker` or `docker.exe` call in a tracked *.ps1
 # that passes a template as `--format <expr>`, `--format=<text>` or `-f <expr>`
 # (the last only when the expression holds `{{` outside any command nested in
-# it, since `docker rm -f $name` is no template) is also found through the PowerShell
-# parser, its template (or the `$fmt` assignment it names) evaluated with sample
-# values, and the result handed to a fake docker under both
-# $PSNativeCommandArgumentPassing = 'Legacy' (the passing Windows PowerShell 5.1
-# uses) and 'Standard'. A template may use only string literals, operators,
-# parentheses and the variables given a sample value; any other variable or
-# shape fails loudly. The walk misses a docker call it cannot name statically
-# (such as `& $docker`), a splatted one (`docker @a`), and an `-f` template whose
-# `{{` is in neither the expression nor the assignment it names; the regex guard
-# still scans the template text of all three. On Linux, Legacy passing builds one Windows-style
-# command line that .NET splits back into argv by the Windows rules, so it
-# reproduces the quote stripping; a control template with an embedded `"` must
-# come out changed, or the check skips honestly instead of passing vacuously.
+# it, since `docker rm -f $name` is no template) is also found through the
+# PowerShell parser, its template evaluated with sample values, and the result
+# handed to a fake docker under both $PSNativeCommandArgumentPassing = 'Legacy'
+# (the passing Windows PowerShell 5.1 uses) and 'Standard'. A template held in
+# a variable is evaluated from the last assignment to it that ends before the
+# call, anywhere in the enclosing function or file (nested blocks included), so
+# an earlier assignment on another branch goes unevaluated, though the regex
+# guard still scans its text. A template may use only string literals,
+# operators, parentheses and the variables given a sample value; any other
+# variable or shape fails loudly. The walk misses a docker call it cannot name
+# statically (`& $docker`, or a path-qualified `C:\...\docker.exe`), a splatted
+# one (`docker @a`), and an `-f` template whose `{{` is in neither the
+# expression nor the assignment it names; the regex guard still scans the
+# template text of all of these. On Linux, Legacy passing builds one
+# Windows-style command line that .NET splits back into argv by the Windows
+# rules, so it reproduces the quote stripping; a control template with an
+# embedded `"` must come out changed, or the check skips honestly instead of
+# passing vacuously.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -139,7 +144,6 @@ SHIM
 param([string]$Root, [string]$ListFile, [string]$ArgvFile)
 $ErrorActionPreference = 'Stop'
 $env:FAKE_ARGV = $ArgvFile
-$L = [System.Management.Automation.Language.Ast]
 
 # The argv the fake docker received for `docker inspect --format <value> probe`.
 function Get-FakeArgv([string]$Mode, [string]$Value) {

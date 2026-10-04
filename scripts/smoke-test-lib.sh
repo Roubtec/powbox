@@ -1,15 +1,16 @@
 # shellcheck shell=bash
 # Helpers sourced by commands/smoke-test.sh: the layer-set probe stage
 # (Stage 1b), the capability gate that decides whether Stages 2 and 3 apply to
-# the image, and the end-of-run banner. scripts/smoke-test-lib.ps1 is the
-# PowerShell mirror and must agree with this file case for case, message for
-# message (a hyphen where this file has an em dash, as in the umbrellas).
+# the image, Stage 3's check that the image's powbox.podman label agrees with
+# its podman binary, and the end-of-run banner. scripts/smoke-test-lib.ps1 is
+# the PowerShell mirror and must agree with this file case for case, message
+# for message (a hyphen where this file has an em dash, as in the umbrellas).
 #
 # They live here rather than inline so scripts/test-smoke-probe-wrapper.sh can
-# drive them against a fake `docker`: while Stage 1's core list still asserts
-# pg-dev-up and podman, an image without them stops at Stage 1, so the
-# not-applicable paths are unreachable end to end and only a fake can cover
-# them.
+# drive them against a fake `docker`, which reaches every case without a built
+# image: the lean and browser images reach the not-applicable paths for real,
+# but only an image of a set that installs Podman (full) reaches the others,
+# and CI builds no such image.
 #
 # The callers own two arrays these functions append to: `skipped` (whole or
 # partial stages that did not run, which make the run PARTIAL) and
@@ -140,6 +141,37 @@ smoke_gate() {
 	esac
 }
 
+# smoke_podman_label_check <image> <gate>: Stage 3's label check. <gate> is
+# smoke_gate's answer for podman: `na` when the image has no podman on its
+# PATH, `run` or `skip` when it has. Returns 1, with a message, when the image's
+# powbox.podman label and its podman binary disagree, or when the labels cannot
+# be read. scripts/launch-agent.{sh,ps1} start the shared image-store writer
+# only for an image that carries the label (with any value but an empty one),
+# so an image with Podman but no label silently loses the shared image store,
+# and one with the label but no Podman starts a writer with nothing to run. It
+# reads only the image's labels, so it runs whatever the stage's skip controls
+# say.
+smoke_podman_label_check() {
+	local label
+	if ! label="$(smoke_image_label "$1" powbox.podman)"; then
+		echo "ERROR: could not read the labels of image '$1' to compare its powbox.podman label with its podman binary." >&2
+		return 1
+	fi
+	if [ "$2" = na ]; then
+		if [ -n "$label" ]; then
+			echo "ERROR: image '$1' carries the powbox.podman label but has no podman on its PATH, so the launcher would start an image-store writer on every launch with nothing to run. Declare the label only in the block that installs Podman." >&2
+			return 1
+		fi
+		echo "Stage 3 label check: image '$1' has neither podman nor the powbox.podman label."
+	else
+		if [ -z "$label" ]; then
+			echo "ERROR: image '$1' has podman on its PATH but no powbox.podman label, so the launcher would never seed the shared image store for its containers. Declare LABEL powbox.podman=\"1\" in the block that installs Podman." >&2
+			return 1
+		fi
+		echo "Stage 3 label check: image '$1' has podman and the powbox.podman label."
+	fi
+}
+
 # smoke_layer_stale_check <image> <repo-root> <rel> [<then>]: warn when the
 # image's powbox.layers.digest label differs from the working tree's digest of
 # <rel>, the set directory; <then>, when given, ends the warning. An image
@@ -249,8 +281,8 @@ smoke_print_banner() {
 		echo "unset it to run them, and set POWBOX_SMOKE_REQUIRE_IMAGE=1 to also"
 		echo "fail on a missing image. The rest were decided at runtime by the"
 		echo "host or the working tree — nothing was set to skip them, and"
-		echo "unsetting a variable will not recover them: hosted CI has no"
-		echo "/dev/net/tun, so Stage 3's nested half self-skips there. See"
+		echo "unsetting a variable will not recover them: on a host without"
+		echo "/dev/net/tun, for example, Stage 3's nested half self-skips. See"
 		echo "docs/smoke-tests.md."
 		echo "==========================================================="
 	elif [ "${#not_applicable[@]}" -gt 0 ]; then

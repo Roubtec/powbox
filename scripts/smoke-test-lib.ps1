@@ -1,15 +1,17 @@
 # Helpers dot-sourced by commands/smoke-test.ps1: the layer-set probe stage
 # (Stage 1b), the capability gate that decides whether Stages 2 and 3 apply to
-# the image, and the end-of-run banner. Mirror of scripts/smoke-test-lib.sh -
-# keep the two in lockstep, case for case and message for message. This file
-# is ASCII-only, so it uses a hyphen wherever the .sh uses an em dash (a
-# non-ASCII byte would force a UTF-8 BOM, AGENTS.md -> "File Conventions").
+# the image, Stage 3's check that the image's powbox.podman label agrees with
+# its podman binary, and the end-of-run banner. Mirror of
+# scripts/smoke-test-lib.sh - keep the two in lockstep, case for case and
+# message for message. This file is ASCII-only, so it uses a hyphen wherever the
+# .sh uses an em dash (a non-ASCII byte would force a UTF-8 BOM, AGENTS.md ->
+# "File Conventions").
 #
 # They live here rather than inline so scripts/test-smoke-probe-wrapper.sh can
-# drive them against a fake `docker`: while Stage 1's core list still asserts
-# pg-dev-up and podman, an image without them stops at Stage 1, so the
-# not-applicable paths are unreachable end to end and only a fake can cover
-# them.
+# drive them against a fake `docker`, which reaches every case without a built
+# image: the lean and browser images reach the not-applicable paths for real,
+# but only an image of a set that installs Podman (full) reaches the others,
+# and CI builds no such image.
 #
 # The callers own two lists these functions append to: $skipped (whole or
 # partial stages that did not run, which make the run PARTIAL) and
@@ -109,6 +111,37 @@ function Get-SmokeGate {
   if (-not $has) { return 'na' }
   if ($SkipRequested) { return 'skip' }
   return 'run'
+}
+
+# Stage 3's label check. $Gate is Get-SmokeGate's answer for podman: 'na'
+# when the image has no podman on its PATH, 'run' or 'skip' when it has. Throws
+# when the image's powbox.podman label and its podman binary disagree, or when
+# the labels cannot be read. scripts/launch-agent.{sh,ps1} start the shared
+# image-store writer only for an image that carries the label (with any value
+# but an empty one), so an image with Podman but no label silently loses the
+# shared image store, and one with the label but no Podman starts a writer with
+# nothing to run. It reads only the image's labels, so it runs whatever the
+# stage's skip controls say.
+function Assert-SmokePodmanLabel {
+  param([string]$Image, [string]$Gate)
+  try {
+    $label = Get-SmokeImageLabel -Image $Image -Label 'powbox.podman'
+  }
+  catch {
+    throw "could not read the labels of image '$Image' to compare its powbox.podman label with its podman binary."
+  }
+  if ($Gate -eq 'na') {
+    if ($label) {
+      throw "image '$Image' carries the powbox.podman label but has no podman on its PATH, so the launcher would start an image-store writer on every launch with nothing to run. Declare the label only in the block that installs Podman."
+    }
+    Write-Host "Stage 3 label check: image '$Image' has neither podman nor the powbox.podman label."
+  }
+  else {
+    if (-not $label) {
+      throw "image '$Image' has podman on its PATH but no powbox.podman label, so the launcher would never seed the shared image store for its containers. Declare LABEL powbox.podman=`"1`" in the block that installs Podman."
+    }
+    Write-Host "Stage 3 label check: image '$Image' has podman and the powbox.podman label."
+  }
 }
 
 # Warns when the image's powbox.layers.digest label differs from the working
@@ -225,8 +258,8 @@ function Write-SmokeBanner {
     Write-Host "-RequireImage to also fail on a missing image. The rest were"
     Write-Host "decided at runtime by the host or the working tree - nothing was"
     Write-Host "set to skip them, and dropping a switch or unsetting a variable"
-    Write-Host "will not recover them: hosted CI has no /dev/net/tun, so Stage 3's"
-    Write-Host "nested half self-skips there. See docs/smoke-tests.md."
+    Write-Host "will not recover them: on a host without /dev/net/tun, for example,"
+    Write-Host "Stage 3's nested half self-skips. See docs/smoke-tests.md."
     Write-Host "==========================================================="
   }
   elseif ($NotApplicable.Count -gt 0) {

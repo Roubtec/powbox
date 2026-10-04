@@ -5,7 +5,7 @@
 #
 # It adds the language toolchains the lean base leaves out. Each sits in its
 # own delimited block below, so a copy can be trimmed by deleting a block
-# together with that tool's probes in smoke-probes.txt and its section of
+# together with that tool's probes in smoke-probes.txt and its notes in
 # agent-notes.md. CI never builds it: Tier 1 exercises the layer-set chain
 # through the smaller `browser` set, Tier 0 only checks this directory against
 # the contract below, and the maintainer builds this set by hand and fixes it

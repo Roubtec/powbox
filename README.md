@@ -1012,6 +1012,7 @@ PowerShell's house rules live separately in `PSScriptAnalyzerSettings.psd1` — 
 The two checks below differ in reach: Markdown lint is local-only, while `shfmt` also runs as an advisory Tier 0 step — so read this section alongside "Continuous Integration" rather than as part of it.
 
 `.markdownlint.jsonc` carries the Markdown rule set — shared in spirit with the other Roubtec projects, with powbox-specific deviations noted inline — and `.markdownlint-cli2.jsonc` carries only the ignore globs for generated, vendored and container-local trees.
+One directory refines the rule set: `docker/layers/.markdownlint.jsonc` extends it and turns off MD041 (first line must be a top-level heading) for the layer sets' `agent-notes.md` fragments, which the build appends under a heading of its own; it sits above the set directories so it never enters a set's build context or digest.
 Run it with `markdownlint-cli2 "**/*.md"`; the agent image bakes `markdownlint-cli2` 0.23.2, and a repository pin or wrapper stays authoritative wherever one exists.
 Markdown lint is **not** a CI gate today: no workflow lints this repo's Markdown, so its findings are advisory until someone adds the step.
 Tier 1's smoke test does invoke `markdownlint-cli2`, but only to probe that the binary is baked at its pinned version — it lints a throwaway file, never the repository.

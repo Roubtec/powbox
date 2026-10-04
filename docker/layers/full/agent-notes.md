@@ -1,5 +1,3 @@
-<!-- markdownlint-disable-file MD041 -->
-
 | Category | Tools |
 |----------|-------|
 | Core runtime | `php`, `composer` |

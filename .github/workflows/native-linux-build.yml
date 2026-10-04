@@ -152,9 +152,10 @@ jobs:
       # image: any change under docker/shared/** or to .dockerignore (which
       # filters the build context feeding every base COPY, so a change there
       # can alter or break a base-only COPY input) busts the key even for files
-      # used only by the agent layer (a harmless extra base rebuild). It covers every file scripts/base-source-files.txt lists; the
-      # layer-set selector and digest are deliberately absent, since the base
-      # build never reads them.
+      # used only by the agent layer (a harmless extra base rebuild). It covers
+      # every file scripts/base-source-files.txt lists; the layer-set selector
+      # and digest are deliberately absent, since the base build never reads
+      # them.
       #
       # The layers key covers the `browser` set, the one Tier 1 builds, and
       # also carries its digest, the value build.sh stamps as

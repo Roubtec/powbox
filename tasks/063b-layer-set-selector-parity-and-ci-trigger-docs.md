@@ -23,7 +23,7 @@ The user writes the selector file, so the severity is low. It is still a parity 
 
 Task 067 added `scripts/stage-agent-template.*` to the `paths:` filter of `.github/workflows/native-linux-build.yml`, so that a PR changing only the staging script runs Tier 1.
 README "Continuous Integration" lists what triggers Tier 1, and that list does not name the staging script. It implies such a PR runs Tier 0 alone.
-While touching that sentence, check it against the rest of the workflow's `paths:` filter, so it is a faithful summary rather than one that drifts again.
+The sentence currently reads as a complete list, which is what lets it drift whenever the filter changes. The workflow's `paths:` filter is the source of truth, so the sentence should summarize it, say where the authoritative list lives, and stop claiming to be exhaustive.
 
 ## Scope
 
@@ -31,7 +31,7 @@ While touching that sentence, check it against the rest of the workflow's `paths
 
 - Make the PowerShell selector's blank-line and comment-line tests ordinal, so they classify exactly the lines the bash selector does.
 - Add selector cases to the existing bash/PowerShell parity coverage in `scripts/test-layer-sets.sh` for ignorable code points: a lone ignorable line, an ignorable line before a valid name, and an ignorable character before `#`. Both languages must reject each one the same way.
-- Bring README "Continuous Integration"'s Tier 1 trigger sentence in line with the workflow's `paths:` filter, including the staging script.
+- Reword README "Continuous Integration"'s Tier 1 trigger sentence as a summary that points at the workflow's `paths:` filter as the authoritative list, mentioning the staging script.
 
 **Out of scope:**
 
@@ -43,11 +43,10 @@ While touching that sentence, check it against the rest of the workflow's `paths
 - Every ignorable-code-point selector case makes `layers-select.sh` and `layers-select.ps1` both fail, with matching stderr, as the existing parity cases do.
 - The existing selector cases still pass unchanged.
 - `scripts/test-layer-sets.sh` passes with `pwsh` present.
-- README's Tier 1 trigger sentence names every path family the workflow's `paths:` filter triggers on, the staging script included.
-- `.ps1` encoding conventions hold: CRLF line endings, and a BOM if the file contains non-ASCII characters.
+- README's Tier 1 trigger sentence mentions the staging script, names the workflow's `paths:` filter as the authoritative list, and no longer reads as exhaustive.
 
 ## Validation
 
 - Run `bash scripts/test-layer-sets.sh` in a `full` image so the PowerShell half runs.
 - Run PSScriptAnalyzer recursively from the repo root (see AGENTS.md "PowerShell Linting").
-- Compare the README sentence against `.github/workflows/native-linux-build.yml` by hand.
+- Read the README sentence against `.github/workflows/native-linux-build.yml` and confirm nothing it says contradicts the filter.

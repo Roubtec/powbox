@@ -71,11 +71,20 @@ Two `Get-ImageLabel` helpers, double-quoted templates with the label name interp
 
    Optionally, also run representative templates through pwsh with `$PSNativeCommandArgumentPassing = 'Legacy'` and a fake `docker`. `scripts/test-image-store-writer-gate.sh` is a fake-`docker` harness to build on, but it runs under pwsh's default passing; setting `Legacy` passing would be new.
 
-3. Note the behavior change in the PR. On 5.1, the ctx, continue, device and mount checks stop misfiring or start working, `-Isolated`, `cci`/`cxi` and the list markers start working, and the build and update check read their labels again.
+3. Make the PowerShell capability-label reads treat a value as present exactly when their Bash twins do. Two reads trim the whole value with `.Trim()`, so a label whose value is only whitespace reads as absent in PowerShell, while the Bash twin, whose `$(…)` strips only trailing newlines, sees a non-empty value and treats it as present:
+
+   - **`Test-PowboxImageStoreWriterWanted`** (`scripts/launch-agent.ps1:1598`, `powbox.podman`). Twin: `powbox_image_store_writer_wanted` in `scripts/launch-agent.sh`. A custom image with such a label passes smoke Stage 3's label check (`Get-SmokeImageLabel` and its Bash twin treat it as present) but launches without the image-store writer, and only when launched through PowerShell.
+   - **The `-Isolated` capability guard** (`scripts/launch-agent.ps1:1404`, `powbox.base.selfhosted`, one of the twelve sites above). Twin: the `selfhosted_cap` check in `scripts/launch-agent.sh`.
+
+   Strip only line endings, as `Get-SmokeImageLabel` does with `` .TrimEnd("`r", "`n") ``, then compare with `''` and `<no value>` exactly as now. Leave the `.Trim()` calls on the launcher's own labels (`powbox.ctx-hash`, `powbox.continue`, `powbox.podman-devices`) and on the mount names alone. The launcher writes those values itself, so trimming them never changes an answer. Only a capability label comes from whoever built the image.
+
+   This came from an unresolved Copilot thread on PR #168 (`scripts/launch-agent.ps1:1598`), merged before it was addressed. It sits here because this task already rewrites both reads.
+
+4. Note the behavior change in the PR. On 5.1, the ctx, continue, device and mount checks stop misfiring or start working, `-Isolated`, `cci`/`cxi` and the list markers start working, and the build and update check read their labels again.
 
 **Out of scope:**
 
-- Rewriting the guards' or helpers' logic.
+- Rewriting the guards' or helpers' logic, apart from the line-ending-only trim in item 3.
 - Behavior changes to any Bash script. The guard suite is a new or changed `scripts/test-*.sh` file, and that is in scope.
 - The probe script in `scripts/smoke-test-podman.ps1`. It is passed to `docker` as one native argument (`-lc $script`), so under `Legacy` passing every double quote in the whole script is stripped, and the argument is split at the spaces those quotes protected. That is a different problem from template quoting: it needs another way to hand the script over, such as stdin. It is worth its own follow-up if the PowerShell smoke drivers are meant to run on 5.1.
 
@@ -90,4 +99,5 @@ Two `Get-ImageLabel` helpers, double-quoted templates with the label name interp
 
 - No tracked `*.ps1` has a double quote inside a `{{ … }}` template action, and the new guard fails when one is reintroduced. Show this with two perturbations: one that puts a quoted label back into a literal `--format` template, and one that puts it back into a `$fmt` variable.
 - Under `Legacy` argument passing, each of the twelve rewritten templates reaches a fake `docker` byte-identical to what the same call delivers under `Standard` passing.
+- A `powbox.podman` label whose value is only whitespace is reported as present by both `Test-PowboxImageStoreWriterWanted` and `powbox_image_store_writer_wanted`. Show it with a new case in `scripts/test-image-store-writer-gate.sh`, which already checks that the two twins agree, and show that the case fails against the old `.Trim()`. The `-Isolated` guard gets the same trim. It has no fake-`docker` harness, so a test for it is optional.
 - PSScriptAnalyzer `-Recurse` reports no error-severity findings, and `./scripts/run-pure-shell-tests.sh` passes.

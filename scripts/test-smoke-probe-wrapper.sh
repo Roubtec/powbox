@@ -1391,6 +1391,25 @@ elif [ "$committed_sets" = "$committed_sets_ps" ]; then
 else
 	bad "committed sets: .sh and .ps1 lists diverged" "sh: $committed_sets / ps1: ${committed_sets_ps:-unreadable}"
 fi
+# Agreeing is not enough: a set dropped from both lists would silently drop its
+# cases below. So the list must also name every committed set directory, which
+# is every tracked docker/layers/<set>/ except the user-owned custom/ (the rule
+# Tier 0's contract scan applies), read from the directories outside a Git
+# checkout.
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	committed_dirs="$(git -C "$ROOT_DIR" ls-files -- docker/layers | sed -n 's#^docker/layers/\([^/]*\)/.*#\1#p')"
+else
+	committed_dirs="$(for d in "$ROOT_DIR"/docker/layers/*/; do basename "$d"; done)"
+fi
+committed_dirs="$(printf '%s\n' "$committed_dirs" | grep -vx -e custom -e '' | sort -u | paste -sd' ' -)"
+committed_sets_sorted="$(tr ' ' '\n' <<<"$committed_sets" | grep -v '^$' | sort -u | paste -sd' ' -)"
+if [ -z "$committed_dirs" ]; then
+	bad "committed sets: found no committed set directory under docker/layers/"
+elif [ "$committed_sets_sorted" = "$committed_dirs" ]; then
+	ok "committed sets: the list names every committed set directory ($committed_dirs)"
+else
+	bad "committed sets: the list and the committed set directories differ" "list: ${committed_sets_sorted:-empty} / docker/layers: $committed_dirs"
+fi
 E2E="$TMP/e2e"
 mkdir -p "$E2E"
 E2E_UNSET=(-u POWBOX_PODMAN -u POWBOX_FUSE -u POWBOX_SMOKE_SKIP_DB -u POWBOX_SMOKE_SKIP_PODMAN

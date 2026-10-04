@@ -20,15 +20,19 @@
 # lines, and an action holding a `}` before the offending quote (which ends the
 # `[^}]*` run early, as in {{if eq .Y `}` "a"}}). None exists today.
 #
-# With pwsh available, every `docker ... --format <expr>` call in a tracked
-# *.ps1 is also found through the PowerShell parser, its template expression
-# (or the `$fmt` assignment it names) evaluated with sample values, and the
-# result handed to a fake docker under both $PSNativeCommandArgumentPassing =
-# 'Legacy' (the passing Windows PowerShell 5.1 uses) and 'Standard'. On Linux,
-# Legacy passing builds one Windows-style command line that .NET splits back
-# into argv by the Windows rules, so it reproduces the quote stripping; a
-# control template with an embedded `"` must come out changed, or the check
-# skips honestly instead of passing vacuously.
+# With pwsh available, every docker call in a tracked *.ps1 that passes a
+# template as `--format <expr>`, `--format=<text>` or `-f <expr>` (the last only
+# when the expression holds `{{`, since `docker rm -f $name` is no template) is
+# also found through the PowerShell parser, its template (or the `$fmt`
+# assignment it names) evaluated with sample values, and the result handed to a
+# fake docker under both $PSNativeCommandArgumentPassing = 'Legacy' (the passing
+# Windows PowerShell 5.1 uses) and 'Standard'. The walk misses a docker call it
+# cannot name statically (such as `& $docker`) and an `-f` template whose `{{`
+# is in neither the expression nor the assignment it names; the regex guard
+# still covers both. On Linux, Legacy passing builds one Windows-style command
+# line that .NET splits back into argv by the Windows rules, so it reproduces
+# the quote stripping; a control template with an embedded `"` must come out
+# changed, or the check skips honestly instead of passing vacuously.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -169,6 +173,7 @@ $allowed = @('StringConstantExpressionAst', 'ExpandableStringExpressionAst', 'Va
 $bindings = @{ Label = 'powbox.example-label'; workspaceMount = '/workspace/example-0123abcd'; sep = [string][char]31 }
 
 $rawSiteFiles = @{}
+$formFiles = @{}
 foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
   $path = Join-Path $Root $rel
   $tokens = $null; $errors = $null
@@ -177,10 +182,27 @@ foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
   $cmds = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'docker' }, $true)
   foreach ($cmd in $cmds) {
     $els = $cmd.CommandElements
-    for ($i = 1; $i -lt $els.Count - 1; $i++) {
-      if (-not ($els[$i] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $els[$i].Value -eq '--format')) { continue }
+    for ($i = 1; $i -lt $els.Count; $i++) {
+      $el = $els[$i]
+      $next = if ($i + 1 -lt $els.Count) { $els[$i + 1] } else { $null }
+      # The three spellings of the flag. `--format <expr>` is always a template.
+      # `-f <expr>` is one only when the expression holds `{{`, since `docker rm
+      # -f $name` and `docker compose -f $file` are not. `--format=<text>` is one
+      # bareword whose text after the `=` is the template.
+      $form = $null; $expr = $null
+      if ($el -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $el.Value -eq '--format' -and $next) {
+        $form = 'long'; $expr = $next
+      }
+      elseif ($el -is [System.Management.Automation.Language.CommandParameterAst] -and $el.ParameterName -ceq 'f') {
+        $form = 'short'; $expr = if ($el.Argument) { $el.Argument } else { $next }
+        if (-not $expr) { continue }
+      }
+      elseif (($el -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+          $el -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) -and $el.Value.StartsWith('--format=')) {
+        $form = 'equals'; $expr = $el
+      }
+      else { continue }
       $site = "${rel}:$($cmd.Extent.StartLineNumber)"
-      $expr = $els[$i + 1]
       if ($expr -is [System.Management.Automation.Language.VariableExpressionAst]) {
         $name = $expr.VariablePath.UserPath
         $scope = $cmd.Parent
@@ -191,20 +213,28 @@ foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
               $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
               $n.Left.VariablePath.UserPath -eq $name -and
               $n.Extent.EndOffset -le $cmd.Extent.StartOffset }, $true)) | Select-Object -Last 1
-        if (-not $assign) { "FAIL`t${site}: no assignment to `$$name before the call"; continue }
+        if (-not $assign) {
+          if ($form -eq 'short') { continue }
+          "FAIL`t${site}: no assignment to `$$name before the call"; continue
+        }
         $expr = $assign.Right
       }
+      if ($form -eq 'short' -and -not $expr.Extent.Text.Contains('{{')) { continue }
       $bad = @($expr.FindAll({ param($n) $true }, $true) | Where-Object { $allowed -notcontains $_.GetType().Name })
       if ($bad.Count -gt 0) { "FAIL`t${site}: unsupported template expression ($($bad[0].GetType().Name)): $($expr.Extent.Text)"; continue }
+      # A bareword is an argument, not an expression, so it is evaluated as one.
+      $code = if ($form -eq 'equals') { 'Write-Output ' + $expr.Extent.Text } else { $expr.Extent.Text }
       try {
         $value = & {
           Set-StrictMode -Version Latest
           foreach ($k in $bindings.Keys) { Set-Variable -Name $k -Value $bindings[$k] }
-          . ([scriptblock]::Create($expr.Extent.Text))
+          . ([scriptblock]::Create($code))
         }
         $value = [string]$value
+        if ($form -eq 'equals') { $value = $value.Substring('--format='.Length) }
       }
       catch { "FAIL`t${site}: cannot evaluate $($expr.Extent.Text): $_"; continue }
+      $formFiles["$form $rel"] = $true
       $legacy = Get-FakeArgv 'Legacy' $value
       $standard = Get-FakeArgv 'Standard' $value
       $arg = (Get-FormatArg 'Standard' $value)
@@ -223,10 +253,12 @@ foreach ($rel in (Get-Content -LiteralPath $ListFile | Where-Object { $_ })) {
   }
 }
 "RAW`t$((@($rawSiteFiles.Keys) | Sort-Object) -join ' ')"
+"FORMS`t$((@($formFiles.Keys) | Sort-Object) -join ',')"
 PS
 	out="$(PATH="$FAKE_DIR:$PATH" pwsh -NoProfile -NonInteractive -File "$WORK_ROOT/legacy.ps1" \
 		-Root "$ROOT_DIR" -ListFile "$WORK_ROOT/files.txt" -ArgvFile "$WORK_ROOT/argv" 2>&1 | tr -d '\r')" || true
 	raw_files=""
+	form_files=""
 	saw_any=false
 	while IFS=$'\t' read -r kind msg detail; do
 		case "$kind" in
@@ -243,6 +275,7 @@ PS
 			skipped "$msg"
 			;;
 		RAW) raw_files="$msg" ;;
+		FORMS) form_files="$msg" ;;
 		*) [ -z "$kind$msg" ] || ko "unexpected harness output: $kind $msg" ;;
 		esac
 	done <<<"$out"
@@ -258,6 +291,41 @@ PS
 			*) ko "$want: no raw-string --format template found by the parser walk" ;;
 			esac
 		done
+		# Likewise for the `-f` spelling, which only `docker info` uses today.
+		case ",$form_files," in
+		*",short scripts/smoke-test-worktree-metadata.ps1,"*) ok "scripts/smoke-test-worktree-metadata.ps1: its -f template was checked" ;;
+		*) ko "scripts/smoke-test-worktree-metadata.ps1: no -f template found by the parser walk" ;;
+		esac
+
+		echo "Test: the parser walk finds every spelling of the flag and flags a quoted template"
+		# A fixture with each spelling clean and quoted, plus `-f` uses that are not
+		# templates. No tracked script spells `--format=` today, so this is the only
+		# place that spelling is exercised.
+		mkdir -p "$WORK_ROOT/forms"
+		cat >"$WORK_ROOT/forms/forms.ps1" <<'FIXTURE'
+$name = 'probe'
+docker inspect --format '{{.A}}' $name
+docker inspect --format='{{.B}}' $name
+& docker info -f '{{.C}}'
+docker rm -f $name
+docker compose -f compose.yml up
+docker inspect --format '{{ index .Config.Labels "x" }}' $name
+docker inspect --format="{{ index .Config.Labels `"$name`" }}" $name
+docker info -f '{{ index .Config.Labels "y" }}'
+FIXTURE
+		printf 'forms.ps1\n' >"$WORK_ROOT/forms/files.txt"
+		fixture_out="$(PATH="$FAKE_DIR:$PATH" pwsh -NoProfile -NonInteractive -File "$WORK_ROOT/legacy.ps1" \
+			-Root "$WORK_ROOT/forms" -ListFile "$WORK_ROOT/forms/files.txt" -ArgvFile "$WORK_ROOT/argv" 2>&1 | tr -d '\r')" || true
+		got="$(printf '%s\n' "$fixture_out" | sed -n \
+			-e 's/^OK	\(forms\.ps1:[0-9]*\):.*/OK \1/p' \
+			-e 's/^FAIL	\(forms\.ps1:[0-9]*\): Legacy argv differs .*/FAIL \1/p' \
+			-e 's/^FAIL	\(forms\.ps1:[0-9]*\):.*/ERROR \1/p' | tr '\n' ' ')"
+		want="OK forms.ps1:2 OK forms.ps1:3 OK forms.ps1:4 FAIL forms.ps1:7 FAIL forms.ps1:8 FAIL forms.ps1:9 "
+		if [ "$got" = "$want" ]; then
+			ok "long, = and -f spellings checked; quoted ones flagged; non-template -f skipped"
+		else
+			ko "unexpected parser walk verdicts on the spelling fixture" "want: $want" "got:  $got" "$fixture_out"
+		fi
 	fi
 fi
 

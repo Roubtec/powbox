@@ -193,7 +193,7 @@ block_of() {
 }
 for launcher in "$LAUNCH_SH" "$LAUNCH_PS"; do
 	name="${launcher##*/}"
-	blk="$(block_of "$launcher")"
+	blk="$(block_of "$launcher")" || true
 	if [ -z "$blk" ]; then
 		ko "$name: writer block not found"
 		continue
@@ -202,8 +202,8 @@ for launcher in "$LAUNCH_SH" "$LAUNCH_PS"; do
 	*.sh) gate_call="powbox_image_store_writer_wanted powbox-agent:latest" ;;
 	*) gate_call="Test-PowboxImageStoreWriterWanted -Image 'powbox-agent:latest'" ;;
 	esac
-	gate_line="$(printf '%s' "$blk" | grep -nF -- "$gate_call" | head -n 1 | cut -d: -f1)"
-	run_line="$(printf '%s' "$blk" | grep -n -- 'compose .*run --rm -d' | head -n 1 | cut -d: -f1)"
+	gate_line="$(printf '%s' "$blk" | grep -nF -- "$gate_call" | head -n 1 | cut -d: -f1)" || true
+	run_line="$(printf '%s' "$blk" | grep -n -- 'compose .*run --rm -d' | head -n 1 | cut -d: -f1)" || true
 	if [ -n "$gate_line" ] && [ -n "$run_line" ] && [ "$gate_line" -le "$run_line" ]; then
 		ok "$name: the writer run is reached only through the gate"
 	else

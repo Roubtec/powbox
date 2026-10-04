@@ -111,7 +111,8 @@ else
 	if [ -z "$offenders" ]; then
 		ok "$(printf '%s\n' "$PS_FILES" | grep -c .) files scanned; use a Go raw string (\`...\`) for a label name or path"
 	else
-		ko "double quote inside a template action; Windows PowerShell 5.1 strips it, use a Go raw string (\`...\`)" "${offenders%$'\n'}"
+		mapfile -t offender_lines <<<"${offenders%$'\n'}"
+		ko "double quote inside a template action; Windows PowerShell 5.1 strips it, use a Go raw string (\`...\`)" "${offender_lines[@]}"
 	fi
 fi
 

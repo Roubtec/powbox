@@ -1374,8 +1374,23 @@ fi
 printf 'P. both umbrellas, end to end against the fake docker\n'
 # Each case runs commands/smoke-test.{sh,ps1} from a scratch copy of the repo's
 # commands/ and scripts/ and of the committed sets (so a case can delete
-# docker/layers/<set> without touching the checkout), with Stages 4-6 skipped and the fake docker answering
-# everything else. Labels come from <fixture>/.labels/<label>.
+# docker/layers/<set> without touching the checkout), with Stages 4-6 skipped
+# and the fake docker answering everything else. Labels come from
+# <fixture>/.labels/<label>.
+#
+# The committed sets are read from both drivers' lists, which must agree: a set
+# added to only one would get the hard missing-file rule from one driver and a
+# note or a skip from the other.
+committed_sets="$(sed -n 's/^SMOKE_COMMITTED_LAYER_SETS=(\(.*\))$/\1/p' "$ROOT_DIR/scripts/smoke-test-lib.sh")"
+committed_sets_ps="$(tr -d '\r' <"$ROOT_DIR/scripts/smoke-test-lib.ps1" |
+	sed -n "s/^\$script:SmokeCommittedLayerSets = @(\(.*\))$/\1/p" | sed -e "s/'//g" -e 's/, */ /g')"
+if [ -z "$committed_sets" ]; then
+	bad "committed sets: could not read SMOKE_COMMITTED_LAYER_SETS from scripts/smoke-test-lib.sh"
+elif [ "$committed_sets" = "$committed_sets_ps" ]; then
+	ok "committed sets: .sh and .ps1 list the same sets ($committed_sets)"
+else
+	bad "committed sets: .sh and .ps1 lists diverged" "sh: $committed_sets / ps1: ${committed_sets_ps:-unreadable}"
+fi
 E2E="$TMP/e2e"
 mkdir -p "$E2E"
 E2E_UNSET=(-u POWBOX_PODMAN -u POWBOX_FUSE -u POWBOX_SMOKE_SKIP_DB -u POWBOX_SMOKE_SKIP_PODMAN
@@ -1386,7 +1401,10 @@ new_fixture() {
 	local fx="$E2E/$1"
 	mkdir -p "$fx/docker/layers" "$fx/.labels"
 	cp -R "$ROOT_DIR/commands" "$ROOT_DIR/scripts" "$fx/"
-	cp -R "$ROOT_DIR/docker/layers/full" "$ROOT_DIR/docker/layers/browser" "$fx/docker/layers/"
+	local cs
+	for cs in $committed_sets; do
+		cp -R "$ROOT_DIR/docker/layers/$cs" "$fx/docker/layers/"
+	done
 	printf '%s' "$fx"
 }
 # set_label <fixture> <label> <value>
@@ -1513,7 +1531,7 @@ for drv in "${e2e_drivers[@]}"; do
 	# no Stage 1b, and nothing partial on its account; deleting the file or the
 	# whole set directory is a hard failure naming the path, before any later
 	# stage.
-	for cs in full browser; do
+	for cs in $committed_sets; do
 		fx="$(new_fixture "$cs-skeleton.$drv")"
 		set_label "$fx" powbox.layers.set "$cs"
 		set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/$cs")"

@@ -381,8 +381,9 @@ jobs:
           fi
           echo "Browser pass: powbox-agent:latest carries powbox.layers.set=browser."
 
-      # Against the committed skeleton, Stage 1b here only prints a note; the
-      # failing-probe step below is what shows it running the set's probes.
+      # While the set's probe file holds no probe line, Stage 1b here only
+      # prints a note; the failing-probe step below shows it running the set's
+      # probes whatever the committed file holds.
       - name: Smoke test - browser image (image required, no image-gated self-skip)
         env:
           POWBOX_SMOKE_REQUIRE_IMAGE: '1'
@@ -440,7 +441,7 @@ jobs:
         run: |
           set -euo pipefail
           probes=docker/layers/browser/smoke-probes.txt
-          trap 'git checkout -- docker/layers/browser/smoke-probes.txt' EXIT
+          trap 'git checkout -- "$probes"' EXIT
           printf '%s\n' 'true' 'false' >"$probes"
           skipped=()
           # shellcheck disable=SC1091 # the umbrella's own Stage 1b

@@ -1,8 +1,8 @@
 # 075 — Evaluate dropping the Podman-only security relaxations for images without Podman
 
-## Why this task is deferred
+**Depends on:** 073 (makes Podman optional and introduces the `powbox.podman` label a gate would key on).
 
-It only becomes actionable once task 073 has made Podman optional, and it needs an investigation on real hosts before anyone can say whether it is viable. Move it to `tasks/` when 073 has merged.
+This task needs an investigation on real hosts before anyone can say whether it is viable.
 
 ## Why this task exists
 

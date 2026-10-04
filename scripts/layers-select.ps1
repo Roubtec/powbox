@@ -37,7 +37,11 @@ $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $name = ''
 foreach ($line in $text.Split([char]"`n")) {
     $trimmed = $line.Trim($whitespace)
-    if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+    # Ordinal, as the .sh's byte tests are: -eq '' and a one-argument StartsWith
+    # compare by culture, which ignores zero-width and format characters, so a
+    # line holding only U+200B or U+00AD would read as blank and U+200B before
+    # '#' as a comment, where the .sh rejects both as an invalid name.
+    if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#', [System.StringComparison]::Ordinal)) { continue }
     $name = $trimmed
     break
 }

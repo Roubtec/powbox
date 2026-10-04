@@ -1109,16 +1109,17 @@ workflows keep cost proportional to the change:
   once, against the `browser` image, because the Bash umbrella never invokes the
   PowerShell mirror and this runner is the only automated configuration where
   its Stage 6 mountpoint-ownership assertions have teeth (see
-  [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). It
-  triggers on `docker/**`, Dockerfiles, `compose*.yml`, `docker-bake.hcl`,
-  `build.*`, and the `scripts/launch-agent.*` / `scripts/build-image*` /
-  `scripts/layers-*` / `scripts/smoke-test*` / `commands/smoke-test.*`
-  entrypoints and three of the four `scripts/test-*.sh` suites routed to the
-  smoke test above (not `test-pg-dev-up-scoped.sh`, which no Tier 1 image can
-  run), except anything under
-  `docker/layers/full/**`, which the last `paths:` entry excludes (a PR that
-  changes only `full` runs Tier 0 alone); skill/docs PRs run
-  Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
+  [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). What
+  triggers it is the workflow's `paths:` filter, which is the authoritative
+  list; in summary, it covers the image's build inputs (`docker/**`,
+  Dockerfiles, `compose*.yml`, `docker-bake.hcl`), the `build.*` entrypoints,
+  the launch, image-build, layer-set, template-staging
+  (`scripts/stage-agent-template.*`) and smoke-test scripts, three of the four
+  `scripts/test-*.sh` suites routed to the smoke test above (not
+  `test-pg-dev-up-scoped.sh`, which no Tier 1 image can run), and the workflow
+  itself, but not anything under `docker/layers/full/**`, which the last
+  `paths:` entry excludes (a PR that changes only `full` runs Tier 0 alone);
+  skill/docs PRs run Tier 0 only, and it carries the same `non-code` label gate as Tier 0 — though
   only Tier 0 subscribes to `labeled`/`unlabeled`, so toggling the label
   re-evaluates Tier 0 at once, while Tier 1 reads its gate only on the next
   `opened`/`synchronize`/`reopened` event and an already-queued or running Tier 1

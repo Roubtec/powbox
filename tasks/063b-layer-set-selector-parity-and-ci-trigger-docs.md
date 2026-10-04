@@ -4,7 +4,7 @@
 
 ## Why this task exists
 
-The sweep that reaped tasks 063 and 067 found two small residuals. Neither is large enough for a task of its own.
+The sweep that reaped tasks 063 and 067 found the residuals below, each too small for a task of its own.
 
 ### The PowerShell selector silently skips a line that bash rejects
 

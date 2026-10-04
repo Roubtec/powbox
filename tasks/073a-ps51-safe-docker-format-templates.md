@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-Task 073 added `Test-PowboxImageStoreWriterWanted` to `scripts/launch-agent.ps1`. It reads the `powbox.podman` label through a Go raw string (`` `powbox.podman` `` inside the template), because Windows PowerShell 5.1 strips double quotes embedded in a native-command argument. The task 073 review (rounds 2 and 3, 2026-10-04) found that older templates in the launcher and in three other scripts still embed double quotes, so they hit exactly that bug. The fix was out of scope for 073, which is about moving tools into layer sets, so it is recorded here.
+Task 073 added `Test-PowboxImageStoreWriterWanted` to `scripts/launch-agent.ps1`. It reads the `powbox.podman` label through a Go raw string (`` `powbox.podman` `` inside the template), because Windows PowerShell 5.1 strips double quotes embedded in a native-command argument. The task 073 review (rounds 2 and 3, 2026-10-04) found that older templates in the launcher and in other scripts still embed double quotes, so they hit exactly that bug. The fix was out of scope for 073, which is about moving tools into layer sets, so it is recorded here.
 
 The bug was confirmed, not just inferred. It was checked on pwsh 7.6 with `$PSNativeCommandArgumentPassing = 'Legacy'`, which is the argument passing Windows PowerShell 5.1 uses, and a fake `docker` that prints its argv:
 
@@ -28,7 +28,7 @@ The guard rule under [Scope](#scope) matches exactly these sites today.
 - **The `.worktrees` and `node_modules` mount-name checks** (`.Destination` compared with `$workspaceMount/.worktrees` and `$workspaceMount/node_modules`). Both names read as empty, so whenever the launch expects a workspace volume, a stopped container is recreated on every launch and a running one gets a warning. The message is "outdated workspace volumes" when the launch expects both volumes (a JS project); a worktrees-only project (Go or .NET) gets the "does not match … expected mounts" message instead, with the same effect.
 - **The Podman storage-mount check** (`.Destination` compared with `/home/node/.local/share/containers`). `$hasPodmanMount` reads as empty, so every stopped container is recreated on every launch as "predates the per-container Podman storage volume", and a running one gets a warning. This is the widest-reaching site: it fires for every non-`-Volatile` launch of an existing container, whatever the project type or flags.
 
-Two `Get-ImageLabel` helpers, double-quoted templates with the label name interpolated from `$Label`:
+The `Get-ImageLabel` helpers, double-quoted templates with the label name interpolated from `$Label`:
 
 - **`Get-ImageLabel` in `scripts/build-image-lib.ps1`.** Every label reads as empty. `Get-LayersStaleReason` then reports the layer-set image as "built from layer set 'none'", so a build with a selected set re-bakes the layer-set image every time. `Resolve-CodexCommit` always falls back to the HEAD commit, so the Codex layer is stamped with HEAD even when it was reused from cache. `scripts/build-image.ps1` stamps the base commit as `unknown`.
 - **`Get-ImageLabel` in `commands/check-updates.ps1`.** Every label reads as absent. The baked base recipe digest is empty, so it compares unequal and the base is always reported stale. The base source falls back to the Dockerfile default. The baked layer-set name reads as empty, so whenever `.powbox-layers` selects a set, the layers are always reported stale.
@@ -53,7 +53,7 @@ Two `Get-ImageLabel` helpers, double-quoted templates with the label name interp
      docker inspect --format '{{with .Config.Labels}}{{with (index . `powbox.ctx-hash`)}}{{.}}{{end}}{{end}}' $containerName
      ```
 
-   - In a **double-quoted** string a lone backtick is PowerShell's escape character, so either double it (` `` ` renders one literal backtick, and `$var` still expands), or switch to concatenated single-quoted pieces as `Get-SmokeImageLabel` in `scripts/smoke-test-lib.ps1` does. This covers the launcher's mount-name checks and both `Get-ImageLabel` helpers:
+   - In a **double-quoted** string a lone backtick is PowerShell's escape character, so either double it (` `` ` renders one literal backtick, and `$var` still expands), or switch to concatenated single-quoted pieces as `Get-SmokeImageLabel` in `scripts/smoke-test-lib.ps1` does. This covers the launcher's mount-name and Podman storage-mount checks and both `Get-ImageLabel` helpers:
 
      ```powershell
      docker image inspect $Image --format "{{ index .Config.Labels ``$Label`` }}"

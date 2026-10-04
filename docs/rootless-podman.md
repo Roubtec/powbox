@@ -1,6 +1,6 @@
 # Rootless containers inside the sandbox (Podman)
 
-> **Where the files live now.** Podman ships only in an image built from the `full` layer set: its "Rootless Podman" block in `docker/layers/full/Dockerfile` installs the engine, copies the engine drop-in from `docker/layers/full/containers.conf` and the image-store seeder from `docker/layers/full/seed-image-store.sh`, and declares the `powbox.podman` label the launcher gates the image-store writer on. The lean base and the `browser` set carry no Podman, and `pg-dev-up` moved to `docker/layers/full/pg-dev-up` with PostgreSQL. The dated status notes, the "What changed" table, the rebuild and validation instructions, the Results and the applied fixes below are records of how the work was done and keep the paths and base-image wording of their time (`docker/shared/…`, `docker/base/Dockerfile`).
+> **Where the files live now.** Podman ships only in an image built from the `full` layer set: its "Rootless Podman" block in `docker/layers/full/Dockerfile` installs the engine, copies the engine drop-in from `docker/layers/full/containers.conf` and the image-store seeder from `docker/layers/full/seed-image-store.sh`, and declares the `powbox.podman` label the launcher gates the image-store writer on. The lean base and the `browser` set carry no Podman, and `pg-dev-up` moved to `docker/layers/full/pg-dev-up` with PostgreSQL. The dated status notes, the "What changed" table, the rebuild instructions, the Results and the applied fixes below are records of how the work was done and keep the paths and base-image wording of their time (`docker/shared/…`, `docker/base/Dockerfile`). The validation prompt is still the deeper manual check (see "Follow-ups"), so it runs in an image built from `full`, which supplies both Podman and the `psql` client the prompt uses; "Rebuilding for testing" says how to select that set.
 
 **Status:** implemented and **validated end-to-end on the trixie/Podman-5.4.2 base**
 (2026-06-07). **Update 2026-06-07 (post-rebuild validation, Claude):** ran the full
@@ -128,6 +128,8 @@ emulators, or a non-headless browser. Track that separately.
 
 ## Rebuilding for testing
 
+> **Today:** Podman ships only in the `full` layer set, so select it before building (`cp .powbox-layers.example .powbox-layers`, whose one uncommented line is `full`); a lean or `browser` image has no Podman for the validation prompt below to exercise. The base-only wording that follows is the record of the original rollout.
+
 The **base image changed**, so rebuild base then agent (not just agent):
 
 ```bash
@@ -188,7 +190,8 @@ since later independent steps still inform us. Clean up at the end.
    - Write data: `podman exec probe-pg psql -U postgres -c \
         "create table probe(x int); insert into probe values (42);"`
    - Reach it from THIS container over the published port (validates the loopback path
-     through the firewall; the base image's postgresql-client-16 provides psql):
+     through the firewall; psql comes from postgresql-client-16, which the `full`
+     layer set installs beside Podman):
      `PGPASSWORD=secret psql -h 127.0.0.1 -p 5432 -U postgres -d postgres \
         -tAc "select x from probe"`
      → prints `42`.

@@ -1,0 +1,10 @@
+// The root rule set, for the layer sets' agent-notes.md fragments. MD041 is off
+// because scripts/stage-agent-template.{sh,ps1} append a fragment under a
+// heading of their own, so it must not open with one. Turning the rule off here
+// rather than by a pragma in the notes keeps the pragma out of every rendered
+// instruction file, and this directory sits above the set directories, so the
+// file joins no set's build context or digest.
+{
+  "extends": "../../.markdownlint.jsonc",
+  "MD041": false
+}

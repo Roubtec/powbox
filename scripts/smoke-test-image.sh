@@ -92,14 +92,15 @@ fi
 # The price is real and deliberate: each probe runs in its OWN shell, so `cd`,
 # `export` and plain shell variables do NOT carry from one probe to the next.
 # Only filesystem effects persist (same container, probes run in order). Probes
-# must therefore be self-contained, and every shipped Stage 1 probe already is —
-# the ones that `cd` do their own `cd` to an absolute path, the golangci fixture
-# probe hands the probes after it a DIRECTORY rather than a shell state, and the
-# ccache probe's `export CCACHE_DIR` is consumed inside that same probe. The
-# container shell is still a LOGIN shell (`sh -lc`), so /etc/profile and
-# /etc/profile.d run exactly once and every probe's `sh -ec` inherits the
-# resulting environment — PATH included, which is precisely what the
-# `$HOME/go/bin` GOBIN probe is there to prove.
+# must therefore be self-contained, and every shipped probe, Stage 1's and the
+# layer sets', already is — the ones that `cd` do their own `cd` to an absolute
+# path, the `full` set's golangci fixture probe hands the probes after it a
+# DIRECTORY rather than a shell state, and its ccache probe's
+# `export CCACHE_DIR` is consumed inside that same probe. The container shell
+# is still a LOGIN shell (`sh -lc`), so /etc/profile and /etc/profile.d run
+# exactly once and every probe's `sh -ec` inherits the resulting environment —
+# PATH included, which is precisely what the `full` set's `$HOME/go/bin` GOBIN
+# probe is there to prove.
 #
 # Limitations remain, all inherent to `set -e` rather than accepted-for-now, and
 # all shared with the original join rather than introduced here. Stated as one

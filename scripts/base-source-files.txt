@@ -19,9 +19,6 @@
 
 docker/base/Dockerfile
 
-# Root file COPYd into the base image.
-PSScriptAnalyzerSettings.psd1
-
 # docker/shared/* COPYd into the base image (/usr/local/bin and elsewhere).
 docker/shared/.bashrc
 docker/shared/.zshrc
@@ -30,7 +27,6 @@ docker/shared/containers.conf
 docker/shared/detect-shadows.sh
 docker/shared/entrypoint-core.sh
 docker/shared/fix-workspace-perms.sh
-docker/shared/golangci-lint-wrapper.sh
 docker/shared/heal-workspace-perms.sh
 docker/shared/init-firewall.sh
 docker/shared/pg-dev-up

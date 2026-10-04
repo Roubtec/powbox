@@ -149,14 +149,13 @@ jobs:
       # hashFiles list out twice would let the two drift apart.
       #
       # The base key is conservatively keyed on every input baked into the base
-      # image: any change under docker/shared/**, to
-      # PSScriptAnalyzerSettings.psd1 (also COPY'd into the base), or to
-      # .dockerignore (which filters the build context feeding every base COPY,
-      # so a change there can alter or break a base-only COPY input) busts the
-      # key even for files used only by the agent layer (a harmless extra base
-      # rebuild). It covers every file scripts/base-source-files.txt lists; the
-      # layer-set selector and digest are deliberately absent, since the base
-      # build never reads them.
+      # image: any change under docker/shared/** or to .dockerignore (which
+      # filters the build context feeding every base COPY, so a change there
+      # can alter or break a base-only COPY input) busts the key even for files
+      # used only by the agent layer (a harmless extra base rebuild). It covers
+      # every file scripts/base-source-files.txt lists; the layer-set selector
+      # and digest are deliberately absent, since the base build never reads
+      # them.
       #
       # The layers key covers the `browser` set, the one Tier 1 builds, and
       # also carries its digest, the value build.sh stamps as
@@ -169,7 +168,7 @@ jobs:
         id: keys
         shell: bash
         env:
-          BASE_INPUTS: ${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', 'PSScriptAnalyzerSettings.psd1', '.dockerignore') }}
+          BASE_INPUTS: ${{ hashFiles('docker/base/Dockerfile', 'docker/shared/**', 'docker-bake.hcl', 'scripts/build-image.sh', '.dockerignore') }}
           LAYERS_INPUTS: ${{ hashFiles('docker/layers/browser/**', 'scripts/layers-select.sh', 'scripts/layers-digest.sh', 'scripts/build-image-lib.sh') }}
         run: |
           set -euo pipefail

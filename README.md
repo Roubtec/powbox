@@ -53,9 +53,9 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 
 ## Layout
 
-- `docker/base/Dockerfile`: shared toolchain image (Node.js, Python, PHP, Go, .NET SDK 10, PostgreSQL 16, OPA, Git, shell utilities, and more) used by the unified agent image
+- `docker/base/Dockerfile`: the lean base image (Node.js, Python, Git, the shell utilities, PostgreSQL 16, and more) used by the unified agent image
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
-- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
+- `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle of language toolchains, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
@@ -103,10 +103,12 @@ Examples:
 The base image is kept to what every user needs; heavier toolchains can live in an optional **layer set**, a Dockerfile under `docker/layers/<set>/` that is baked into `powbox-agent-layers:latest` between the base and the agent image. Exactly one set is selected, or none:
 
 - No `.powbox-layers` file, or one holding only blank and `#` lines: no set. The agent image is built directly on the lean base, and no layer-set image is built.
-- `full`: the maintainer's bundle in `docker/layers/full/`. It installs nothing yet; tools move into it later. CI never builds it: the maintainer builds it by hand, and CI only checks it against the contract below.
+- `full`: the maintainer's bundle in `docker/layers/full/`, the language toolchains the lean base leaves out: Go with `golangci-lint`, the .NET SDK 10, PowerShell with PSScriptAnalyzer, PHP 8.4 with composer, OPA, `sqlcmd`/`bcp`, and the CMake/Ninja/ccache native-build tools. CI never builds it: the maintainer builds it by hand, and CI only checks it against the contract below.
 - `browser`: a headless browser stack in `docker/layers/browser/`, for turning Marp decks, Mermaid diagrams and HTML pages into PDF or SVG. It is a separate, smaller set, not a layer under `full`, and it is the set CI builds and smoke-tests. It ships no tools yet.
 - `custom`: your own set in `docker/layers/custom/`, which is gitignored apart from its `.gitkeep`. Start from a copy of a committed set; `browser` is the smaller starting point.
 - Any other directory under `docker/layers/` with a `Dockerfile` can be named the same way.
+
+Upgrading from an older checkout: tools that used to ship in the base image now live in `full`. With no set selected, the next `agent-update` or base rebuild produces the lean image without them, so if you rely on them, select `full` as shown below before you update.
 
 ```bash
 # Select the maintainer's bundle (the template's one uncommented line is `full`)
@@ -1012,6 +1014,7 @@ PowerShell's house rules live separately in `PSScriptAnalyzerSettings.psd1` — 
 The two checks below differ in reach: Markdown lint is local-only, while `shfmt` also runs as an advisory Tier 0 step — so read this section alongside "Continuous Integration" rather than as part of it.
 
 `.markdownlint.jsonc` carries the Markdown rule set — shared in spirit with the other Roubtec projects, with powbox-specific deviations noted inline — and `.markdownlint-cli2.jsonc` carries only the ignore globs for generated, vendored and container-local trees.
+One directory refines the rule set: `docker/layers/.markdownlint.jsonc` extends it and turns off MD041 (first line must be a top-level heading) for the layer sets' `agent-notes.md` fragments, which the build appends under a heading of its own; it sits above the set directories so it never enters a set's build context or digest.
 Run it with `markdownlint-cli2 "**/*.md"`; the agent image bakes `markdownlint-cli2` 0.23.2, and a repository pin or wrapper stays authoritative wherever one exists.
 Markdown lint is **not** a CI gate today: no workflow lints this repo's Markdown, so its findings are advisory until someone adds the step.
 Tier 1's smoke test does invoke `markdownlint-cli2`, but only to probe that the binary is baked at its pinned version — it lints a throwaway file, never the repository.

@@ -43,9 +43,10 @@
 # principle) — on failure it just warns and runs with the default cache.
 set -uo pipefail
 
-# The real binary, extracted off PATH by docker/base/Dockerfile (the wrapper
-# owns /usr/local/bin/golangci-lint). Exec'd by this absolute path, never by
-# name — resolving `golangci-lint` again would recurse into this wrapper.
+# The real binary, extracted off PATH by docker/layers/full/Dockerfile (the
+# wrapper owns /usr/local/bin/golangci-lint). Exec'd by this absolute path,
+# never by name — resolving `golangci-lint` again would recurse into this
+# wrapper.
 GOLANGCI_REAL="/usr/local/libexec/golangci-lint"
 
 run_real() {

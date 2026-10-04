@@ -43,12 +43,15 @@ Both config volumes are always mounted (not just the primary agent's) so the pri
 ## PowerShell Linting
 
 - Lint with `pwsh -Command "Invoke-ScriptAnalyzer -Path . -Recurse"` from the repo root. `Invoke-ScriptAnalyzer` is a `pwsh` cmdlet, not a shell command on `PATH`. `-Recurse` is required: without it only the scripts directly in the given directory are analyzed (here just `build.ps1`), so the run reports nothing while `commands/`, `scripts/` and `shell/` go unchecked. Tier 0 runs the same recursive pass and blocks on error-severity findings.
-- The repo-root `PSScriptAnalyzerSettings.psd1` is auto-applied (PSScriptAnalyzer discovers it in the analyzed directory) and is baked into the image as the house default at `/usr/local/share/powershell/PSScriptAnalyzerSettings.psd1`. It excludes rules that clash with these CLI-style scripts — see the file for the per-rule rationale.
+- `pwsh` and PSScriptAnalyzer ship only in images built with the `full` layer set; see [Validating Changes](#validating-changes) for working on the lean image.
+- The repo-root `PSScriptAnalyzerSettings.psd1` is auto-applied (PSScriptAnalyzer discovers it in the analyzed directory). The `full` layer set bakes it as the house default at `/usr/local/share/powershell/PSScriptAnalyzerSettings.psd1` from its own byte-identical copy, `docker/layers/full/PSScriptAnalyzerSettings.psd1`, because a set's build context is its own directory; edit the root file and copy it over, since `scripts/test-layer-sets.sh` fails while the two differ. It excludes rules that clash with these CLI-style scripts — see the file for the per-rule rationale.
 - To override the config for a single run, pass an explicit `-Settings`: `-Settings @{}` for a full unfiltered pass against all default rules, or e.g. `-Settings @{IncludeRules=@('PSReviewUnusedParameter')}` to run one otherwise-excluded rule across the tree. Note that `-IncludeRule` alone does **not** override `ExcludeRules` — the auto-discovered config wins.
 
 ## Validating Changes
 
 When you develop powbox from **inside** a powbox container, the validation surface is split: static checks and pure-shell tests run here, but anything that needs a built image runs on the host or in CI.
+
+Developing powbox in-container needs an image built with the `full` layer set, because `pwsh` and PSScriptAnalyzer ship only there: PSScriptAnalyzer lints the `.ps1` files, and the pure-shell suites that cover a PowerShell twin run it under `pwsh`, skipping that half honestly without it, except `test-context-mount-config.sh`, which fails. On the lean image, rely on Tier 0, which runs the same recursive PSScriptAnalyzer pass and every pure-shell suite on each eligible PR.
 
 Shell formatting convention: among the extensionless `docker/shared/` helpers (`pg-dev-up`, `wt-bootstrap`, `wt-enter`, `wt-remove`, `gitcat`, `peer-review-run`, `pnpm-shadow-doctor`, `cid`, and `powbox-provenance`), only `pg-dev-up` currently differs from default `shfmt`; its indented `case` bodies are accepted house style, and additions should match that existing style. CI's advisory `shfmt` check selects only changed `*.sh` files, so reviewers should not raise pre-existing default-`shfmt` diffs in extensionless helpers.
 

@@ -71,6 +71,7 @@ A label that is not a valid set name (`^[a-z0-9][a-z0-9._-]*$`, the rule `.powbo
 The probe file is what makes a missing tool a failure for a set.
 Stages 2 and 3 report "not applicable" on an image without `pg-dev-up` or `podman` instead of failing, so a set that installs a tool must carry a presence probe for it (`command -v <tool> >/dev/null`, or something stronger) in its `smoke-probes.txt`; without one, an image that lost the tool passes.
 For the committed sets, `full` and `browser`, the guard cannot be lost by deleting the file or the directory: cases 3 and 4 above fail the run. Both drivers name these sets in one list (`SMOKE_COMMITTED_LAYER_SETS` in `scripts/smoke-test-lib.sh`, `$SmokeCommittedLayerSets` in its `.ps1` mirror), so a newly committed set must be added to both lists to join the rule. For `browser` this is also what keeps Tier 1 honest: a `browser` image whose working tree lost the probe file fails Tier 1's smoke step instead of turning Stage 1b into a note.
+`full`'s file carries a probe for every tool the set installs, functional checks included (the golangci-lint cache scoping, the GOBIN login-shell `PATH`, the .NET first-use sentinels), each group with its rationale as `#` lines; `browser`'s holds none yet.
 The opt-out in case 2 is for sets of your own: a user who edits their own set maintains or deletes its probes.
 A set contributes in-container probes only; stages that need host orchestration stay in this repository.
 

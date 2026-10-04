@@ -5,8 +5,9 @@
 # (scripts/build-image-lib.{sh,ps1}: layer-set currency, parent signature,
 # Codex-commit resolution), the update check's layers row
 # (commands/check-updates.{sh,ps1}), agent-update's routing of a stale set and
-# agent-image-info (shell/powbox.{sh,ps1}), and both build drivers' dispatch
-# (scripts/build-image.{sh,ps1}). Docker, npm and the build are fakes on PATH, so no
+# agent-image-info (shell/powbox.{sh,ps1}), both build drivers' dispatch
+# (scripts/build-image.{sh,ps1}), and that a committed set's copy of a repo
+# file matches the original. Docker, npm and the build are fakes on PATH, so no
 # daemon or image is needed. Every PowerShell twin is run against the same
 # fixture and must agree with the bash one; without pwsh those halves report an
 # honest skip.
@@ -1450,6 +1451,22 @@ if $HAVE_PWSH; then
 		"$(cat "$SEQ_STATE/bake.log")" "$(cat "$SH_LOG")"
 else
 	skipped "build-image.ps1 dispatch (pwsh not installed)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Repo files a committed set keeps its own copy of
+# ---------------------------------------------------------------------------
+
+echo "Test: committed sets' copies of repo files match the originals"
+
+# A set's build context is its own directory, so `full` bakes its own copy of
+# PSScriptAnalyzerSettings.psd1, while the repo-root file stays where
+# PSScriptAnalyzer auto-discovers it for this repository's own lint.
+if cmp -s "$ROOT_DIR/PSScriptAnalyzerSettings.psd1" "$ROOT_DIR/docker/layers/full/PSScriptAnalyzerSettings.psd1"; then
+	ok "docker/layers/full/PSScriptAnalyzerSettings.psd1 is byte-identical to the repo-root file"
+else
+	ko "docker/layers/full/PSScriptAnalyzerSettings.psd1 differs from the repo-root file" \
+		"copy it again: cp PSScriptAnalyzerSettings.psd1 docker/layers/full/"
 fi
 
 echo

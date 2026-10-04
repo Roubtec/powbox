@@ -452,8 +452,9 @@ for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR NUGET_PACKAGES PLAYWRIGHT_BROWSE
 done
 unset _cache_var _cache_dir
 
-# Prepare rootless Podman (only present once the image gained container-engine
-# support). XDG_RUNTIME_DIR must exist, be private, and be exported so Podman
+# Prepare rootless Podman (present only in an image whose layer set installs it,
+# such as full; the lean base has none, so this whole block is skipped there).
+# XDG_RUNTIME_DIR must exist, be private, and be exported so Podman
 # uses it for the runtime/runroot instead of falling back to a /run/user/<uid>
 # that does not exist in this container. The graphroot
 # (~/.local/share/containers) is a per-container Docker volume (keyed by agent +

@@ -148,7 +148,10 @@ function _Powbox-GetIsolatedByName {
     if ($cand.Count -eq 0) { return @() }
 
     $sep = [char]31
-    $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels "powbox.instance-name"}}' + $sep + '{{index .Config.Labels "powbox.repo"}}' + $sep + '{{index .Config.Labels "powbox.ref"}}' + $sep + '{{.State.Status}}'
+    # Label names in this script's --format templates are Go raw strings (`...`),
+    # not "..." ones: Windows PowerShell 5.1 strips double quotes embedded in a
+    # native argument, which would leave docker an invalid template.
+    $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels `powbox.instance-name`}}' + $sep + '{{index .Config.Labels `powbox.repo`}}' + $sep + '{{index .Config.Labels `powbox.ref`}}' + $sep + '{{.State.Status}}'
     @(docker inspect --format $fmt @cand 2>$null | ForEach-Object {
         $parts = $_.Split($sep)
         if ($parts.Count -lt 5) { return }
@@ -342,7 +345,7 @@ function agent-image-info {
         Write-Error "Image $img not found - build it with agent-update."
         return
     }
-    $fmt = '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}'
+    $fmt = '{{index .Config.Labels `powbox.commit.base`}}|{{index .Config.Labels `powbox.commit.codex`}}|{{index .Config.Labels `powbox.commit.claude`}}|{{index .Config.Labels `powbox.codex.version`}}|{{index .Config.Labels `powbox.claude.version`}}|{{index .Config.Labels `powbox.layers.set`}}|{{index .Config.Labels `powbox.layers.digest`}}|{{index .Config.Labels `powbox.commit.layers`}}'
     $p = (docker image inspect $img --format $fmt) -split '\|'
     Write-Host "$img - powbox commit that built each layer:"
     Write-Host ("  base:         {0}" -f (_Powbox-NormLabel $p[0]))
@@ -642,7 +645,7 @@ function _Powbox-AgentList {
     $markers = @{}
     if ($cand.Count -gt 0) {
         $sep = [char]31
-        $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels "powbox.instance-name"}}' + $sep + '{{index .Config.Labels "powbox.repo"}}' + $sep + '{{index .Config.Labels "powbox.ref"}}'
+        $fmt = '{{.Name}}' + $sep + '{{index .Config.Labels `powbox.instance-name`}}' + $sep + '{{index .Config.Labels `powbox.repo`}}' + $sep + '{{index .Config.Labels `powbox.ref`}}'
         docker inspect --format $fmt @cand 2>$null | ForEach-Object {
             $parts = $_.Split($sep)
             $n = $parts[0].TrimStart('/') # docker inspect's .Name is /-prefixed

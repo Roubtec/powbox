@@ -10,9 +10,10 @@
 # Test-PowboxImageStoreWriterWanted in launch-agent.ps1, each extracted from
 # the launcher and run against a fake `docker` on PATH that answers
 # `image inspect`. Both are checked for the same cases (label present, absent,
-# empty, `<no value>`, an image that cannot be inspected) and must agree. A
-# static check pins each call site: the writer's `compose run` is reached only
-# through the gate and carries the container label powbox.image-store-role=writer.
+# empty, whitespace only, `<no value>`, an image that cannot be inspected) and
+# must agree. A static check pins each call site: the writer's `compose run` is
+# reached only through the gate and carries the container label
+# powbox.image-store-role=writer.
 # Without pwsh the PowerShell half reports an honest skip.
 set -euo pipefail
 
@@ -134,6 +135,7 @@ echo "Test: the writer is started only for an image that carries powbox.podman"
 CASES=(
 	"value|1|seed|label powbox.podman=1"
 	"value|yes|seed|label with another non-empty value"
+	"value|  |seed|label whose value is only whitespace"
 	"novalue||skip|label absent (<no value>)"
 	"empty||skip|label present but empty"
 	"fail||skip|image that cannot be inspected"

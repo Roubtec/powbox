@@ -185,10 +185,12 @@ case "$1 $2" in
 	'{{json .Config.OnBuild}}') cat "$dir/onbuild" 2>/dev/null || echo null; exit 0 ;;
 	esac
 	out="$fmt"
-	re='\{\{ ?index \.Config\.Labels "([^"]*)" ?\}\}'
+	# The .sh names the label in a Go "..." string, the .ps1 in a raw `...` one.
+	re='\{\{ ?index \.Config\.Labels ("([^"]*)"|`([^`]*)`) ?\}\}'
 	while [[ "$out" =~ $re ]]; do
+		label="${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
 		val=""
-		[ -f "$dir/labels/${BASH_REMATCH[1]}" ] && val="$(cat "$dir/labels/${BASH_REMATCH[1]}")"
+		[ -f "$dir/labels/$label" ] && val="$(cat "$dir/labels/$label")"
 		out="${out/"${BASH_REMATCH[0]}"/$val}"
 	done
 	printf '%s\n' "$out"

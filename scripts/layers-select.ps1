@@ -50,8 +50,9 @@ foreach ($line in $text.Split([char]"`n")) {
 if (-not $name) { exit 0 }
 
 if ($name -cnotmatch '^[a-z0-9][a-z0-9._-]*\z') {
-    # Bytes, not [Console]::Error, which would turn a byte that is not UTF-8 into
-    # U+FFFD where the .sh echoes the name exactly as the file holds it.
+    # Bytes, not [Console]::Error: the name was decoded one char per byte, so a
+    # text writer would re-encode each non-ASCII byte (0xFF as C3 BF), where the
+    # .sh echoes the name exactly as the file holds it.
     $utf8 = [System.Text.Encoding]::UTF8
     [byte[]]$message = $utf8.GetBytes("layers-select: invalid layer-set name '") + $latin1.GetBytes($name) +
         $utf8.GetBytes("' in $selector (must match ^[a-z0-9][a-z0-9._-]*`$)`n")

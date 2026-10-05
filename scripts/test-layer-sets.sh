@@ -324,11 +324,12 @@ sel_case "leading dot" file $'.hidden\n' "" 1 "'.hidden'"
 sel_case "non-breaking space is not trimmed" file $'full\xc2\xa0\n' "" 1 "invalid layer-set name"
 sel_case "lone CR mid-line" file $'fu\rll\n' "" 1 "invalid layer-set name"
 sel_case "byte that is not UTF-8" file $'fu\xffll\n' "" 1 "invalid layer-set name"
-# Culture-aware comparison ignores these code points; the selector must not.
-sel_case "lone soft hyphen line" file $'\xc2\xad\n' "" 1 "invalid layer-set name"
-sel_case "lone zero-width space line" file $'\xe2\x80\x8b\n' "" 1 "invalid layer-set name"
-sel_case "zero-width space line before name" file $'\xe2\x80\x8b\nfull\n' "" 1 "invalid layer-set name"
-sel_case "zero-width space before #" file $'\xe2\x80\x8b# comment\nfull\n' "" 1 "invalid layer-set name"
+# The .ps1 reads one char per byte, so 0xAD is U+00AD (soft hyphen) and 0x01 is
+# U+0001: culture-aware comparison ignores both, and the selector must not.
+sel_case "lone soft hyphen line" file $'\xad\n' "" 1 "invalid layer-set name"
+sel_case "soft hyphen line before name" file $'\xad\nfull\n' "" 1 "invalid layer-set name"
+sel_case "soft hyphen before #" file $'\xad# comment\nfull\n' "" 1 "invalid layer-set name"
+sel_case "lone control byte line" file $'\x01\n' "" 1 "invalid layer-set name"
 sel_case "missing set directory" file $'nosuchset\n' "" 1 "docker/layers/nosuchset/Dockerfile"
 sel_case "set without Dockerfile" file $'emptyset\n' "" 1 "docker/layers/emptyset/Dockerfile"
 sel_case "selector is a directory" dir "" "" 1 ".powbox-layers is not a regular file"

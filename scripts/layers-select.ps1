@@ -31,13 +31,18 @@ if (-not (Test-Path -LiteralPath $selector -PathType Leaf)) { Exit-Select "$sele
 $bytes = [System.IO.File]::ReadAllBytes($selector)
 $offset = 0
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $offset = 3 }
-$text = [System.Text.Encoding]::UTF8.GetString($bytes, $offset, $bytes.Length - $offset)
+$latin1 = [System.Text.Encoding]::GetEncoding(28591)
+$text = $latin1.GetString($bytes, $offset, $bytes.Length - $offset)
 
 $whitespace = [char[]]@(' ', "`t", "`n", "`r", [char]0x0B, [char]0x0C)
 $name = ''
 foreach ($line in $text.Split([char]"`n")) {
     $trimmed = $line.Trim($whitespace)
-    if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+    # Ordinal, as the .sh's byte tests are: -eq '' and a one-argument StartsWith
+    # compare by culture, which ignores format and control characters, so a line
+    # holding only the byte 0xAD (U+00AD) would read as blank and 0xAD before '#'
+    # as a comment, where the .sh rejects both as an invalid name.
+    if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#', [System.StringComparison]::Ordinal)) { continue }
     $name = $trimmed
     break
 }
@@ -45,7 +50,16 @@ foreach ($line in $text.Split([char]"`n")) {
 if (-not $name) { exit 0 }
 
 if ($name -cnotmatch '^[a-z0-9][a-z0-9._-]*\z') {
-    Exit-Select "invalid layer-set name '$name' in $selector (must match ^[a-z0-9][a-z0-9._-]*`$)"
+    # Bytes, not [Console]::Error: the name was decoded one char per byte, so a
+    # text writer would re-encode each non-ASCII byte (0xFF as C3 BF), where the
+    # .sh echoes the name exactly as the file holds it.
+    $utf8 = [System.Text.Encoding]::UTF8
+    [byte[]]$message = $utf8.GetBytes("layers-select: invalid layer-set name '") + $latin1.GetBytes($name) +
+        $utf8.GetBytes("' in $selector (must match ^[a-z0-9][a-z0-9._-]*`$)`n")
+    $stderr = [Console]::OpenStandardError()
+    $stderr.Write($message, 0, $message.Length)
+    $stderr.Flush()
+    exit 1
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Root "docker/layers/$name/Dockerfile") -PathType Leaf)) {
     Exit-Select "docker/layers/$name/Dockerfile not found (layer set '$name' is selected in $selector)"

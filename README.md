@@ -1045,9 +1045,10 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 18-suite set is `test-claude-hook-skew.sh`,
+  routed to the smoke test. The current 19-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
-  `test-image-store-writer-gate.sh`, `test-layer-sets.sh`, `test-peer-review-run.sh`,
+  `test-image-store-writer-gate.sh`, `test-launcher-tail-reread.sh`,
+  `test-layer-sets.sh`, `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,
   `test-seed-marker-source.sh`,
   `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,

@@ -2072,6 +2072,8 @@ esac
 
 CTX_COMPOSE_DIR=""
 CTX_COMPOSE_FILE=""
+# Called only by the EXIT trap, which ShellCheck cannot see past the final `exit`.
+# shellcheck disable=SC2317
 cleanup_ctx_compose_file() {
 	if [ -n "$CTX_COMPOSE_FILE" ]; then
 		rm -f "$CTX_COMPOSE_FILE"
@@ -2090,18 +2092,30 @@ if [ "${#CTX_MOUNT_NAMES[@]}" -gt 0 ]; then
 	FINAL_COMPOSE_ARGS+=(-f "$CTX_COMPOSE_FILE")
 fi
 
-docker compose "${FINAL_COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
-	--name "$CONTAINER_NAME" \
-	--label "powbox.continue=${CONTINUE_LABEL}" \
-	--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
-	"${CTX_LABEL_ARGS[@]}" \
-	"${SELFHOSTED_LABEL[@]}" \
-	"${EXTRA_ENV[@]}" \
-	"${GIT_CONFIG_ARGS[@]}" \
-	"${GH_CONFIG_ARGS[@]}" \
-	"${WORKSPACE_VOL_ARGS[@]}" \
-	-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
-	-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \
-	-w "${WORKSPACE_MOUNT}" \
-	agent \
-	"${CMD[@]}"
+# Bash reads a script one command at a time, at a byte offset into the file, so
+# when the agent session ends it would go back to this file for whatever follows
+# the run. A `git pull` or branch switch during the session (hours long) can
+# replace the file, and that read then lands mid-line in the new version and
+# executes the fragment it finds (seen as e.g. `ault: command not found`). Bash
+# parses a brace group whole before running any of it, so the `exit` inside is
+# already read when the run returns and bash never reads past the group; it
+# still fires the EXIT trap above, unlike an `exec`. Keep the run and its `exit`
+# inside the group, and any new step above it.
+{
+	docker compose "${FINAL_COMPOSE_ARGS[@]}" run "${RUN_ARGS[@]}" \
+		--name "$CONTAINER_NAME" \
+		--label "powbox.continue=${CONTINUE_LABEL}" \
+		--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
+		"${CTX_LABEL_ARGS[@]}" \
+		"${SELFHOSTED_LABEL[@]}" \
+		"${EXTRA_ENV[@]}" \
+		"${GIT_CONFIG_ARGS[@]}" \
+		"${GH_CONFIG_ARGS[@]}" \
+		"${WORKSPACE_VOL_ARGS[@]}" \
+		-v "${PODMAN_VOLUME}:/home/node/.local/share/containers" \
+		-v "agent-podman-imagestore:/mnt/podman-imagestore:ro" \
+		-w "${WORKSPACE_MOUNT}" \
+		agent \
+		"${CMD[@]}"
+	exit
+}

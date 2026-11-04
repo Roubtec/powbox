@@ -236,6 +236,40 @@ RUN OPA_VERSION=1.18.2 \
     && chmod 0755 /usr/local/bin/opa
 
 # ---------------------------------------------------------------------------
+# gitleaks
+# ---------------------------------------------------------------------------
+# Install gitleaks, the secret scanner projects run as a CI "secret scan" lane
+# (`gitleaks git …` over a PR's commits, `gitleaks dir . --config .gitleaks.toml`
+# locally). Baked so a session can run the same scan before it pushes instead of
+# re-downloading the binary every time the container is recycled. Fetched as
+# the statically linked release tarball from GitHub and sha256-pinned per arch
+# (checksums from the release's gitleaks_<ver>_checksums.txt); bump the version
+# and both sums together (https://github.com/gitleaks/gitleaks/releases).
+# Only the binary is extracted from the tarball (LICENSE/README stay out).
+#
+# Version note: 8.30.1 is the newest release and the one projects' CI pins
+# today. Upstream declared gitleaks feature complete in 2026 (security patches
+# only; its author moved to Betterleaks), so this pin should rarely move. Like
+# OPA, this is ONE baked release: a project pinning a different version in CI
+# should verify against its own pin, and if a project moves its lane to
+# Betterleaks, swap the baked tool rather than baking both.
+#
+# Placed low so a bump never busts the expensive apt/mssql/pwsh/Go layers.
+RUN GITLEAKS_VERSION=8.30.1 \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+        amd64) gitleaks_arch=x64; gitleaks_sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;; \
+        arm64) gitleaks_arch=arm64; gitleaks_sha256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;; \
+        *) echo "no pinned gitleaks checksum for architecture: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/gitleaks.tar.gz \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${gitleaks_arch}.tar.gz" \
+    && echo "${gitleaks_sha256}  /tmp/gitleaks.tar.gz" | sha256sum -c - \
+    && tar -C /usr/local/bin --no-same-owner -xzf /tmp/gitleaks.tar.gz gitleaks \
+    && chmod 0755 /usr/local/bin/gitleaks \
+    && rm /tmp/gitleaks.tar.gz
+
+# ---------------------------------------------------------------------------
 # Native build tools: CMake, Ninja, pkg-config, ccache, OpenSSL/zlib headers
 # ---------------------------------------------------------------------------
 # General-purpose native/CGo/CMake build dependencies. `build-essential` (gcc,

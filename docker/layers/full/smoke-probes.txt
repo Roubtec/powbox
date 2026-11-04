@@ -84,6 +84,14 @@ mkdir -p "$HOME/go/bin" && printf "%s\n" "#!/bin/sh" "echo gobin-ok" > "$HOME/go
 opa version >/dev/null
 p=/tmp/powbox-opa-probe && rm -rf "$p" && mkdir -p "$p" && printf "%s\n" "package smoke" "" "allow if { input.x == 1 }" > "$p/p.rego" && printf "%s\n" "package smoke" "" "test_allow if { allow with input as {\"x\": 1} }" > "$p/p_test.rego" && opa test "$p" | grep -q "PASS: 1/1"
 
+# gitleaks. The version probe pins the baked release (bump it with the
+# Dockerfile). The functional probe scans offline, with the default rules: a
+# clean folder must exit 0 and a folder holding a planted AWS-style key must
+# exit 1 (gitleaks' "leaks found" code), so a binary that runs but no longer
+# detects anything fails here. `gitleaks dir` scans plain files, not history.
+gitleaks version | grep -qx 8.30.1
+d=/tmp/powbox-gitleaks-probe && rm -rf "$d" && mkdir -p "$d/clean" "$d/leak" && printf "hello\n" > "$d/clean/a.txt" && printf "%s\n" "aws_access_key_id = AKIAZ7Q3LXWNV4PTR2EM" > "$d/leak/creds.txt" && gitleaks dir "$d/clean" --no-banner --redact >/dev/null 2>&1 && { rc=0; gitleaks dir "$d/leak" --no-banner --redact >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 1 ]; }
+
 # PostgreSQL 16 and pg-dev-up. `pg-dev-up check` runs the server binaries it
 # resolves (initdb, postgres). Stage 2 starts real clusters, but only on an
 # image that has pg-dev-up, so these probes are what fail a full image that

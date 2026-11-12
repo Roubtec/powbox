@@ -2073,7 +2073,7 @@ esac
 CTX_COMPOSE_DIR=""
 CTX_COMPOSE_FILE=""
 # Called only by the EXIT trap, which ShellCheck cannot see past the final `exit`.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup_ctx_compose_file() {
 	if [ -n "$CTX_COMPOSE_FILE" ]; then
 		rm -f "$CTX_COMPOSE_FILE"

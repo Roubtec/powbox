@@ -60,11 +60,15 @@ eval "$(cat | jq -r '
   @sh "five_resets=\(.rate_limits.five_hour.resets_at // "")",
   @sh "seven_pct=\(.rate_limits.seven_day.used_percentage // "")",
   @sh "api_dur_ms=\(.cost.total_api_duration_ms // "")",
-  @sh "session_id=\(.session_id // "")"
+  @sh "session_id=\(.session_id // "")",
+  @sh "effort=\(.effort.level // "")"
 ' | tr '\n' ' ')"
 
-# effort is not in the JSON input; read it from settings as a static label
-effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/null)
+# effort: the CLI passes the active per-turn level (after any per-model
+# downgrade) as .effort.level. settings.json's effortLevel is only the saved
+# default and does not track /effort or --effort, so it is a last resort for
+# older CLIs that predate the field.
+[ -n "$effort" ] || effort=$(jq -r '.effortLevel // empty' /home/node/.claude/settings.json 2>/dev/null)
 
 # The account is not in the JSON input either — so ASK, rather than guess from
 # `.claude.json`'s cached oauthAccount. That cache is not proof of the credential

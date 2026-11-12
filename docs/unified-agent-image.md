@@ -41,7 +41,7 @@ Install order matters for pull cost. Docker invalidates every layer **above** a 
 
 1. base (`powbox-agent-base`)
 2. Codex install layer (infrequent updates)
-3. stable shared-linter layers (`actionlint`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the agent image's own parent (the base, or the layer-set image `powbox-agent-layers:latest` when a layer set is selected), which is what the provenance resolver models
+3. stable shared-linter layers (`actionlint`, `shellcheck`, `markdownlint-cli2`); these stay above Codex so Codex's cache parent remains the agent image's own parent (the base, or the layer-set image `powbox-agent-layers:latest` when a layer set is selected), which is what the provenance resolver models
 4. Claude install layer (frequent, larger updates)
 5. shared seeding assets: both hooks, the Codex skills tree (copied from the agent-skills staging clone; Claude's skills/workflows arrive via the dev-skills plugin, not the bake), the Claude statusline assets, prompt template, build epoch.
 

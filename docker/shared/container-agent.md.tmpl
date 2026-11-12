@@ -13,8 +13,9 @@ Everything below is on `PATH` and ready to use — no installation needed.
 |----------|-------|
 | Core runtime | `node`, `npm`, `pnpm`, `python3`, `pip3` |
 | Git/GitHub | `git`, `gh`, `ssh` |
-| Shell | `zsh`, `jq`, `yq`, `fzf`, `less`, `tree`, `file`, `htop`, `shellcheck`, `shfmt`, `strace`, `lsof` |
+| Shell | `zsh`, `jq`, `yq`, `fzf`, `less`, `tree`, `file`, `htop`, `shfmt`, `strace`, `lsof` |
 | Build | `make`, `patch`, `gcc`, `g++` |
+| Shell linting | `shellcheck` 0.11.0 is the baked default, the same release GitHub's ubuntu runners ship, so a clean local pass predicts a clean CI pass; a repository's pinned version or wrapper stays authoritative when present. |
 | GitHub Actions linting | `actionlint` 1.7.12 is the baked default; invoke it as `actionlint`, but use a repository's pinned version or wrapper when present. |
 | Markdown linting | `markdownlint-cli2` 0.23.2 is the baked default; invoke it as `markdownlint-cli2`, but repository CI pins and wrappers remain authoritative, so use the wrapper or `npx --yes markdownlint-cli2@<pin>` when another version is required. |
 | Workflow debugging | `wf-check <script.js>` validates Claude Workflow metadata and async-body syntax without running it; `wf-status <runId-or-transcript-dir>` summarizes a run best-effort from its snapshot, journal, and agent transcripts. |

@@ -60,6 +60,29 @@ RUN ACTIONLINT_VERSION=1.7.12 \
     && chmod 0755 /usr/local/bin/actionlint \
     && rm /tmp/actionlint.tar.gz
 
+# ShellCheck 0.11.0 matches the version GitHub's ubuntu runners ship, so a clean
+# local pass predicts a clean Tier 0 shellcheck step (Debian trixie's apt package
+# lags at 0.10.0, which misses checks such as SC2329). Fetch the statically
+# linked release tarball and verify the per-architecture SHA256 (the digests
+# GitHub lists on the v0.11.0 release assets) before extracting only the binary.
+# Bump the version, both checksums, the tooling-table row, and the exact Bash
+# and PowerShell Stage 1 smoke assertions together.
+RUN SHELLCHECK_VERSION=0.11.0 \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) shellcheck_arch=x86_64 \
+               shellcheck_sha256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;; \
+        arm64) shellcheck_arch=aarch64 \
+               shellcheck_sha256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;; \
+        *) echo "no pinned ShellCheck checksum for architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/shellcheck.tar.xz \
+        "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.${shellcheck_arch}.tar.xz" \
+    && echo "${shellcheck_sha256}  /tmp/shellcheck.tar.xz" | sha256sum -c - \
+    && tar -C /usr/local/bin --strip-components=1 --no-same-owner \
+        -xJf /tmp/shellcheck.tar.xz "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
+    && chmod 0755 /usr/local/bin/shellcheck \
+    && rm /tmp/shellcheck.tar.xz
+
 # markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
 # default reproducible and omit optional dependencies; repository wrappers and
 # CI pins remain authoritative when they require another version. wf-check uses

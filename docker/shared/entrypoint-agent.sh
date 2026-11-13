@@ -56,6 +56,15 @@ agent_env() {
 		# shellcheck disable=SC2016
 		AGENT_ONESHOT='One-shot: `codex exec --sandbox read-only -o <file> "<prompt>"` for read-only work like reviews (`codex review --base <branch>` is the purpose-built review form, run from the tree to review; note `--base` and a custom prompt are mutually exclusive); use `codex exec --dangerously-bypass-approvals-and-sandbox` only when the sub-task must write. `-m <model>` / `-c model_reasoning_effort=<level>` pick strength. Preflight with `codex login status` (non-zero exit = not logged in) — an unauthenticated `codex exec` burns ~30s of retries before failing.'
 		;;
+	muse)
+		# Peer-only: Muse Code is never a PRIMARY_AGENT and has no setup hook, seed
+		# directory or instruction file. Only the fields peer_list prints are set.
+		AGENT_NAME="Muse"
+		AGENT_BINARY="muse"
+		AGENT_AUTONOMY_FLAG="--yolo"
+		AGENT_LABEL="Muse Code (Meta) — optional reviewer; use it only when it is logged in"
+		AGENT_ONESHOT='One-shot: `muse exec --prompt-file <file>` prints the final answer on stdout (`--json` for JSONL events; `--model <id>` / `--effort <level>` to pick strength). Approval and the sandbox stay on unless you pass flags to lift them, which suits a review; a review prompt should still say the checkout is shared with other agents, so the reviewer reads the diff rather than running builds or changing files. Preflight with `muse usage` (non-zero exit = not logged in, and it prints the remaining subscription allowance otherwise). Contributor mode follows the saved Muse setting; pass `--contributor-mode on|off` only when the user asked for a per-run override.'
+		;;
 	*)
 		echo "entrypoint-agent: unknown agent '$1'" >&2
 		return 1
@@ -63,12 +72,19 @@ agent_env() {
 	esac
 }
 
+# Peer-only agents: listed as a peer when their binary is baked into this image
+# (an opt-in build input), never seeded and never a valid PRIMARY_AGENT.
+PEER_ONLY_AGENTS="muse"
+
 # Render the Markdown bullet list of peer agents (every agent except $1) that the
 # instruction template substitutes via ${AGENT_PEERS}.
 peer_list() {
 	local self="$1" other
-	for other in $ALL_AGENTS; do
+	for other in $ALL_AGENTS $PEER_ONLY_AGENTS; do
 		[ "$other" = "$self" ] && continue
+		case " $PEER_ONLY_AGENTS " in
+		*" $other "*) command -v "$other" >/dev/null 2>&1 || continue ;;
+		esac
 		(
 			agent_env "$other" || exit 0
 			# Backticks here are literal Markdown for the instruction file, not a

@@ -1310,7 +1310,7 @@ fi
 # agent-podman-imagestore is the single GLOBAL read-only image cache shared by
 # every container across all projects (consumed via Podman additionalimagestores).
 # It is infra, like the config volumes — created here, never per-container.
-SHARED_VOLUMES=(agent-gh-config agent-zsh-history claude-config codex-config agent-podman-imagestore)
+SHARED_VOLUMES=(agent-gh-config agent-zsh-history claude-config codex-config muse-config agent-podman-imagestore)
 for vol in "${SHARED_VOLUMES[@]}"; do
 	if ! docker volume inspect "$vol" >/dev/null 2>&1; then
 		docker volume create "$vol" >/dev/null

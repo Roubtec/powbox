@@ -3,6 +3,7 @@ param(
   [string]$Target = "all",
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",
+  [string]$MuseVersion = "",
   [switch]$NoCache,
   [switch]$Pull
 )
@@ -14,5 +15,6 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   -Target $Target `
   -ClaudeVersion $ClaudeVersion `
   -CodexVersion $CodexVersion `
+  -MuseVersion $MuseVersion `
   -NoCache:$NoCache `
   -Pull:$Pull

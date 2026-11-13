@@ -693,5 +693,5 @@ function agent-list {
 }
 
 function agent-volumes {
-    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
+    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=muse-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
 }

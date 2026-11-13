@@ -120,7 +120,7 @@ The value is `none`, `latest`, or a full release id as the stable channel prints
 Once an image carries Muse, opting in is set-and-forget: `agent-check-updates` and `agent-update` show a `Muse` row beside Codex and Claude, offer the update when the stable channel publishes a newer release, and carry the baked release forward on every other rebuild — no flag or variable needed.
 `POWBOX_MUSE_VERSION` then only matters at the edges: set it to `latest` on a machine whose image has no Muse yet and the next `agent-update` adds it, set it to a full release id to hold that release, or set it to `none` to drop Muse: while the image still carries it, the update check then shows a pending `-> none (removal requested)` row, and `agent-update` rebuilds without it.
 When the stable channel cannot be read, the row shows the latest release as unknown and every rebuild keeps the baked one.
-`agent-image-info` shows the baked release when there is one.
+`agent-image-info` shows what the image was built with, exactly as it does for Claude and Codex: the release id once `agent-update` has pinned one, or `latest` for an image hand-built with `--muse-version latest` (the update check reads the real release from the binary either way).
 The binary is fetched in its own build stage, verified against the size-and-sha256 release manifest, and copied in above the Claude layer, so a Claude or Codex bump never downloads it again and a Muse bump never reinstalls them.
 
 After the first launch of a Muse-enabled image, log in once from any container shell with `muse login` (a device-code flow: approve the printed code in a browser on any machine).

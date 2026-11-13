@@ -24,11 +24,19 @@ ARG BASE_IMAGE=powbox-agent-base:latest
 # costs ~0.5 GB (one statically linked binary), which is why it is not a default.
 #
 # It is fetched in its own stage rather than in a RUN of the main chain so its
-# cost is keyed on MUSE_VERSION alone: this stage's cache does not depend on the
-# Codex, linter or Claude layers, so bumping either other agent never downloads
-# Muse again, and bumping Muse never reinstalls them. That makes Muse's position
-# in the release-cadence ordering above irrelevant (its cadence sits near
-# Codex's, well under Claude's).
+# cost is keyed on MUSE_VERSION and the base image alone: this stage's cache does
+# not depend on the Codex, linter or Claude layers, so bumping either other agent
+# never downloads Muse again, and bumping Muse never reinstalls them. That makes
+# Muse's position in the release-cadence ordering above irrelevant (its cadence
+# sits near Codex's, well under Claude's).
+#
+# The stage is built FROM the base image by its fixed tag, deliberately NOT from
+# ${BASE_IMAGE}: that is the layer-set image when a set is selected, and a stage
+# parented on it would download the binary again on every layer-set edit and on
+# every switch between the lean image and a set, for a download that uses
+# nothing a set adds. The base carries the curl, jq and sha256sum this needs and
+# is rebuilt far less often. Both build drivers build or verify that tag before
+# any agent bake, the same guarantee the layer-set image's own FROM relies on.
 #
 # MUSE_VERSION is `none`, `latest`, or a full release id as the channel manifest
 # prints it (e.g. 1.4.18-R8587.1). `latest` is resolved here from the stable
@@ -38,7 +46,7 @@ ARG BASE_IMAGE=powbox-agent-base:latest
 # it installs a self-updating launcher into $HOME and edits shell profiles,
 # whereas the release manifest gives a versioned URL, a size and a sha256 for
 # the binary itself, all verified below. No sign-in is needed for the download.
-FROM ${BASE_IMAGE} AS muse-fetch
+FROM powbox-agent-base:latest AS muse-fetch
 ARG MUSE_VERSION=none
 USER root
 RUN mkdir -p /out \

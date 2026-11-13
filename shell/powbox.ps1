@@ -490,9 +490,13 @@ function _Powbox-BuildFromTable {
     _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -MuseVersion $museVer -ExtraArgs $ExtraArgs
 }
 
-# The Muse Code release powbox-agent:latest was built with (its
-# powbox.muse.version label), or "" when the image is missing or carries no
-# Muse. For the one rebuild that has no update table to read it from.
+# What powbox-agent:latest was asked to bake for Muse Code (its
+# powbox.muse.version label): a release id, or the literal `latest` for an image
+# hand-built that way - like the claude and codex version labels, it records the
+# build argument, not what `latest` resolved to. "" when the image is missing or
+# carries no Muse. For the one rebuild that has no update table to read it from;
+# that rebuild puts every binary at its latest release anyway, so either value
+# keeps Muse installed, which is the point.
 function _Powbox-BakedMuseVersion {
     $v = docker image inspect powbox-agent:latest --format '{{index .Config.Labels `powbox.muse.version`}}' 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $v) { return "" }

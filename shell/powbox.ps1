@@ -460,7 +460,8 @@ function _Powbox-BuildFromTable {
     )
     $claudeVer = ""
     $codexVer = ""
-    # The muse row exists only when Muse Code is wanted (see check-updates.sh);
+    # The muse row exists only when the update check tracks Muse Code - baked,
+    # asked for, or baked with its removal requested (see check-updates.sh);
     # without one no -MuseVersion is passed and build.ps1's own default decides.
     $museVer = ""
     foreach ($row in $Table) {
@@ -489,13 +490,6 @@ function _Powbox-BuildFromTable {
     _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -MuseVersion $museVer -ExtraArgs $ExtraArgs
 }
 
-# Nuclear option: rebuild the entire stack - base, the layer-set image when a
-# set is selected, and the agent image - from the current repo commit,
-# re-pulling the upstream base and ignoring the layer cache, with both agents at
-# their latest release (build.ps1 all -Pull -NoCache). For when the images are
-# in an unknown state and you want a clean slate. To pick up powbox recipe
-# changes without discarding cache, use the much faster `agent-update -Refresh`
-# instead.
 # The Muse Code release powbox-agent:latest was built with (its
 # powbox.muse.version label), or "" when the image is missing or carries no
 # Muse. For the one rebuild that has no update table to read it from.
@@ -507,6 +501,13 @@ function _Powbox-BakedMuseVersion {
     return $v
 }
 
+# Nuclear option: rebuild the entire stack - base, the layer-set image when a
+# set is selected, and the agent image - from the current repo commit,
+# re-pulling the upstream base and ignoring the layer cache, with both agents at
+# their latest release (build.ps1 all -Pull -NoCache). For when the images are
+# in an unknown state and you want a clean slate. To pick up powbox recipe
+# changes without discarding cache, use the much faster `agent-update -Refresh`
+# instead.
 function agent-full-rebuild {
     $table = _Powbox-AgentPorcelain
     if ($LASTEXITCODE -eq 0) {

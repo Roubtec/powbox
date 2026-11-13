@@ -395,7 +395,8 @@ _powbox_build_from_table() {
     local args=("$target")
     [ -n "$claude_ver" ] && args+=(--claude-version "$claude_ver")
     [ -n "$codex_ver" ]  && args+=(--codex-version "$codex_ver")
-    # The muse row exists only when Muse Code is wanted (see check-updates.sh);
+    # The muse row exists only when the update check tracks Muse Code — baked,
+    # asked for, or baked with its removal requested (see check-updates.sh);
     # without one no flag is passed and build.sh's own default decides.
     [ -n "$muse_ver" ]   && args+=(--muse-version "$muse_ver")
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"

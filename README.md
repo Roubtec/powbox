@@ -122,6 +122,8 @@ After the first launch of a Muse-enabled image, log in once from any container s
 The login and Muse's settings live on the shared `muse-config` volume (`/home/node/.config/muse`), so every container and both agents reuse it; `META_API_KEY`, when exported on the host, is passed through and outranks the stored login.
 Muse's own session logs under `~/.local/share/muse` are container-lifetime by design.
 Contributor mode (Meta may train on your content in exchange for a larger allowance) follows whatever you saved in Muse's own `/settings`; powbox does not override it.
+A headless `muse exec` writes to the checkout without asking unless it is told otherwise, so the review form the agents are given is `muse exec --prompt-file <file> --disable-write --no-foreign-personal-context`: no file-writing tools and a read-only instruction, with the shell still available for `git show`. That is strong encouragement rather than an enforced sandbox.
+On plans that include it, `--model muse-wonder-full-1.0` selects the stronger model; `muse-wonder-1.0` is the default and the fallback.
 
 ### Layer sets
 

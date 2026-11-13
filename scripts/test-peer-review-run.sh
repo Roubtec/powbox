@@ -9,7 +9,8 @@ set -uo pipefail
 # literal (never shell-eval'd) prompt handling, read-only permission flags, JSON
 # normalization, Codex progress forwarding, timeout/retry policy, process-group
 # reaping, and path containment — in BOTH directions (Claude reviewing, Codex
-# reviewing), not one shared happy path.
+# reviewing), not one shared happy path. A fake `muse` covers the optional third
+# reviewer the same way (section 18, at the end).
 #
 # Covered:
 #   (1) codex passed + live --json progress forwarded to stderr
@@ -2206,7 +2207,7 @@ d="$(new_case)"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" codex) --effort max
 assert_eq "14g: effort max rejected for codex" "$RUN_RC" 64
-assert_contains "14g: max rejection names the provider limit" "$RUN_ERR" "claude-only"
+assert_contains "14g: max rejection names the provider limit" "$RUN_ERR" "not offered by codex"
 
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
@@ -3540,6 +3541,114 @@ assert_eq "17k: retried true" "$(jqf "$RUN_RESULT" .retried)" true
 assert_eq "17k: the retry still recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_contains "17k: the run-global survivor warning is still reported" "$(jqf "$RUN_RESULT" .reason)" "survived SIGKILL"
 assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)" "suppressed"
+
+# (18) muse — the optional third reviewer. A fake `muse` records its argv and
+# the prompt file it was pointed at; its `exec --help` advertises the posture
+# flags the adapter gates on.
+#   18a  default model is the preferred one, the review posture flags are all
+#        present, the prompt is read from the attempt's private copy, and plain
+#        stdout becomes reviewFile
+#   18b  the preferred model refused for this account → ONE fallback attempt on
+#        the floor model, which the result then reports
+#   18c  an explicit --model is never second-guessed: a refusal fails, no retry
+#   18d  the logged-out message is `unavailable`, not a failure, and not retried
+#   18e  --effort max is accepted for muse
+#   18f  a muse without --disable-write still runs, and says so
+#   18g  a refused fallback is not retried again (two-attempt cap)
+make_muse_fake() { # <case-dir> <body run after argv and the prompt are recorded>
+	cat >"$1/bin/muse" <<MUSEFAKE
+#!/usr/bin/env bash
+if [ "\$1" = exec ] && [ "\$2" = --help ]; then
+	printf '%s\n' "\${MUSE_HELP:-"--prompt-file --disable-write --approval-mode --no-foreign-personal-context --disable-web-tools --model --reasoning-effort"}"
+	exit 0
+fi
+n=\$(cat "$1/calls" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"$1/calls"
+printf '%s\n' "\$@" >"$1/argv.\$n"
+model=""; pf=""
+while [ \$# -gt 0 ]; do case "\$1" in --model) model="\$2"; shift 2;; --prompt-file) pf="\$2"; shift 2;; *) shift;; esac; done
+cat "\$pf" >"$1/prompt-seen.\$n" 2>/dev/null
+$2
+MUSEFAKE
+	chmod +x "$1/bin/muse"
+}
+# shellcheck disable=SC2016 # expanded by the fake, not here
+MUSE_DENY='echo "run ended with Failed: model \`$model\` does not exist or you lack access [request_id=x]" >&2; exit 1'
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "Looks fine.\n\nVERDICT: PASS\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse) --effort medium
+assert_eq "18a: muse passed" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "18a: one attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "18a: the preferred model is the default" "$(jqf "$RUN_RESULT" .model)" muse-wonder-full-1.0
+assert_eq "18a: effort reported" "$(jqf "$RUN_RESULT" .effort)" medium
+assert_eq "18a: buffered, like claude" "$(jqf "$RUN_RESULT" .liveProgress)" false
+muse_argv=" $(tr '\n' ' ' <"$d/argv.1")"
+assert_contains "18a: headless exec" "$muse_argv" " exec --prompt-file "
+assert_contains "18a: write tools withheld" "$muse_argv" " --disable-write "
+assert_contains "18a: approval never (nobody to ask)" "$muse_argv" " --approval-mode never "
+assert_contains "18a: personal rules kept out" "$muse_argv" " --no-foreign-personal-context "
+assert_contains "18a: web tools off" "$muse_argv" " --disable-web-tools "
+assert_contains "18a: model on argv" "$muse_argv" " --model muse-wonder-full-1.0 "
+assert_contains "18a: effort on argv" "$muse_argv" " --reasoning-effort medium "
+assert_not_contains "18a: the workspace is never trusted" "$muse_argv" "--trust-workspace"
+assert_not_contains "18a: never yolo" "$muse_argv" "--yolo"
+assert_not_contains "18a: contributor mode is left to the user's own setting" "$muse_argv" "--contributor-mode"
+assert_eq "18a: the prompt file is the attempt's private copy" "$(grep -A1 -x -- '--prompt-file' "$d/argv.1" | tail -1)" "$(jqf "$RUN_RESULT" .artifactDir)/prompt.txt"
+assert_eq "18a: the literal prompt reached the provider" "$(cat "$d/prompt-seen.1")" "$(cat "$d/prompt.txt")"
+assert_eq "18a: reviewFile carries plain stdout" "$(cat "$(jqf "$RUN_RESULT" .reviewFile)")" "$(printf 'Looks fine.\n\nVERDICT: PASS')"
+
+d="$(new_case)"
+make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; printf "VERDICT: ISSUES\n- a.py:1 - minor - x\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18b: the floor model's review is the outcome" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "18b: two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "18b: retried" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "18b: the result reports the model that actually reviewed" "$(jqf "$RUN_RESULT" .model)" muse-wonder-1.0
+assert_contains "18b: the second attempt asked for the floor model" " $(tr '\n' ' ' <"$d/argv.2")" " --model muse-wonder-1.0 "
+assert_contains "18b: the fallback is announced" "$RUN_ERR" "retrying with muse-wonder-1.0"
+
+d="$(new_case)"
+make_muse_fake "$d" "$MUSE_DENY"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse) --model muse-wonder-full-1.0
+assert_eq "18c: an explicit model that is refused fails" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "18c: and is not retried on another model" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_contains "18c: the reason names the refused model" "$(jqf "$RUN_RESULT" .reason)" "refused model 'muse-wonder-full-1.0'"
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # literal backticks in the provider's own message
+make_muse_fake "$d" 'echo "missing meta credentials: run \`muse login\` or set META_API_KEY, or save credentials at /x/auth.json" >&2; exit 1'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18d: logged out is unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "18d: not retried" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "18d: no review file" "$(jqf "$RUN_RESULT" .reviewFile)" null
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse) --effort max
+assert_eq "18e: effort max accepted for muse" "$(jqf "$RUN_RESULT" .effort)" max
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+export MUSE_HELP="--prompt-file --model --reasoning-effort"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+unset MUSE_HELP
+assert_eq "18f: a muse without the posture flags still reviews" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_not_contains "18f: an unadvertised flag is not passed" "$(tr '\n' ' ' <"$d/argv.1")" "--disable-write"
+assert_contains "18f: the missing write restraint is named" "$RUN_ERR" "no --disable-write"
+
+d="$(new_case)"
+make_muse_fake "$d" "$MUSE_DENY"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18g: refused on both models fails" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "18g: the cap is two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "18g: exactly two provider launches" "$(cat "$d/calls")" 2
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

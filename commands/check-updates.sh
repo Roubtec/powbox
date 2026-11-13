@@ -13,10 +13,14 @@
 #
 # The muse row is OPTIONAL: Muse Code is an opt-in peer reviewer, so the row is
 # printed only when the image already carries it or POWBOX_MUSE_VERSION asks for
-# it, and never when POWBOX_MUSE_VERSION=none. Its "latest" column is the
-# release the next build should carry: POWBOX_MUSE_VERSION when that pins a full
-# release id, the stable channel's current release otherwise. A consumer that
-# sees no muse row passes no --muse-version, so the build's own default applies.
+# it. Its "latest" column is what the next build should carry:
+# POWBOX_MUSE_VERSION when that pins a full release id, the stable channel's
+# current release otherwise, and the literal `none` when POWBOX_MUSE_VERSION=none
+# asks for a baked Muse to be removed — a stale row, so the removal is offered
+# like any other update and the rebuild is told `--muse-version none`. With
+# nothing baked, `none` prints no row: there is nothing to remove. A consumer
+# that sees no muse row passes no --muse-version, so the build's own default
+# applies.
 #
 # A component is stale when a latest value is known and differs from what is
 # baked in (a missing image counts as stale); unknown means the latest could not
@@ -315,13 +319,22 @@ else
 	note "npm not found — latest agent versions will be shown as (unknown)."
 fi
 
-# Muse Code is tracked only when it is wanted: already baked, or asked for by
-# POWBOX_MUSE_VERSION — and never when that is explicitly `none`, which is how a
-# user drops it again. A full release id in the variable is the wanted release;
-# anything else (`latest`, or unset beside a baked binary) follows the channel.
+# Muse Code is tracked only when there is something to say about it: already
+# baked, or asked for by POWBOX_MUSE_VERSION. A full release id in the variable
+# is the wanted release; `latest`, or an unset variable beside a baked binary,
+# follows the channel. `none` is how a user drops it again, and while a binary
+# is still baked that is a pending change like any other — the wanted value is
+# the literal `none`, which differs from the baked release and so reads stale.
+# Hiding the row there would leave agent-update reporting "up to date" over an
+# image that still carries what the user asked to remove.
 muse_wanted="${POWBOX_MUSE_VERSION:-}"
 muse_tracked=false
-if [ "$muse_wanted" != none ] && { [ -n "$muse_baked" ] || [ -n "$muse_wanted" ]; }; then
+if [ "$muse_wanted" = none ]; then
+	if [ -n "$muse_baked" ]; then
+		muse_tracked=true
+		muse_latest=none
+	fi
+elif [ -n "$muse_baked" ] || [ -n "$muse_wanted" ]; then
 	muse_tracked=true
 	case "$muse_wanted" in
 	[0-9]*) muse_latest="$muse_wanted" ;;
@@ -400,6 +413,9 @@ if $muse_tracked; then
 	if [ -z "$muse_baked" ] && [ -n "$muse_latest" ]; then
 		# Opted in but not baked yet: say so rather than "baked: (unknown)".
 		printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "Muse" "(not baked)" "$muse_latest"
+	elif [ "$muse_latest" = none ]; then
+		# Baked, and POWBOX_MUSE_VERSION=none asks for it to go.
+		printf '  %-8s  %s -> none (removal requested)  ** update available **\n' "Muse" "$muse_baked"
 	else
 		compare "Muse" "$muse_baked" "$muse_latest"
 	fi

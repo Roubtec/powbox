@@ -1095,7 +1095,10 @@ muse_case "not baked, not asked for" "$(cu_state)" "" "" ""
 muse_case "not baked, pinned by the variable" "$(cu_state)" 1.4.18-R8587.1 $'muse\tstale\t-\t1.4.18-R8587.1' " Muse baked: (not baked) latest: 1.4.18-R8587.1 ** update available **"
 muse_case "baked at the pinned release" "$(muse_baked_state)" 1.4.18-R8587.1 $'muse\tok\t1.4.18-R8587.1\t1.4.18-R8587.1' " Muse 1.4.18-R8587.1 (up to date)"
 muse_case "baked, a newer release pinned" "$(muse_baked_state)" 1.4.19-R8600 $'muse\tstale\t1.4.18-R8587.1\t1.4.19-R8600' " Muse 1.4.18-R8587.1 -> 1.4.19-R8600 ** update available **"
-muse_case "baked, but dropped with none" "$(muse_baked_state)" none "" ""
+# Dropping a baked Muse is a pending change, so it is a stale row whose wanted
+# value is the literal none; with nothing baked there is nothing to remove.
+muse_case "baked, removal requested with none" "$(muse_baked_state)" none $'muse\tstale\t1.4.18-R8587.1\tnone' " Muse 1.4.18-R8587.1 -> none (removal requested) ** update available **"
+muse_case "not baked, none" "$(cu_state)" none "" ""
 if ! $HAVE_PWSH; then
 	skipped "check-updates muse row PowerShell parity (pwsh not installed)"
 fi
@@ -1159,6 +1162,7 @@ AU_ROOT="$WORK_ROOT/au-root"
 mkdir -p "$AU_ROOT/commands"
 cat >"$AU_ROOT/commands/check-updates.sh" <<'SH'
 #!/usr/bin/env bash
+[ -f "$AU_TABLE" ] || exit 1 # no table: the update check itself failed
 if [ "${1:-}" = --porcelain ]; then cat "$AU_TABLE"; exit 0; fi
 grep -q $'\tstale\t' "$AU_TABLE" && echo "  Something  ** update available **"
 exit 0
@@ -1170,6 +1174,7 @@ SH
 chmod +x "$AU_ROOT/commands/check-updates.sh" "$AU_ROOT/build.sh"
 # shellcheck disable=SC2016 # literal PowerShell
 printf '%s\r\n' 'param([switch]$Porcelain)' \
+	'if (-not (Test-Path $env:AU_TABLE)) { $global:LASTEXITCODE = 1; exit 1 }' \
 	'if ($Porcelain) { Get-Content $env:AU_TABLE; $global:LASTEXITCODE = 0; return }' \
 	'if (Select-String -Path $env:AU_TABLE -Pattern "`tstale`t" -Quiet) { Write-Host "  Something  ** update available **" }' \
 	'$global:LASTEXITCODE = 0' >"$AU_ROOT/commands/check-updates.ps1"
@@ -1216,6 +1221,73 @@ au_case "--refresh with a stale layer set" stale ok 2.0.0 --refresh "all --claud
 au_case "stale Muse only" ok ok 2.0.0 "" "agent --claude-version 2.0.0 --codex-version 0.50.0 --muse-version 1.4.19-R8600" $'muse\tstale\t1.4.18-R8587.1\t1.4.19-R8600'
 au_case "Claude release beside a current Muse" ok stale 2.1.0 "" "agent --claude-version 2.1.0 --codex-version 0.50.0 --muse-version 1.4.18-R8587.1" $'muse\tok\t1.4.18-R8587.1\t1.4.18-R8587.1'
 au_case "Muse wanted but not baked" ok ok 2.0.0 "" "agent --claude-version 2.0.0 --codex-version 0.50.0 --muse-version 1.4.18-R8587.1" $'muse\tstale\t-\t1.4.18-R8587.1'
+au_case "Muse removal requested" ok ok 2.0.0 "" "agent --claude-version 2.0.0 --codex-version 0.50.0 --muse-version none" $'muse\tstale\t1.4.18-R8587.1\tnone'
+au_case "Muse release unknown, nothing stale" ok ok 2.0.0 "" "" $'muse\tunknown\t1.4.18-R8587.1\t-'
+
+# A rebuild that FORCES every binary to its latest release must not uninstall a
+# baked Muse whose latest release could not be read: with no --muse-version the
+# build defaults to none. agent-full-rebuild forces all three.
+# full_rebuild_case <label> <muse row> <expected build line>
+full_rebuild_case() {
+	local label="$1" want="$3" st log
+	st="$(new_state)"
+	au_table ok ok 2.0.0 >"$st/table"
+	printf '%s\n' "$2" >>"$st/table"
+	log="$st/build.log"
+	: >"$log"
+	# shellcheck disable=SC2016 # expanded by the inner bash
+	with_fakes "$st" env POWBOX_ROOT="$AU_ROOT" AU_TABLE="$st/table" AU_LOG="$log" \
+		bash -c '. "$0"; agent-full-rebuild' "$ROOT_DIR/shell/powbox.sh" >/dev/null 2>&1 || true
+	assert_eq "agent-full-rebuild [$label]: build" "$(cat "$log")" "$want"
+	if $HAVE_PWSH; then
+		: >"$log"
+		with_fakes "$st" env POWBOX_ROOT="$AU_ROOT" AU_TABLE="$st/table" AU_LOG="$log" \
+			pwsh -NoProfile -Command ". '$ROOT_DIR/shell/powbox.ps1'; agent-full-rebuild" >/dev/null 2>&1 || true
+		assert_eq "agent-full-rebuild [$label]: PowerShell build" "$(cat "$log")" "$want"
+	fi
+}
+full_rebuild_case "Muse release unknown keeps the baked one" $'muse\tunknown\t1.4.18-R8587.1\t-' \
+	"all --claude-version 2.0.0 --codex-version 0.50.0 --muse-version 1.4.18-R8587.1 --pull --no-cache"
+full_rebuild_case "Muse release known moves to it" $'muse\tstale\t1.4.18-R8587.1\t1.4.19-R8600' \
+	"all --claude-version 2.0.0 --codex-version 0.50.0 --muse-version 1.4.19-R8600 --pull --no-cache"
+full_rebuild_case "Muse removal still removes" $'muse\tstale\t1.4.18-R8587.1\tnone' \
+	"all --claude-version 2.0.0 --codex-version 0.50.0 --muse-version none --pull --no-cache"
+full_rebuild_case "Muse wanted, never baked, release unknown: left to the build default" $'muse\tunknown\t-\t-' \
+	"all --claude-version 2.0.0 --codex-version 0.50.0 --pull --no-cache"
+
+# With no update table at all (the check itself failed) the rebuild has nothing
+# to pin from; the baked Muse is then read off the image's own label.
+# no_table_case <label> <image labels...> -- <POWBOX_MUSE_VERSION or ""> <expected build line>
+no_table_case() {
+	local label="$1" st log
+	shift
+	st="$(new_state)"
+	local labels=()
+	while [ "$1" != -- ]; do
+		labels+=("$1")
+		shift
+	done
+	shift
+	local envs=() want="$2"
+	[ -n "$1" ] && envs=(POWBOX_MUSE_VERSION="$1")
+	mkimage "$st" "$AGENT" "${labels[@]}"
+	log="$st/build.log"
+	: >"$log"
+	# shellcheck disable=SC2016 # expanded by the inner bash
+	with_fakes "$st" env "${envs[@]}" POWBOX_ROOT="$AU_ROOT" AU_TABLE="$st/absent" AU_LOG="$log" \
+		bash -c '. "$0"; agent-full-rebuild' "$ROOT_DIR/shell/powbox.sh" >/dev/null 2>&1 || true
+	assert_eq "agent-full-rebuild without a table [$label]: build" "$(cat "$log")" "$want"
+	if $HAVE_PWSH; then
+		: >"$log"
+		with_fakes "$st" env "${envs[@]}" POWBOX_ROOT="$AU_ROOT" AU_TABLE="$st/absent" AU_LOG="$log" \
+			pwsh -NoProfile -Command ". '$ROOT_DIR/shell/powbox.ps1'; agent-full-rebuild" >/dev/null 2>&1 || true
+		assert_eq "agent-full-rebuild without a table [$label]: PowerShell build" "$(cat "$log")" "$want"
+	fi
+}
+no_table_case "baked Muse is carried forward" powbox.muse.version=1.4.18-R8587.1 -- "" "all --muse-version 1.4.18-R8587.1 --pull --no-cache"
+no_table_case "an image built without Muse stays without" powbox.muse.version=none -- "" "all --pull --no-cache"
+no_table_case "an image predating the label stays without" powbox.claude.version=2.0.0 -- "" "all --pull --no-cache"
+no_table_case "the standing variable decides instead" powbox.muse.version=1.4.18-R8587.1 -- none "all --pull --no-cache"
 if ! $HAVE_PWSH; then
 	skipped "agent-update PowerShell routing (pwsh not installed)"
 fi

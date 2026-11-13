@@ -321,13 +321,19 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
     Write-Warning 'npm not found — latest agent versions will be shown as (unknown).'
 }
 
-# Muse Code is tracked only when it is wanted: already baked, or asked for by
-# POWBOX_MUSE_VERSION - and never when that is explicitly `none`. A full release
-# id in the variable is the wanted release; anything else follows the channel.
+# Muse Code is tracked only when there is something to say about it: already
+# baked, or asked for by POWBOX_MUSE_VERSION. A full release id in the variable
+# is the wanted release; anything else follows the channel. `none` drops it, and
+# while a binary is still baked that is a pending change: the wanted value is
+# the literal `none`, which reads stale, so the removal is offered and the
+# rebuild is told -MuseVersion none (see commands/check-updates.sh).
 $museWanted = [string]$env:POWBOX_MUSE_VERSION
 $museLatest = $null
-$museTracked = ($museWanted -ne 'none') -and ($museBaked -or $museWanted)
-if ($museTracked) {
+$museTracked = $false
+if ($museWanted -eq 'none') {
+    if ($museBaked) { $museTracked = $true; $museLatest = 'none' }
+} elseif ($museBaked -or $museWanted) {
+    $museTracked = $true
     if ($museWanted -match '^[0-9]') { $museLatest = $museWanted } else { $museLatest = Get-LatestMuseVersion }
 }
 
@@ -399,6 +405,9 @@ if ($museTracked) {
     if (-not $museBaked -and $museLatest) {
         # Opted in but not baked yet: say so rather than "baked: (unknown)".
         Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f 'Muse', '(not baked)', $museLatest)
+    } elseif ($museLatest -eq 'none') {
+        # Baked, and POWBOX_MUSE_VERSION=none asks for it to go.
+        Write-Host ("  {0,-8}  {1} -> none (removal requested)  ** update available **" -f 'Muse', $museBaked)
     } else {
         Write-Comparison 'Muse' $museBaked $museLatest
     }

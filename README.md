@@ -118,7 +118,8 @@ The value is `none`, `latest`, or a full release id as the stable channel prints
 `latest` is resolved when the fetch stage runs and Docker then caches it, so a hand-run `./build.sh agent --muse-version latest` does not by itself move to a newer release; `agent-update` does, because it pins the release id.
 
 Once an image carries Muse, opting in is set-and-forget: `agent-check-updates` and `agent-update` show a `Muse` row beside Codex and Claude, offer the update when the stable channel publishes a newer release, and carry the baked release forward on every other rebuild — no flag or variable needed.
-`POWBOX_MUSE_VERSION` then only matters at the edges: set it to `latest` on a machine whose image has no Muse yet and the next `agent-update` adds it, set it to a full release id to hold that release, or set it to `none` to drop Muse at the next update.
+`POWBOX_MUSE_VERSION` then only matters at the edges: set it to `latest` on a machine whose image has no Muse yet and the next `agent-update` adds it, set it to a full release id to hold that release, or set it to `none` to drop Muse: while the image still carries it, the update check then shows a pending `-> none (removal requested)` row, and `agent-update` rebuilds without it.
+When the stable channel cannot be read, the row shows the latest release as unknown and every rebuild keeps the baked one.
 `agent-image-info` shows the baked release when there is one.
 The binary is fetched in its own build stage, verified against the size-and-sha256 release manifest, and copied in above the Claude layer, so a Claude or Codex bump never downloads it again and a Muse bump never reinstalls them.
 

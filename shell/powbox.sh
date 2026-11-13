@@ -379,6 +379,13 @@ _powbox_build_from_table() {
         # '-' is the porcelain's empty marker (unknown/missing); leave unpinned so
         # the build falls back to the `latest` tag for that binary.
         [ "$ver" = "-" ] && ver=""
+        # Muse cannot take that fallback: with no --muse-version the build's
+        # default is `none`, so a forced rebuild whose wanted release is unknown
+        # (channel unreachable, no curl on the host) would silently uninstall an
+        # opted-in reviewer. Keep the baked release instead.
+        if [ "$name" = muse ] && [ -z "$ver" ] && [ "$baked" != "-" ]; then
+            ver="$baked"
+        fi
         case "$name" in
             claude) claude_ver="$ver" ;;
             codex)  codex_ver="$ver" ;;
@@ -394,6 +401,19 @@ _powbox_build_from_table() {
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
 }
 
+# The Muse Code release powbox-agent:latest was built with (its
+# powbox.muse.version label), or nothing when the image is missing or carries no
+# Muse. For the one rebuild that has no update table to read the baked release
+# from.
+_powbox_baked_muse_version() {
+    local v
+    v="$(docker image inspect powbox-agent:latest --format '{{index .Config.Labels "powbox.muse.version"}}' 2>/dev/null)" || return 0
+    case "$v" in
+        "" | "<no value>" | none) ;;
+        *) printf '%s\n' "$v" ;;
+    esac
+}
+
 # Nuclear option: rebuild the entire stack — base, the layer-set image when a
 # set is selected, and the agent image — from the current repo commit,
 # re-pulling the upstream base and ignoring the layer cache, with both agents at
@@ -406,7 +426,17 @@ agent-full-rebuild() {
     if table="$(_powbox_agent_porcelain)"; then
         _powbox_build_from_table "$table" "claude codex muse" all --pull --no-cache "$@"
     else
-        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        # No table to pin from, so both agents fall back to `latest`. Muse has no
+        # such fallback — without --muse-version the build bakes none — so carry
+        # forward what the current image was built with, unless the standing
+        # POWBOX_MUSE_VERSION already decides.
+        local muse_keep=""
+        [ -n "${POWBOX_MUSE_VERSION:-}" ] || muse_keep="$(_powbox_baked_muse_version)"
+        if [ -n "$muse_keep" ]; then
+            "$POWBOX_ROOT/build.sh" all --muse-version "$muse_keep" --pull --no-cache "$@"
+        else
+            "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        fi
     fi
 }
 

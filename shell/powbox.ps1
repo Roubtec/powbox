@@ -475,6 +475,11 @@ function _Powbox-BuildFromTable {
         # '-' is the porcelain's empty marker (unknown/missing); leave unpinned so
         # the build falls back to the `latest` tag for that binary.
         if ($ver -eq '-') { $ver = "" }
+        # Muse cannot take that fallback: with no -MuseVersion the build's
+        # default is `none`, so a forced rebuild whose wanted release is unknown
+        # (channel unreachable) would silently uninstall an opted-in reviewer.
+        # Keep the baked release instead.
+        if ($name -eq 'muse' -and -not $ver -and $baked -and $baked -ne '-') { $ver = $baked }
         switch ($name) {
             'claude' { $claudeVer = $ver }
             'codex'  { $codexVer = $ver }
@@ -491,13 +496,29 @@ function _Powbox-BuildFromTable {
 # in an unknown state and you want a clean slate. To pick up powbox recipe
 # changes without discarding cache, use the much faster `agent-update -Refresh`
 # instead.
+# The Muse Code release powbox-agent:latest was built with (its
+# powbox.muse.version label), or "" when the image is missing or carries no
+# Muse. For the one rebuild that has no update table to read it from.
+function _Powbox-BakedMuseVersion {
+    $v = docker image inspect powbox-agent:latest --format '{{index .Config.Labels `powbox.muse.version`}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $v) { return "" }
+    $v = ([string]$v).Trim()
+    if ($v -eq '<no value>' -or $v -eq 'none') { return "" }
+    return $v
+}
+
 function agent-full-rebuild {
     $table = _Powbox-AgentPorcelain
     if ($LASTEXITCODE -eq 0) {
         _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex", "muse") -Target all -Pull -NoCache @args
         return
     }
-    _Powbox-InvokeBuild -Target all -Pull -NoCache -ExtraArgs $args
+    # No table to pin from, so both agents fall back to `latest`. Muse has no
+    # such fallback - without -MuseVersion the build bakes none - so carry
+    # forward what the current image was built with, unless the standing
+    # POWBOX_MUSE_VERSION already decides.
+    $museKeep = if ($env:POWBOX_MUSE_VERSION) { "" } else { _Powbox-BakedMuseVersion }
+    _Powbox-InvokeBuild -Target all -Pull -NoCache -MuseVersion $museKeep -ExtraArgs $args
 }
 
 # Show the full update report, then (if anything is stale) ask for confirmation

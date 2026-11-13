@@ -1535,18 +1535,21 @@ build_cmd_codex() {
 #   --disable-web-tools the review is of the checkout, not of the internet.
 # The workspace is deliberately NOT trusted (no --trust-workspace, no --yolo), so
 # the reviewed tree's own AGENTS.md/CLAUDE.md, skills, hooks and MCP servers are
-# not loaded and cannot steer their own reviewer. Each posture flag is added only
-# when the installed CLI advertises it, so a release that renames one degrades to
-# a warning instead of a usage failure; a missing --disable-write is the one that
-# matters, and it is named loudly.
+# not loaded and cannot steer their own reviewer.
+#
+# --disable-write is passed UNCONDITIONALLY, like codex's `--sandbox read-only`
+# and claude's tool list: it is the one flag standing between a reviewer and the
+# shared checkout, and the help probe is not a safe gate for it — a probe that
+# timed out or printed nothing would read as "not advertised" and launch a
+# write-enabled review with no restraint at all, since this helper adds nothing
+# to the caller's prompt. A CLI that really has dropped the flag rejects it and
+# the attempt fails closed, which the caller sees as an ordinary non-blocking
+# `failed`. The remaining flags tighten isolation rather than guard the tree, so
+# each is added only when the installed CLI advertises it and a release that
+# renames one degrades to running without it.
 build_cmd_muse() {
 	local dir="$1" flag
-	CMD=(muse exec --prompt-file "$dir/prompt.txt")
-	if provider_supports '--disable-write'; then
-		CMD+=(--disable-write)
-	else
-		echo "peer-review-run: installed muse has no --disable-write; the reviewer keeps its file-writing tools (the prompt's shared-checkout instruction is the only restraint)" >&2
-	fi
+	CMD=(muse exec --prompt-file "$dir/prompt.txt" --disable-write)
 	provider_supports '--approval-mode' && CMD+=(--approval-mode never)
 	for flag in --no-foreign-personal-context --disable-web-tools; do
 		provider_supports "$flag" && CMD+=("$flag")

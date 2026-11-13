@@ -3553,7 +3553,9 @@ assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)"
 #   18c  an explicit --model is never second-guessed: a refusal fails, no retry
 #   18d  the logged-out message is `unavailable`, not a failure, and not retried
 #   18e  --effort max is accepted for muse
-#   18f  a muse without --disable-write still runs, and says so
+#   18f  --disable-write does not depend on the help probe: it is passed when
+#        the probe does not advertise it, and a muse that rejects it fails
+#        closed (no write-enabled review, no retry)
 #   18g  a refused fallback is not retried again (two-attempt cap)
 make_muse_fake() { # <case-dir> <body run after argv and the prompt are recorded>
 	cat >"$1/bin/muse" <<MUSEFAKE
@@ -3638,9 +3640,31 @@ export MUSE_HELP="--prompt-file --model --reasoning-effort"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" muse)
 unset MUSE_HELP
-assert_eq "18f: a muse without the posture flags still reviews" "$(jqf "$RUN_RESULT" .outcome)" passed
-assert_not_contains "18f: an unadvertised flag is not passed" "$(tr '\n' ' ' <"$d/argv.1")" "--disable-write"
-assert_contains "18f: the missing write restraint is named" "$RUN_ERR" "no --disable-write"
+muse_argv=" $(tr '\n' ' ' <"$d/argv.1")"
+assert_eq "18f: an unadvertised isolation flag only degrades" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_contains "18f: the write restraint is passed without the probe's say-so" "$muse_argv" " --disable-write "
+assert_not_contains "18f: an unadvertised isolation flag is not passed" "$muse_argv" "--no-foreign-personal-context"
+
+# A probe that printed nothing at all (it failed, or timed out) is the case the
+# gate must not open on: the restraint still reaches the provider.
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+export MUSE_HELP=" "
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+unset MUSE_HELP
+assert_contains "18f: an empty help probe still gets --disable-write" " $(tr '\n' ' ' <"$d/argv.1")" " --disable-write "
+
+# A muse that has dropped the flag rejects it: the review fails closed rather
+# than running with its write tools, and a usage error is not retried.
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'if grep -qx -- "--disable-write" "'"$d"'/argv.$n"; then echo "error: unexpected argument --disable-write found" >&2; exit 2; fi; printf "VERDICT: PASS\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18f: a muse rejecting --disable-write fails closed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "18f: never a pass from a write-enabled run" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "18f: the usage failure is not retried" "$(jqf "$RUN_RESULT" .attempts)" 1
 
 d="$(new_case)"
 make_muse_fake "$d" "$MUSE_DENY"

@@ -13,6 +13,10 @@ variable "CODEX_VERSION" {
   default = "latest"
 }
 
+variable "MUSE_VERSION" {
+  default = "none"
+}
+
 variable "BASE_SOURCE_IMAGE" {
   default = "node:24-trixie-slim"
 }
@@ -123,6 +127,7 @@ target "agent" {
     BASE_IMAGE = BASE_IMAGE
     CLAUDE_CODE_VERSION = CLAUDE_CODE_VERSION
     CODEX_VERSION = CODEX_VERSION
+    MUSE_VERSION = MUSE_VERSION
     POWBOX_COMMIT = POWBOX_COMMIT
     POWBOX_COMMIT_CODEX = POWBOX_COMMIT_CODEX
     POWBOX_COMMIT_BASE = POWBOX_COMMIT_BASE

@@ -16,6 +16,65 @@
 # The parent is powbox-agent-base:latest, or powbox-agent-layers:latest when a
 # layer set is selected (scripts/build-image.{sh,ps1} pass BASE_IMAGE).
 ARG BASE_IMAGE=powbox-agent-base:latest
+
+# --- Muse Code fetch stage (opt-in peer reviewer) -----------------------------
+# Meta's Muse Code CLI is an OPTIONAL third harness, baked only as a peer
+# reviewer: MUSE_VERSION defaults to `none`, which leaves /out empty so the COPY
+# further down adds nothing and the image carries no `muse` at all. Opting in
+# costs ~0.5 GB (one statically linked binary), which is why it is not a default.
+#
+# It is fetched in its own stage rather than in a RUN of the main chain so its
+# cost is keyed on MUSE_VERSION and the base image alone: this stage's cache does
+# not depend on the Codex, linter or Claude layers, so bumping either other agent
+# never downloads Muse again, and bumping Muse never reinstalls them. That makes
+# Muse's position in the release-cadence ordering above irrelevant (its cadence
+# sits near Codex's, well under Claude's).
+#
+# The stage is built FROM the base image by its fixed tag, deliberately NOT from
+# ${BASE_IMAGE}: that is the layer-set image when a set is selected, and a stage
+# parented on it would download the binary again on every layer-set edit and on
+# every switch between the lean image and a set, for a download that uses
+# nothing a set adds. The base carries the curl, jq and sha256sum this needs and
+# is rebuilt far less often. Both build drivers build or verify that tag before
+# any agent bake, the same guarantee the layer-set image's own FROM relies on.
+#
+# MUSE_VERSION is `none`, `latest`, or a full release id as the channel manifest
+# prints it (e.g. 1.4.18-R8587.1). `latest` is resolved here from the stable
+# channel; like the other agents' `latest`, Docker then caches the result until
+# the value changes or the build runs with --no-cache, so pin the full id to
+# move to a specific release. The official installer is deliberately not used:
+# it installs a self-updating launcher into $HOME and edits shell profiles,
+# whereas the release manifest gives a versioned URL, a size and a sha256 for
+# the binary itself, all verified below. No sign-in is needed for the download.
+FROM powbox-agent-base:latest AS muse-fetch
+ARG MUSE_VERSION=none
+USER root
+RUN mkdir -p /out \
+    && if [ "${MUSE_VERSION}" != none ]; then \
+        case "$(dpkg --print-architecture)" in \
+            amd64) muse_platform=x86_linux ;; \
+            arm64) muse_platform=aarch64_linux ;; \
+            *) echo "no Muse Code build for architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac \
+        && muse_version="${MUSE_VERSION}" \
+        && if [ "$muse_version" = latest ]; then \
+            muse_version="$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://api.meta.ai/muse-code/channels/muse-stable | jq -er .version)"; \
+        fi \
+        && { printf '%s\n' "$muse_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?$' \
+            || { echo "MUSE_VERSION must be none, latest, or a full release id like 1.4.18-R8587.1 (got: $muse_version)" >&2; exit 1; }; } \
+        && muse_download="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${muse_version}" \
+        && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/muse-manifest.json "${muse_download}&file=manifest.json" \
+        && muse_url="$(jq -er --arg p "$muse_platform" '.artifacts[$p].url' /tmp/muse-manifest.json)" \
+        && muse_sha256="$(jq -er --arg p "$muse_platform" '.artifacts[$p].checksum' /tmp/muse-manifest.json)" \
+        && [ "$(jq -er .checksum_algorithm /tmp/muse-manifest.json)" = sha256 ] \
+        && case "$muse_url" in https://lookaside.facebook.com/*) ;; *) echo "unexpected Muse Code download host: $muse_url" >&2; exit 1 ;; esac \
+        && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /out/muse "$muse_url" \
+        && echo "${muse_sha256}  /out/muse" | sha256sum -c - \
+        && chmod 0755 /out/muse \
+        && /out/muse --version \
+        && rm /tmp/muse-manifest.json; \
+    fi
+
 FROM ${BASE_IMAGE}
 
 # --- Codex (lower layer: updated less often) ---------------------------------
@@ -113,6 +172,18 @@ RUN curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/cl
     && bash /tmp/claude-install.sh "${CLAUDE_CODE_VERSION}" \
     && rm /tmp/claude-install.sh
 RUN rm -rf /home/node/.claude/downloads
+
+# --- Muse Code (optional peer reviewer; see the muse-fetch stage) ------------
+# Copies nothing when MUSE_VERSION=none. --link keeps this layer independent of
+# the ones under it, so a Claude or Codex bump reuses it as-is instead of
+# re-materializing ~0.5 GB. The config directory is created here so the
+# muse-config volume mounted over it (compose.agent.yml) starts out owned by
+# node; it is created unconditionally so the mount is valid on an image built
+# without Muse too. Muse keeps its login (auth.json) and settings there; its
+# session logs under ~/.local/share/muse are deliberately container-lifetime.
+ARG MUSE_VERSION=none
+COPY --link --from=muse-fetch /out/ /usr/local/bin/
+RUN mkdir -m 700 -p /home/node/.config/muse
 
 # --- Per-agent seed assets ---------------------------------------------------
 # Each agent gets its own seed directory under /home/node/.agent-container/<agent>
@@ -256,6 +327,7 @@ LABEL powbox.commit.base="${POWBOX_COMMIT_BASE}" \
       powbox.parent.signature="${POWBOX_PARENT_SIGNATURE}" \
       powbox.codex.version="${CODEX_VERSION}" \
       powbox.claude.version="${CLAUDE_CODE_VERSION}" \
+      powbox.muse.version="${MUSE_VERSION}" \
       powbox.agent-skills.commit="${AGENT_SKILLS_COMMIT}"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint-agent.sh"]

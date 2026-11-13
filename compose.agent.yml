@@ -6,6 +6,9 @@ services:
       # its own, but a delegated peer invocation needs the other's key present.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Optional: only read by Muse Code, and only present in an image built
+      # with MUSE_VERSION set. It outranks a stored `muse login`.
+      META_API_KEY: ${META_API_KEY:-}
       # Which agent this container runs; the launcher overrides it per invocation.
       PRIMARY_AGENT: ${PRIMARY_AGENT:-claude}
     volumes:
@@ -13,6 +16,9 @@ services:
       # primary agent can spin up the other in-container.
       - claude-config:/home/node/.claude
       - codex-config:/home/node/.codex
+      # Muse Code's login and settings. Mounted on every image, with or without
+      # the opt-in binary, so opting in later needs no compose change.
+      - muse-config:/home/node/.config/muse
 
 volumes:
   claude-config:
@@ -20,4 +26,7 @@ volumes:
     external: true
   codex-config:
     name: codex-config
+    external: true
+  muse-config:
+    name: muse-config
     external: true

@@ -56,6 +56,15 @@ agent_env() {
 		# shellcheck disable=SC2016
 		AGENT_ONESHOT='One-shot: `codex exec --sandbox read-only -o <file> "<prompt>"` for read-only work like reviews (`codex review --base <branch>` is the purpose-built review form, run from the tree to review; note `--base` and a custom prompt are mutually exclusive); use `codex exec --dangerously-bypass-approvals-and-sandbox` only when the sub-task must write. `-m <model>` / `-c model_reasoning_effort=<level>` pick strength. Preflight with `codex login status` (non-zero exit = not logged in) — an unauthenticated `codex exec` burns ~30s of retries before failing.'
 		;;
+	muse)
+		# Peer-only: Muse Code is never a PRIMARY_AGENT and has no setup hook, seed
+		# directory or instruction file. Only the fields peer_list prints are set.
+		AGENT_NAME="Muse"
+		AGENT_BINARY="muse"
+		AGENT_AUTONOMY_FLAG="--yolo"
+		AGENT_LABEL="Muse Code (Meta) — optional reviewer; use it only when it is logged in"
+		AGENT_ONESHOT='One-shot: `muse exec --prompt-file <file> --disable-write --no-foreign-personal-context` prints only the final answer on stdout (`--json` for JSONL events, whose `run.terminal.completed` record carries the answer as `text`). `--disable-write` is the review form: it withholds the file-writing tools and tells the model the session is read-only, while the shell stays available for `git show` and the like — without it a headless run writes to the checkout unprompted. It is an instruction, not an enforced sandbox, so a review prompt should still say the checkout is shared with other agents and that builds, tests and file changes are out of scope. `--no-foreign-personal-context` stops it loading your own personal rules and skills. Strength: `--model muse-wonder-full-1.0` is the stronger model on plans that include it; a run that exits 1 within seconds saying the model `does not exist or you lack access` means the plan does not, so retry with `--model muse-wonder-1.0` (the default). `--effort <level>` sets reasoning effort (default high). Preflight with `muse usage` (non-zero exit = not logged in; otherwise it prints the plan tier and remaining allowance). Contributor mode follows the saved Muse setting; pass `--contributor-mode on|off` only when the user asked for a per-run override.'
+		;;
 	*)
 		echo "entrypoint-agent: unknown agent '$1'" >&2
 		return 1
@@ -63,12 +72,19 @@ agent_env() {
 	esac
 }
 
+# Peer-only agents: listed as a peer when their binary is baked into this image
+# (an opt-in build input), never seeded and never a valid PRIMARY_AGENT.
+PEER_ONLY_AGENTS="muse"
+
 # Render the Markdown bullet list of peer agents (every agent except $1) that the
 # instruction template substitutes via ${AGENT_PEERS}.
 peer_list() {
 	local self="$1" other
-	for other in $ALL_AGENTS; do
+	for other in $ALL_AGENTS $PEER_ONLY_AGENTS; do
 		[ "$other" = "$self" ] && continue
+		case " $PEER_ONLY_AGENTS " in
+		*" $other "*) command -v "$other" >/dev/null 2>&1 || continue ;;
+		esac
 		(
 			agent_env "$other" || exit 0
 			# Backticks here are literal Markdown for the instruction file, not a

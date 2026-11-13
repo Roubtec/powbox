@@ -9,6 +9,11 @@ shift || true
 
 CLAUDE_CODE_VERSION="latest"
 CODEX_VERSION="latest"
+# Muse Code is an opt-in peer reviewer: `none` (the default) bakes no binary.
+# POWBOX_MUSE_VERSION in the environment is the standing opt-in, so a wrapper
+# that never passes --muse-version (agent-update, agent-full-rebuild) keeps
+# building the image the same way; the flag overrides it for one build.
+MUSE_VERSION="${POWBOX_MUSE_VERSION:-none}"
 NO_CACHE=false
 PULL=false
 
@@ -21,6 +26,10 @@ while [ "$#" -gt 0 ]; do
 	--codex-version)
 		shift
 		CODEX_VERSION="${1:?missing value for --codex-version}"
+		;;
+	--muse-version)
+		shift
+		MUSE_VERSION="${1:?missing value for --muse-version}"
 		;;
 	--no-cache)
 		NO_CACHE=true
@@ -306,6 +315,7 @@ run_bake() {
 		BASE_IMAGE="$BASE_IMAGE"
 		CLAUDE_CODE_VERSION="$CLAUDE_CODE_VERSION"
 		CODEX_VERSION="$CODEX_VERSION"
+		MUSE_VERSION="$MUSE_VERSION"
 		BASE_SOURCE_IMAGE="$BASE_SOURCE_IMAGE"
 		BASE_SOURCE_DIGEST="$BASE_SOURCE_DIGEST"
 		POWBOX_BASE_RECIPE_DIGEST="$POWBOX_BASE_RECIPE_DIGEST"

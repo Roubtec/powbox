@@ -3,21 +3,23 @@
 #
 # A Claude-led workflow reviews with Codex, and a Codex-led workflow reviews
 # with Claude, through ONE command interface and ONE machine-readable result
-# contract. The helper owns the mechanics that peer reviews previously required
+# contract. Either may also ask Muse Code, the optional third reviewer an image
+# carries only when it was built with it, through the same interface. The helper owns the mechanics that peer reviews previously required
 # by hand: a private owner-only artifact directory, literal (never shell-eval'd)
 # prompt handling, read-only provider execution, process-group supervision with
 # a timeout, a retry-once policy for transient failures, result parsing, and
 # process reaping on every exit path.
 #
 # Usage:
-#   peer-review-run --provider <claude|codex> \
+#   peer-review-run --provider <claude|codex|muse> \
 #                   --worktree <ABS_DIR> \
 #                   --prompt-file <FILE> \
 #                   --artifact-root <ABS_DIR> \
 #                   [--base <REF>] [--timeout <SECONDS>] \
 #                   [--model <ID>] [--effort <LEVEL>]
 #
-#   --provider       claude | codex — the PEER that reviews (the opposite agent).
+#   --provider       claude | codex — the PEER that reviews (the opposite agent),
+#                    or muse — Muse Code, an optional extra reviewer for either.
 #   --worktree       absolute path to the checkout the peer reviews (read-only).
 #   --prompt-file    file whose CONTENTS are the literal review prompt; fed to
 #                    the provider on stdin, never interpolated through a shell.
@@ -51,8 +53,18 @@
 #                    `--model ""` is told rather than silently given the claude
 #                    default or the codex lookup the explicit flag bypasses.
 #                    Passed as `--model` (claude) or `-m` (codex).
+#                    For muse with no --model, the review is attempted on
+#                    `muse-wonder-full-1.0`, the stronger model only some plans
+#                    include, and when the provider answers that the model does
+#                    not exist or the account lacks access, the run's second
+#                    attempt uses `muse-wonder-1.0`, which every plan includes.
+#                    That fallback is one more alternative route through the
+#                    two-attempt budget, so a run that took it has no transient
+#                    retry left. An explicit --model is used as given, with no
+#                    fallback.
 #   --effort         reasoning effort: low | medium | high | xhigh | max
-#                    (`max` is claude-only). Default: high, for BOTH providers.
+#                    (`max` is not offered by codex). Default: high, for EVERY
+#                    provider.
 #                    An EMPTY value (`--effort ""`, what forwarding an unset
 #                    variable produces) is an OMISSION, not a level outside that
 #                    set: it resolves to the same `high` default, byte-identically.
@@ -157,6 +169,19 @@
 # and a single up-front note rather than a simulated heartbeat. stdout stays a
 # single parseable JSON object regardless.
 #
+# Muse specifics. Muse Code has no enforced read-only mode comparable to the
+# other two: the adapter passes `--disable-write`, which withholds its
+# file-writing tools and tells the model the session is read-only, but its shell
+# stays available (that is how it reads `git show`), so "read-only" is a strong
+# instruction rather than a sandbox guarantee — the review prompt should say the
+# checkout is shared. The reviewed workspace stays untrusted, so its own rules,
+# skills and hooks are not loaded, and `--no-foreign-personal-context` keeps the
+# invoking user's Claude/Codex personal rules out as well. Credentials and
+# Contributor mode are Muse's own business: the adapter forwards the environment
+# unchanged, so META_API_KEY outranks a stored login exactly as Muse documents,
+# and Contributor mode follows the user's saved Muse setting unless the caller
+# exports MUSE_CONTRIBUTOR_MODE=0 or =1 for the run.
+#
 # This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
 # and no peer outcome is required for publication.
 set -uo pipefail
@@ -171,12 +196,12 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,161p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,186p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
 	echo "peer-review-run: $*" >&2
-	echo "Try: peer-review-run --provider <claude|codex> --worktree <dir> --prompt-file <file> --artifact-root <dir>" >&2
+	echo "Try: peer-review-run --provider <claude|codex|muse> --worktree <dir> --prompt-file <file> --artifact-root <dir>" >&2
 	exit "$EX_USAGE"
 }
 
@@ -961,9 +986,9 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 case "$PROVIDER" in
-claude | codex) ;;
-"") die_usage "--provider is required (claude|codex)" ;;
-*) die_usage "unsupported --provider '$PROVIDER' (claude|codex)" ;;
+claude | codex | muse) ;;
+"") die_usage "--provider is required (claude|codex|muse)" ;;
+*) die_usage "unsupported --provider '$PROVIDER' (claude|codex|muse)" ;;
 esac
 
 # --- strength knobs ----------------------------------------------------------
@@ -992,8 +1017,8 @@ max)
 	# does NOT fail fast — it echoes the bogus level in its session header and
 	# then dies on a 400 from the API, mid-review, after the timeout budget has
 	# already been spent.
-	[ "$PROVIDER" = claude ] ||
-		die_usage "--effort max is claude-only (got provider '$PROVIDER'; use xhigh)"
+	[ "$PROVIDER" != codex ] ||
+		die_usage "--effort max is not offered by codex (use xhigh)"
 	;;
 *) die_usage "--effort must be low|medium|high|xhigh|max (got '$EFFORT')" ;;
 esac
@@ -1010,6 +1035,19 @@ esac
 # caller names a model explicitly.
 if [ -z "$MODEL" ] && [ "$PROVIDER" = claude ]; then
 	MODEL=opus
+fi
+# Muse's default is a preference with a floor, not a single pin: the stronger
+# `muse-wonder-full-1.0` is included only in the larger subscription plans, and
+# `muse-wonder-1.0` in all of them. The preferred model is tried first and the
+# floor only when the provider says this account cannot use it (see the
+# muse-model-fallback retry route). MUSE_MODEL_FALLBACK stays empty when the
+# caller named a model, because an explicit choice is never second-guessed.
+readonly MUSE_PREFERRED_MODEL="muse-wonder-full-1.0"
+readonly MUSE_FLOOR_MODEL="muse-wonder-1.0"
+MUSE_MODEL_FALLBACK=""
+if [ -z "$MODEL" ] && [ "$PROVIDER" = muse ]; then
+	MODEL="$MUSE_PREFERRED_MODEL"
+	MUSE_MODEL_FALLBACK="$MUSE_FLOOR_MODEL"
 fi
 # A model spelled like a flag would silently become one on the provider's argv.
 case "$MODEL" in
@@ -1189,6 +1227,7 @@ PEER_BIN="$PROVIDER"
 case "$PROVIDER" in
 codex) PROVIDER_HELP_CMD=(codex exec --help) ;;
 claude) PROVIDER_HELP_CMD=(claude --help) ;;
+muse) PROVIDER_HELP_CMD=(muse exec --help) ;;
 esac
 PROVIDER_HELP_FILE="$SESSION_DIR/$PROVIDER-help.txt"
 PROVIDER_HELP=""
@@ -1482,6 +1521,52 @@ build_cmd_codex() {
 	fi
 	CMD+=(-)
 }
+# Muse Code. One static binary whose headless mode is `muse exec`; the prompt is
+# read from the attempt's own private copy (`--prompt-file`), never from argv.
+#   --disable-write     withholds the file-writing tools and tells the model the
+#                       session is read-only. The shell stays available — it is
+#                       how the reviewer reads `git show` — so this is the
+#                       strongest review posture Muse offers, not an enforced
+#                       read-only sandbox (see "Muse specifics" in the header).
+#   --approval-mode never   a headless run has nobody to answer an approval
+#                       prompt; the OS sandbox stays on regardless.
+#   --no-foreign-personal-context   keeps the invoking user's Claude/Codex
+#                       personal rules and skills out of the reviewer.
+#   --disable-web-tools the review is of the checkout, not of the internet.
+# The workspace is deliberately NOT trusted (no --trust-workspace, no --yolo), so
+# the reviewed tree's own AGENTS.md/CLAUDE.md, skills, hooks and MCP servers are
+# not loaded and cannot steer their own reviewer.
+#
+# --disable-write is passed UNCONDITIONALLY, like codex's `--sandbox read-only`
+# and claude's tool list: it is the one flag standing between a reviewer and the
+# shared checkout, and the help probe is not a safe gate for it — a probe that
+# timed out or printed nothing would read as "not advertised" and launch a
+# write-enabled review with no restraint at all, since this helper adds nothing
+# to the caller's prompt. A CLI that really has dropped the flag rejects it and
+# the attempt fails closed, which the caller sees as an ordinary non-blocking
+# `failed`. The remaining flags tighten isolation rather than guard the tree, so
+# each is added only when the installed CLI advertises it and a release that
+# renames one degrades to running without it.
+build_cmd_muse() {
+	local dir="$1" flag
+	CMD=(muse exec --prompt-file "$dir/prompt.txt" --disable-write)
+	provider_supports '--approval-mode' && CMD+=(--approval-mode never)
+	for flag in --no-foreign-personal-context --disable-web-tools; do
+		provider_supports "$flag" && CMD+=("$flag")
+	done
+	CMD+=(--model "$MODEL")
+	EFFECTIVE_MODEL="$MODEL"
+	if provider_supports '--reasoning-effort'; then
+		CMD+=(--reasoning-effort "$EFFORT")
+		EFFECTIVE_EFFORT="$EFFORT"
+	else
+		EFFECTIVE_EFFORT=""
+		echo "peer-review-run: installed muse has no --reasoning-effort; running at the CLI's default effort (result reports effort:null)" >&2
+	fi
+	# Plain stdout carries the final answer and nothing else, so the run is
+	# buffered like Claude's rather than streamed.
+	LIVE=0
+}
 
 # --- progress forwarding -----------------------------------------------------
 # Forward newly-appended provider stdout lines to STDERR as normalized progress
@@ -1507,7 +1592,7 @@ forward_tick() {
 # These are NON-transient — retrying wastes quota — so they short-circuit retry.
 looks_unavailable() {
 	grep -Eiq \
-		'not (logged|signed) ?in|please (run )?[^ ]*login|log ?in (again|required)|re-?authenticate|unauthorized|(^|[^0-9])401([^0-9]|$)|(^|[^0-9])429([^0-9]|$)|usage limit|rate.?limit|too many requests|quota (exceeded|exhausted|reached)|(credits?|usage|balance) (exhausted|exceeded|depleted)|insufficient (quota|credit)' \
+		'not (logged|signed) ?in|missing [a-z]+ credentials|please (run )?[^ ]*login|log ?in (again|required)|re-?authenticate|unauthorized|(^|[^0-9])401([^0-9]|$)|(^|[^0-9])429([^0-9]|$)|usage limit|rate.?limit|too many requests|quota (exceeded|exhausted|reached)|(credits?|usage|balance) (exhausted|exceeded|depleted)|insufficient (quota|credit)' \
 		"$@"
 }
 
@@ -1548,6 +1633,10 @@ extract_final_message() {
 	codex)
 		# The final assistant message is captured verbatim in the -o file.
 		cat "$dir/codex-last-message.txt" 2>/dev/null || true
+		;;
+	muse)
+		# Without --json, `muse exec` prints the final answer alone on stdout.
+		cat "$out" 2>/dev/null || true
 		;;
 	esac
 }
@@ -1772,6 +1861,9 @@ run_attempt() {
 	# key-fallback keys off this: a missing binary cannot be fixed by switching
 	# auth mode, so it must NOT trigger a pointless second attempt.
 	ATT_BINARY_MISSING=0
+	# Set when Muse refused the requested MODEL for this account; read by the
+	# muse-model-fallback retry route below.
+	ATT_MODEL_DENIED=0
 
 	ATTEMPT_DIR="$(mktemp -d "${SESSION_DIR}/peer-review-${PROVIDER}-XXXXXX")" ||
 		die_usage "cannot create an attempt directory under '$SESSION_DIR'"
@@ -1805,6 +1897,7 @@ run_attempt() {
 	case "$PROVIDER" in
 	claude) build_cmd_claude ;;
 	codex) build_cmd_codex "$dir" ;;
+	muse) build_cmd_muse "$dir" ;;
 	esac
 	write_meta "$dir" "$attempt_no" "launched"
 
@@ -1980,6 +2073,19 @@ run_attempt() {
 		#   * positively transient (network/5xx/timeout/overloaded) → FAILED,
 		#     retried once with a fresh attempt dir.
 		#   * anything else (unclassified/deterministic) → FAILED, NOT retried.
+		# Muse answers a model the account's plan does not include within a few
+		# seconds, before any review work: "model `<id>` does not exist or you
+		# lack access". That is neither an auth failure nor transient, so it is
+		# recorded on its own and classified below as an ordinary failure; the
+		# retry routing decides whether a floor model is left to try.
+		if [ "$PROVIDER" = muse ] && grep -Eiq 'does not exist or you lack access' "$out" "$err"; then
+			ATT_MODEL_DENIED=1
+			ATT_OUTCOME=failed
+			ATT_TRANSIENT=0
+			ATT_REASON="provider refused model '$MODEL' for this account (exit $rc)"
+			write_meta "$dir" "$attempt_no" "failed-model-denied"
+			return 0
+		fi
 		if looks_unavailable "$out" "$err"; then
 			ATT_OUTCOME=unavailable
 			ATT_REASON="provider reported an authentication or usage/quota problem (exit $rc)"
@@ -2125,6 +2231,11 @@ TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3
 RETRY_ROUTE=""
 if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
 	RETRY_ROUTE=claude-fallback
+elif [ "$PROVIDER" = muse ] && [ "$ATT_MODEL_DENIED" = 1 ] && [ -n "$MUSE_MODEL_FALLBACK" ]; then
+	# The preferred Muse model is not in this account's plan: spend the second
+	# attempt on the floor model. Like the Claude fallback, an alternative route
+	# through the same two-attempt budget, never an extra attempt.
+	RETRY_ROUTE=muse-model-fallback
 elif [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_OUTCOME" = timeout ]; then
 	RETRY_ROUTE=timeout
 elif [ "$ATT_TRANSIENT" = 1 ]; then
@@ -2171,7 +2282,26 @@ if [ "$RETRY_SUPPRESSED" = 1 ]; then
 		printf '{"event":"note","provider":"claude","message":"env-credential fallback suppressed; the unavailable attempt process tree could not be confirmed reaped"}\n' >&2
 		ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this outcome is the login credential's alone, not both credentials)"
 		;;
+	muse-model-fallback)
+		printf '{"event":"note","provider":"muse","message":"model fallback suppressed; the refused attempt process tree could not be confirmed reaped"}\n' >&2
+		ATT_REASON="${ATT_REASON}; the fallback to '${MUSE_MODEL_FALLBACK}' was suppressed because reaping could not confirm that attempt's process tree was gone, so that model was never tried"
+		;;
 	esac
+elif [ "$RETRY_ROUTE" = muse-model-fallback ]; then
+	printf '{"event":"note","provider":"muse","message":"preferred model %s is not available to this account; retrying with %s"}\n' "$MODEL" "$MUSE_MODEL_FALLBACK" >&2
+	MODEL="$MUSE_MODEL_FALLBACK"
+	MUSE_MODEL_FALLBACK=""
+	run_attempt 2
+	ATTEMPTS=2
+	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
+	RETRIED=true
+	if [ "$ATT_TRANSIENT" = 1 ]; then
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the model-fallback attempt; attempt cap reached, not retried further"
+		else
+			ATT_REASON="provider failed transiently on the model-fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+		fi
+	fi
 elif [ "$RETRY_ROUTE" = claude-fallback ]; then
 	# The login attempt could not AUTHENTICATE the peer (expired session, or a
 	# session limit) — fall back to the documented env-credential path ONCE, in a

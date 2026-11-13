@@ -3,11 +3,17 @@ param(
   [string]$Target = "all",
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",
+  # Muse Code is an opt-in peer reviewer: "none" bakes no binary. Left empty,
+  # the standing opt-in POWBOX_MUSE_VERSION decides (see build-image.sh).
+  [string]$MuseVersion = "",
   [switch]$NoCache,
   [switch]$Pull
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $MuseVersion) {
+  $MuseVersion = if ($env:POWBOX_MUSE_VERSION) { $env:POWBOX_MUSE_VERSION } else { "none" }
+}
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Push-Location $rootDir
 try {
@@ -239,6 +245,7 @@ No image was built.
       BASE_IMAGE                = $script:BaseImage
       CLAUDE_CODE_VERSION       = $ClaudeVersion
       CODEX_VERSION             = $CodexVersion
+      MUSE_VERSION              = $MuseVersion
       BASE_SOURCE_IMAGE         = $script:BaseSourceImage
       BASE_SOURCE_DIGEST        = $script:BaseSourceDigest
       POWBOX_BASE_RECIPE_DIGEST = $script:PowboxBaseRecipeDigest

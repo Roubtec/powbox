@@ -943,7 +943,7 @@ if ($Isolated) {
 # agent-podman-imagestore is the single GLOBAL read-only image cache shared by
 # every container across all projects (consumed via Podman additionalimagestores).
 # It is infra, like the config volumes — created here, never per-container.
-$sharedVolumes = @("agent-gh-config", "agent-zsh-history", "claude-config", "codex-config", "agent-podman-imagestore")
+$sharedVolumes = @("agent-gh-config", "agent-zsh-history", "claude-config", "codex-config", "muse-config", "agent-podman-imagestore")
 foreach ($vol in $sharedVolumes) {
   docker volume inspect $vol *> $null
   if ($LASTEXITCODE -ne 0) {

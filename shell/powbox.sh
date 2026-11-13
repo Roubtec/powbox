@@ -315,10 +315,10 @@ agent-image-info() {
     fi
     # '|' rather than a tab: IFS whitespace would merge the empty fields an
     # image built without a layer set has.
-    local base codex claude codexver claudever layerset layersdigest layerscommit
-    IFS='|' read -r base codex claude codexver claudever layerset layersdigest layerscommit < <(
+    local base codex claude codexver claudever layerset layersdigest layerscommit musever
+    IFS='|' read -r base codex claude codexver claudever layerset layersdigest layerscommit musever < <(
         docker image inspect "$img" --format \
-            '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}'
+            '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}|{{index .Config.Labels "powbox.muse.version"}}'
     )
     echo "$img — powbox commit that built each layer:"
     printf '  base:         %s\n' "$(_powbox_norm_label "$base")"
@@ -328,6 +328,12 @@ agent-image-info() {
     esac
     printf '  codex:        %s  (codex %s)\n' "$(_powbox_norm_label "$codex")" "$(_powbox_norm_label "$codexver")"
     printf '  claude/top:   %s  (claude %s)\n' "$(_powbox_norm_label "$claude")" "$(_powbox_norm_label "$claudever")"
+    # Muse Code is an opt-in peer reviewer copied in above Claude; it has no
+    # powbox commit of its own, so only the release it was built with is shown.
+    case "$musever" in
+        "" | "<no value>" | none) ;;
+        *) printf '  muse:         %s  (optional reviewer)\n' "$musever" ;;
+    esac
     local head
     if head="$(git -C "$POWBOX_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
         [ -n "$(git -C "$POWBOX_ROOT" status --porcelain 2>/dev/null)" ] && head="${head}-dirty"
@@ -362,7 +368,7 @@ _powbox_build_from_table() {
     local table="$1" force=" $2 " target="$3"
     shift 3
     local name cstatus baked latest ver
-    local claude_ver="" codex_ver=""
+    local claude_ver="" codex_ver="" muse_ver=""
     while IFS=$'\t' read -r name cstatus baked latest; do
         [ -n "$name" ] || continue
         case "$name" in base | layers) continue ;; esac
@@ -373,15 +379,43 @@ _powbox_build_from_table() {
         # '-' is the porcelain's empty marker (unknown/missing); leave unpinned so
         # the build falls back to the `latest` tag for that binary.
         [ "$ver" = "-" ] && ver=""
+        # Muse cannot take that fallback: with no --muse-version the build's
+        # default is `none`, so a forced rebuild whose wanted release is unknown
+        # (channel unreachable, no curl on the host) would silently uninstall an
+        # opted-in reviewer. Keep the baked release instead.
+        if [ "$name" = muse ] && [ -z "$ver" ] && [ "$baked" != "-" ]; then
+            ver="$baked"
+        fi
         case "$name" in
             claude) claude_ver="$ver" ;;
             codex)  codex_ver="$ver" ;;
+            muse)   muse_ver="$ver" ;;
         esac
     done < <(printf '%s\n' "$table")
     local args=("$target")
     [ -n "$claude_ver" ] && args+=(--claude-version "$claude_ver")
     [ -n "$codex_ver" ]  && args+=(--codex-version "$codex_ver")
+    # The muse row exists only when the update check tracks Muse Code — baked,
+    # asked for, or baked with its removal requested (see check-updates.sh);
+    # without one no flag is passed and build.sh's own default decides.
+    [ -n "$muse_ver" ]   && args+=(--muse-version "$muse_ver")
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
+}
+
+# What powbox-agent:latest was asked to bake for Muse Code (its
+# powbox.muse.version label): a release id, or the literal `latest` for an image
+# hand-built that way — like the claude and codex version labels, it records the
+# build argument, not what `latest` resolved to. Nothing when the image is
+# missing or carries no Muse. For the one rebuild that has no update table to
+# read the baked release from; that rebuild puts every binary at its latest
+# release anyway, so either value keeps Muse installed, which is the point.
+_powbox_baked_muse_version() {
+    local v
+    v="$(docker image inspect powbox-agent:latest --format '{{index .Config.Labels "powbox.muse.version"}}' 2>/dev/null)" || return 0
+    case "$v" in
+        "" | "<no value>" | none) ;;
+        *) printf '%s\n' "$v" ;;
+    esac
 }
 
 # Nuclear option: rebuild the entire stack — base, the layer-set image when a
@@ -394,9 +428,19 @@ _powbox_build_from_table() {
 agent-full-rebuild() {
     local table
     if table="$(_powbox_agent_porcelain)"; then
-        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
+        _powbox_build_from_table "$table" "claude codex muse" all --pull --no-cache "$@"
     else
-        "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        # No table to pin from, so both agents fall back to `latest`. Muse has no
+        # such fallback — without --muse-version the build bakes none — so carry
+        # forward what the current image was built with, unless the standing
+        # POWBOX_MUSE_VERSION already decides.
+        local muse_keep=""
+        [ -n "${POWBOX_MUSE_VERSION:-}" ] || muse_keep="$(_powbox_baked_muse_version)"
+        if [ -n "$muse_keep" ]; then
+            "$POWBOX_ROOT/build.sh" all --muse-version "$muse_keep" --pull --no-cache "$@"
+        else
+            "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
+        fi
     fi
 }
 
@@ -478,7 +522,7 @@ agent-update() {
 
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
         echo "Base image is stale — rebuilding base (with --pull) and the images on top."
-        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "${passthru[@]}"
+        _powbox_build_from_table "$table" "claude codex muse" all --pull --no-cache "${passthru[@]}"
         local rc=$?
         [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"
@@ -487,7 +531,7 @@ agent-update() {
     local name cstatus rest stale="" layers_stale=false
     while IFS=$'\t' read -r name cstatus rest; do
         case "$name" in
-            claude|codex) [ "$cstatus" = stale ] && stale="$stale $name" ;;
+            claude|codex|muse) [ "$cstatus" = stale ] && stale="$stale $name" ;;
             layers) [ "$cstatus" = stale ] && layers_stale=true ;;
         esac
     done < <(printf '%s\n' "$table")
@@ -621,5 +665,5 @@ agent-list() {
 }
 
 agent-volumes() {
-    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format $'table {{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
+    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=muse-config" --filter "name=agent-" --format $'table {{.Name}}\t{{.Driver}}\t{{.Mountpoint}}'
 }

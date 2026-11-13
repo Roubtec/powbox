@@ -345,7 +345,7 @@ function agent-image-info {
         Write-Error "Image $img not found - build it with agent-update."
         return
     }
-    $fmt = '{{index .Config.Labels `powbox.commit.base`}}|{{index .Config.Labels `powbox.commit.codex`}}|{{index .Config.Labels `powbox.commit.claude`}}|{{index .Config.Labels `powbox.codex.version`}}|{{index .Config.Labels `powbox.claude.version`}}|{{index .Config.Labels `powbox.layers.set`}}|{{index .Config.Labels `powbox.layers.digest`}}|{{index .Config.Labels `powbox.commit.layers`}}'
+    $fmt = '{{index .Config.Labels `powbox.commit.base`}}|{{index .Config.Labels `powbox.commit.codex`}}|{{index .Config.Labels `powbox.commit.claude`}}|{{index .Config.Labels `powbox.codex.version`}}|{{index .Config.Labels `powbox.claude.version`}}|{{index .Config.Labels `powbox.layers.set`}}|{{index .Config.Labels `powbox.layers.digest`}}|{{index .Config.Labels `powbox.commit.layers`}}|{{index .Config.Labels `powbox.muse.version`}}'
     $p = (docker image inspect $img --format $fmt) -split '\|'
     Write-Host "$img - powbox commit that built each layer:"
     Write-Host ("  base:         {0}" -f (_Powbox-NormLabel $p[0]))
@@ -356,6 +356,12 @@ function agent-image-info {
     }
     Write-Host ("  codex:        {0}  (codex {1})" -f (_Powbox-NormLabel $p[1]), (_Powbox-NormLabel $p[3]))
     Write-Host ("  claude/top:   {0}  (claude {1})" -f (_Powbox-NormLabel $p[2]), (_Powbox-NormLabel $p[4]))
+    # Muse Code is an opt-in peer reviewer copied in above Claude; it has no
+    # powbox commit of its own, so only the release it was built with is shown.
+    $museVer = if ($p.Count -gt 8) { $p[8] } else { "" }
+    if ($museVer -and $museVer -ne '<no value>' -and $museVer -ne 'none') {
+        Write-Host ("  muse:         {0}  (optional reviewer)" -f $museVer)
+    }
     $head = git -C $env:POWBOX_ROOT rev-parse --short HEAD 2>$null
     if ($LASTEXITCODE -eq 0 -and $head) {
         $dirty = git -C $env:POWBOX_ROOT status --porcelain 2>$null
@@ -382,6 +388,7 @@ function _Powbox-InvokeBuild {
         [string]$Target,
         [string]$ClaudeVersion = "",
         [string]$CodexVersion = "",
+        [string]$MuseVersion = "",
         [switch]$Pull,
         [switch]$NoCache,
         [object[]]$ExtraArgs = @()
@@ -389,6 +396,7 @@ function _Powbox-InvokeBuild {
     $buildParams = @{ Target = $Target }
     if ($ClaudeVersion) { $buildParams["ClaudeVersion"] = $ClaudeVersion }
     if ($CodexVersion)  { $buildParams["CodexVersion"] = $CodexVersion }
+    if ($MuseVersion)   { $buildParams["MuseVersion"] = $MuseVersion }
     if ($Pull)          { $buildParams["Pull"] = $true }
     if ($NoCache)       { $buildParams["NoCache"] = $true }
 
@@ -409,6 +417,11 @@ function _Powbox-InvokeBuild {
                 if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -CodexVersion" }
                 $i++
                 $buildParams["CodexVersion"] = [string]$ExtraArgs[$i]
+            }
+            '-museversion' {
+                if ($i + 1 -ge $ExtraArgs.Count) { throw "Missing value for -MuseVersion" }
+                $i++
+                $buildParams["MuseVersion"] = [string]$ExtraArgs[$i]
             }
             '-pull' {
                 $buildParams["Pull"] = $true
@@ -447,6 +460,10 @@ function _Powbox-BuildFromTable {
     )
     $claudeVer = ""
     $codexVer = ""
+    # The muse row exists only when the update check tracks Muse Code - baked,
+    # asked for, or baked with its removal requested (see check-updates.sh);
+    # without one no -MuseVersion is passed and build.ps1's own default decides.
+    $museVer = ""
     foreach ($row in $Table) {
         if (-not $row) { continue }
         $fields = $row -split "`t"
@@ -459,12 +476,33 @@ function _Powbox-BuildFromTable {
         # '-' is the porcelain's empty marker (unknown/missing); leave unpinned so
         # the build falls back to the `latest` tag for that binary.
         if ($ver -eq '-') { $ver = "" }
+        # Muse cannot take that fallback: with no -MuseVersion the build's
+        # default is `none`, so a forced rebuild whose wanted release is unknown
+        # (channel unreachable) would silently uninstall an opted-in reviewer.
+        # Keep the baked release instead.
+        if ($name -eq 'muse' -and -not $ver -and $baked -and $baked -ne '-') { $ver = $baked }
         switch ($name) {
             'claude' { $claudeVer = $ver }
             'codex'  { $codexVer = $ver }
+            'muse'   { $museVer = $ver }
         }
     }
-    _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -ExtraArgs $ExtraArgs
+    _Powbox-InvokeBuild -Target $Target -ClaudeVersion $claudeVer -CodexVersion $codexVer -MuseVersion $museVer -ExtraArgs $ExtraArgs
+}
+
+# What powbox-agent:latest was asked to bake for Muse Code (its
+# powbox.muse.version label): a release id, or the literal `latest` for an image
+# hand-built that way - like the claude and codex version labels, it records the
+# build argument, not what `latest` resolved to. "" when the image is missing or
+# carries no Muse. For the one rebuild that has no update table to read it from;
+# that rebuild puts every binary at its latest release anyway, so either value
+# keeps Muse installed, which is the point.
+function _Powbox-BakedMuseVersion {
+    $v = docker image inspect powbox-agent:latest --format '{{index .Config.Labels `powbox.muse.version`}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $v) { return "" }
+    $v = ([string]$v).Trim()
+    if ($v -eq '<no value>' -or $v -eq 'none') { return "" }
+    return $v
 }
 
 # Nuclear option: rebuild the entire stack - base, the layer-set image when a
@@ -477,10 +515,15 @@ function _Powbox-BuildFromTable {
 function agent-full-rebuild {
     $table = _Powbox-AgentPorcelain
     if ($LASTEXITCODE -eq 0) {
-        _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex") -Target all -Pull -NoCache @args
+        _Powbox-BuildFromTable -Table @($table) -Force @("claude", "codex", "muse") -Target all -Pull -NoCache @args
         return
     }
-    _Powbox-InvokeBuild -Target all -Pull -NoCache -ExtraArgs $args
+    # No table to pin from, so both agents fall back to `latest`. Muse has no
+    # such fallback - without -MuseVersion the build bakes none - so carry
+    # forward what the current image was built with, unless the standing
+    # POWBOX_MUSE_VERSION already decides.
+    $museKeep = if ($env:POWBOX_MUSE_VERSION) { "" } else { _Powbox-BakedMuseVersion }
+    _Powbox-InvokeBuild -Target all -Pull -NoCache -MuseVersion $museKeep -ExtraArgs $args
 }
 
 # Show the full update report, then (if anything is stale) ask for confirmation
@@ -573,14 +616,14 @@ function agent-update {
         $status = if ($fields.Count -gt 1) { $fields[1] } else { "" }
         if ($name -eq 'base' -and $status -eq 'stale') { $baseStale = $true }
         if ($name -eq 'layers' -and $status -eq 'stale') { $layersStale = $true }
-        if (($name -eq 'claude' -or $name -eq 'codex') -and $status -eq 'stale') {
+        if (($name -eq 'claude' -or $name -eq 'codex' -or $name -eq 'muse') -and $status -eq 'stale') {
             $stale += $name
         }
     }
 
     if ($baseStale) {
         Write-Host "Base image is stale — rebuilding base (with -Pull) and the images on top."
-        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex") -Target all -Pull -NoCache @passthru
+        _Powbox-BuildFromTable -Table $table -Force @("claude", "codex", "muse") -Target all -Pull -NoCache @passthru
         if ($LASTEXITCODE -eq 0) { _Powbox-PostBuild }
         return
     }
@@ -693,5 +736,5 @@ function agent-list {
 }
 
 function agent-volumes {
-    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
+    docker volume ls --filter "name=claude-config" --filter "name=codex-config" --filter "name=muse-config" --filter "name=agent-" --format "table {{.Name}}`t{{.Driver}}`t{{.Mountpoint}}"
 }

@@ -9,6 +9,14 @@
 #     layers	<ok|stale>	<baked-set@digest|->	<wanted-set@digest|->
 #     claude	<ok|stale|unknown>	<baked-version|->	<latest-version|->
 #     codex	<ok|stale|unknown>	<baked-version|->	<latest-version|->
+#     muse	<ok|stale|unknown>	<baked-release|->	<wanted-release|->
+#
+# The muse row is OPTIONAL: Muse Code is an opt-in peer reviewer, so the row is
+# printed only when the image already carries it or POWBOX_MUSE_VERSION asks for
+# it, and never when POWBOX_MUSE_VERSION=none. Its "latest" column is the
+# release the next build should carry: POWBOX_MUSE_VERSION when that pins a full
+# release id, the stable channel's current release otherwise. A consumer that
+# sees no muse row passes no --muse-version, so the build's own default applies.
 #
 # A component is stale when a latest value is known and differs from what is
 # baked in (a missing image counts as stale); unknown means the latest could not
@@ -58,11 +66,23 @@ has_image() {
 # back regardless of either command's own output quirks:
 #   CLAUDE:<raw claude --version line>
 #   CODEX:<raw codex --version line>
+#   MUSE:<raw muse --version line, empty when the image carries no Muse Code>
 baked_versions_raw() {
 	docker run --rm --entrypoint sh "$1" -c '
 		printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"
 		printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"
+		printf "MUSE:%s\n" "$(muse --version 2>/dev/null | head -1)"
 	' 2>/dev/null
+}
+
+# Current release id on Muse Code's stable channel (e.g. 1.4.18-R8587.1), the
+# same endpoint the agent Dockerfile's muse-fetch stage resolves `latest` from.
+# Empty when it cannot be read; like an unreachable npm, that leaves the row
+# "unknown" and never forces a rebuild. Parsed with sed so the host needs no jq.
+latest_muse_version() {
+	command -v curl >/dev/null 2>&1 || return 0
+	curl -fsSL --max-time 15 https://api.meta.ai/muse-code/channels/muse-stable 2>/dev/null |
+		sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9A-Za-z.-]*\)".*/\1/p' | head -1 || true
 }
 
 latest_npm_version() {
@@ -239,8 +259,8 @@ fi
 # Gather versions
 # -------------------------------------------------------------------
 
-claude_baked="" codex_baked=""
-claude_latest="" codex_latest=""
+claude_baked="" codex_baked="" muse_baked=""
+claude_latest="" codex_latest="" muse_latest=""
 base_source="" base_baked="" base_latest=""
 # Powbox base-source ("recipe") staleness: the base image records a digest over
 # its own build inputs (powbox.base.recipe.digest); if the working tree's
@@ -259,6 +279,9 @@ if has_image "$AGENT_IMAGE"; then
 	versions_raw="$(baked_versions_raw "$AGENT_IMAGE")"
 	claude_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CLAUDE://p' | head -1 | sed 's/ *(.*//; s/[[:space:]]*$//')"
 	codex_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^CODEX://p' | head -1 | sed 's/^codex-cli *//; s/[[:space:]]*$//')"
+	# "Muse Code 1.4.18 (1.4.18-R8587.1)": the parenthesised release id is what
+	# the channel publishes and what --muse-version takes.
+	muse_baked="$(printf '%s\n' "$versions_raw" | sed -n 's/^MUSE:.*(\([^)]*\)).*/\1/p' | head -1)"
 else
 	note "Image $AGENT_IMAGE not found — baked agent versions will be shown as (unknown)."
 fi
@@ -290,6 +313,20 @@ if command -v npm >/dev/null 2>&1; then
 	codex_latest="$(latest_npm_version '@openai/codex')"
 else
 	note "npm not found — latest agent versions will be shown as (unknown)."
+fi
+
+# Muse Code is tracked only when it is wanted: already baked, or asked for by
+# POWBOX_MUSE_VERSION — and never when that is explicitly `none`, which is how a
+# user drops it again. A full release id in the variable is the wanted release;
+# anything else (`latest`, or unset beside a baked binary) follows the channel.
+muse_wanted="${POWBOX_MUSE_VERSION:-}"
+muse_tracked=false
+if [ "$muse_wanted" != none ] && { [ -n "$muse_baked" ] || [ -n "$muse_wanted" ]; }; then
+	muse_tracked=true
+	case "$muse_wanted" in
+	[0-9]*) muse_latest="$muse_wanted" ;;
+	*) muse_latest="$(latest_muse_version)" ;;
+	esac
 fi
 
 # When the local base image is absent (or carries no source label) we can't
@@ -335,6 +372,11 @@ if $PORCELAIN; then
 	printf '%s\t%s\t%s\t%s\n' codex \
 		"$(component_status "$codex_baked" "$codex_latest")" \
 		"${codex_baked:--}" "${codex_latest:--}"
+	if $muse_tracked; then
+		printf '%s\t%s\t%s\t%s\n' muse \
+			"$(component_status "$muse_baked" "$muse_latest")" \
+			"${muse_baked:--}" "${muse_latest:--}"
+	fi
 	exit 0
 fi
 
@@ -354,4 +396,12 @@ if [ -n "$base_baked" ] || [ -n "$base_latest" ] || [ "$recipe_stale" = true ]; 
 compare_layers "$layers_status" "$layers_baked_set" "$layers_baked_digest" "$layers_wanted_set" "$layers_wanted_digest"
 if [ -n "$codex_baked" ] || [ -n "$codex_latest" ]; then compare "Codex" "$codex_baked" "$codex_latest"; fi
 if [ -n "$claude_baked" ] || [ -n "$claude_latest" ]; then compare "Claude" "$claude_baked" "$claude_latest"; fi
+if $muse_tracked; then
+	if [ -z "$muse_baked" ] && [ -n "$muse_latest" ]; then
+		# Opted in but not baked yet: say so rather than "baked: (unknown)".
+		printf '  %-8s  baked: %-14s  latest: %s  ** update available **\n' "Muse" "(not baked)" "$muse_latest"
+	else
+		compare "Muse" "$muse_baked" "$muse_latest"
+	fi
+fi
 echo ""

@@ -8,6 +8,9 @@
     #     layers  <ok|stale>          <baked-set@digest|->  <wanted-set@digest|->
     #     claude  <ok|stale|unknown>  <baked-version|->  <latest-version|->
     #     codex   <ok|stale|unknown>  <baked-version|->  <latest-version|->
+    #     muse    <ok|stale|unknown>  <baked-release|->  <wanted-release|->
+    # The muse row is optional (the opt-in Muse Code reviewer): see the header of
+    # commands/check-updates.sh for when it is printed and what its columns mean.
     #
     # A component is stale when a latest value is known and differs from what is
     # baked in (a missing image counts as stale); unknown means the latest could
@@ -65,18 +68,37 @@ function Get-BakedAgentVersions([string]$Image) {
     $script = @(
       'printf "CLAUDE:%s\n" "$(claude --version 2>/dev/null | head -1)"'
       'printf "CODEX:%s\n" "$(codex --version 2>/dev/null | head -1)"'
+      'printf "MUSE:%s\n" "$(muse --version 2>/dev/null | head -1)"'
     ) -join "`n"
     $raw = docker run --rm --entrypoint sh $Image -c $script 2>$null
     $claude = $null
     $codex = $null
+    $muse = $null
     foreach ($line in @($raw)) {
         if ($line -like 'CLAUDE:*') {
             $claude = ($line.Substring(7) -replace ' *\(.*', '').Trim()
         } elseif ($line -like 'CODEX:*') {
             $codex = ($line.Substring(6) -replace '^codex-cli *', '').Trim()
+        } elseif ($line -match '^MUSE:.*\(([^)]*)\)') {
+            # "Muse Code 1.4.18 (1.4.18-R8587.1)": the parenthesised release id
+            # is what the channel publishes and what -MuseVersion takes.
+            $muse = $Matches[1].Trim()
         }
     }
-    return [PSCustomObject]@{ Claude = $claude; Codex = $codex }
+    return [PSCustomObject]@{ Claude = $claude; Codex = $codex; Muse = $muse }
+}
+
+# Current release id on Muse Code's stable channel, the endpoint the agent
+# Dockerfile's muse-fetch stage resolves `latest` from. $null when it cannot be
+# read, which leaves the row "unknown" and never forces a rebuild.
+function Get-LatestMuseVersion {
+    try {
+        $channel = Invoke-RestMethod -Uri 'https://api.meta.ai/muse-code/channels/muse-stable' -TimeoutSec 15
+        if ($channel.version -match '^[0-9][0-9A-Za-z.-]*$') { return [string]$channel.version }
+    } catch {
+        Write-Warning 'Could not fetch the latest Muse Code release (channel unreachable?).'
+    }
+    return $null
 }
 
 function Get-LatestNpmVersion([string]$Package) {
@@ -235,6 +257,7 @@ if ($layersWantedSet) {
 
 $claudeBaked = $null
 $codexBaked  = $null
+$museBaked   = $null
 $baseSource  = $null
 $baseBaked   = $null
 $baseLatest  = $null
@@ -258,6 +281,7 @@ if (Test-ImageExists $AgentImage) {
     $bakedVersions = Get-BakedAgentVersions $AgentImage
     $claudeBaked = $bakedVersions.Claude
     $codexBaked  = $bakedVersions.Codex
+    $museBaked   = $bakedVersions.Muse
 } else {
     Write-Note "Image $AgentImage not found — baked agent versions will be shown as (unknown)."
 }
@@ -295,6 +319,16 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
     $codexLatest  = Get-LatestNpmVersion '@openai/codex'
 } else {
     Write-Warning 'npm not found — latest agent versions will be shown as (unknown).'
+}
+
+# Muse Code is tracked only when it is wanted: already baked, or asked for by
+# POWBOX_MUSE_VERSION - and never when that is explicitly `none`. A full release
+# id in the variable is the wanted release; anything else follows the channel.
+$museWanted = [string]$env:POWBOX_MUSE_VERSION
+$museLatest = $null
+$museTracked = ($museWanted -ne 'none') -and ($museBaked -or $museWanted)
+if ($museTracked) {
+    if ($museWanted -match '^[0-9]') { $museLatest = $museWanted } else { $museLatest = Get-LatestMuseVersion }
 }
 
 # When the local base image is absent (or carries no source label) we can't read
@@ -338,6 +372,9 @@ if ($Porcelain) {
     'layers' + $tab + $layersStatus + $tab + (Format-LayersValue $layersBakedSet $layersBakedDigest) + $tab + (Format-LayersValue $layersWantedSet $layersWantedDigest)
     'claude' + $tab + (Get-ComponentStatus $claudeBaked $claudeLatest) + $tab + (Format-PorcelainValue $claudeBaked) + $tab + (Format-PorcelainValue $claudeLatest)
     'codex' + $tab + (Get-ComponentStatus $codexBaked $codexLatest) + $tab + (Format-PorcelainValue $codexBaked) + $tab + (Format-PorcelainValue $codexLatest)
+    if ($museTracked) {
+        'muse' + $tab + (Get-ComponentStatus $museBaked $museLatest) + $tab + (Format-PorcelainValue $museBaked) + $tab + (Format-PorcelainValue $museLatest)
+    }
     $global:LASTEXITCODE = 0
     return
 }
@@ -358,5 +395,13 @@ if ($baseBaked   -or $baseLatest -or $recipeStale)   { Write-BaseComparison $bas
 Write-LayersComparison -Status $layersStatus -BakedSet $layersBakedSet -BakedDigest $layersBakedDigest -WantedSet $layersWantedSet -WantedDigest $layersWantedDigest
 if ($codexBaked  -or $codexLatest)  { Write-Comparison 'Codex'  $codexBaked  $codexLatest  }
 if ($claudeBaked -or $claudeLatest) { Write-Comparison 'Claude' $claudeBaked $claudeLatest }
+if ($museTracked) {
+    if (-not $museBaked -and $museLatest) {
+        # Opted in but not baked yet: say so rather than "baked: (unknown)".
+        Write-Host ("  {0,-8}  baked: {1,-14}  latest: {2}  ** update available **" -f 'Muse', '(not baked)', $museLatest)
+    } else {
+        Write-Comparison 'Muse' $museBaked $museLatest
+    }
+}
 Write-Host ''
 $global:LASTEXITCODE = 0

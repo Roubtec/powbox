@@ -315,10 +315,10 @@ agent-image-info() {
     fi
     # '|' rather than a tab: IFS whitespace would merge the empty fields an
     # image built without a layer set has.
-    local base codex claude codexver claudever layerset layersdigest layerscommit
-    IFS='|' read -r base codex claude codexver claudever layerset layersdigest layerscommit < <(
+    local base codex claude codexver claudever layerset layersdigest layerscommit musever
+    IFS='|' read -r base codex claude codexver claudever layerset layersdigest layerscommit musever < <(
         docker image inspect "$img" --format \
-            '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}'
+            '{{index .Config.Labels "powbox.commit.base"}}|{{index .Config.Labels "powbox.commit.codex"}}|{{index .Config.Labels "powbox.commit.claude"}}|{{index .Config.Labels "powbox.codex.version"}}|{{index .Config.Labels "powbox.claude.version"}}|{{index .Config.Labels "powbox.layers.set"}}|{{index .Config.Labels "powbox.layers.digest"}}|{{index .Config.Labels "powbox.commit.layers"}}|{{index .Config.Labels "powbox.muse.version"}}'
     )
     echo "$img — powbox commit that built each layer:"
     printf '  base:         %s\n' "$(_powbox_norm_label "$base")"
@@ -328,6 +328,12 @@ agent-image-info() {
     esac
     printf '  codex:        %s  (codex %s)\n' "$(_powbox_norm_label "$codex")" "$(_powbox_norm_label "$codexver")"
     printf '  claude/top:   %s  (claude %s)\n' "$(_powbox_norm_label "$claude")" "$(_powbox_norm_label "$claudever")"
+    # Muse Code is an opt-in peer reviewer copied in above Claude; it has no
+    # powbox commit of its own, so only the release it was built with is shown.
+    case "$musever" in
+        "" | "<no value>" | none) ;;
+        *) printf '  muse:         %s  (optional reviewer)\n' "$musever" ;;
+    esac
     local head
     if head="$(git -C "$POWBOX_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
         [ -n "$(git -C "$POWBOX_ROOT" status --porcelain 2>/dev/null)" ] && head="${head}-dirty"
@@ -362,7 +368,7 @@ _powbox_build_from_table() {
     local table="$1" force=" $2 " target="$3"
     shift 3
     local name cstatus baked latest ver
-    local claude_ver="" codex_ver=""
+    local claude_ver="" codex_ver="" muse_ver=""
     while IFS=$'\t' read -r name cstatus baked latest; do
         [ -n "$name" ] || continue
         case "$name" in base | layers) continue ;; esac
@@ -376,11 +382,15 @@ _powbox_build_from_table() {
         case "$name" in
             claude) claude_ver="$ver" ;;
             codex)  codex_ver="$ver" ;;
+            muse)   muse_ver="$ver" ;;
         esac
     done < <(printf '%s\n' "$table")
     local args=("$target")
     [ -n "$claude_ver" ] && args+=(--claude-version "$claude_ver")
     [ -n "$codex_ver" ]  && args+=(--codex-version "$codex_ver")
+    # The muse row exists only when Muse Code is wanted (see check-updates.sh);
+    # without one no flag is passed and build.sh's own default decides.
+    [ -n "$muse_ver" ]   && args+=(--muse-version "$muse_ver")
     "$POWBOX_ROOT/build.sh" "${args[@]}" "$@"
 }
 
@@ -394,7 +404,7 @@ _powbox_build_from_table() {
 agent-full-rebuild() {
     local table
     if table="$(_powbox_agent_porcelain)"; then
-        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "$@"
+        _powbox_build_from_table "$table" "claude codex muse" all --pull --no-cache "$@"
     else
         "$POWBOX_ROOT/build.sh" all --pull --no-cache "$@"
     fi
@@ -478,7 +488,7 @@ agent-update() {
 
     if printf '%s\n' "$table" | awk -F'\t' '$1=="base" && $2=="stale"{f=1} END{exit !f}'; then
         echo "Base image is stale — rebuilding base (with --pull) and the images on top."
-        _powbox_build_from_table "$table" "claude codex" all --pull --no-cache "${passthru[@]}"
+        _powbox_build_from_table "$table" "claude codex muse" all --pull --no-cache "${passthru[@]}"
         local rc=$?
         [ "$rc" -eq 0 ] && _powbox_post_build
         return "$rc"
@@ -487,7 +497,7 @@ agent-update() {
     local name cstatus rest stale="" layers_stale=false
     while IFS=$'\t' read -r name cstatus rest; do
         case "$name" in
-            claude|codex) [ "$cstatus" = stale ] && stale="$stale $name" ;;
+            claude|codex|muse) [ "$cstatus" = stale ] && stale="$stale $name" ;;
             layers) [ "$cstatus" = stale ] && layers_stale=true ;;
         esac
     done < <(printf '%s\n' "$table")

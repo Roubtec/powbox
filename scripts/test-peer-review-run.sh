@@ -3557,6 +3557,8 @@ assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)"
 #        the probe does not advertise it, and a muse that rejects it fails
 #        closed (no write-enabled review, no retry)
 #   18g  a refused fallback is not retried again (two-attempt cap)
+#   18h  an empty model catalog is unavailable, not a refused model: no
+#        fallback attempt
 make_muse_fake() { # <case-dir> <body run after argv and the prompt are recorded>
 	cat >"$1/bin/muse" <<MUSEFAKE
 #!/usr/bin/env bash
@@ -3673,6 +3675,16 @@ run "$d" $(std_args "$d" muse)
 assert_eq "18g: refused on both models fails" "$(jqf "$RUN_RESULT" .outcome)" failed
 assert_eq "18g: the cap is two attempts" "$(jqf "$RUN_RESULT" .attempts)" 2
 assert_eq "18g: exactly two provider launches" "$(cat "$d/calls")" 2
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'echo "muse: model catalog has no visible models; continuing with model \`$model\`" >&2; '"$MUSE_DENY"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18h: an empty model catalog is unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "18h: the floor model is not tried" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "18h: exactly one provider launch" "$(cat "$d/calls")" 1
+assert_contains "18h: the reason names the empty catalog" "$(jqf "$RUN_RESULT" .reason)" "model catalog is empty"
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

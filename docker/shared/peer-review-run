@@ -180,7 +180,10 @@
 # Contributor mode are Muse's own business: the adapter forwards the environment
 # unchanged, so META_API_KEY outranks a stored login exactly as Muse documents,
 # and Contributor mode follows the user's saved Muse setting unless the caller
-# exports MUSE_CONTRIBUTOR_MODE=0 or =1 for the run.
+# exports MUSE_CONTRIBUTOR_MODE=0 or =1 for the run. A logged-in account whose
+# model catalog comes back empty ("model catalog has no visible models", seen
+# from some networks) can run no model at all, so it is `unavailable` with no
+# model-fallback attempt.
 #
 # This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
 # and no peer outcome is required for publication.
@@ -196,7 +199,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,186p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,189p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -2078,6 +2081,17 @@ run_attempt() {
 		# lack access". That is neither an auth failure nor transient, so it is
 		# recorded on its own and classified below as an ordinary failure; the
 		# retry routing decides whether a floor model is left to try.
+		# The exception is an EMPTY model catalog: Muse warns "model catalog has
+		# no visible models" before it asks for the model, and then no model will
+		# be served, the floor included. A logged-in account can see an empty
+		# catalog from some networks, so that is UNAVAILABLE, checked first so the
+		# model-denied route below never spends a second attempt on it.
+		if [ "$PROVIDER" = muse ] && grep -Eiq 'model catalog has no visible models' "$out" "$err"; then
+			ATT_OUTCOME=unavailable
+			ATT_REASON="provider's model catalog is empty for this account from this network, so no model can run (exit $rc)"
+			write_meta "$dir" "$attempt_no" "unavailable-empty-catalog"
+			return 0
+		fi
 		if [ "$PROVIDER" = muse ] && grep -Eiq 'does not exist or you lack access' "$out" "$err"; then
 			ATT_MODEL_DENIED=1
 			ATT_OUTCOME=failed

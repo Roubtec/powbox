@@ -4,20 +4,24 @@ param(
   [string]$ClaudeVersion = "latest",
   [string]$CodexVersion = "latest",
   # Muse Code is an opt-in peer reviewer: "none" bakes no binary. Left empty,
-  # the standing opt-in POWBOX_MUSE_VERSION decides (see build-image.sh).
+  # Resolve-MuseVersion falls back to POWBOX_MUSE_VERSION, then to what
+  # powbox-agent:latest was built with, then to "none" (see build-image.sh).
   [string]$MuseVersion = "",
   [switch]$NoCache,
   [switch]$Pull
 )
 
 $ErrorActionPreference = "Stop"
-if (-not $MuseVersion) {
-  $MuseVersion = if ($env:POWBOX_MUSE_VERSION) { $env:POWBOX_MUSE_VERSION } else { "none" }
-}
 $rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Push-Location $rootDir
 try {
   . (Join-Path $rootDir "scripts/build-image-lib.ps1")
+
+  $museFlag = $MuseVersion
+  $MuseVersion = Resolve-MuseVersion -Flag $museFlag -Standing $env:POWBOX_MUSE_VERSION
+  if (-not $museFlag -and -not $env:POWBOX_MUSE_VERSION -and $MuseVersion -ne 'none' -and ($Target -eq 'agent' -or $Target -eq 'all')) {
+    Write-Host "Muse Code: keeping MUSE_VERSION=$MuseVersion from $($script:PowboxAgentTag) (pass -MuseVersion none to drop it)."
+  }
 
   # Upstream base image, parsed from the base Dockerfile's FROM so it never
   # drifts from what is actually built. $script:BaseSourceDigest is resolved

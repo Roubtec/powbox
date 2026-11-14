@@ -130,3 +130,13 @@ function Resolve-CodexCommit {
     }
     return $HeadCommit
 }
+
+# See resolve_muse_version in build-image-lib.sh.
+function Resolve-MuseVersion {
+    param([string]$Flag, [string]$Standing)
+    if ($Flag) { return $Flag }
+    if ($Standing) { return $Standing }
+    $baked = Get-ImageLabel $script:PowboxAgentTag 'powbox.muse.version'
+    if (-not $baked -or $baked -ceq 'none') { return 'none' }
+    return $baked
+}

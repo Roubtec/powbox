@@ -105,11 +105,11 @@ Meta's [Muse Code](https://dev.meta.ai/docs/muse-code) CLI can be baked in as an
 It is off by default (`MUSE_VERSION=none`), because the single static binary adds about 0.5 GB to the image and is only useful with a Muse subscription or a Meta Model API key.
 It is never a primary agent: there is no `muse` launcher, setup hook or skill palette, only a binary a Claude or Codex session can ask for a second opinion.
 
-Opt in for one build with `--muse-version` (`-MuseVersion` on `build.ps1`), or keep the opt-in standing by exporting `POWBOX_MUSE_VERSION` on the host, which every build then honours — including the ones `agent-update` and `agent-full-rebuild` start:
+Opt in once with `--muse-version` (`-MuseVersion` on `build.ps1`); the image then remembers the choice. A build that is not told otherwise reads what `powbox-agent:latest` was built with (its `powbox.muse.version` label) and keeps it, so every later `build.sh`, `agent-update` or `agent-full-rebuild` keeps Muse without a flag or a variable. The fallback order is: the flag, then `POWBOX_MUSE_VERSION` if exported, then the existing image's choice, then `none`:
 
 ```bash
-./build.sh agent --muse-version latest             # this build only
-export POWBOX_MUSE_VERSION=latest                  # standing opt-in (shell profile)
+./build.sh agent --muse-version latest             # opt in; later builds keep it
+export POWBOX_MUSE_VERSION=latest                  # optional standing override (shell profile)
 ./build.sh agent --muse-version 1.4.18-R8587.1     # pin a release
 ./build.sh agent --muse-version none               # build without it again
 ```
@@ -118,6 +118,7 @@ The value is `none`, `latest`, or a full release id as the stable channel prints
 `latest` is resolved when the fetch stage runs and Docker then caches it, so a hand-run `./build.sh agent --muse-version latest` does not by itself move to a newer release; `agent-update` does, because it pins the release id.
 
 Once an image carries Muse, opting in is set-and-forget: `agent-check-updates` and `agent-update` show a `Muse` row beside Codex and Claude, offer the update when the stable channel publishes a newer release, and carry the baked release forward on every other rebuild — no flag or variable needed.
+Because the build scripts make that decision, and they always run from disk, it holds even when `agent-update` runs in a long-lived shell that sourced `shell/powbox.sh` before Muse support existed.
 `POWBOX_MUSE_VERSION` then only matters at the edges: set it to `latest` on a machine whose image has no Muse yet and the next `agent-update` adds it, set it to a full release id to hold that release, or set it to `none` to drop Muse: while the image still carries it, the update check then shows a pending `-> none (removal requested)` row, and `agent-update` rebuilds without it.
 When the stable channel cannot be read, the row shows the latest release as unknown and every rebuild keeps the baked one.
 `agent-image-info` shows what the image was built with, exactly as it does for Claude and Codex: the release id once `agent-update` has pinned one, or `latest` for an image hand-built with `--muse-version latest` (the update check reads the real release from the binary either way).
@@ -788,7 +789,7 @@ Both libraries honour the same variables:
 |---|---|---|
 | `POWBOX_ROOT` | auto-detected from the script's location | Path to your PowBox checkout. Only needed if auto-detection fails. |
 | `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
-| `POWBOX_MUSE_VERSION` | unset (`none`) | Standing opt-in for baking the optional Muse Code reviewer: `latest` or a full release id. Read by `build.sh`/`build.ps1` when no `--muse-version`/`-MuseVersion` is passed. See [Optional third harness](#optional-third-harness-muse-code-reviewer-only). |
+| `POWBOX_MUSE_VERSION` | unset (`none`) | Standing opt-in for baking the optional Muse Code reviewer: `latest` or a full release id. Read by `build.sh`/`build.ps1` when no `--muse-version`/`-MuseVersion` is passed; when it is unset too, the build keeps whatever the existing `powbox-agent:latest` was built with. See [Optional third harness](#optional-third-harness-muse-code-reviewer-only). |
 | `POWBOX_PODMAN` | `auto` | Whether to pass the host devices rootless Podman needs into the agent: `/dev/fuse` (fuse-overlayfs `overlay` storage driver; absence falls back to the slower `vfs`) and `/dev/net/tun` (nested-container networking; absence breaks default `podman run`). `auto` attaches each device when the launcher's host shell can see it; `on` forces both (use when the Docker daemon/VM has them but the host shell doesn't, e.g. Docker Desktop); `off` skips both. (`POWBOX_FUSE` is a deprecated alias for this variable.) |
 
 Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.

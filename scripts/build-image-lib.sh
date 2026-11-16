@@ -172,3 +172,30 @@ resolve_codex_commit() {
 		printf '%s\n' "$head"
 	fi
 }
+
+# Usage: resolve_muse_version <--muse-version value or ""> <POWBOX_MUSE_VERSION or "">
+# Print the MUSE_VERSION this build bakes. An explicit flag wins, then the
+# standing POWBOX_MUSE_VERSION, then what powbox-agent:latest was built with (its
+# powbox.muse.version label), and only then `none`. The third step is what keeps
+# an opted-in Muse across rebuilds whose caller never mentions it: a shell that
+# sourced shell/powbox.sh before Muse support existed still runs this script
+# fresh from disk, so its agent-update cannot silently drop the reviewer. The
+# label records the build argument (a release id, or `latest` for a hand-built
+# image), and the Muse fetch stage caches on that argument, so carrying it
+# forward reuses the baked binary rather than moving to a newer release. A
+# `none` label, a missing label or a missing image all fall through to `none`;
+# removing Muse again takes an explicit `none` in the flag or the variable.
+resolve_muse_version() {
+	local flag="$1" standing="$2" baked
+	if [ -n "$flag" ]; then
+		printf '%s\n' "$flag"
+	elif [ -n "$standing" ]; then
+		printf '%s\n' "$standing"
+	else
+		baked="$(image_label "$POWBOX_AGENT_TAG" 'powbox.muse.version')"
+		case "$baked" in
+		"" | none) printf '%s\n' none ;;
+		*) printf '%s\n' "$baked" ;;
+		esac
+	fi
+}

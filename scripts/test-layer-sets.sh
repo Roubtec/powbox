@@ -969,6 +969,60 @@ if ! $HAVE_PWSH; then
 	skipped "codex commit PowerShell parity (pwsh not installed)"
 fi
 
+# muse_resolve_case <label> <flag> <POWBOX_MUSE_VERSION> <expected>; the caller
+# prepares $MUSE_STATE.
+muse_resolve_case() {
+	local label="$1" out ps
+	out="$(lib_sh "$MUSE_STATE" resolve_muse_version "$2" "$3")"
+	assert_eq "muse version [$label]" "$out" "$4"
+	if $HAVE_PWSH; then
+		ps="$(lib_ps "$MUSE_STATE" "Resolve-MuseVersion -Flag '$2' -Standing '$3'")"
+		assert_eq "muse version [$label]: PowerShell agrees" "$ps" "$out"
+	fi
+}
+
+echo "Test: the build carries a baked Muse forward when nothing else decides"
+MUSE_STATE="$(new_state)"
+muse_resolve_case "no image, nothing asked" "" "" none
+muse_resolve_case "no image, the variable asks" "" latest latest
+if $HAVE_PWSH; then
+	# The driver runs under $ErrorActionPreference = 'Stop', where Windows
+	# PowerShell 5.1 turns a failed inspect's redirected stderr into a terminating
+	# error. $PSNativeCommandUseErrorActionPreference makes pwsh 7 throw at the
+	# same call, so a missing image must still answer rather than abort the build.
+	# shellcheck disable=SC2016 # PowerShell variables, expanded by pwsh
+	strict='$ErrorActionPreference = "Stop"; $PSNativeCommandUseErrorActionPreference = $true'
+	assert_eq "muse version [no image, under the driver's error preference]: PowerShell" \
+		"$(lib_ps "$MUSE_STATE" "$strict; Resolve-MuseVersion -Flag '' -Standing ''" 2>&1)" none
+	assert_eq "Test-ImagePresent [no image, under the driver's error preference]: PowerShell" \
+		"$(lib_ps "$MUSE_STATE" "$strict; Test-ImagePresent '$AGENT'" 2>&1)" False
+fi
+mkimage "$MUSE_STATE" "$AGENT" powbox.muse.version=1.4.18-R8587.1
+# The regression this guards: a caller that never mentions Muse (agent-update
+# from a shell holding pre-Muse functions) must not drop the baked reviewer.
+muse_resolve_case "baked release carried forward" "" "" 1.4.18-R8587.1
+muse_resolve_case "the flag wins over the baked release" 1.4.19-R8600 "" 1.4.19-R8600
+muse_resolve_case "the variable wins over the baked release" "" latest latest
+muse_resolve_case "the flag wins over the variable" none latest none
+muse_resolve_case "an explicit none in the variable still removes" "" none none
+mkimage "$MUSE_STATE" "$AGENT" powbox.muse.version=latest
+muse_resolve_case "a hand-built latest is carried as latest" "" "" latest
+mkimage "$MUSE_STATE" "$AGENT" powbox.muse.version=none
+muse_resolve_case "an image built without Muse stays without" "" "" none
+mkimage "$MUSE_STATE" "$AGENT" powbox.claude.version=2.0.0
+muse_resolve_case "an image predating the label stays without" "" "" none
+if ! $HAVE_PWSH; then
+	skipped "muse version PowerShell parity (pwsh not installed)"
+fi
+for driver in "$ROOT_DIR/scripts/build-image.sh" "$ROOT_DIR/scripts/build-image.ps1"; do
+	# shellcheck disable=SC2016 # a literal pattern
+	if grep -qE 'resolve_muse_version "\$MUSE_FLAG"|Resolve-MuseVersion -Flag \$museFlag' "$driver"; then
+		ok "$(basename "$driver"): resolves MUSE_VERSION through the library"
+	else
+		ko "$(basename "$driver"): resolves MUSE_VERSION through the library"
+	fi
+done
+
 # The agent target used to stamp HEAD for any `all` or --pull run; those now
 # fall through to the parent comparison, which runs after the parent exists.
 for driver in "$ROOT_DIR/scripts/build-image.sh" "$ROOT_DIR/scripts/build-image.ps1"; do

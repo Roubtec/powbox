@@ -9,11 +9,12 @@ shift || true
 
 CLAUDE_CODE_VERSION="latest"
 CODEX_VERSION="latest"
-# Muse Code is an opt-in peer reviewer: `none` (the default) bakes no binary.
-# POWBOX_MUSE_VERSION in the environment is the standing opt-in, so a wrapper
-# that never passes --muse-version (agent-update, agent-full-rebuild) keeps
-# building the image the same way; the flag overrides it for one build.
-MUSE_VERSION="${POWBOX_MUSE_VERSION:-none}"
+# Muse Code is an opt-in peer reviewer. --muse-version sets it for one build;
+# without it, resolve_muse_version (scripts/build-image-lib.sh) falls back to the
+# standing POWBOX_MUSE_VERSION, then to what powbox-agent:latest was built with,
+# and only then to `none` — so a wrapper that never passes the flag (agent-update
+# from a shell holding stale functions, agent-full-rebuild) keeps the image's Muse.
+MUSE_FLAG=""
 NO_CACHE=false
 PULL=false
 
@@ -29,7 +30,7 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--muse-version)
 		shift
-		MUSE_VERSION="${1:?missing value for --muse-version}"
+		MUSE_FLAG="${1:?missing value for --muse-version}"
 		;;
 	--no-cache)
 		NO_CACHE=true
@@ -78,6 +79,15 @@ fi
 
 # shellcheck source=scripts/build-image-lib.sh
 . "${ROOT_DIR}/scripts/build-image-lib.sh"
+
+MUSE_VERSION="$(resolve_muse_version "$MUSE_FLAG" "${POWBOX_MUSE_VERSION:-}")"
+if [ -z "$MUSE_FLAG" ] && [ -z "${POWBOX_MUSE_VERSION:-}" ] && [ "$MUSE_VERSION" != none ]; then
+	case "$TARGET" in
+	agent | all)
+		echo "Muse Code: keeping MUSE_VERSION=$MUSE_VERSION from $POWBOX_AGENT_TAG (pass --muse-version none to drop it)."
+		;;
+	esac
+fi
 
 # Upstream base image, parsed from the base Dockerfile's FROM so it never drifts
 # from what is actually built. BASE_SOURCE_DIGEST is resolved lazily just before

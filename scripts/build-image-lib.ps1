@@ -11,9 +11,18 @@ $script:PowboxAgentTag = 'powbox-agent:latest'
 # The label name is a Go raw string (`...`), not a "..." one: Windows PowerShell
 # 5.1 strips double quotes embedded in a native argument, which would leave docker
 # an invalid template.
+#
+# A missing image answers "" (Test-ImagePresent: $false) rather than failing. The
+# try is load-bearing, not defensive: Windows PowerShell 5.1 turns the redirected
+# stderr of a failed inspect into a terminating error under the driver's
+# $ErrorActionPreference = 'Stop', before $LASTEXITCODE is ever read.
 function Get-ImageLabel {
     param([string]$Image, [string]$Label)
-    $v = docker image inspect $Image --format ('{{ index .Config.Labels `' + $Label + '` }}') 2>$null
+    try {
+        $v = docker image inspect $Image --format ('{{ index .Config.Labels `' + $Label + '` }}') 2>$null
+    } catch {
+        return ""
+    }
     if ($LASTEXITCODE -ne 0 -or -not $v -or $v -eq '<no value>') { return "" }
     return ([string]$v).Trim()
 }
@@ -27,7 +36,11 @@ function Get-ImageId {
 
 function Test-ImagePresent {
     param([string]$Image)
-    docker image inspect $Image *> $null
+    try {
+        docker image inspect $Image *> $null
+    } catch {
+        return $false
+    }
     return ($LASTEXITCODE -eq 0)
 }
 

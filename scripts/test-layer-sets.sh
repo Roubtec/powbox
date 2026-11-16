@@ -985,6 +985,18 @@ echo "Test: the build carries a baked Muse forward when nothing else decides"
 MUSE_STATE="$(new_state)"
 muse_resolve_case "no image, nothing asked" "" "" none
 muse_resolve_case "no image, the variable asks" "" latest latest
+if $HAVE_PWSH; then
+	# The driver runs under $ErrorActionPreference = 'Stop', where Windows
+	# PowerShell 5.1 turns a failed inspect's redirected stderr into a terminating
+	# error. $PSNativeCommandUseErrorActionPreference makes pwsh 7 throw at the
+	# same call, so a missing image must still answer rather than abort the build.
+	# shellcheck disable=SC2016 # PowerShell variables, expanded by pwsh
+	strict='$ErrorActionPreference = "Stop"; $PSNativeCommandUseErrorActionPreference = $true'
+	assert_eq "muse version [no image, under the driver's error preference]: PowerShell" \
+		"$(lib_ps "$MUSE_STATE" "$strict; Resolve-MuseVersion -Flag '' -Standing ''" 2>&1)" none
+	assert_eq "Test-ImagePresent [no image, under the driver's error preference]: PowerShell" \
+		"$(lib_ps "$MUSE_STATE" "$strict; Test-ImagePresent '$AGENT'" 2>&1)" False
+fi
 mkimage "$MUSE_STATE" "$AGENT" powbox.muse.version=1.4.18-R8587.1
 # The regression this guards: a caller that never mentions Muse (agent-update
 # from a shell holding pre-Muse functions) must not drop the baked reviewer.

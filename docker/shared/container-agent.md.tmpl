@@ -97,5 +97,5 @@ Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by th
 
 ## Installing additional packages
 
-- **System packages:** `sudo apt-get update && sudo apt-get install -y <package>` — sudo is allowed for `apt-get`.
+- **System packages:** `sudo apt-get update && sudo apt-get install -y <package>` — `sudo apt-get` goes through a wrapper that allows `update`, `upgrade`, `install`, `remove`, `purge`, `autoremove` and `clean` with package names from the configured repositories (optionally `name=version` or `name/release`). It refuses config options such as `-o`, local `.deb` files, paths, URLs and other verbs; `sudo apt-get --help` lists what it accepts.
 - **Python packages:** `pip3 install <package>` — no `--break-system-packages` flag needed.

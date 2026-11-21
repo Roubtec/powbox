@@ -958,6 +958,100 @@ powbox_warn_if_local_config_not_ignored() {
 	fi
 }
 
+# Egress exceptions: the gitignored .powbox-egress in the powbox checkout (see
+# .powbox-egress.example), applied to every container this checkout launches.
+# It is never read from a workspace: under --isolated the launcher works on
+# arbitrary clones, and a committed file there must not be able to widen
+# egress. A malformed line is a hard error, since launching under a different
+# policy than the one written would be worse than not launching.
+# EGRESS_RULES becomes the canonical, sorted, deduplicated rules joined by `;`
+# (the POWBOX_EGRESS_ALLOW value: no spaces or quotes, so it passes through
+# `docker compose run -e` from bash and Windows PowerShell 5.1 alike), and
+# EGRESS_HASH its SHA-256; both stay empty when there are no rules.
+# launch-agent.ps1's Read-Powbox-EgressRules is the twin;
+# scripts/test-egress-allow-list.sh holds them to the same fixtures.
+powbox_egress_load() {
+	local file="$1" lib="$2" line lineno=0 first=true proto dest port extra rule
+	local -a rules=()
+	EGRESS_RULES=""
+	EGRESS_HASH=""
+	[ -e "$file" ] || return 0
+	if [ ! -f "$file" ]; then
+		echo "Error: ${file} is not a regular file." >&2
+		exit 1
+	fi
+	# shellcheck source=docker/shared/egress-rules.sh
+	. "$lib"
+	while IFS= read -r line || [ -n "$line" ]; do
+		lineno=$((lineno + 1))
+		if $first; then
+			line="${line#$'\xef\xbb\xbf'}"
+			first=false
+		fi
+		line="${line%%#*}"
+		line="${line%$'\r'}"
+		proto="" dest="" port="" extra=""
+		IFS=$' \t' read -r proto dest port extra <<<"$line" || true
+		[ -n "$proto" ] || continue
+		if [ -z "$port" ] || [ -n "$extra" ]; then
+			echo "Error: ${file} line ${lineno}: expected '<proto> <destination> <port>'." >&2
+			exit 1
+		fi
+		if ! powbox_egress_validate "$proto" "$dest" "$port"; then
+			echo "Error: ${file} line ${lineno}: ${POWBOX_EGRESS_ERROR}." >&2
+			exit 1
+		fi
+		rule="$POWBOX_EGRESS_RULE"
+		powbox_egress_classify "$rule"
+		case "$POWBOX_EGRESS_NOTE" in
+		outside)
+			powbox_warn "${file} line ${lineno}: ${dest} is outside every blocked range; the default policy already allows it, so this rule changes nothing."
+			;;
+		broad\ *)
+			powbox_warn "${file} line ${lineno}: ${dest} reopens at least half of the blocked range ${POWBOX_EGRESS_NOTE#broad }; check that this is intended."
+			;;
+		esac
+		rules+=("$rule")
+	done <"$file"
+	[ "${#rules[@]}" -gt 0 ] || return 0
+	EGRESS_RULES="$(printf '%s\n' "${rules[@]}" | LC_ALL=C sort -u | paste -sd ';' -)"
+	EGRESS_HASH="$(printf '%s' "$EGRESS_RULES" | powbox_sha256_stdin)"
+}
+
+# powbox_egress_check_existing <reuse|resume>: before an existing container is
+# reused, compare its powbox.egress-hash label with this launch's EGRESS_HASH
+# (no label and no rules both mean "none", so a container from before this
+# feature is not recreated needlessly). A stopped mismatch is recreated, or
+# refused under --resume, which restarts the container as it is. A running one
+# is refused rather than attached with a warning: attaching would keep a
+# removed exception open in a session the user believes is back on the default
+# policy. Sets CONTAINER_EXISTS=false after removing the container.
+powbox_egress_check_existing() {
+	local mode="$1" existing
+	if ! existing="$(docker container inspect --format '{{with .Config.Labels}}{{with index . `powbox.egress-hash`}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null)"; then
+		echo "Error: cannot read the egress exceptions container ${CONTAINER_NAME} was created with." >&2
+		exit 1
+	fi
+	existing="${existing%$'\r'}"
+	[ "$existing" != "$EGRESS_HASH" ] || return 0
+	if [ "$CONTAINER_RUNNING" = true ]; then
+		echo "Container ${CONTAINER_NAME} is running with different egress exceptions than .powbox-egress now lists. Stop the container first, then relaunch to apply them." >&2
+		exit 1
+	fi
+	if [ "$mode" = resume ]; then
+		echo "Container ${CONTAINER_NAME} was created with different egress exceptions than .powbox-egress now lists, and --resume would restart it unchanged. Relaunch without --resume to recreate it." >&2
+		exit 1
+	fi
+	echo "Egress exceptions changed (was '${existing:-none}', now '${EGRESS_HASH:-none}'); recreating container."
+	if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+		if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+			echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+			exit 1
+		fi
+	fi
+	CONTAINER_EXISTS=false
+}
+
 # Per-instance volume names that only exist in one mode. Declared empty up front
 # so referencing them under `set -u` in the other mode is always safe.
 NM_VOLUME=""
@@ -1260,6 +1354,18 @@ if [ "${POWBOX_PRINT_IDENTITY:-}" = "1" ]; then
 	exit 0
 fi
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+powbox_egress_load "${ROOT_DIR}/.powbox-egress" "${ROOT_DIR}/docker/shared/egress-rules.sh"
+
+# Internal/testing hook: print the normalized egress exceptions and exit before
+# touching Docker.
+if [ "${POWBOX_PRINT_EGRESS:-}" = "1" ]; then
+	printf 'EGRESS_RULES=%s\n' "$EGRESS_RULES"
+	printf 'EGRESS_HASH=%s\n' "$EGRESS_HASH"
+	exit 0
+fi
+
 CTX_CONFIG_PRESENT=false
 if [ "$ISOLATED" != true ]; then
 	powbox_warn_if_local_config_not_ignored "$PROJECT_PATH"
@@ -1294,7 +1400,6 @@ if [ "${POWBOX_PRINT_CTX:-}" = "1" ]; then
 	exit 0
 fi
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE_ARGS=(-p powbox -f "${ROOT_DIR}/compose.shared.yml" -f "${ROOT_DIR}/compose.agent.yml")
 # Self-hosted overlay: replaces the host workspace BIND mount in compose.shared.yml
 # with the per-instance named volume (merged by target path /workspace/<slug>).
@@ -1352,6 +1457,7 @@ if [ "$RESUME" = true ]; then
 		echo "No persisted container named ${CONTAINER_NAME} was found. Start it once normally, or with --persist if you want to be explicit." >&2
 		exit 1
 	fi
+	powbox_egress_check_existing resume
 	if [ "${#CTX_VALUES[@]}" -gt 0 ]; then
 		echo "Note: --ctx is ignored with --resume; container will resume with its existing mounts. Omit --resume to apply ctx changes." >&2
 	elif [ "$CTX_CONFIG_PRESENT" = true ]; then
@@ -1419,6 +1525,13 @@ fi
 if [ "$ISOLATED" = true ] && [ -n "$CLONE_REF" ] && [ "$RECLONE" != true ] &&
 	docker volume inspect "$WS_VOLUME" >/dev/null 2>&1; then
 	echo "Note: --ref '${CLONE_REF}' applies only to a fresh clone; ${CONTAINER_NAME} keeps the existing checkout in its workspace volume. Use --reclone to re-clone at this ref, or switch branches inside the container." >&2
+fi
+
+# Egress exceptions are frozen at creation too. Unlike the ctx check below, this
+# runs on every reuse, so a deleted .powbox-egress cannot leave an exception
+# live. Every later check can only recreate, never bring a container back.
+if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	powbox_egress_check_existing reuse
 fi
 
 if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
@@ -1789,6 +1902,13 @@ if [ "$CTX_DESIRED_PRESENT" = true ]; then
 	CTX_LABEL_ARGS=(--label "powbox.ctx-hash=${CTX_HASH}")
 fi
 
+# No rules: neither label nor variable, which is what a container from before
+# egress exceptions carries too.
+EGRESS_ARGS=()
+if [ -n "$EGRESS_RULES" ]; then
+	EGRESS_ARGS=(--label "powbox.egress-hash=${EGRESS_HASH}" -e "POWBOX_EGRESS_ALLOW=${EGRESS_RULES}")
+fi
+
 # Pre-create and chown the per-instance volumes to node so the entrypoint (which
 # runs as node) can write into them. Self-hosted mode has ONE workspace volume
 # (it must be node-owned before the entrypoint clones into it) and no nm/wt
@@ -2107,6 +2227,7 @@ fi
 		--label "powbox.continue=${CONTINUE_LABEL}" \
 		--label "powbox.podman-devices=${PODMAN_DEVICE_MODE}" \
 		"${CTX_LABEL_ARGS[@]}" \
+		"${EGRESS_ARGS[@]}" \
 		"${SELFHOSTED_LABEL[@]}" \
 		"${EXTRA_ENV[@]}" \
 		"${GIT_CONFIG_ARGS[@]}" \

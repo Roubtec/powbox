@@ -13,6 +13,9 @@ node_modules/
 # Host-local layer-set selector: one line naming a docker/layers/<set>; absent
 # means the lean image (see .powbox-layers.example).
 .powbox-layers
+# Host-local egress exceptions for every container this checkout launches;
+# absent means the default firewall policy (see .powbox-egress.example).
+.powbox-egress
 # A user's own layer set; only the placeholder that keeps the directory is
 # tracked.
 docker/layers/custom/*

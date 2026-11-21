@@ -1,0 +1,42 @@
+# Egress-exception template. Copy this file to .powbox-egress (gitignored) in the
+# powbox checkout to let every agent container this checkout launches reach a
+# few destinations the firewall otherwise blocks: private (10/8, 172.16/12,
+# 192.168/16), link-local (169.254/16, fe80::/10), unique-local (fc00::/7) and
+# CGNAT (100.64/10, the range Tailscale assigns). Everything else is already
+# allowed. With no .powbox-egress, or one holding only blank and # lines, the
+# default policy applies unchanged.
+#
+# One rule per line, like a hosts file:
+#
+#   <proto> <destination> <port>
+#
+#   - proto: tcp or udp.
+#   - destination: an IPv4 or IPv6 address (one host) or a CIDR. Host bits past
+#     the prefix must be zero, and a /0 is refused.
+#   - port: one port number, or `any`. Write one line per port.
+#
+# A # starts a comment that runs to the end of the line. A malformed line stops
+# the launch with a message naming the line. A destination the default already
+# allows, or one that reopens at least half of a blocked range, is accepted
+# with a warning.
+#
+# Changes apply to new containers: a stopped container whose rules differ is
+# recreated on the next launch, and a running one must be stopped first. Inside
+# a container, $POWBOX_EGRESS_ALLOW lists the active exceptions. The rules need
+# a base image built with egress-exception support; an older one ignores them
+# and keeps the destinations blocked.
+#
+# Examples (uncomment and adapt):
+#
+# A forward proxy on one tailnet host:
+# tcp 100.101.102.103 3128
+#
+# The same host over the tailnet's IPv6 address:
+# tcp fd7a:115c:a1e0::1234 3128
+#
+# A development database on the LAN:
+# tcp 192.168.1.20 5432
+#
+# DNS on a LAN resolver, both transports:
+# udp 192.168.1.1 53
+# tcp 192.168.1.1 53

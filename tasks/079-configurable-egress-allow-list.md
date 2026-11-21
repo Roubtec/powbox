@@ -98,4 +98,4 @@ Out of scope:
 
 ## Review plan
 
-Read `init-firewall.sh` first, adversarially: look for every path where a bad or hostile input could leave the chain more open than the defaults, or where the rules could come from somewhere other than the creation-time environment. Then check that the two launchers agree on the same fixtures, and walk the reuse paths the Transport contract names.
+Read `init-firewall.sh` first, adversarially: look for every path where a bad or hostile input could leave the chain more open than the defaults, or where the rules could come from somewhere other than the creation-time environment. Then check that the two launchers agree on parsing, normalization and hash for the same fixtures, and walk the reuse paths the Transport contract names.

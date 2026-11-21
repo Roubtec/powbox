@@ -303,6 +303,13 @@ fi
 # working directory. A bare `typst --version` would
 # not catch the pandoc template incompatibility that motivated the pin. A Typst
 # bump must update the version probe and its PowerShell mirror.
+# The five sudo probes pin the apt-get grant (task 081): the sudoers command
+# list exactly, that `sudo apt-get` resolves to the wrapper while
+# `sudo /usr/bin/apt-get` is refused and a plain PATH (what a build-time root
+# `RUN apt-get` sees) still finds the real binary, that a hook option and a
+# local .deb are refused with the wrapper's message, and a real update plus a
+# tiny install through it. That last probe is the only one in Stage 1 that
+# reaches the network (the configured apt mirrors); see docs/smoke-tests.md.
 # shellcheck disable=SC2016  # the probes' $HOME and $d expand in the container shell, NOT the host
 "${ROOT_DIR}/scripts/smoke-test-image.sh" "$IMAGE" \
 	"claude --version >/dev/null" \
@@ -355,7 +362,12 @@ fi
 	"unzip -v >/dev/null" \
 	"zip -v >/dev/null" \
 	"wget --version >/dev/null" \
-	"htop --version >/dev/null"
+	"htop --version >/dev/null" \
+	'sudo -n -l | grep -Eqx "[[:space:]]*\(ALL\) NOPASSWD: /usr/local/bin/init-firewall\.sh, /usr/local/bin/shadow-mounts\.sh, /usr/local/bin/fix-workspace-perms\.sh, /usr/local/libexec/powbox-sudo/apt-get"' \
+	'sudo -n apt-get --help | grep -q "^sudo apt-get is limited" && ! sudo -n /usr/bin/apt-get --version >/dev/null 2>&1 && test "$(command -v apt-get)" = /usr/bin/apt-get' \
+	'rc=0; out="$(sudo -n apt-get -o APT::Update::Pre-Invoke::=id update 2>&1)" || rc=$?; test "$rc" -eq 2 && printf "%s\n" "$out" | grep -q "^apt-get: refused -o: not an allowed flag"' \
+	'rc=0; out="$(sudo -n apt-get install -y ./local.deb 2>&1)" || rc=$?; test "$rc" -eq 2 && printf "%s\n" "$out" | grep -q "^apt-get: refused ./local.deb"' \
+	'sudo -n apt-get -qq update && sudo -n apt-get install -qq --no-install-recommends hello >/dev/null && hello --version >/dev/null'
 
 # Stage 1b — layer-set probes. An image built from a layer set carries the
 # set's name in its powbox.layers.set label, and the set may ship its own

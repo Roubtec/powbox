@@ -33,7 +33,7 @@ What decides the filter appears to be the network a request comes from, not the 
 
 The most likely explanation is that datacenter address space is filtered. That is unconfirmed and unpublished; Meta support could clarify it for a specific account, given the request IDs Muse prints on failing runs. Expect GitHub-hosted Actions runners to be filtered too, since they also run on datacenter networks.
 
-Two ways around it were considered. One is sending only Muse's traffic out through a residential connection the user owns, using the configurable egress exceptions and the tailnet proxy guide (tasks 079 and 080). The other is running Muse reviews from a self-hosted runner on a residential network; that plan was drafted but is kept outside `main` while the proxy route is tried.
+Two ways around it were considered. One is sending only Muse's traffic out through a residential connection the user owns, using the configurable egress exceptions and the [tailnet proxy guide](tailnet-proxy-guide.md). The other is running Muse reviews from a self-hosted runner on a residential network; that plan was drafted but is kept outside `main` while the proxy route is tried.
 
 ## Settings and contributor mode
 
@@ -41,6 +41,7 @@ Two ways around it were considered. One is sending only Muse's traffic out throu
 - The file is a flat JSON document that must carry `"schema_version": 1`. Without it Muse refuses to start with `malformed settings file … no schema_version member`, which matters when writing the file by hand or from a script.
 - `"contributor_mode_enabled": true` turns contributor mode on. Requests then go to the `-contributor` variant of the chosen model (for example `muse-wonder-1.0-contributor`). Muse may ask once, interactively, for the contributor disclosure to be acknowledged (`contributor_mode_disclosure_acknowledged`), so do that from an interactive shell before relying on it headlessly.
 - `MUSE_CONTRIBUTOR_MODE=0` or `=1` overrides the saved setting for one `peer-review-run` without touching the file.
+- `"endpoint_transport": {"proxy": "http://<host>:<port>"}` sends Muse's model requests through a forward proxy; `muse exec -c 'endpoint_transport.proxy="…"'` does the same for one run. Muse's public docs do not describe it; the [tailnet proxy guide](tailnet-proxy-guide.md#muse) says how it was confirmed and what it was not shown to cover.
 
 ## Headless `muse exec` pitfalls
 

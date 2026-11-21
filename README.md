@@ -131,6 +131,7 @@ Contributor mode (Meta may train on your content in exchange for a larger allowa
 A headless `muse exec` writes to the checkout without asking unless it is told otherwise, so the review form the agents are given is `muse exec --prompt-file <file> --disable-write --no-foreign-personal-context`: no file-writing tools and a read-only instruction, with the shell still available for `git show`. That is strong encouragement rather than an enforced sandbox.
 On plans that include it, `--model muse-wonder-full-1.0` selects the stronger model; `muse-wonder-1.0` is the default and the fallback.
 `peer-review-run --provider muse` wraps all of that behind the same result contract as the other two reviewers: it passes those flags, prefers `muse-wonder-full-1.0` and spends its second attempt on `muse-wonder-1.0` when the plan lacks the former, and reports a logged-out or exhausted account as `unavailable`, as it does an account whose model catalog comes back empty (`model catalog has no visible models`): `muse usage` can succeed while Meta serves that login no models from the network it runs on, and then no model, the fallback included, will run. Export `MUSE_CONTRIBUTOR_MODE=0` or `=1` to override Contributor mode for one run without touching the saved setting.
+[docs/muse-code-notes.md](docs/muse-code-notes.md) keeps the field notes: how to tell the `unavailable` causes apart, the network-filtered model catalog, the settings file, and headless `muse exec` pitfalls.
 
 ### Layer sets
 

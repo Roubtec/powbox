@@ -1,7 +1,7 @@
 # 080 — Write a host setup guide for reaching a tailnet proxy from containers
 
 **Depends on:** 079, because the guide documents its `.powbox-egress` format and trust model.
-**Relates to:** task 078 (Muse reviews from a residential network), whose catalog filter is the guide's worked example.
+**Relates to:** task 078 (Muse reviews from a residential network), whose catalog filter is the guide's worked example; task 081 (the narrowed `apt-get` grant), which shapes how easily the in-container firewall can be removed.
 
 ## Why this task exists
 
@@ -50,13 +50,13 @@ Out of scope:
 
 ## Target files or areas
 
-A new `docs/` chapter. A README pointer near the firewall description. A row in `AGENTS.md` → "Where to read more" for tasks that touch egress exceptions.
+A new `docs/` chapter. A README pointer from the egress firewall description that task 079 adds. A row in `AGENTS.md` → "Where to read more" for tasks that touch egress exceptions.
 
 ## Implementation notes
 
 - Write it as a case study a user can follow step by step, keeping one line per paragraph as the repo's Markdown convention asks. Use placeholders for tailnet IPs, ports and hostnames. Never commit the maintainer's real addresses.
 - Mark plainly which steps happen on which machine. That split is the point of the guide.
-- Keep the trust-model statement consistent with task 081. Once 081 lands, the agent cannot casually remove the firewall, but the tailnet policy and the proxy filter remain the limits that do not depend on the container at all.
+- Word the trust model so it holds whatever root inside the container can do: the in-container firewall guards against accidents, while the tailnet policy and the proxy filter are the limits that do not depend on the container at all. Task 081 makes removing the firewall a deliberate act, but the guide's claims must not rest on it.
 
 ## Acceptance criteria
 

@@ -33,21 +33,22 @@ Out of scope:
 
 ## The agreed contract
 
-- **File:** `<powbox checkout>/.powbox-egress`, found beside `.powbox-layers` and resolved the same way (`scripts/layers-select.sh` is the precedent for the location, BOM/CRLF tolerance and comment handling). It is never read from a workspace.
-- **Line format:** like a hosts file. One rule per line: `<proto> <destination> <port>`, separated by whitespace. `#` starts a comment, and blank lines are ignored.
+- **File:** `<powbox checkout>/.powbox-egress`, found beside `.powbox-layers` and resolved the same way (`scripts/layers-select.sh` is the precedent for the location and BOM/CRLF tolerance). It is never read from a workspace.
+- **Line format:** like a hosts file. One rule per line: `<proto> <destination> <port>`, separated by whitespace. `#` starts a comment that runs to the end of the line, whether it fills the line or follows a rule, and blank lines are ignored.
   - `proto` is `tcp` or `udp`.
   - `destination` is an IPv4 or IPv6 address or a CIDR. A bare address means a single host.
   - `port` is a single port number, or the literal `any`.
   - A user who wants several ports on one host writes several lines.
-- **Validation:** a malformed line is a hard launcher error that names the file and line, following the `layers-select.sh` precedent: launching with a different policy than the one written would be worse than not launching. Reject `/0` in either family outright. Warn, but proceed, for two cases:
+- **Validation:** a malformed line is a hard launcher error that names the file and line, following the `layers-select.sh` precedent: launching with a different policy than the one written would be worse than not launching. Reject `/0` in either family outright. Warn, but proceed, when a rule looks like a mistake rather than a policy:
   - A destination outside every blocked range. The default already allows it, so the rule does nothing.
   - A prefix broad enough to reopen most of a blocked range.
-- **Normalization:** produce a canonical, deduplicated and order-independent form, so reordering lines or editing comments does not change the hash.
+- **Normalization:** produce a canonical, deduplicated and order-independent form, so reordering lines or editing comments does not change the hash. Textual canonicalization (trim, lowercase, sort, dedupe) is enough; two spellings of the same IPv6 address may hash differently, which costs at most one needless recreate.
 - **Transport:** the launcher passes the normalized rules as a container environment variable, and records their hash in a `powbox.egress-hash` label.
-  - A stopped container whose label differs is recreated. A running one gets a warning that the new rules apply after it is stopped and relaunched. This is the same behaviour as the `powbox.ctx-hash` check in both launchers.
-  - With no file, no label value and no variable are set. A container created before this feature therefore counts as "no rules" and is not recreated needlessly.
+  - A stopped container whose label differs is recreated. A running one is refused with an error that says to stop it first, as the `powbox.ctx-hash` check does in both launchers. Attaching with a warning, as `powbox.continue` does, is not acceptable here: it would keep a removed exception open in a session the user believes is back on the default policy.
+  - With no file, no label value and no variable are set. A container that carries no label, including one created before this feature, therefore counts as "no rules" and is not recreated needlessly. A container that carries a label while the file is now absent or empty differs, and is recreated.
 - **Reading inside the container:** `init-firewall.sh` reads the rules as root from the container's creation-time environment (`/proc/1/environ`; PID 1 is `docker-init`, because compose sets `init: true`).
-  - It never reads them from its own argv or environment. An agent re-running `sudo init-firewall.sh` can then only restore the policy from launch time, and cannot hand itself a wider one. sudo's `env_reset` already strips the caller's environment; keep it that way rather than adding `env_keep`.
+  - It never reads them from its own argv or environment, so an agent re-running `sudo init-firewall.sh` re-applies the launch-time policy rather than one it passes in. sudo's `env_reset` already strips the caller's environment; keep it that way rather than adding `env_keep`.
+  - This is accident-grade protection, in line with task 081: it stops a mistaken or casual widening, not a determined agent. Word the trust model that way wherever it is documented.
   - The variable stays visible in the agent's own environment, and that is intended: it is how an agent sees which exceptions exist.
 - **Applying:** the exceptions are ACCEPT rules placed after the loopback and ESTABLISHED rules and before the private-range DROPs. `iptables` takes the IPv4 rules and `ip6tables` the IPv6 rules. The start banner lists the active exceptions, and stays as it is today when there are none.
 
@@ -59,10 +60,11 @@ Out of scope:
 - `scripts/layers-select.sh` / `.ps1`: how a gitignored, per-machine selector file in the checkout is located and parsed in both shells.
 - `docker/shared/container-agent.md.tmpl`, section "Network": the agent-facing description of the firewall. It also omits CGNAT today, which is worth fixing while touching it.
 - `scripts/test-context-mount-config.sh`: the precedent for one pure-shell suite that covers a bash launcher helper and its PowerShell twin.
+- `docs/rootless-podman.md`: where the docs describe what nested containers inherit from the firewall.
 
 ## Target files or areas
 
-`docker/shared/init-firewall.sh`, `scripts/launch-agent.sh`, `scripts/launch-agent.ps1`, `.gitignore`, a new `.powbox-egress.example`, a new `scripts/test-*.sh` suite, `docker/shared/container-agent.md.tmpl`, `README.md`, `AGENTS.md` (Security), and the chapter doc that covers the entrypoint (`docs/entrypoint-and-runtime.md`) wherever the firewall's behaviour is described.
+`docker/shared/init-firewall.sh`, `scripts/launch-agent.sh`, `scripts/launch-agent.ps1`, `.gitignore`, a new `.powbox-egress.example`, a new `scripts/test-*.sh` suite, `docker/shared/container-agent.md.tmpl`, `AGENTS.md` (Security), and `docs/rootless-podman.md`. Give the README a short description of the egress firewall, covering the default policy and the exceptions file; task 080 links its guide from there. Any new file baked into the base image needs its `COPY` in `docker/base/Dockerfile` and an entry in `scripts/base-source-files.txt`.
 
 ## Implementation notes and landmines
 
@@ -71,18 +73,21 @@ Out of scope:
 - **Testability:** split rule generation from rule application, so the hermetic suite can check the generated iptables invocations (order included, so the exceptions are proven to sit before the DROPs) without `NET_ADMIN`. The suite must also show that an invalid entry never removes a default DROP.
 - **Backward compatibility is deliberately not handled.** An older base image ignores the variable, which fails closed: the destination stays blocked. Document that the feature needs a base rebuild; no capability label or skew check is wanted.
 - **Hash scope:** hash only the normalized rules, so a comment edit does not recreate containers.
+- **Compare on every reuse.** The ctx-hash comparison runs only when a context mount is desired, so a literal copy would skip the case where `.powbox-egress` was deleted and leave a removed exception live. The egress comparison must run whenever an existing container is about to be reused.
+- **The blocked ranges live in two places.** The launchers' "outside every blocked range" and "over-broad" warnings need the same range list `init-firewall.sh` blocks. Let the shared fixtures pin the launchers' copy against the firewall's, so the warnings cannot drift from the policy.
+- **Verify the environ trust claim.** PID 1 runs as `node`, so `/proc/1/environ` stays trustworthy only while `node` cannot write PID 1's memory. That rests on the host's ptrace policy (yama `ptrace_scope` varies by host) with seccomp unconfined in `compose.shared.yml`. Check it on a real container, and keep the documented trust model no stronger than what holds.
 - **Nested Podman containers** route through this container's network namespace and already inherit the firewall. They inherit the exceptions too, with no extra work. Mention this where the docs describe what nested containers inherit.
 - **Agent instructions:** say that the user may configure exceptions, and that the variable lists them. Keep it short and free of values that could drift.
 
 ## Acceptance criteria
 
-- With no `.powbox-egress`, the generated rule set and the banner are identical to today's, and existing containers are not recreated.
+- With no `.powbox-egress`, the generated rule set and the banner are identical to today's, and a container without exceptions is not recreated. A container that still carries exceptions is recreated once the file is removed.
 - With a valid file, a new container accepts exactly the listed protocol, destination and port combinations inside the blocked ranges, and still drops everything else there, on IPv4 and IPv6.
-- Editing the rules recreates a stopped container on its next launch, and warns about a running one. Editing only comments or line order does neither.
+- Editing or removing the rules recreates a stopped container on its next launch, and refuses to attach to a running one. Editing only comments or line order does neither.
 - A malformed line stops the launch with a message that names the file and line, in both launchers. `/0` is rejected, and a public or over-broad destination warns.
 - `sudo init-firewall.sh` run by the agent re-applies the launch-time policy and accepts no other input.
 - `.powbox-egress` is gitignored, and `.powbox-egress.example` documents the format with commented examples. One of them is a single tailnet host and port.
-- The README, `AGENTS.md`, the agent instructions template and the relevant chapter doc describe the feature and its trust model in line with the implementation.
+- The README, `AGENTS.md`, the agent instructions template and `docs/rootless-podman.md` describe the feature and its accident-grade trust model in line with the implementation.
 
 ## Validation
 
@@ -92,4 +97,4 @@ Out of scope:
 
 ## Review plan
 
-Read `init-firewall.sh` first, adversarially: look for every path where a bad or hostile input could leave the chain more open than the defaults, or where the rules could come from somewhere other than the creation-time environment. Then check that the bash and PowerShell launchers agree on parsing, normalization and hash for the same fixtures, and that the recreate logic matches the ctx-hash behaviour.
+Read `init-firewall.sh` first, adversarially: look for every path where a bad or hostile input could leave the chain more open than the defaults, or where the rules could come from somewhere other than the creation-time environment. Then check that the bash and PowerShell launchers agree on parsing, normalization and hash for the same fixtures, and that the recreate logic matches the ctx-hash behaviour, including for a deleted file and a running container.

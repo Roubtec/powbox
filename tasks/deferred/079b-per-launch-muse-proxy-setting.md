@@ -5,11 +5,11 @@
 
 ## Why this task exists
 
-Once a container can reach a residential proxy (tasks 079 and 080), Muse needs to send its requests through it. Muse has a persisted proxy setting of its own, which is a first-class feature meant for enterprise egress control. It lives on the shared `muse-config` volume, so it already applies to every container on that machine. A powbox-level variable (for example one that `peer-review-run` passes to `muse`) would duplicate that setting, so it is not built yet.
+Once a container can reach a residential proxy (tasks 079 and 080), Muse needs to send its requests through it. The expectation is that Muse's own persisted proxy setting covers this; task 080 confirms its real name and form. Such a setting lives on the shared `muse-config` volume, so it would already apply to every container on that machine. A powbox-level variable (for example one that `peer-review-run` passes to `muse`) would duplicate it, so it is not built yet.
 
 ## When it becomes actionable
 
-When the persisted Muse setting turns out to be too coarse. One example: a machine where some containers must go through the proxy and others must not, all sharing one `muse-config` volume. Another: Muse's setting fails to cover a request path that the review run depends on.
+When task 080 finds no usable persisted Muse setting, or when that setting turns out to be too coarse. One example: a machine where some containers must go through the proxy and others must not, all sharing one `muse-config` volume. Another: Muse's setting fails to cover a request path that the review run depends on.
 
 ## Direction and constraints
 

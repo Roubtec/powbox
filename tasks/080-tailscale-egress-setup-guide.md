@@ -1,11 +1,11 @@
 # 080 — Write a host setup guide for reaching a tailnet proxy from containers
 
 **Depends on:** 079, because the guide documents its `.powbox-egress` format and trust model.
-**Relates to:** task 078 (Muse reviews from a residential network), whose catalog filter is the guide's worked example; task 081 (the narrowed `apt-get` grant), which shapes how easily the in-container firewall can be removed.
+**Relates to:** task 078 (Muse PR reviews from a self-hosted runner), whose network-filtered Muse catalog is the guide's worked example; task 081 (the narrowed `apt-get` grant), which shapes how easily the in-container firewall can be removed.
 
 ## Why this task exists
 
-Task 079 gives powbox an egress allow-list, but powbox deliberately stops there. Joining a tailnet, running a proxy and restricting who may use it are host-side jobs the user owns. Without a worked example, a user, the maintainer included since they are new to Tailscale, has to put that together from several vendors' docs. The guide also has to state the trust model plainly. The in-container firewall is the first line, but the hard limits on what a container may reach across the tailnet belong in the tailnet policy and in the proxy. Those are settings the user controls outside the agent's reach.
+Task 079 gives powbox an egress allow-list, but powbox deliberately stops there. Joining a tailnet, running a proxy and restricting who may use it are host-side jobs the user owns. Without a worked example, a user new to Tailscale has to put that together from several vendors' docs. The guide also has to state the trust model plainly. The in-container firewall is the first line, but the hard limits on what a container may reach across the tailnet belong in the tailnet policy and in the proxy. Those are settings the user controls outside the agent's reach.
 
 ## Goal
 
@@ -32,6 +32,7 @@ In scope:
   - Another port on the same host is still blocked.
   - The proxy refuses a destination outside its filter.
 - **Pointing a tool at the proxy:** generic `HTTPS_PROXY` for a single command, and, for Muse, its own persisted proxy setting on the shared `muse-config` volume. The implementer must confirm the setting's real name and form from Muse's docs or from `muse` itself, and say how it was confirmed. Do not invent it.
+- **A native-Linux routing note:** container traffic is forwarded and masqueraded into `tailscale0`, not host-originated, so "works from the host, fails from the container" is the likely failure. Say what to check (forwarding and NAT for the Docker bridge toward the tailnet interface) instead of leaving the reader to infer it.
 - **A short section on host VPNs.** A full-tunnel VPN on the host needs no powbox change, because container traffic is NAT'd by the host and follows its routes. The caveats: VPN-side resources in private or CGNAT ranges still need a 079 rule; per-app split tunnelling may not count Docker's forwarded traffic as the chosen app; and a host kill switch can drop that forwarded traffic.
 - **A short Docker Desktop (Windows/WSL2) note:** container egress leaves through the Windows host's network stack. The reader should check that the Windows Tailscale client's routes apply, rather than assume it.
 

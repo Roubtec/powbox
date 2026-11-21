@@ -1,6 +1,6 @@
 # 079 — Add a configurable egress allow-list to the container firewall
 
-**Relates to:** the egress firewall (`docker/shared/init-firewall.sh`); task 078 (Muse PR reviews from a network Meta serves), whose network-filtered Muse catalog is the first concrete use case.
+**Relates to:** the egress firewall (`docker/shared/init-firewall.sh`); task 078 (Muse PR reviews from a self-hosted runner), whose network-filtered Muse catalog is the first concrete use case.
 
 ## Why this task exists
 
@@ -28,7 +28,7 @@ Out of scope:
 - Per-project opt-in or narrowing from `.powbox.yml` / `.powbox.local.yml` (deferred as 079a). A committed `.powbox.yml` must never be able to widen egress: under `--isolated` the launcher works on arbitrary cloned repos, and one could otherwise ship a LAN-opening rule.
 - Hostname destinations, ICMP, port ranges and multi-port lines.
 - A per-launch proxy variable for Muse (deferred as 079b).
-- Host-side enforcement (a `DOCKER-USER` chain, Tailscale ACLs). Task 080 documents those.
+- Host-side enforcement such as tailnet policy. Task 080 documents it for the tailnet case.
 - Hardening the sudo allowlist (task 081).
 
 ## The agreed contract
@@ -45,7 +45,7 @@ Out of scope:
 - **Normalization:** produce a canonical, deduplicated and order-independent form, so reordering lines or editing comments does not change the hash. Textual canonicalization (trim, lowercase, sort, dedupe) is enough; two spellings of the same IPv6 address may hash differently, which costs at most one needless recreate.
 - **Transport:** the launcher passes the normalized rules as a container environment variable, and records their hash in a `powbox.egress-hash` label.
   - A stopped container whose label differs is recreated. A running one is refused with an error that says to stop it first, as the `powbox.ctx-hash` check does in both launchers. Attaching with a warning, as `powbox.continue` does, is not acceptable here: it would keep a removed exception open in a session the user believes is back on the default policy.
-  - With no file, no label value and no variable are set. A container that carries no label, including one created before this feature, therefore counts as "no rules" and is not recreated needlessly. A container that carries a label while the file is now absent or empty differs, and is recreated.
+  - With no file, or a file with no rules, no label value and no variable are set. A container that carries no label, including one created before this feature, therefore counts as "no rules" and is not recreated needlessly. A container that carries a label while the file is now absent or empty differs, and is recreated.
 - **Reading inside the container:** `init-firewall.sh` reads the rules as root from the container's creation-time environment (`/proc/1/environ`; PID 1 is `docker-init`, because compose sets `init: true`).
   - It never reads them from its own argv or environment, so an agent re-running `sudo init-firewall.sh` re-applies the launch-time policy rather than one it passes in. sudo's `env_reset` already strips the caller's environment; keep it that way rather than adding `env_keep`.
   - This is accident-grade protection, in line with task 081: it stops a mistaken or casual widening, not a determined agent. Word the trust model that way wherever it is documented.
@@ -72,10 +72,12 @@ Out of scope:
 - **Check again inside the container.** `init-firewall.sh` runs as root on input that crosses a trust boundary, so it must apply its own strict check rather than trusting the launcher's. The shells differ, so the parsing logic exists in the bash launcher, the PowerShell launcher and the firewall. The line format was chosen to keep that cheap. Keep them in agreement, and let the test suite pin them against shared fixtures.
 - **Testability:** split rule generation from rule application, so the hermetic suite can check the generated iptables invocations (order included, so the exceptions are proven to sit before the DROPs) without `NET_ADMIN`. The suite must also show that an invalid entry never removes a default DROP.
 - **Backward compatibility is deliberately not handled.** An older base image ignores the variable, which fails closed: the destination stays blocked. Document that the feature needs a base rebuild; no capability label or skew check is wanted.
+- **Keep the variable single-line.** A multi-line value is fragile through `docker compose run -e` from bash and from Windows PowerShell 5.1 alike, so pick a single-line serialization of the normalized rules.
 - **Hash scope:** hash only the normalized rules, so a comment edit does not recreate containers.
 - **Compare on every reuse.** The ctx-hash comparison runs only when a context mount is desired, so a literal copy would skip the case where `.powbox-egress` was deleted and leave a removed exception live. The egress comparison must run whenever an existing container is about to be reused.
 - **The blocked ranges live in two places.** The launchers' "outside every blocked range" and "over-broad" warnings need the same range list `init-firewall.sh` blocks. Let the shared fixtures pin the launchers' copy against the firewall's, so the warnings cannot drift from the policy.
-- **Verify the environ trust claim.** PID 1 runs as `node`, so `/proc/1/environ` stays trustworthy only while `node` cannot write PID 1's memory. That rests on the host's ptrace policy (yama `ptrace_scope` varies by host) with seccomp unconfined in `compose.shared.yml`. Check it on a real container, and keep the documented trust model no stronger than what holds.
+- **Root cannot read PID 1's environ as-is.** PID 1 runs as `node`, and the kernel gates another user's `/proc/<pid>/environ` behind `CAP_SYS_PTRACE`, which the container does not hold. A plain root read is therefore denied, and the exceptions would silently never load. Do the read under PID 1's own uid (root holds `CAP_SETUID`) rather than adding `CAP_SYS_PTRACE` to the compose file, which would widen what root in the container can do. Keep this case under the never-fail-open rule: an unreadable environ means no exceptions, never a half-applied policy.
+- **Verify the environ trust claim.** Because PID 1 runs as `node`, `/proc/1/environ` stays trustworthy only while `node` cannot write PID 1's memory. That rests on the host's ptrace policy (yama `ptrace_scope` varies by host) with seccomp unconfined in `compose.shared.yml`. Check it on a real container, and keep the documented trust model no stronger than what holds.
 - **Nested Podman containers** route through this container's network namespace and already inherit the firewall. They inherit the exceptions too, with no extra work. Mention this where the docs describe what nested containers inherit.
 - **Agent instructions:** say that the user may configure exceptions, and that the variable lists them. Keep it short and free of values that could drift.
 

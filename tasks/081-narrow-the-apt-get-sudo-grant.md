@@ -1,6 +1,6 @@
 # 081 — Narrow the `apt-get` sudo grant so it cannot be used as a root shell
 
-**Relates to:** task 079 (egress allow-list), whose firewall the current grant lets an agent remove. Also the sudoers allowlist in `docker/base/Dockerfile`, and the Security section of `AGENTS.md`.
+**Relates to:** task 079 (egress allow-list), whose exceptions rely on the in-container firewall that the current grant lets an agent remove. Also the sudoers allowlist in `docker/base/Dockerfile`, and the Security section of `AGENTS.md`.
 
 ## Why this task exists
 
@@ -42,7 +42,7 @@ Out of scope:
 
 - **Path resolution decides what sudo runs.** The user types `sudo apt-get`, and sudo resolves the name through `secure_path`, not the caller's `PATH`. The wrapper must be what that resolves to, and the sudoers entry must name the wrapper's path only. Check that `sudo /usr/bin/apt-get …` is refused.
 - **Allowlist, don't denylist.** Accept known-good verbs and flags, and reject everything else: config options (`-o`, `-c`), anything that turns a package argument into a path or URL, flags that disable authentication, and verbs that open a pager or build from source. Base the accepted set on the documented uses, then widen it only where a common, harmless need shows up.
-- **The wrapper parses hostile input as root.** Keep it small. Use `set -euo pipefail`, and never pass an argument through a shell evaluation. Run the real binary with a clean, fixed environment and explicit arguments.
+- **The wrapper parses hostile input as root.** Keep it small. Use `set -euo pipefail`, and never pass an argument through a shell evaluation. Run the real binary with a clean, fixed environment, explicit arguments and no interactive prompts: dpkg's conffile prompt offers a shell when a terminal is attached.
 - **Reassess the shadow-mounts race.** The ownership-fix race in `shadow-mounts.sh` was accepted partly because apt-get already gave root. Once that route is closed, decide whether the residual race still only narrows a window or now deserves closing. Record the decision either way, and file a follow-up task if it deserves closing but is not cheap.
 - **Image builds run `apt-get` as root too.** Layer-set Dockerfiles switch to `USER root` and call `apt-get`, and `full` installs a local `.deb`, which is exactly what the wrapper refuses. A wrapper named `apt-get` in a directory ahead of `/usr/bin` on root's default `PATH` would therefore break those builds, and user-authored sets alike. CI never builds `full`, so this would surface only in the maintainer's host build. Keep the wrapper reachable only through sudo's own resolution for `node` (a node-scoped `secure_path` pointing at a private directory is one way), not through root's `PATH`.
 - Changing this requires a base rebuild. No backward-compatibility handling is wanted.

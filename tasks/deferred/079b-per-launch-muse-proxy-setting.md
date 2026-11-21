@@ -1,7 +1,7 @@
 # 079b — A per-launch proxy setting for the Muse peer reviewer
 
 **Depends on:** 079, because a tailnet proxy is only reachable through its allow-list.
-**Relates to:** 078 (Muse reviews from a network Meta serves), 080 (the setup guide, which covers Muse's own proxy setting), and `peer-review-run --provider muse`.
+**Relates to:** 078 (Muse PR reviews from a self-hosted runner), 080 (the setup guide, which covers Muse's own proxy setting), and `peer-review-run --provider muse`.
 
 ## Why this task exists
 

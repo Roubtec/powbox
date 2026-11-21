@@ -753,11 +753,15 @@ function Read-Powbox-EgressRules ([string]$File) {
   # One path lookup decides whether the file is there, so its name matches as
   # the file system matches names: case-insensitively on a default Windows or
   # macOS volume, exactly on Linux, as launch-agent.sh's [ -e ] and [ -L ] do.
-  # File.GetAttributes reports a final symbolic link's own attributes rather
-  # than following it, on Windows PowerShell 5.1 (GetFileAttributesEx) and
-  # pwsh 7 (GetFileAttributesEx on Windows, lstat elsewhere), so a link to a
-  # missing file is found here; Windows PowerShell 5.1's Test-Path would report
-  # it absent and launch with no rules.
+  # File.GetAttributes looks a final symbolic link up without needing its
+  # target: on Windows (PowerShell 5.1 and pwsh 7) GetFileAttributesEx returns
+  # the link's own attributes, and pwsh 7 elsewhere uses lstat, taking only the
+  # Directory bit from a target that exists. So a link to a missing file is
+  # found here, where Windows PowerShell 5.1's Test-Path would report it absent
+  # and launch with no rules, and a link to a directory is rejected below, as
+  # launch-agent.sh's [ -f ] rejects it. A Windows directory link or junction
+  # carries the Directory bit itself, so a dangling one is rejected there too,
+  # as not a regular file rather than as a link to a missing file.
   try { $attributes = [System.IO.File]::GetAttributes($File) }
   catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $none }
   if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {

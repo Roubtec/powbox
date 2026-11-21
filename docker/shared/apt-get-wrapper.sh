@@ -14,10 +14,10 @@
 # in a scrubbed environment with no terminal on stdin (dpkg's conffile prompt
 # offers a shell). It adds no -y: apt's own confirmation then reads EOF and
 # aborts, so a cascading remove or a pattern-matched install proceeds only when
-# the caller asked for it. Packages from the configured repositories stay
-# installable; their maintainer scripts run as root by design and those
-# repositories are trusted. The policy is pinned by
-# scripts/test-apt-get-wrapper.sh.
+# the caller asked for it (-y, or -qq, which apt treats as implying -y).
+# Packages from the configured repositories stay installable; their maintainer
+# scripts run as root by design and those repositories are trusted. The policy
+# is pinned by scripts/test-apt-get-wrapper.sh.
 set -euo pipefail
 export LC_ALL=C
 
@@ -54,8 +54,9 @@ sudo apt-get is limited to managing packages from the configured repositories:
 Refused: config options (-o, -c), local .deb files, paths and URLs, flags that
 weaken signature checks, and every other verb (changelog, source, build-dep,
 download, ...). It runs with no terminal and keeps existing config files, so
-a step apt would ask you to confirm aborts unless you pass -y. Anything else
-belongs in the image build (a layer set) - ask the user.
+a step apt would ask you to confirm aborts unless you pass -y (or -qq, which
+implies it). Anything else belongs in the image build (a layer set) - ask the
+user.
 EOF
 }
 

@@ -751,12 +751,21 @@ function Get-Powbox-EgressNote ([object]$Parsed) {
 function Read-Powbox-EgressRules ([string]$File) {
   $none = [pscustomobject]@{ Rules = ""; Hash = "" }
   # A symbolic link to a missing file is an error, as in launch-agent.sh, not
-  # "no file": Windows PowerShell 5.1's Test-Path reports it absent, pwsh 7's
-  # present, so look at the link itself.
-  $isLink = $false
-  try { $isLink = ([System.IO.File]::GetAttributes($File) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 } catch { $isLink = $false }
-  if (-not $isLink -and -not (Test-Path -LiteralPath $File)) { return $none }
-  if ($isLink) {
+  # "no file". Path lookups disagree on it (Windows PowerShell 5.1's Test-Path
+  # reports it absent, pwsh 7's present), so find the directory entry itself:
+  # an enumerated entry carries the link's own attributes on both, never its
+  # target's. -Filter matches case-insensitively even on Linux, so keep only
+  # the exact name, and leave a differently cased one on a case-insensitive
+  # file system to the path lookup.
+  $parent = Split-Path -Parent $File
+  if ($parent -eq "") { $parent = "." }
+  $leaf = Split-Path -Leaf $File
+  $entry = Get-ChildItem -LiteralPath $parent -Force -Filter $leaf -ErrorAction SilentlyContinue | Where-Object { $_.Name -ceq $leaf } | Select-Object -First 1
+  if ($null -eq $entry) {
+    if (-not (Test-Path -LiteralPath $File)) { return $none }
+    $entry = Get-Item -LiteralPath $File -Force
+  }
+  if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     $missing = $false
     try { [System.IO.File]::OpenRead($File).Dispose() }
     catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $missing = $true }

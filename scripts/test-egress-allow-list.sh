@@ -680,6 +680,11 @@ printf 'tcp 10.0.0.1 22\n' >"$WORK_ROOT/real-egress-file"
 ln -s "$WORK_ROOT/real-egress-file" "$EGRESS_FILE"
 check_print "a symlink to a real file" "tcp,10.0.0.1/32,22"
 rm -f "$EGRESS_FILE" "$WORK_ROOT/real-egress-file"
+# Not .powbox-egress on a case-sensitive file system, though the PowerShell
+# launcher's -Filter lookup matches it.
+printf 'tcp 10.0.0.1 22\n' >"$CHECKOUT/.POWBOX-EGRESS"
+check_print "a differently cased name" ""
+rm -f "$CHECKOUT/.POWBOX-EGRESS"
 
 # ---------------------------------------------------------------------------
 # The launchers' create and reuse paths, end to end against a fake docker.

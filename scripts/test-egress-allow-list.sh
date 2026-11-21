@@ -190,7 +190,7 @@ grammar_ps() {
 		. $env:PS_EXTRACT
 		foreach ($line in [System.IO.File]::ReadAllLines($env:FIXTURES)) {
 			$f = $line.Split("|")
-			$r = Test-Powbox-EgressRule $f[1] $f[2] $f[3]
+			$r = Test-Powbox-EgressRule -Proto $f[1] -Destination $f[2] -Port $f[3]
 			if ($r.Error -ne "") { "ERR:$($r.Error)" } else { "$($r.Rule)|$(Get-Powbox-EgressNote $r)" }
 		}'
 }
@@ -411,7 +411,7 @@ assert_eq "every valid fixture at once: the DROPs and the final ACCEPT come last
 assert_eq "every valid fixture at once: IPv6 DROPs and final ACCEPT come last" \
 	"$(printf '%s\n' "$FW_V6" | tail -n 3)" "$(printf '%s\n' "$DEFAULT_V6" | tail -n 3)"
 
-echo "Test: a line break in the value, a failed read or a missing library means no exceptions"
+echo "Test: a line break in the value, a failed read, or a missing or aborting library means no exceptions"
 fw_run "$(environ_file env-newline "POWBOX_EGRESS_ALLOW=tcp,10.0.0.5/32,22
 tcp,10.0.0.6/32,22")"
 assert_eq "line break: IPv4 chain is the default" "$FW_V4" "$DEFAULT_V4"
@@ -424,6 +424,12 @@ FW_LIB_OVERRIDE="$WORK_ROOT/no-such-lib.sh" fw_run "$(environ_file env-lib "POWB
 assert_eq "missing library: IPv4 chain is the default" "$FW_V4" "$DEFAULT_V4"
 assert_contains "missing library: warns" "$FW_ERR" "cannot load"
 assert_eq "missing library: banner unchanged" "$FW_OUT" "$BANNER"
+printf 'exit 7\n' >"$WORK_ROOT/aborting-lib.sh"
+FW_LIB_OVERRIDE="$WORK_ROOT/aborting-lib.sh" fw_run "$(environ_file env-abort "POWBOX_EGRESS_ALLOW=tcp,10.0.0.5/32,22")"
+assert_eq "aborting library: exit status" "$FW_RC" 0
+assert_eq "aborting library: IPv4 chain is the default" "$FW_V4" "$DEFAULT_V4"
+assert_eq "aborting library: IPv6 chain is the default" "$FW_V6" "$DEFAULT_V6"
+assert_contains "aborting library: warns" "$FW_ERR" "could not load the egress exceptions; applying none"
 
 echo "Test: a failing iptables insert leaves the destination blocked, not the chain open"
 SIM_FAIL_INSERT=1 fw_run "$(environ_file env-fail "POWBOX_EGRESS_ALLOW=tcp,10.0.0.5/32,22;tcp,fd00::1/128,22")"

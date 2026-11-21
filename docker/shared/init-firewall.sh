@@ -22,9 +22,6 @@ POWBOX_FW_ENVIRON=/proc/1/environ
 POWBOX_FW_STATUS=/proc/1/status
 POWBOX_FW_LIB="$(dirname "${BASH_SOURCE[0]}")/egress-rules.sh"
 
-FW_V4_RULES=()
-FW_V6_RULES=()
-
 fw_warn() {
 	echo "init-firewall: $*" >&2
 }
@@ -90,13 +87,12 @@ fw_extract_allow() {
 	return 0
 }
 
-# Fill FW_V4_RULES / FW_V6_RULES with the valid, deduplicated launch-time
-# exceptions. Every failure here means fewer exceptions, never fewer DROPs.
+# Print the valid, deduplicated launch-time exceptions, one "<4|6> <rule>" per
+# line. fw_main runs this in a subshell, so even an unexpected abort in here
+# only means no exceptions; it can never keep the default policy from loading.
 fw_load_exceptions() {
 	local raw entry proto dest port extra
 	local -a entries=() seen=()
-	FW_V4_RULES=()
-	FW_V6_RULES=()
 	# pipefail (set above) makes a failed read fail the substitution.
 	if ! raw="$(fw_pid1_environ | fw_extract_allow)"; then
 		fw_warn "cannot read the launch-time environment from ${POWBOX_FW_ENVIRON}; applying no egress exceptions"
@@ -130,11 +126,7 @@ fw_load_exceptions() {
 		*" ${POWBOX_EGRESS_RULE} "*) continue ;;
 		esac
 		seen+=("$POWBOX_EGRESS_RULE")
-		if [ "$POWBOX_EGRESS_FAMILY" = 4 ]; then
-			FW_V4_RULES+=("$POWBOX_EGRESS_RULE")
-		else
-			FW_V6_RULES+=("$POWBOX_EGRESS_RULE")
-		fi
+		printf '%s %s\n' "$POWBOX_EGRESS_FAMILY" "$POWBOX_EGRESS_RULE"
 	done
 }
 
@@ -163,11 +155,22 @@ fw_main() {
 	if [ "$#" -gt 0 ]; then
 		fw_warn "arguments are ignored; egress exceptions come only from the launch-time environment"
 	fi
-	fw_load_exceptions
+	local loaded family rule
+	local -a v4=() v6=()
+	if ! loaded="$(fw_load_exceptions)"; then
+		fw_warn "could not load the egress exceptions; applying none"
+		loaded=""
+	fi
+	while read -r family rule; do
+		case "$family" in
+		4) v4+=("$rule") ;;
+		6) v6+=("$rule") ;;
+		esac
+	done <<<"$loaded"
 	fw_apply_default
 	FW_APPLIED=()
-	fw_insert_exceptions iptables "${FW_V4_RULES[@]}"
-	fw_insert_exceptions ip6tables "${FW_V6_RULES[@]}"
+	fw_insert_exceptions iptables "${v4[@]}"
+	fw_insert_exceptions ip6tables "${v6[@]}"
 
 	echo "Firewall active: local networks blocked, public internet allowed."
 	if [ "${#FW_APPLIED[@]}" -gt 0 ]; then

@@ -774,7 +774,7 @@ function Read-Powbox-EgressRules ([string]$File) {
       Write-Error "$File line ${lineNo}: expected '<proto> <destination> <port>'."
       exit 1
     }
-    $parsed = Test-Powbox-EgressRule $fields[0] $fields[1] $fields[2]
+    $parsed = Test-Powbox-EgressRule -Proto $fields[0] -Destination $fields[1] -Port $fields[2]
     if ($parsed.Error -ne "") {
       Write-Error "$File line ${lineNo}: $($parsed.Error)."
       exit 1
@@ -1271,7 +1271,7 @@ if ($Resume) {
     Write-Error "No persisted container named $containerName was found. Start it once normally, or with -Persist if you want to be explicit."
     exit 1
   }
-  $null = Confirm-Powbox-EgressReuse $containerName $containerRunning $egressHash "resume"
+  $null = Confirm-Powbox-EgressReuse -ContainerName $containerName -Running $containerRunning -DesiredHash $egressHash -Mode "resume"
   if (@($Ctx).Count -gt 0) {
     Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
   }
@@ -1355,7 +1355,7 @@ if ($Isolated -and $Ref -ne "" -and -not $Reclone) {
 # runs on every reuse, so a deleted .powbox-egress cannot leave an exception live.
 # Every later check can only recreate, never bring a container back.
 if (-not $Volatile -and $containerExists) {
-  if ((Confirm-Powbox-EgressReuse $containerName $containerRunning $egressHash "reuse") -eq "removed") {
+  if ((Confirm-Powbox-EgressReuse -ContainerName $containerName -Running $containerRunning -DesiredHash $egressHash -Mode "reuse") -eq "removed") {
     $containerExists = $false
   }
 }

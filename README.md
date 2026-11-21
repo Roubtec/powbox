@@ -57,6 +57,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `docker/agent/Dockerfile`: the unified `powbox-agent:latest` image on top of the shared base (or of the layer-set image, when a set is selected); installs both the Codex and Claude binaries (Codex below Claude — see [Build Modes](#build-modes)) plus the per-agent seed assets and the entrypoint
 - `docker/layers/<set>/`: optional [layer sets](#layer-sets), each a Dockerfile (plus any files it copies, and an optional `agent-notes.md` [appended to the agents' instructions](#updating-agent-instructions)) baked into `powbox-agent-layers:latest` between the base and the agent image; `full/` is the maintainer's bundle of language toolchains, PostgreSQL, rootless Podman and the browser stack, `browser/` a smaller headless-browser set (the one CI builds), `custom/` is yours and gitignored apart from its `.gitkeep`
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
+- `.powbox-egress.example`: template for the gitignored `.powbox-egress` list of [egress exceptions](#egress-exceptions-powbox-egress) every launched container allows (absent: the default firewall policy)
 - `compose.shared.yml`: common runtime service and shared volumes
 - `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
 - `compose.selfhosted.yml`: [self-hosted mode](#self-hosted-mode---isolated) overlay — replaces the host workspace bind mount with a per-instance named volume the container clones into itself (added to the `-f` chain only with `--isolated`)
@@ -380,6 +381,32 @@ For the specific case of a **delegated peer review**, the baked `peer-review-run
 **Configured Codex model, preserved.** Codex has no rolling alias to default to, and the adapter's own `--ignore-user-config` — which is what stops the reviewed worktree steering its own reviewer — also discards the top-level `model` your `/model` selection wrote into `$CODEX_HOME/config.toml`. So when you pass no `--model`, the helper reads just that root `model` back and re-applies it as `-m`, and nothing else from that file crosses. It refuses to do even that when a root `profile` or a root `model_provider` is set: the bare name is then meaningless without the configuration the helper deliberately does not forward, so the run degrades to the CLI default with a warning and `model:null` rather than reviewing with something you did not pick. Any unreadable, unparseable or unusable config degrades the same honest way instead of failing the review — including a value the reader cannot hand back verbatim, such as one carrying a newline — while no config at all, or one with no root `model`, is simply the unconfigured case: no `-m`, `model:null`, and nothing on stderr. An explicit `--model` wins and skips the lookup entirely — and an explicit *empty* one (`--model ""`, the shape a caller produces by forwarding an unset variable) is a usage error rather than an omission, so it is rejected instead of quietly taking that lookup. `--effort` stays independent of all of this: a configured `model_reasoning_effort` never overrides the level you asked for.
 
 **Relaying the peer's prose.** For a `passed` or `issues` outcome the result carries `reviewFile`, the absolute path of `<artifactDir>/review.txt` — the peer's complete final review message as plain text, identical for both providers. Read the review from there; do not open `provider.stdout`, construct Codex's final-message filename, or parse a provider-native JSON envelope. The provider-native artifacts stay in `artifactDir` unchanged for debugging and audit — `review.txt` is an additional consumption surface, not a replacement for them. Two consequences worth knowing: the helper now needs `python3` (baked into the image; it writes and verifies that file, and its absence exits 70 before any provider is launched), and a `passed` review whose `review.txt` cannot be created or verified is **discarded** — the helper exits 70 with no result rather than pointing you at prose it could not prove.
+
+## Egress Firewall
+
+Every agent container runs `init-firewall.sh` at start, as root through the scoped sudo grant. Its default policy blocks outbound traffic to private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`), unique-local (`fc00::/7`) and CGNAT (`100.64.0.0/10`, the range Tailscale assigns) destinations, over IPv4 and IPv6 alike, and allows the rest of the internet. Loopback and replies on established connections always pass. [Nested Podman containers](#nested-containers-rootless-podman) route through the agent container's network namespace, so they inherit the same policy, exceptions included.
+
+### Egress exceptions (`.powbox-egress`)
+
+Some setups need a narrow hole in that policy: a forward proxy on another device of your tailnet, a development database on the LAN, a service behind a corporate VPN. List those destinations in `.powbox-egress` in the powbox checkout, beside `.powbox-layers`. The file is gitignored, and `.powbox-egress.example` documents the format. Every container the checkout launches afterwards allows exactly those protocol, destination and port combinations, on top of the unchanged default; a machine without the file behaves exactly as before. Powbox owns only this allow-list: joining the tailnet or VPN, and running the service, stay host-side.
+
+```bash
+cp .powbox-egress.example .powbox-egress
+# One rule per line: <proto> <destination> <port>
+echo 'tcp 100.101.102.103 3128' >> .powbox-egress
+```
+
+Each line is `<proto> <destination> <port>`, separated by whitespace, like a hosts file. `proto` is `tcp` or `udp`; `destination` is an IPv4 or IPv6 address (one host) or a CIDR whose host bits are zero; `port` is one port number or `any`, so several ports on one host take several lines. `#` starts a comment, and blank lines are ignored; a UTF-8 BOM and CRLF line endings are accepted. Hostnames, ICMP, port ranges, and IPv6 written with an embedded dotted quad or a zone (`%eth0`) are not supported.
+
+A malformed line stops the launch with a message that names the file and line, since launching with a different policy than the one written would be worse than not launching; a `/0` is refused outright. A rule that looks like a mistake rather than a policy warns and is kept: a destination outside every blocked range (the default already allows it, so the rule does nothing), or one that reopens at least half of a blocked range.
+
+The file is read only from the powbox checkout, never from a workspace. A committed `.powbox.yml` therefore cannot widen egress, which matters under `--isolated`, where the launcher works on arbitrary cloned repos.
+
+The rules are fixed when a container is created. The launcher passes them in canonical form as the `POWBOX_EGRESS_ALLOW` variable and records their hash in a `powbox.egress-hash` label, and on every reuse it compares that label with the current file. A stopped container whose rules differ is recreated; a running one is refused with an error that says to stop it first, because attaching would keep a removed exception open in a session you believe is back on the default; `--resume` refuses a mismatch instead of restarting the old rules. Reordering lines or editing comments changes nothing, and a container created before this feature, or without rules, carries no label and counts as having none. Inside the container, `$POWBOX_EGRESS_ALLOW` lists the active exceptions (`proto,destination,port` entries separated by `;`), and the firewall's start banner names them.
+
+The firewall validates the rules again on its own, skipping with a warning any entry it rejects, and adds them only after the full default policy is in place, so a bad entry can leave a destination blocked but never remove a block. Exceptions need a base image built with this feature (`./build.sh all`); an older base ignores the variable, which fails closed: the destinations stay blocked.
+
+The trust model is accident-grade, like the scoped sudo grant it runs under. `init-firewall.sh` reads the rules only from the container's creation-time environment (PID 1's `/proc/1/environ`), never from its own arguments or environment, so an agent that re-runs `sudo init-firewall.sh` re-applies the launch-time policy rather than one it passes in. That stops a mistaken or casual widening, not a determined agent: `sudo apt-get` already lets an agent run code as root. The creation-time environment also stays trustworthy only while the `node` user cannot write PID 1's memory, which holds when the host kernel's Yama `ptrace_scope` is 1 or higher (a running container on a WSL2 kernel with 1 refuses `node` access to `/proc/1/mem`) and not when it is 0, a value that varies by distribution and host: check `/proc/sys/kernel/yama/ptrace_scope` on the host.
 
 ## Nested Containers (rootless Podman)
 
@@ -1083,8 +1110,9 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 19-suite set is `test-claude-hook-skew.sh`,
+  routed to the smoke test. The current 20-suite set is `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
+  `test-egress-allow-list.sh`,
   `test-image-store-writer-gate.sh`, `test-launcher-tail-reread.sh`,
   `test-layer-sets.sh`, `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,

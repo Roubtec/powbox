@@ -57,8 +57,10 @@ assert_eq() {
 	fi
 }
 
+# Match in-process: a `printf | grep -q` pipeline lets grep exit at the first
+# match while printf is still writing, which pipefail reports as a failure.
 assert_contains() {
-	if printf '%s' "$2" | grep -qF -- "$3"; then
+	if [[ "$2" == *"$3"* ]]; then
 		ok "$1"
 	else
 		ko "$1" "missing: $3" "in:      $2"
@@ -66,7 +68,7 @@ assert_contains() {
 }
 
 assert_not_contains() {
-	if printf '%s' "$2" | grep -qF -- "$3"; then
+	if [[ "$2" == *"$3"* ]]; then
 		ko "$1" "unexpected: $3" "in:         $2"
 	else
 		ok "$1"
@@ -172,16 +174,20 @@ grammar_sh() {
 }
 
 # The launcher's egress functions, from the blocked-range lists to the end of
-# Read-Powbox-EgressRules, plus the two helpers they call.
+# Read-Powbox-EgressRules, plus the two helpers they call. awk reads the file
+# itself and strips the CRs: fed through a pipe, its early exit would leave the
+# writer to die of SIGPIPE (or, with SIGPIPE ignored as on CI runners, fail with
+# EPIPE), and pipefail would end the suite.
 PS_EXTRACT="$WORK_ROOT/egress-functions.ps1"
-tr -d '\r' <"$LAUNCH_PS" | awk '
+awk '
+	{ gsub(/\r/, "") }
 	/^function (Get-Powbox-HashHexFromByteArray|Write-Powbox-Warning) / { helper = 1 }
 	helper { print; if ($0 == "}") helper = 0; next }
 	/^\$script:PowboxEgressBlockedV4 = / { on = 1 }
 	on { print }
 	on && /^function Read-Powbox-EgressRules / { last = 1 }
 	on && last && $0 == "}" { exit }
-' >"$PS_EXTRACT"
+' "$LAUNCH_PS" >"$PS_EXTRACT"
 
 grammar_ps() {
 	# shellcheck disable=SC2016 # PowerShell variables, expanded by pwsh
@@ -408,8 +414,8 @@ while IFS='|' read -r want proto dest port expect _note; do
 	fw_run "$(environ_file env-fixture "POWBOX_EGRESS_ALLOW=${proto},${dest},${port}")"
 	what="[fw] ${proto} ${dest} ${port}"
 	drops_intact=true
-	printf '%s\n' "$FW_V4" | grep -qxF -- '-d 100.64.0.0/10 -j DROP' || drops_intact=false
-	printf '%s\n' "$FW_V6" | grep -qxF -- '-d fe80::/10 -j DROP' || drops_intact=false
+	grep -qxF -- '-d 100.64.0.0/10 -j DROP' <<<"$FW_V4" || drops_intact=false
+	grep -qxF -- '-d fe80::/10 -j DROP' <<<"$FW_V6" || drops_intact=false
 	if [ "$want" = ok ]; then
 		IFS=',' read -r cproto cdest cport <<<"$expect"
 		assert_contains "$what is applied" "$FW_OUT" "allow ${cproto} ${cdest} port ${cport}"
@@ -548,7 +554,9 @@ print_ps() {
 	POWBOX_PRINT_EGRESS=1 pwsh -NoProfile -NonInteractive -File "$CHECKOUT/scripts/launch-agent.ps1" codex "$@" 2>&1 | norm
 }
 value_of() {
-	printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -n 1
+	# awk keeps reading after the first match rather than exiting like
+	# `head -n 1`, so the writers upstream cannot take SIGPIPE.
+	printf '%s\n' "$1" | tr ' ' '\n' | awk -v key="$2=" '!found && index($0, key) == 1 { print substr($0, length(key) + 1); found = 1 }'
 }
 
 # check_print <label> <want-rules> [<want-warning>...]: both launchers, in both
@@ -792,7 +800,7 @@ launch() {
 
 # log_has <command>: whether the fake docker was called as `docker <command> ...`.
 log_has() {
-	printf '%s\n' "$L_LOG" | grep -q "^$1 "
+	grep -q "^$1 " <<<"$L_LOG"
 }
 
 # The agent's own `compose ... run --name` call (not the volume-prep run).

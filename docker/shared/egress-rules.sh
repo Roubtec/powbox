@@ -86,9 +86,12 @@ _powbox_egress_v6() {
 # 4 or 6. Failure: returns 1 with POWBOX_EGRESS_ERROR saying why.
 powbox_egress_validate() {
 	local proto port dest addr prefix family max i start bits
-	proto="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-	dest="$(printf '%s' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-	port="$(printf '%s' "$3" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+	# The trailing "." keeps $(...) from stripping a trailing newline, which
+	# would let "tcp<newline>" pass as "tcp" where launch-agent.ps1 rejects it.
+	proto="$(printf '%s.' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+	dest="$(printf '%s.' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+	port="$(printf '%s.' "$3" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+	proto="${proto%.}" dest="${dest%.}" port="${port%.}"
 	POWBOX_EGRESS_RULE=""
 	POWBOX_EGRESS_FAMILY=""
 	POWBOX_EGRESS_ERROR=""

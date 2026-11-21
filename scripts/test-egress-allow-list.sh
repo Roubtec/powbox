@@ -230,6 +230,28 @@ else
 	skipped "pwsh unavailable - PowerShell grammar parity not run"
 fi
 
+echo "Test: a field ending in a line break is rejected, not trimmed"
+check_newline_field() {
+	local what got
+	what="$(printf '%q %q %q' "$1" "$2" "$3")"
+	got="$(
+		# shellcheck source=docker/shared/egress-rules.sh
+		. "$LIB"
+		powbox_egress_validate "$1" "$2" "$3" && echo accepted || echo rejected
+	)"
+	assert_eq "[sh] $what" "$got" rejected
+	if $HAVE_PWSH; then
+		# shellcheck disable=SC2016 # PowerShell variables, expanded by pwsh
+		got="$(PS_EXTRACT="$PS_EXTRACT" P="$1" D="$2" N="$3" pwsh -NoProfile -NonInteractive -Command '
+			. $env:PS_EXTRACT
+			if ((Test-Powbox-EgressRule -Proto $env:P -Destination $env:D -Port $env:N).Error -eq "") { "accepted" } else { "rejected" }' 2>&1 | tr -d '\r')"
+		assert_eq "[ps1] $what" "$got" rejected
+	fi
+}
+check_newline_field $'tcp\n' 10.0.0.1 22
+check_newline_field tcp $'10.0.0.1\n' 22
+check_newline_field tcp 10.0.0.1 $'22\n'
+
 echo "Test: the blocked ranges agree across the firewall, the library and launch-agent.ps1"
 fw_drops() {
 	awk -v fam="$1" '
@@ -530,26 +552,28 @@ value_of() {
 }
 
 # check_print <label> <want-rules> [<want-warning>...]: both launchers, in both
-# launch modes, print <want-rules> and its hash (empty for no rules).
+# launch modes, succeed and print <want-rules> and its hash (empty for no rules).
 check_print() {
-	local label="$1" want="$2" hash="" out mode
+	local label="$1" want="$2" hash="" out mode rc
 	shift 2
 	[ -z "$want" ] || hash="$(sha256_of "$want")"
 	for mode in dir isolated; do
 		if [ "$mode" = dir ]; then
-			out="$(print_sh "$WS")" || true
+			rc=0 && out="$(print_sh "$WS")" || rc=$?
 		else
-			out="$(print_sh --isolated --repo example/repo)" || true
+			rc=0 && out="$(print_sh --isolated --repo example/repo)" || rc=$?
 		fi
+		assert_eq "[sh/$mode] $label: exit status" "$rc" 0
 		assert_eq "[sh/$mode] $label: rules" "$(value_of "$(printf '%s' "$out" | tr '\n' ' ')" EGRESS_RULES)" "$want"
 		assert_eq "[sh/$mode] $label: hash" "$(value_of "$(printf '%s' "$out" | tr '\n' ' ')" EGRESS_HASH)" "$hash"
 		for w in "$@"; do assert_contains "[sh/$mode] $label: warns" "$out" "$w"; done
 		if $HAVE_PWSH; then
 			if [ "$mode" = dir ]; then
-				out="$(print_ps "$WS")" || true
+				rc=0 && out="$(print_ps "$WS")" || rc=$?
 			else
-				out="$(print_ps -Isolated -Repo example/repo)" || true
+				rc=0 && out="$(print_ps -Isolated -Repo example/repo)" || rc=$?
 			fi
+			assert_eq "[ps1/$mode] $label: exit status" "$rc" 0
 			assert_eq "[ps1/$mode] $label: rules" "$(value_of "$out" EGRESS_RULES)" "$want"
 			assert_eq "[ps1/$mode] $label: hash" "$(value_of "$out" EGRESS_HASH)" "$hash"
 			for w in "$@"; do assert_contains "[ps1/$mode] $label: warns" "$out" "$w"; done

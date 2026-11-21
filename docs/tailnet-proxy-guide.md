@@ -55,13 +55,13 @@ Tailnet IP addresses are used everywhere instead of MagicDNS names. `.powbox-egr
 
 Three separate limits stand between a container on host A and your home network. Only the first one runs inside the container.
 
-| Limit | Enforced by | Stops | Can root in the container undo it? |
+| Limit | Enforced by | Stops | Can anything in the container undo it? |
 |---|---|---|---|
 | In-container firewall with the `.powbox-egress` rule | `init-firewall.sh` in the container | A container reaching any other tailnet, LAN or CGNAT address by mistake | Yes |
-| Tailnet policy | Tailscale on host B, using the policy from your admin console | Host A reaching anything on the tailnet except the proxy port | No |
+| Tailnet policy | Tailscale on each receiving device (host B for the proxy), using the policy from your admin console | Host A reaching anything on the tailnet except the proxy port | No |
 | Proxy `Allow` and `Filter` | tinyproxy on host B | Any other tailnet peer using the proxy, and host A sending traffic anywhere other than your chosen destinations | No |
 
-The in-container firewall guards against accidents. A mistyped address or a casual probe stays blocked. It is not a boundary against a process that holds root in the container. Such a process can flush the rules, and today `sudo apt-get` gives an agent root (see the trust model in the README's [Egress exceptions](../README.md#egress-exceptions-powbox-egress) section). Narrowing that grant is tracked as separate hardening. Nothing in this guide relies on it.
+The in-container firewall guards against accidents. A mistyped address or a casual probe stays blocked. It is not a boundary against a process that holds root in the container. Such a process can flush the rules. How easily an agent can reach root in the container is a separate question (see the trust model in the README's [Egress exceptions](../README.md#egress-exceptions-powbox-egress) section), and nothing in this guide relies on the answer.
 
 The tailnet policy and the proxy filter are the hard limits. Neither depends on anything that happens on host A:
 
@@ -145,7 +145,7 @@ A new tailnet's policy allows every device to reach every other device. Before h
 }
 ```
 
-Remove the allow-all rule while merging. In a grants-based file it is `{"src": ["*"], "dst": ["*"], "ip": ["*"]}`. In a file that still uses the older `acls` section, it is an `accept` rule from `*` to `*:*`. Either one would let host A reach every device. Grants and `acls` can coexist in one file, so an existing `acls` section can stay as long as no rule in it matches `tag:powbox-host` or `*` as its source.
+Remove the allow-all rule while merging. In a grants-based file it is `{"src": ["*"], "dst": ["*"], "ip": ["*"]}`. In a file that still uses the older `acls` section, it is an `accept` rule from `*` to `*:*`. Either one would let host A reach every device. Grants and `acls` can coexist in one file, so an existing `acls` section can stay as long as no rule in it has a source that includes host A. That covers `tag:powbox-host` and `*`, and also `autogroup:tagged`, a CIDR such as `100.64.0.0/10`, and any `hosts` alias or group that resolves to host A.
 
 The member grant is a starting point that keeps today's behaviour for your own devices. Narrow it if you already have a stricter policy.
 
@@ -155,7 +155,7 @@ The member grant is a starting point that keeps today's behaviour for your own d
 
 **Where:** host A.
 
-Install Tailscale and join with the tag. You must be one of the tag's owners, which Stage 2 set up for admins:
+Install Tailscale and join with the tag. The account you sign in with must be allowed to apply it: Stage 2 made `autogroup:admin` the tag's owner, and the tailnet's Owner, Admins and Network admins can apply any tag anyway:
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
@@ -163,11 +163,11 @@ sudo tailscale up --advertise-tags=tag:powbox-host
 tailscale ip -4
 ```
 
-The last command prints host A's address, which is `100.a.b.c` below. If host A is already on the tailnet as a user-owned device, re-running `tailscale up` with the extra flag may ask for `--force-reauth`. The CLI prints a copyable command that keeps your other flags. Alternatively, apply the tag on the admin console's **Machines** page with **Edit tags**. Either way, the device's tailnet IP stays the same. Tagged devices have key expiry disabled by default.
+The last command prints host A's address, which is `100.a.b.c` below. If host A is already on the tailnet as a user-owned device, re-running `tailscale up` with the extra flag may ask for `--force-reauth`. The CLI prints a copyable command that keeps your other flags. Alternatively, apply the tag on the admin console's **Machines** page with **Edit tags**. Either way, the device's tailnet IP stays the same. Key expiry differs between the two routes. A device that authenticates with the tag has key expiry disabled by default. A device tagged through **Edit tags** keeps its current expiry until it re-authenticates, so on that route also choose **Disable key expiry** in host A's menu, as in Stage 1, or host A drops off the tailnet when its key expires.
 
 Do not pass `--exit-node` or `--accept-routes` on host A for this setup. Neither is needed, and both change what host A's traffic does outside the tailnet.
 
-**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw`, first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. Then start the listeners, one on the granted port and one on a port the policy denies. On host B:
+**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw`, first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. For this check, also allow TCP 9999 on `tailscale0` for a moment, so that only the tailnet policy can block it. Then start the listeners, one on the granted port and one on a port the policy denies. On host B:
 
 ```bash
 python3 -m http.server 8888 --bind 100.x.y.z &
@@ -181,7 +181,7 @@ curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://100.x.y.z:8888/   # prints
 curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://100.x.y.z:9999/   # fails
 ```
 
-The second request must fail, by timeout or refusal. From one of your own devices, the same request to port 9999 succeeds, which shows that the policy and not something else is blocking host A. Stop both listeners on host B afterwards (`kill %1 %2`) so port 8888 is free for the proxy.
+The second request must fail, by timeout or refusal. From one of your own devices, the same request to port 9999 succeeds, which shows that the policy and not something else is blocking host A. Stop both listeners on host B afterwards (`kill %1 %2`) so port 8888 is free for the proxy, and remove any temporary firewall rule for 9999.
 
 ## Stage 4: run tinyproxy on the home machine
 
@@ -195,7 +195,7 @@ sudo apt-get install tinyproxy
 
 The configuration below keeps tinyproxy's default regular-expression filter type, so it does not depend on the `FilterType` directive that newer releases add.
 
-Edit `/etc/tinyproxy/tinyproxy.conf`. Keep the packaged `User`, `Group`, `LogFile` and `PidFile` lines, delete the packaged `Allow 127.0.0.1` and `Allow ::1` lines, and make sure these lines are present:
+Edit `/etc/tinyproxy/tinyproxy.conf`. Keep the packaged `User`, `Group`, `LogFile` and `PidFile` lines, delete the packaged `Allow 127.0.0.1` and `Allow ::1` lines, and make sure these lines are present. `ConnectPort 443` must be the only uncommented `ConnectPort` line: some packaged configurations also enable `ConnectPort 563`, and with no `ConnectPort` line at all, tinyproxy tunnels to any port.
 
 ```text
 Port 8888
@@ -214,7 +214,7 @@ FilterDefaultDeny Yes
 ConnectPort 443
 ```
 
-Then create `/etc/tinyproxy/filter` with one rule per line. The rules are POSIX basic regular expressions, matched case-insensitively against the destination host name. That holds for HTTPS tunnels too, as long as `FilterURLs` stays off. Anchor each rule at both ends: an unanchored `meta.ai` would also match `meta.ai.example.net`. For Muse, the worked example, the model API host is enough:
+Then create `/etc/tinyproxy/filter` with one rule per line. The rules are POSIX basic regular expressions (BRE), tinyproxy's default filter type in every release this guide covers, matched case-insensitively against the destination host name. In BRE, `?`, `+`, `|` and unescaped parentheses are literal characters, so write one rule per host rather than alternations. That holds for HTTPS tunnels too, as long as `FilterURLs` stays off. Anchor each rule at both ends: an unanchored `meta.ai` would also match `meta.ai.example.net`. For Muse, the worked example, the model API host is enough:
 
 ```text
 # One anchored host per line. Everything not listed is refused.
@@ -255,7 +255,9 @@ curl -sS -o /dev/null -x http://100.x.y.z:8888 https://example.com/
 
 On host B, `/var/log/tinyproxy/tinyproxy.log` shows `Proxying refused on filtered domain "example.com"` for the second request. To check `Allow`, run the first request on host B itself: it also fails with a 403, and the log shows `Unauthorized connection from "100.x.y.z"`, because host B is not host A.
 
-To confirm that the traffic leaves from home, add an IP-echo service of your choice to the filter for a moment, request it through the proxy from host A, and compare the answer with your home connection's public address. Remove the rule afterwards.
+tinyproxy reads the filter file only when it starts or reloads, so after every later edit of `/etc/tinyproxy/filter` run `sudo systemctl restart tinyproxy` on host B. A restart works whatever reload signal the packaged unit uses.
+
+To confirm that the traffic leaves from home, add an IP-echo service of your choice to the filter for a moment, restart tinyproxy, request the service through the proxy from host A, and compare the answer with your home connection's public address. Remove the rule and restart tinyproxy again afterwards.
 
 ## Stage 5: open the port in powbox
 
@@ -267,6 +269,15 @@ Add one line for the proxy to `.powbox-egress`, beside `.powbox-layers`. The REA
 cp .powbox-egress.example .powbox-egress     # first time only
 echo 'tcp 100.x.y.z 8888' >> .powbox-egress
 ```
+
+With the PowerShell launcher, use the PowerShell forms instead. `echo … >>` in Windows PowerShell 5.1 writes UTF-16, which the launcher refuses with a `holds a NUL byte` error:
+
+```powershell
+Copy-Item .powbox-egress.example .powbox-egress     # first time only
+Add-Content .powbox-egress 'tcp 100.x.y.z 8888'
+```
+
+A text editor works too, as long as it saves the file as UTF-8.
 
 Use the IPv4 address. Powbox containers normally have no IPv6 route out, so the tailnet IPv6 address would not help.
 
@@ -326,7 +337,7 @@ Muse has its own persisted proxy setting, `endpoint_transport.proxy`, which take
 
 The setting's name and form were confirmed against Muse 1.4.24 itself, by read-only means, because Muse's public documentation does not describe it:
 
-- `muse config validate --plane defaults` accepts a settings document that sets `endpoint_transport.proxy` to an `http://` or `https://` URL. It rejects a misspelled member name, a `socks5://` URL and a value that is not a URL.
+- `muse config validate --plane defaults --file <file>` checks an enterprise defaults-plane document, `{"schema_version": 1, "settings": {…}}`, not the flat `settings.json`. It accepts one whose `settings` set `endpoint_transport.proxy` to an `http://` or `https://` URL, and reports that member as `user_overridable=true`, which is what ties it to the user's own setting. It rejects a misspelled member name, a `socks5://` URL and a value that is not a URL.
 - `muse exec -c 'endpoint_transport.proxy="…"'` accepts the key as a one-run override, while a misspelled key is refused with `unknown key: no such setting`. With the override pointing at a closed local port, the model request to `https://api.meta.ai/v1/responses` failed with a transport error, so the setting does route Muse's model traffic.
 
 Try it for one run first. The `-c` value is JSON, hence the inner quotes. Run it from a checkout or a scratch directory, not from under `~/.config/muse`:
@@ -337,11 +348,11 @@ muse exec -c 'endpoint_transport.proxy="http://100.x.y.z:8888"' \
   --prompt-file prompt.md --disable-write --no-foreign-personal-context
 ```
 
-A reply of `hello` means models are served through the proxy. Then persist the setting by adding a top-level `endpoint_transport` member to the settings file. With `jq`, from any container on host A:
+A reply of `hello` means models are served through the proxy. Then persist the setting by adding a top-level `endpoint_transport` member to the settings file. With `jq`, from any container on host A, while no Muse run is in progress:
 
 ```bash
 f=~/.config/muse/settings.json
-jq '.endpoint_transport.proxy = "http://100.x.y.z:8888"' "$f" > "$f.new" && mv "$f.new" "$f"
+jq '.endpoint_transport.proxy = "http://100.x.y.z:8888"' "$f" > "$f.new" && chmod 600 "$f.new" && mv "$f.new" "$f"
 ```
 
 If the file does not exist yet, create it with `{"schema_version": 1, "endpoint_transport": {"proxy": "http://100.x.y.z:8888"}}`. Muse refuses to start on a settings file without `schema_version`.
@@ -376,7 +387,7 @@ The caveats:
 
 ## Docker Desktop on Windows (WSL2)
 
-The guide needs no powbox change on Docker Desktop either: the same `.powbox-egress` line in the checkout works with the PowerShell launcher.
+The guide needs no powbox change on Docker Desktop either: the same `.powbox-egress` line in the checkout works with the PowerShell launcher. Add it with Stage 5's PowerShell form, so the file stays UTF-8.
 
 The network path is different, though. Docker Desktop relays container connections through its own processes, and they leave through the Windows host's network stack. So the Windows Tailscale client is what joins the tailnet, the device to tag is the Windows machine, and the proxy's `Allow` line takes that machine's tailnet address. Tagging a personal Windows machine removes its user identity in the tailnet, so weigh that before using one as host A.
 

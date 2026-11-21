@@ -22,6 +22,7 @@ docker/base/Dockerfile
 # docker/shared/* COPYd into the base image (/usr/local/bin and elsewhere).
 docker/shared/.bashrc
 docker/shared/.zshrc
+docker/shared/apt-get-wrapper.sh
 docker/shared/cid
 docker/shared/detect-shadows.sh
 docker/shared/entrypoint-core.sh

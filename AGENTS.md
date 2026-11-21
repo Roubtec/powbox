@@ -75,7 +75,7 @@ The gates live in `.github/workflows/native-linux-ci.yml` (Tier 0 static guards)
 ## Security
 
 - Firewall rules allow loopback and block private/local networks for both IPv4 and IPv6.
-- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh`, `/usr/local/bin/shadow-mounts.sh`, `/usr/local/bin/fix-workspace-perms.sh`, and `/usr/bin/apt-get` only (mode `0440`). `fix-workspace-perms.sh` is root-owned and immutable and refuses to act outside `/workspace/`, like `shadow-mounts.sh`.
+- `/etc/sudoers.d/node` must stay scoped to `/usr/local/bin/init-firewall.sh`, `/usr/local/bin/shadow-mounts.sh`, `/usr/local/bin/fix-workspace-perms.sh`, and the apt-get wrapper `/usr/local/libexec/powbox-sudo/apt-get` only (mode `0440`), plus a node-only `secure_path` that puts the wrapper's directory first so `sudo apt-get` resolves to it. Never grant `/usr/bin/apt-get` itself, and never put that directory on a `PATH`: root's `PATH` must keep reaching the real binary for build-time `RUN apt-get`. The wrapper (`docker/shared/apt-get-wrapper.sh`, pinned by `scripts/test-apt-get-wrapper.sh`) admits an allowlist of verbs, flags and package names and refuses everything else, such as `-o`/`-c` and local `.deb` files; keep it an allowlist. `fix-workspace-perms.sh` is root-owned and immutable and refuses to act outside `/workspace/`, like `shadow-mounts.sh`.
 - The base image includes `bubblewrap` for sandboxing.
 
 See README "Workspace Shadow Mounts → Security" for the `shadow-mounts.sh` / `CAP_SYS_ADMIN` rationale.

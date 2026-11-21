@@ -91,8 +91,7 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 # (see sensitive-host-path.sh and tasks/009); /run is a plain image directory
 # here (no tmpfs is mounted over it), so the build-time dir survives to runtime.
 #
-# Sudoers security rationale — the three allowed commands are intentionally
-# scoped:
+# Sudoers security rationale — every allowed command is intentionally scoped:
 #
 #   init-firewall.sh  — sets up iptables rules that restrict outbound traffic to
 #                       an allowlist; the script itself is root-owned and immutable
@@ -138,18 +137,30 @@ RUN pip3 install --no-cache-dir --break-system-packages yq
 #                       /proc/self/mountinfo source lookup the root helper trusts because node
 #                       cannot forge it) lives in sensitive-host-path.sh, sourced by both.
 #
-#   apt-get           — allows agents to install system packages at runtime for
-#                       anything not pre-installed in the base image. apt-get runs
-#                       package maintainer scripts as root, so this is a deliberate
-#                       trade-off: the goal is a productive sandbox, not a hardened
-#                       multi-tenant environment. Arbitrary root commands (iptables,
-#                       shell, etc.) are NOT in the sudoers list. The threat being
-#                       guarded against is firewall circumvention, not local
-#                       privilege escalation — these containers are single-user and
-#                       disposable, and container escape is unrelated to sudo scope.
+#   apt-get           — lets agents install system packages at runtime for anything
+#                       not pre-installed in the image. The grant is NOT /usr/bin/apt-get:
+#                       unrestricted apt-get as root is a root shell in one command (hook
+#                       options, a local .deb, a pager), and root holds NET_ADMIN, so it
+#                       would remove the firewall. The firewall is an accident guard, not a
+#                       barrier against a determined agent, but getting around it must take a
+#                       deliberate choice rather than one `sudo apt-get -o ...`. So the grant
+#                       is a root-owned, immutable wrapper (docker/shared/apt-get-wrapper.sh)
+#                       that admits an allowlist of verbs, flags and package names and refuses
+#                       everything else; packages from the configured repositories stay
+#                       installable, their maintainer scripts running as root by design. A
+#                       node-only secure_path puts the wrapper's private directory first, so
+#                       the documented `sudo apt-get ...` resolves to it, while root's own
+#                       PATH — every image build's `RUN apt-get`, including a layer set's
+#                       local .deb install — still reaches the real binary. Never put that
+#                       directory on a PATH. visudo checks the file so a syntax slip fails
+#                       the build instead of disabling sudo in every container.
 RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && echo "node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/local/bin/fix-workspace-perms.sh, /usr/bin/apt-get" > /etc/sudoers.d/node \
+    && printf '%s\n' \
+        'Defaults:node secure_path="/usr/local/libexec/powbox-sudo:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+        'node ALL=(ALL) NOPASSWD: /usr/local/bin/init-firewall.sh, /usr/local/bin/shadow-mounts.sh, /usr/local/bin/fix-workspace-perms.sh, /usr/local/libexec/powbox-sudo/apt-get' \
+        > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node \
+    && visudo -c -f /etc/sudoers.d/node \
     && usermod --shell /bin/zsh node \
     && mkdir -p \
         /home/node/.config/gh \
@@ -224,6 +235,10 @@ COPY --chmod=755 \
     docker/shared/heal-workspace-perms.sh \
     docker/shared/sensitive-host-path.sh \
     /usr/local/bin/
+
+# The sudo-only apt-get wrapper, in a directory nothing but the node-scoped
+# sudoers secure_path names (see the sudoers rationale above).
+COPY --chmod=755 docker/shared/apt-get-wrapper.sh /usr/local/libexec/powbox-sudo/apt-get
 
 # Route pnpm (and its `pn` short alias) through the shadow wrapper so a package
 # scaffolded mid-session gets its node_modules tmpfs-shadowed before pnpm can

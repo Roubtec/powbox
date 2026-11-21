@@ -190,11 +190,13 @@ for target in "$@"; do
 				# This NARROWS the mkdir→chown window rather than closing it: `chown -h`
 				# declines to dereference only the FINAL component, so a swap of an
 				# intermediate one between this check and the chown would still be
-				# followed. That residue is not a privilege boundary here — the node user
-				# already reaches root through the sudoers-allowed apt-get, and the
-				# mkdir and mount below traverse the very same attacker-mutable path —
-				# so the cheap check is worth having and the race is not worth the
-				# create-as-the-target-user machinery it would take to remove.
+				# followed, and the mkdir above and the mount below traverse the very
+				# same attacker-mutable path after the containment check. With apt-get
+				# no longer a route to root, these swaps are the known remaining one
+				# through this helper; winning one takes a deliberately written race,
+				# which the accident-guard model the firewall serves accepts for now.
+				# Closing them all needs fd-relative walking rather than another
+				# path check, tracked as task 081a.
 				if [ -L "$new_dir" ]; then
 					chown_failed=1
 					continue

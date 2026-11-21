@@ -162,7 +162,12 @@ for ws in "$@"; do
 	# that user — exactly what the root-level refusal avoids — so claim only uid-0 entries
 	# and leave any foreign-owned ones to their owner. (find still descends through a
 	# foreign-owned dir, so root-owned files nested inside it are still claimed.)
-	if ! find "$ws" -xdev "${prune[@]}" -uid 0 -print0 2>/dev/null | xargs -0 --no-run-if-empty chown -h "$NODE_OWNER" 2>/dev/null; then
+	# -execdir, not a path list piped to chown: node can rename a directory it owns
+	# and plant a symlink in its place between find listing a root-owned file inside
+	# it and chown acting on that path, which would hand node any file outside the
+	# tree (/etc/passwd included). -execdir runs chown on ./<name> from a directory
+	# find already holds open, so a swapped parent cannot redirect it.
+	if ! find "$ws" -xdev "${prune[@]}" -uid 0 -execdir chown -h "$NODE_OWNER" {} + 2>/dev/null; then
 		echo "fix-workspace-perms: warning: could not fully chown $ws; some files may remain unwritable by node." >&2
 		status=1
 	fi

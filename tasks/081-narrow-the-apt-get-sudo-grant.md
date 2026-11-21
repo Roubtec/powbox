@@ -6,7 +6,7 @@
 
 The `node` user may run `/usr/bin/apt-get` through sudo with any arguments. apt runs configurable hook commands (`-o APT::Update::Pre-Invoke::=…` and similar), installs local `.deb` files whose maintainer scripts run as root, and opens a pager for some verbs. Any of these gives a root shell in one command. Because the container holds `NET_ADMIN` (and `SYS_ADMIN`), root can then flush the firewall or remount things.
 
-The firewall is not meant to stop a determined adversary. It is a guard against accidents. An agent that mistypes an IP should be blocked, and should have to make a deliberate choice before it can get around the block. One `sudo apt-get -o …` call is too cheap a way around for that purpose. The repo already acknowledges this gap: the shadow-mounts ownership bullet in `docs/entrypoint-and-runtime.md` and the matching comment in `docker/shared/shadow-mounts.sh` treat it as a known route to root.
+The firewall is not meant to stop a determined adversary. It is a guard against accidents. An agent that mistypes an IP should be blocked, and should have to make a deliberate choice before it can get around the block. One `sudo apt-get -o …` call is too cheap a way around for that purpose. The repo already acknowledges this gap: the shadow-mounts ownership bullet in `docs/entrypoint-and-runtime.md` and the matching comment in `docker/shared/shadow-mounts.sh` treat it as a known route to root, and the `apt-get` entry in the sudoers comment in `docker/base/Dockerfile` calls it a deliberate trade-off.
 
 ## Goal
 
@@ -19,7 +19,7 @@ In scope:
 - A root-owned wrapper reached by the documented `sudo apt-get …` spelling. It accepts a narrow allowlist of verbs, flags and package-name arguments, and rejects everything else with a clear message.
 - Pointing the sudoers entry at the wrapper instead of `/usr/bin/apt-get`.
 - A hermetic test for the argument policy, and a smoke assertion on the built image (the `sudo -l` contents, a working `sudo apt-get update`, a refused `-o …`) so Tier 1 covers the wiring too. `docs/smoke-tests.md` says where such a check belongs.
-- Updating the docs and comments that currently cite apt-get as a route to root, and the `AGENTS.md` Security bullet that lists the sudoers contents.
+- Updating the docs and comments that currently cite apt-get as a route to root or as a deliberate trade-off, and the `AGENTS.md` Security bullet that lists the sudoers contents.
 - A quick review of every other sudo-allowed helper for argument- or environment-driven escalation. Fix anything that is cheap to fix; record anything that is not as a follow-up task.
 
 Out of scope:
@@ -29,7 +29,7 @@ Out of scope:
 
 ## Context and references
 
-- `docker/base/Dockerfile`: the sudoers line and the "root-owned and immutable" helper pattern used by `fix-workspace-perms.sh` and `shadow-mounts.sh`.
+- `docker/base/Dockerfile`: the sudoers line, the comment above it (whose `apt-get` entry frames the grant as a deliberate trade-off and needs rewording too), and the "root-owned and immutable" helper pattern used by `fix-workspace-perms.sh` and `shadow-mounts.sh`.
 - `sudo -l` inside a container: `env_reset` is on, and `secure_path` starts with `/usr/local/sbin`.
 - `docker/shared/container-agent.md.tmpl`, "Installing additional packages", and the .NET entry in `docker/layers/full/agent-notes.md`, for the invocations that must keep working.
 - `docs/entrypoint-and-runtime.md` (shadow-mounts ownership bullet) and the comment in `docker/shared/shadow-mounts.sh` that reasons from "node already reaches root through apt-get".

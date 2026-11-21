@@ -26,13 +26,13 @@ In scope:
   - It allows only the tailnet peer.
   - It filters destinations by default-deny, so the home connection is not a general-purpose egress.
   - How to run it as a service.
-- **The `.powbox-egress` line** for the proxy's tailnet IP and port. Use tailnet IPs rather than MagicDNS names: names may not resolve inside a container, and node IPs are stable.
+- **The `.powbox-egress` line** for the proxy's tailnet IP and port. Use tailnet IPs rather than MagicDNS names: 079 accepts no hostnames, and node IPs are stable.
 - **Verification from inside a container:**
   - The proxy port answers.
   - Another port on the same host is still blocked.
   - The proxy refuses a destination outside its filter.
 - **Pointing a tool at the proxy:** generic `HTTPS_PROXY` for a single command, and, for Muse, its own persisted proxy setting on the shared `muse-config` volume. The implementer must confirm the setting's real name and form from Muse's docs or from `muse` itself, and say how it was confirmed. Do not invent it.
-- **A native-Linux routing note:** container traffic is forwarded and masqueraded into `tailscale0`, not host-originated, so "works from the host, fails from the container" is the likely failure. Say what to check (forwarding and NAT for the Docker bridge toward the tailnet interface) instead of leaving the reader to infer it.
+- **A native-Linux routing note:** container traffic is forwarded and masqueraded into `tailscale0`, not host-originated. Docker's default masquerading usually covers this, but if the proxy answers from the host and not from a container, say what to check (forwarding and NAT for the Docker bridge toward the tailnet interface) instead of leaving the reader to infer it.
 - **A short section on host VPNs.** A full-tunnel VPN on the host needs no powbox change, because container traffic is NAT'd by the host and follows its routes. The caveats: VPN-side resources in private or CGNAT ranges still need a 079 rule; per-app split tunnelling may not count Docker's forwarded traffic as the chosen app; and a host kill switch can drop that forwarded traffic.
 - **A short Docker Desktop (Windows/WSL2) note:** container egress leaves through the Windows host's network stack. The reader should check that the Windows Tailscale client's routes apply, rather than assume it.
 

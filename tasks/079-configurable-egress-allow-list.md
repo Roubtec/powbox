@@ -10,7 +10,7 @@ Powbox should own only the allow-list. Joining a tailnet or a VPN, and running t
 
 ## Goal
 
-A user can write `.powbox-egress` in their powbox checkout. Every container the launcher creates afterwards then allows exactly those destinations and ports, on top of the unchanged default policy. A machine without the file behaves exactly as today.
+A user can write `.powbox-egress` in their powbox checkout. Every agent container the launcher creates afterwards then allows exactly those destinations and ports, on top of the unchanged default policy. A machine without the file behaves exactly as today.
 
 ## Scope
 
@@ -30,6 +30,7 @@ Out of scope:
 - A per-launch proxy variable for Muse (deferred as 079b).
 - Host-side enforcement such as tailnet policy. Task 080 documents it for the tailnet case.
 - Hardening the sudo allowlist (task 081).
+- The launcher's short-lived image-store writer container. It only pulls images from public registries, so it keeps the default policy.
 
 ## The agreed contract
 
@@ -46,7 +47,7 @@ Out of scope:
 - **Transport:** the launcher passes the normalized rules as a container environment variable, and records their hash in a `powbox.egress-hash` label.
   - A stopped container whose label differs is recreated. A running one is refused with an error that says to stop it first, as the `powbox.ctx-hash` check does in both launchers. Attaching with a warning, as `powbox.continue` does, is not acceptable here: it would keep a removed exception open in a session the user believes is back on the default policy.
   - With no file, or a file with no rules, no label value and no variable are set. A container that carries no label, including one created before this feature, therefore counts as "no rules" and is not recreated needlessly. A container that carries a label while the file is now absent or empty differs, and is recreated.
-- **Reading inside the container:** `init-firewall.sh` reads the rules as root from the container's creation-time environment (`/proc/1/environ`; PID 1 is `docker-init`, because compose sets `init: true`).
+- **Reading inside the container:** `init-firewall.sh`, which runs as root, reads the rules from the container's creation-time environment (`/proc/1/environ`; PID 1 is `docker-init`, because compose sets `init: true`).
   - It never reads them from its own argv or environment, so an agent re-running `sudo init-firewall.sh` re-applies the launch-time policy rather than one it passes in. sudo's `env_reset` already strips the caller's environment; keep it that way rather than adding `env_keep`.
   - This is accident-grade protection, in line with task 081: it stops a mistaken or casual widening, not a determined agent. Word the trust model that way wherever it is documented.
   - The variable stays visible in the agent's own environment, and that is intended: it is how an agent sees which exceptions exist.
@@ -76,7 +77,7 @@ Out of scope:
 - **Hash scope:** hash only the normalized rules, so a comment edit does not recreate containers.
 - **Compare on every reuse.** The ctx-hash comparison runs only when a context mount is desired, so a literal copy would skip the case where `.powbox-egress` was deleted and leave a removed exception live. The egress comparison must run whenever an existing container is about to be reused.
 - **The blocked ranges live in two places.** The launchers' "outside every blocked range" and "over-broad" warnings need the same range list `init-firewall.sh` blocks. Let the shared fixtures pin the launchers' copy against the firewall's, so the warnings cannot drift from the policy.
-- **Root cannot read PID 1's environ as-is.** PID 1 runs as `node`, and the kernel gates another user's `/proc/<pid>/environ` behind `CAP_SYS_PTRACE`, which the container does not hold. A plain root read is therefore denied, and the exceptions would silently never load. Do the read under PID 1's own uid (root holds `CAP_SETUID`) rather than adding `CAP_SYS_PTRACE` to the compose file, which would widen what root in the container can do. Keep this case under the never-fail-open rule: an unreadable environ means no exceptions, never a half-applied policy.
+- **Root cannot read PID 1's environ as-is.** PID 1 runs as `node`, and the kernel gates another user's `/proc/<pid>/environ` behind `CAP_SYS_PTRACE`, which the container does not hold. A plain root read is therefore denied, and the exceptions would silently never load. Do the read under PID 1's own uid and gid (root holds `CAP_SETUID` and `CAP_SETGID`; the kernel checks both, so dropping the uid alone is still denied) rather than adding `CAP_SYS_PTRACE` to the compose file, which would widen what root in the container can do. Keep this case under the never-fail-open rule: an unreadable environ means no exceptions, never a half-applied policy. Warn when the read fails, as for a skipped entry, so a broken read is not mistaken for an empty file; the hermetic suite cannot reach this path, so only the maintainer's host check proves it.
 - **Verify the environ trust claim.** Because PID 1 runs as `node`, `/proc/1/environ` stays trustworthy only while `node` cannot write PID 1's memory. That rests on the host's ptrace policy (yama `ptrace_scope` varies by host) with seccomp unconfined in `compose.shared.yml`. Check it on a real container, and keep the documented trust model no stronger than what holds.
 - **Nested Podman containers** route through this container's network namespace and already inherit the firewall. They inherit the exceptions too, with no extra work. Mention this where the docs describe what nested containers inherit.
 - **Agent instructions:** say that the user may configure exceptions, and that the variable lists them. Keep it short and free of values that could drift.

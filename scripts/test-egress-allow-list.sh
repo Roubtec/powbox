@@ -323,7 +323,7 @@ fw_run() {
 		# shellcheck disable=SC2329 # Replaces the setpriv reader fw_main calls.
 		fw_pid1_environ() { cat "$POWBOX_FW_ENVIRON"; }
 		# shellcheck disable=SC2034 # Read by the sourced init-firewall.sh.
-		[ -z "${FW_LIB_OVERRIDE:-}" ] || POWBOX_FW_LIB="$FW_LIB_OVERRIDE"
+		POWBOX_FW_LIB="${FW_LIB_OVERRIDE:-$LIB}"
 		fw_main "$@"
 	) >"$WORK_ROOT/fw.out" 2>"$WORK_ROOT/fw.err"
 	FW_RC=$?
@@ -345,6 +345,13 @@ environ_file() {
 	done
 	printf '%s' "$file"
 }
+
+echo "Test: the firewall sources the image's rule library, never one beside its invocation path"
+assert_eq "the library path is absolute and fixed" \
+	"$(bash -c '. "$1"; printf "%s" "$POWBOX_FW_LIB"' _ "$FW")" /usr/local/bin/egress-rules.sh
+base_copy="$(awk '/^COPY / { block = "" } { block = block $0 "\n" } /^ *\/usr\/local\/bin\/$/ { print block }' "${ROOT_DIR}/docker/base/Dockerfile")"
+assert_contains "the base image copies init-firewall.sh into /usr/local/bin" "$base_copy" "docker/shared/init-firewall.sh"
+assert_contains "the base image copies egress-rules.sh into /usr/local/bin" "$base_copy" "docker/shared/egress-rules.sh"
 
 echo "Test: with no exceptions the firewall applies exactly today's rules"
 env_none="$(environ_file env-none)"
@@ -397,10 +404,11 @@ while IFS='|' read -r want proto dest port expect _note; do
 done <"$FIXTURES"
 
 echo "Test: an invalid entry never removes a default DROP"
-fw_run "$(environ_file env-mixed "POWBOX_EGRESS_ALLOW=;tcp,0.0.0.0/0,any;garbage;tcp,10.0.0.5/32,22;udp,::/0,53;tcp,10.0.0.5/32,22,extra;tcp,10.0.0.5/32;;tcp,10.0.0.5/32,22")"
+fw_run "$(environ_file env-mixed "POWBOX_EGRESS_ALLOW=;tcp,0.0.0.0/0,any;garbage;tcp,10.0.0.5/32,22;udp,::/0,53;tcp,10.0.0.5/32,22,extra;tcp,10.0.0.5/32;;tcp,10.0.0.6/32,22,;tcp,,22;tcp,10.0.0.7/32,;tcp,10.0.0.5/32,22")"
 assert_eq "IPv4 chain keeps every DROP, with only the valid rule added once" "$FW_V4" "$(with_head "-p tcp -d 10.0.0.5/32 --dport 22 -j ACCEPT" "$DEFAULT_V4")"
 assert_eq "IPv6 chain unchanged" "$FW_V6" "$DEFAULT_V6"
-assert_eq "one skip warning per invalid entry" "$(printf '%s\n' "$FW_ERR" | grep -c 'skipping egress exception')" 5
+assert_eq "one skip warning per invalid entry" "$(printf '%s\n' "$FW_ERR" | grep -c 'skipping egress exception')" 8
+assert_contains "a trailing comma is skipped, not read as three fields" "$FW_ERR" "skipping egress exception 'tcp,10.0.0.6/32,22,': expected proto,destination,port"
 fw_run "$(environ_file env-all-fixtures "POWBOX_EGRESS_ALLOW=${fixture_allow}")"
 for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10; do
 	assert_eq "every valid fixture at once still ends with the DROP for $range" \
@@ -430,6 +438,11 @@ assert_eq "aborting library: exit status" "$FW_RC" 0
 assert_eq "aborting library: IPv4 chain is the default" "$FW_V4" "$DEFAULT_V4"
 assert_eq "aborting library: IPv6 chain is the default" "$FW_V6" "$DEFAULT_V6"
 assert_contains "aborting library: warns" "$FW_ERR" "could not load the egress exceptions; applying none"
+
+echo "Test: a launch-time environment larger than a pipe buffer still yields its exceptions"
+fw_run "$(environ_file env-large "POWBOX_EGRESS_ALLOW=tcp,10.0.0.5/32,22" "PAD=$(head -c 300000 /dev/zero | tr '\0' x)")"
+assert_eq "large environ: IPv4 chain has the exception" "$FW_V4" "$(with_head "-p tcp -d 10.0.0.5/32 --dport 22 -j ACCEPT" "$DEFAULT_V4")"
+assert_eq "large environ: no warnings" "$FW_ERR" ""
 
 echo "Test: a failing iptables insert leaves the destination blocked, not the chain open"
 SIM_FAIL_INSERT=1 fw_run "$(environ_file env-fail "POWBOX_EGRESS_ALLOW=tcp,10.0.0.5/32,22;tcp,fd00::1/128,22")"
@@ -607,6 +620,14 @@ printf 'tcp 10.1.2.3/8 22\n' >"$EGRESS_FILE"
 check_error "host bits" 1 "has host bits set beyond /8"
 printf 'tcp 10.0.0.1 22-25\n' >"$EGRESS_FILE"
 check_error "port range" 1 "port '22-25' is not"
+printf 'tcp 10.0.0.1 22\ntc\0p 10.0.0.2 22\n' >"$EGRESS_FILE"
+check_error "a NUL byte inside a field" 2 "holds a NUL byte"
+printf '# a comment\0\ntcp 10.0.0.1 22\n' >"$EGRESS_FILE"
+check_error "a NUL byte in a comment" 1 "holds a NUL byte"
+printf 'tcp 10.0.0.1 22\n\0' >"$EGRESS_FILE"
+check_error "a last line of only a NUL byte" 2 "holds a NUL byte"
+printf 'tcp 10.0.0.1\ntcp 10.0.0.2 22\n\0\n' >"$EGRESS_FILE"
+check_error "an earlier malformed line is reported before a NUL byte" 1 "expected '<proto> <destination> <port>'"
 rm -f "$EGRESS_FILE"
 mkdir "$EGRESS_FILE"
 check_error_dir() {

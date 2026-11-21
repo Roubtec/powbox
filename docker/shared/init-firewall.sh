@@ -20,7 +20,10 @@ set -euo pipefail
 
 POWBOX_FW_ENVIRON=/proc/1/environ
 POWBOX_FW_STATUS=/proc/1/status
-POWBOX_FW_LIB="$(dirname "${BASH_SOURCE[0]}")/egress-rules.sh"
+# An absolute path, not one relative to how this script was invoked: root
+# sources it, so it must be the image's copy and never one beside a path the
+# caller chose.
+POWBOX_FW_LIB=/usr/local/bin/egress-rules.sh
 
 fw_warn() {
 	echo "init-firewall: $*" >&2
@@ -73,13 +76,16 @@ fw_pid1_environ() {
 }
 
 # Print the first POWBOX_EGRESS_ALLOW value in a NUL-separated environment on
-# stdin, the one getenv would return.
+# stdin, the one getenv would return. The rest of stdin is still drained: a
+# writer left blocked on a full pipe would die of SIGPIPE, and pipefail would
+# then discard a value that was read correctly.
 fw_extract_allow() {
 	local entry
 	while IFS= read -r -d '' entry || [ -n "$entry" ]; do
 		case "$entry" in
 		POWBOX_EGRESS_ALLOW=*)
 			printf '%s' "${entry#POWBOX_EGRESS_ALLOW=}"
+			cat >/dev/null
 			return 0
 			;;
 		esac
@@ -91,7 +97,7 @@ fw_extract_allow() {
 # line. fw_main runs this in a subshell, so even an unexpected abort in here
 # only means no exceptions; it can never keep the default policy from loading.
 fw_load_exceptions() {
-	local raw entry proto dest port extra
+	local raw entry proto dest port
 	local -a entries=() seen=()
 	# pipefail (set above) makes a failed read fail the substitution.
 	if ! raw="$(fw_pid1_environ | fw_extract_allow)"; then
@@ -113,11 +119,13 @@ fw_load_exceptions() {
 	IFS=';' read -r -a entries <<<"$raw"
 	for entry in "${entries[@]}"; do
 		[ -n "$entry" ] || continue
-		IFS=',' read -r proto dest port extra <<<"$entry"
-		if [ -n "${extra:-}" ] || [ -z "${port:-}" ]; then
+		# Count the commas rather than reading a fourth field, which read leaves
+		# empty for a trailing comma. An empty field fails validation below.
+		if [[ "$entry" != *,*,* ]] || [[ "$entry" == *,*,*,* ]]; then
 			fw_warn "skipping egress exception '${entry}': expected proto,destination,port"
 			continue
 		fi
+		IFS=',' read -r proto dest port <<<"$entry"
 		if ! powbox_egress_validate "$proto" "$dest" "$port"; then
 			fw_warn "skipping egress exception '${entry}': ${POWBOX_EGRESS_ERROR}"
 			continue

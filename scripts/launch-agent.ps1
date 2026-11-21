@@ -763,6 +763,11 @@ function Read-Powbox-EgressRules ([string]$File) {
   $lineNo = 0
   foreach ($raw in $text.Split("`n")) {
     $lineNo++
+    # Anywhere on the line, comment included, as launch-agent.sh rejects it.
+    if ($raw.IndexOf([char]0) -ge 0) {
+      Write-Error "$File line ${lineNo}: holds a NUL byte."
+      exit 1
+    }
     $line = $raw
     $hash = $line.IndexOf('#', [StringComparison]::Ordinal)
     if ($hash -ge 0) { $line = $line.Substring(0, $hash) }

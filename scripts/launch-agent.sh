@@ -971,7 +971,7 @@ powbox_warn_if_local_config_not_ignored() {
 # launch-agent.ps1's Read-Powbox-EgressRules is the twin;
 # scripts/test-egress-allow-list.sh holds them to the same fixtures.
 powbox_egress_load() {
-	local file="$1" lib="$2" line lineno=0 first=true proto dest port extra rule
+	local file="$1" lib="$2" line lineno=0 first=true proto dest port extra rule nul_line
 	local -a rules=()
 	EGRESS_RULES=""
 	EGRESS_HASH=""
@@ -982,8 +982,16 @@ powbox_egress_load() {
 	fi
 	# shellcheck source=docker/shared/egress-rules.sh
 	. "$lib"
+	# read drops NUL bytes silently, which could turn `tc<NUL>p` into a valid
+	# `tcp`; find the first line holding one (od and awk see every byte) and
+	# reject it in line order, as launch-agent.ps1 does.
+	nul_line="$(od -An -v -tu1 <"$file" | awk '{ for (i = 1; i <= NF; i++) { if ($i == 0) { print n + 1; exit } if ($i == 10) n++ } }')"
 	while IFS= read -r line || [ -n "$line" ]; do
 		lineno=$((lineno + 1))
+		if [ "$lineno" = "$nul_line" ]; then
+			echo "Error: ${file} line ${lineno}: holds a NUL byte." >&2
+			exit 1
+		fi
 		if $first; then
 			line="${line#$'\xef\xbb\xbf'}"
 			first=false
@@ -1013,6 +1021,11 @@ powbox_egress_load() {
 		esac
 		rules+=("$rule")
 	done <"$file"
+	# A last line of only NUL bytes and no newline reads as nothing at all.
+	if [ -n "$nul_line" ]; then
+		echo "Error: ${file} line ${nul_line}: holds a NUL byte." >&2
+		exit 1
+	fi
 	[ "${#rules[@]}" -gt 0 ] || return 0
 	EGRESS_RULES="$(printf '%s\n' "${rules[@]}" | LC_ALL=C sort -u | paste -sd ';' -)"
 	EGRESS_HASH="$(printf '%s' "$EGRESS_RULES" | powbox_sha256_stdin)"

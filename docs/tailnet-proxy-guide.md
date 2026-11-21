@@ -167,11 +167,12 @@ The last command prints host A's address, which is `100.a.b.c` below. If host A 
 
 Do not pass `--exit-node` or `--accept-routes` on host A for this setup. Neither is needed, and both change what host A's traffic does outside the tailnet.
 
-**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw`, first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. For this check, also allow TCP 9999 on `tailscale0` for a moment, so that only the tailnet policy can block it. Then start the listeners, one on the granted port and one on a port the policy denies. On host B:
+**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw`, first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. For this check, also allow TCP 9999 on `tailscale0` for a moment, so that only the tailnet policy can block it. Then start the listeners, one on the granted port and one on a port the policy denies. Both serve an empty temporary directory: `http.server` otherwise serves the directory it starts in, hidden files such as `.ssh/` included, to host A and to every device the member grant lets in. On host B, in one shell:
 
 ```bash
-python3 -m http.server 8888 --bind 100.x.y.z &
-python3 -m http.server 9999 --bind 100.x.y.z &
+d="$(mktemp -d)"                                                  # empty, so no host files are served
+python3 -m http.server 8888 --bind 100.x.y.z --directory "$d" &
+python3 -m http.server 9999 --bind 100.x.y.z --directory "$d" &
 ```
 
 On host A:
@@ -181,7 +182,7 @@ curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://100.x.y.z:8888/   # prints
 curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://100.x.y.z:9999/   # fails
 ```
 
-The second request must fail, by timeout or refusal. From one of your own devices, the same request to port 9999 succeeds, which shows that the policy and not something else is blocking host A. Stop both listeners on host B afterwards (`kill %1 %2`) so port 8888 is free for the proxy, and remove any temporary firewall rule for 9999.
+The second request must fail, by timeout or refusal. From one of your own devices, the same request to port 9999 succeeds, which shows that the policy and not something else is blocking host A. Afterwards, in the same shell on host B, stop both listeners (`kill %1 %2`) so port 8888 is free for the proxy, remove the temporary directory (`rmdir "$d"`), and remove any temporary firewall rule for 9999.
 
 ## Stage 4: run tinyproxy on the home machine
 

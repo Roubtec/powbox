@@ -975,6 +975,12 @@ powbox_egress_load() {
 	local -a rules=()
 	EGRESS_RULES=""
 	EGRESS_HASH=""
+	# A symbolic link to a missing file is an error, not "no file": the link
+	# says a policy was meant to be there.
+	if [ -L "$file" ] && [ ! -e "$file" ]; then
+		echo "Error: ${file} is a symbolic link to a missing file." >&2
+		exit 1
+	fi
 	[ -e "$file" ] || return 0
 	if [ ! -f "$file" ]; then
 		echo "Error: ${file} is not a regular file." >&2

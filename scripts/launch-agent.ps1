@@ -750,7 +750,22 @@ function Get-Powbox-EgressNote ([object]$Parsed) {
 # passing in Windows PowerShell 5.1); Hash: its SHA-256. Both are "" with no rules.
 function Read-Powbox-EgressRules ([string]$File) {
   $none = [pscustomobject]@{ Rules = ""; Hash = "" }
-  if (-not (Test-Path -LiteralPath $File)) { return $none }
+  # A symbolic link to a missing file is an error, as in launch-agent.sh, not
+  # "no file": Windows PowerShell 5.1's Test-Path reports it absent, pwsh 7's
+  # present, so look at the link itself.
+  $isLink = $false
+  try { $isLink = ([System.IO.File]::GetAttributes($File) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 } catch { $isLink = $false }
+  if (-not $isLink -and -not (Test-Path -LiteralPath $File)) { return $none }
+  if ($isLink) {
+    $missing = $false
+    try { [System.IO.File]::OpenRead($File).Dispose() }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $missing = $true }
+    catch { $missing = $false }
+    if ($missing) {
+      Write-Error "$File is a symbolic link to a missing file."
+      exit 1
+    }
+  }
   if (-not (Test-Path -LiteralPath $File -PathType Leaf)) {
     Write-Error "$File is not a regular file."
     exit 1

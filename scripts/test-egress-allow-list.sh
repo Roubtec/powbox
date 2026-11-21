@@ -656,6 +656,30 @@ check_error_dir() {
 }
 check_error_dir
 rmdir "$EGRESS_FILE"
+ln -s "$WORK_ROOT/no-such-egress-file" "$EGRESS_FILE"
+check_error_dangling() {
+	local out rc
+	set +e
+	out="$(print_sh "$WS")"
+	rc=$?
+	set -e
+	assert_eq "[sh] a dangling symlink: exit status" "$rc" 1
+	assert_contains "[sh] a dangling symlink: error" "$out" "${EGRESS_FILE} is a symbolic link to a missing file"
+	if $HAVE_PWSH; then
+		set +e
+		out="$(POWBOX_PRINT_EGRESS=1 pwsh -NoProfile -NonInteractive -File "$CHECKOUT/scripts/launch-agent.ps1" codex "$WS" 2>&1 | norm)"
+		rc=${PIPESTATUS[0]}
+		set -e
+		assert_eq "[ps1] a dangling symlink: exit status" "$rc" 1
+		assert_contains "[ps1] a dangling symlink: error" "$out" "${EGRESS_FILE} is a symbolic link to a missing file"
+	fi
+}
+check_error_dangling
+rm -f "$EGRESS_FILE"
+printf 'tcp 10.0.0.1 22\n' >"$WORK_ROOT/real-egress-file"
+ln -s "$WORK_ROOT/real-egress-file" "$EGRESS_FILE"
+check_print "a symlink to a real file" "tcp,10.0.0.1/32,22"
+rm -f "$EGRESS_FILE" "$WORK_ROOT/real-egress-file"
 
 # ---------------------------------------------------------------------------
 # The launchers' create and reuse paths, end to end against a fake docker.

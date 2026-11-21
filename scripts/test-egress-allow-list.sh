@@ -700,12 +700,35 @@ check_error_dangling() {
 }
 check_error_dangling
 rm -f "$EGRESS_FILE"
+# A link to itself never resolves: both launchers refuse it (in their own words).
+ln -s "$EGRESS_FILE" "$EGRESS_FILE"
+check_error_loop() {
+	local out rc
+	set +e
+	out="$(print_sh "$WS")"
+	rc=$?
+	set -e
+	assert_eq "[sh] a symlink loop: exit status" "$rc" 1
+	assert_contains "[sh] a symlink loop: names the file" "$out" "${EGRESS_FILE} "
+	assert_not_contains "[sh] a symlink loop: prints no rules" "$out" "EGRESS_RULES="
+	if $HAVE_PWSH; then
+		set +e
+		out="$(POWBOX_PRINT_EGRESS=1 pwsh -NoProfile -NonInteractive -File "$CHECKOUT/scripts/launch-agent.ps1" codex "$WS" 2>&1 | norm)"
+		rc=${PIPESTATUS[0]}
+		set -e
+		assert_eq "[ps1] a symlink loop: exit status" "$rc" 1
+		assert_contains "[ps1] a symlink loop: error" "$out" "${EGRESS_FILE} cannot be read: "
+		assert_not_contains "[ps1] a symlink loop: prints no rules" "$out" "EGRESS_RULES="
+	fi
+}
+check_error_loop
+rm -f "$EGRESS_FILE"
 printf 'tcp 10.0.0.1 22\n' >"$WORK_ROOT/real-egress-file"
 ln -s "$WORK_ROOT/real-egress-file" "$EGRESS_FILE"
 check_print "a symlink to a real file" "tcp,10.0.0.1/32,22"
 rm -f "$EGRESS_FILE" "$WORK_ROOT/real-egress-file"
-# Not .powbox-egress on a case-sensitive file system, though the PowerShell
-# launcher's -Filter lookup matches it.
+# Not .powbox-egress on a case-sensitive file system: both launchers look the
+# name up as the file system matches names.
 printf 'tcp 10.0.0.1 22\n' >"$CHECKOUT/.POWBOX-EGRESS"
 check_print "a differently cased name" ""
 rm -f "$CHECKOUT/.POWBOX-EGRESS"

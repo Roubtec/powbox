@@ -750,36 +750,39 @@ function Get-Powbox-EgressNote ([object]$Parsed) {
 # passing in Windows PowerShell 5.1); Hash: its SHA-256. Both are "" with no rules.
 function Read-Powbox-EgressRules ([string]$File) {
   $none = [pscustomobject]@{ Rules = ""; Hash = "" }
-  # A symbolic link to a missing file is an error, as in launch-agent.sh, not
-  # "no file". Path lookups disagree on it (Windows PowerShell 5.1's Test-Path
-  # reports it absent, pwsh 7's present), so find the directory entry itself:
-  # an enumerated entry carries the link's own attributes on both, never its
-  # target's. -Filter matches case-insensitively even on Linux, so keep only
-  # the exact name, and leave a differently cased one on a case-insensitive
-  # file system to the path lookup.
-  $parent = Split-Path -Parent $File
-  if ($parent -eq "") { $parent = "." }
-  $leaf = Split-Path -Leaf $File
-  $entry = Get-ChildItem -LiteralPath $parent -Force -Filter $leaf -ErrorAction SilentlyContinue | Where-Object { $_.Name -ceq $leaf } | Select-Object -First 1
-  if ($null -eq $entry) {
-    if (-not (Test-Path -LiteralPath $File)) { return $none }
-    $entry = Get-Item -LiteralPath $File -Force
-  }
-  if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-    $missing = $false
-    try { [System.IO.File]::OpenRead($File).Dispose() }
-    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $missing = $true }
-    catch { $missing = $false }
-    if ($missing) {
-      Write-Error "$File is a symbolic link to a missing file."
-      exit 1
-    }
-  }
-  if (-not (Test-Path -LiteralPath $File -PathType Leaf)) {
+  # One path lookup decides whether the file is there, so its name matches as
+  # the file system matches names: case-insensitively on a default Windows or
+  # macOS volume, exactly on Linux, as launch-agent.sh's [ -e ] and [ -L ] do.
+  # File.GetAttributes reports a final symbolic link's own attributes rather
+  # than following it, on Windows PowerShell 5.1 (GetFileAttributesEx) and
+  # pwsh 7 (GetFileAttributesEx on Windows, lstat elsewhere), so a link to a
+  # missing file is found here; Windows PowerShell 5.1's Test-Path would report
+  # it absent and launch with no rules.
+  try { $attributes = [System.IO.File]::GetAttributes($File) }
+  catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $none }
+  if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
     Write-Error "$File is not a regular file."
     exit 1
   }
-  $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($File))
+  # Opening follows the link: a missing target is the error launch-agent.sh
+  # gives, and any other failure (a link loop, access denied) ends the launch
+  # too. A named pipe on Linux or macOS is not told apart from a file here, so
+  # opening it waits for a writer, where launch-agent.sh rejects it outright.
+  try { $bytes = [System.IO.File]::ReadAllBytes($File) }
+  catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      Write-Error "$File is a symbolic link to a missing file."
+    }
+    else {
+      Write-Error "$File disappeared while it was being read."
+    }
+    exit 1
+  }
+  catch {
+    Write-Error "$File cannot be read: $($_.Exception.GetBaseException().Message)"
+    exit 1
+  }
+  $text = [System.Text.Encoding]::UTF8.GetString($bytes)
   # Ordinal checks throughout: a culture-aware StartsWith treats U+FEFF as ignorable
   # and matches it at the start of any text.
   if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }

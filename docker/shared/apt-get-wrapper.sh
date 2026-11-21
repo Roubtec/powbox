@@ -12,9 +12,12 @@
 # This script parses an untrusted caller's arguments as root, so it admits an
 # allowlist and nothing else, and hands the real binary only what it approved,
 # in a scrubbed environment with no terminal on stdin (dpkg's conffile prompt
-# offers a shell). Packages from the configured repositories stay installable;
-# their maintainer scripts run as root by design and those repositories are
-# trusted. The policy is pinned by scripts/test-apt-get-wrapper.sh.
+# offers a shell). It adds no -y: apt's own confirmation then reads EOF and
+# aborts, so a cascading remove or a pattern-matched install proceeds only when
+# the caller asked for it. Packages from the configured repositories stay
+# installable; their maintainer scripts run as root by design and those
+# repositories are trusted. The policy is pinned by
+# scripts/test-apt-get-wrapper.sh.
 set -euo pipefail
 export LC_ALL=C
 
@@ -50,9 +53,9 @@ sudo apt-get is limited to managing packages from the configured repositories:
 
 Refused: config options (-o, -c), local .deb files, paths and URLs, flags that
 weaken signature checks, and every other verb (changelog, source, build-dep,
-download, ...). It always runs non-interactively, as if -y were given, and
-keeps existing config files. Anything else belongs in the image build (a
-layer set) - ask the user.
+download, ...). It runs with no terminal and keeps existing config files, so
+a step apt would ask you to confirm aborts unless you pass -y. Anything else
+belongs in the image build (a layer set) - ask the user.
 EOF
 }
 
@@ -123,7 +126,7 @@ exec /usr/bin/env -i \
 	DEBIAN_FRONTEND=noninteractive \
 	PAGER=cat \
 	LESSSECURE=1 \
-	"$APT_GET" -y \
+	"$APT_GET" \
 	-o Dpkg::Options::=--force-confdef \
 	-o Dpkg::Options::=--force-confold \
 	"${flags[@]}" "$verb" -- "${packages[@]}" </dev/null

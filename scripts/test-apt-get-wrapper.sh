@@ -74,7 +74,7 @@ stub_args() {
 	sed -n 's/^arg=//p' "$LOG"
 }
 
-FIXED_PREFIX=$'-y\n-o\nDpkg::Options::=--force-confdef\n-o\nDpkg::Options::=--force-confold'
+FIXED_PREFIX=$'-o\nDpkg::Options::=--force-confdef\n-o\nDpkg::Options::=--force-confold'
 
 expect_accept() {
 	local want=$1 desc=$2

@@ -367,7 +367,7 @@ fi
 	'sudo -n apt-get --help | grep -q "^sudo apt-get is limited" && ! sudo -n /usr/bin/apt-get --version >/dev/null 2>&1 && test "$(command -v apt-get)" = /usr/bin/apt-get' \
 	'rc=0; out="$(sudo -n apt-get -o APT::Update::Pre-Invoke::=id update 2>&1)" || rc=$?; test "$rc" -eq 2 && printf "%s\n" "$out" | grep -q "^apt-get: refused -o: not an allowed flag"' \
 	'rc=0; out="$(sudo -n apt-get install -y ./local.deb 2>&1)" || rc=$?; test "$rc" -eq 2 && printf "%s\n" "$out" | grep -q "^apt-get: refused ./local.deb"' \
-	'sudo -n apt-get -qq update && sudo -n apt-get install -qq --no-install-recommends hello >/dev/null && hello --version >/dev/null'
+	'sudo -n apt-get -qq update && sudo -n apt-get install -y -qq --no-install-recommends hello >/dev/null && hello --version >/dev/null'
 
 # Stage 1b — layer-set probes. An image built from a layer set carries the
 # set's name in its powbox.layers.set label, and the set may ship its own

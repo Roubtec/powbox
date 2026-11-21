@@ -628,6 +628,13 @@ printf 'tcp 10.0.0.1 22\n\0' >"$EGRESS_FILE"
 check_error "a last line of only a NUL byte" 2 "holds a NUL byte"
 printf 'tcp 10.0.0.1\ntcp 10.0.0.2 22\n\0\n' >"$EGRESS_FILE"
 check_error "an earlier malformed line is reported before a NUL byte" 1 "expected '<proto> <destination> <port>'"
+# Far more od output than a pipe buffer holds after the NUL: the scan must
+# drain it, or od dies of SIGPIPE and pipefail ends the launch without the error.
+{
+	printf 'tcp 10.0.0.1 22\ntc\0p 10.0.0.2 22\n'
+	awk 'BEGIN { for (i = 0; i < 20000; i++) print "# padding comment line to outgrow a pipe buffer" }'
+} >"$EGRESS_FILE"
+check_error "a NUL byte early in a large file" 2 "holds a NUL byte"
 rm -f "$EGRESS_FILE"
 mkdir "$EGRESS_FILE"
 check_error_dir() {

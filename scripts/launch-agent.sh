@@ -984,8 +984,9 @@ powbox_egress_load() {
 	. "$lib"
 	# read drops NUL bytes silently, which could turn `tc<NUL>p` into a valid
 	# `tcp`; find the first line holding one (od and awk see every byte) and
-	# reject it in line order, as launch-agent.ps1 does.
-	nul_line="$(od -An -v -tu1 <"$file" | awk '{ for (i = 1; i <= NF; i++) { if ($i == 0) { print n + 1; exit } if ($i == 10) n++ } }')"
+	# reject it in line order, as launch-agent.ps1 does. awk reads to the end
+	# rather than exiting at the NUL, so od never dies of SIGPIPE under pipefail.
+	nul_line="$(od -An -v -tu1 <"$file" | awk 'found { next } { for (i = 1; i <= NF; i++) { if ($i == 0) { found = n + 1; break } if ($i == 10) n++ } } END { if (found) print found }')"
 	while IFS= read -r line || [ -n "$line" ]; do
 		lineno=$((lineno + 1))
 		if [ "$lineno" = "$nul_line" ]; then

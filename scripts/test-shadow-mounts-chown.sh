@@ -204,7 +204,9 @@ race_point() {
 		;;
 	esac
 	if [ -e "$RACE_SWAP" ] || [ -L "$RACE_SWAP" ]; then
-		mv -- "$RACE_SWAP" "$RACE_SWAP.displaced" 2>/dev/null || return 0
+		# Named per race dir: a swapped workspace's displaced copy outlives
+		# reset_fixture, and mv would nest a second one inside the first.
+		mv -T -- "$RACE_SWAP" "$RACE_SWAP.displaced-${RACE_DIR##*/}" 2>/dev/null || return 0
 	fi
 	ln -s -- "$RACE_DEST" "$RACE_SWAP" 2>/dev/null && : >"$RACE_DIR/fired"
 	return 0
@@ -801,10 +803,110 @@ if [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$E
 else
 	ko "expected no effect at all; log was: $(cat "$LOG"); elsewhere holds: $(ls -A "$ELSEWHERE/swapnow")"
 fi
-if grep -qF "is a symlink, was swapped while being entered" "$ERR"; then
+if grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
 	ok "the refusal names the swapped component"
 else
 	ko "expected the swapped-component refusal on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a workspace swapped for a symlink to a mount outside the root is refused"
+# Every other component is swapped by the sweep below; this pins the first step,
+# into /workspace/<slug>, against a symlink whose target is itself a mount root
+# (as /tmp can be), so the mount-root check alone would not refuse it.
+ws="$(reset_fixture swapslug)"
+mkdir -p "$ws/proj" "$ELSEWHERE/swapslug/proj"
+MOUNTPOINTS="$ELSEWHERE/swapslug"
+RACE_DIR="$WORK_ROOT/race-swapslug"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws" RACE_DEST="$ELSEWHERE/swapslug" \
+	run_sut swapslug "$ws/proj/bin"
+RACE_DIR=""
+MOUNTPOINTS=""
+if [ -e "$WORK_ROOT/race-swapslug/fired" ] && [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$ELSEWHERE/swapslug/proj")" ]; then
+	ok "nothing was mounted, chowned or created through the swapped workspace"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG"); elsewhere holds: $(ls -A "$ELSEWHERE/swapslug/proj")"
+fi
+if grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "the refusal names the swapped workspace"
+else
+	ko "expected the swapped-component refusal on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a component the kernel reports in another case is still shadowed"
+# On a case-insensitive host bind mount, an existing on-disk 'Bin' can be what
+# the kernel reports for the literal 'bin' detect-shadows emits.  A symlink
+# bin -> Bin, made after validation, produces exactly that cwd hermetically.
+ws="$(reset_fixture caseins)"
+mkdir -p "$ws/proj/Bin" "$ws/proj/Other"
+RACE_DIR="$WORK_ROOT/race-caseins"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj/bin" RACE_DEST="$ws/proj/Bin" \
+	run_sut caseins "$ws/proj/bin"
+if [ -e "$RACE_DIR/fired" ] && [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/Bin" && [ ! -s "$ERR" ]; then
+	ok "the directory reported as 'Bin' is mounted for the literal 'bin', without a refusal"
+else
+	ko "expected one mount at $ws/proj/Bin and no stderr; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+RACE_DIR="$WORK_ROOT/race-caseins-other"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj/obj" RACE_DEST="$ws/proj/Other" \
+	run_sut caseins-other "$ws/proj/obj"
+RACE_DIR=""
+if [ "$(count mount)" = "0" ] && grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "a sibling with a different name is still refused"
+else
+	ko "expected the swapped-component refusal and no mount; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a symlinked .worktrees is not followed for the durable bind, and says so"
+# A mounted .worktrees cannot be swapped, so tmpfs is the right outcome here;
+# what must not happen is a silent fallback that looks like a no-volume launch.
+ws="$(reset_fixture wtlink)"
+mkdir -p "$ws/.git" "$ws/realwt"
+ln -s realwt "$ws/.worktrees"
+MOUNTPOINTS="$ws/realwt"
+FAKE_FINDMNT_FSTYPE=ext4
+run_sut wtlink "$ws/.git/worktrees"
+MOUNTPOINTS=""
+FAKE_FINDMNT_FSTYPE=""
+if ! calls mount | grep -qF -- "--bind" && [ "$(count mount)" = "1" ] && has "at-mount $ws/.git/worktrees" && [ ! -e "$ws/realwt/.gitworktrees" ]; then
+	ok "the target falls back to tmpfs and nothing is made behind the symlink"
+else
+	ko "expected one tmpfs mount at $ws/.git/worktrees and no bind; log was: $(cat "$LOG")"
+fi
+if grep -qF "not binding durable metadata for '$ws/.git/worktrees'" "$ERR"; then
+	ok "the refused .worktrees walk is reported on stderr"
+else
+	ko "expected the refused-walk note on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a .git/worktrees mountpoint that cannot be held open skips only that target"
+# The held descriptor is an open(2) of '.', which needs read permission: a
+# write+search-only directory makes it fail without exhausting descriptors.
+# Root ignores the mode, so the case cannot be staged there.
+if [ "$(/usr/bin/id -u)" = 0 ]; then
+	ok "skipped: running as root, where a mode-0300 directory can still be opened"
+else
+	ws="$(reset_fixture dstfd)"
+	mkdir -p "$ws/.git/worktrees" "$ws/proj"
+	chmod 0300 "$ws/.git/worktrees"
+	run_sut dstfd "$ws/.git/worktrees" "$ws/proj/bin"
+	chmod 0755 "$ws/.git/worktrees"
+	if grep -qF "skipping '$ws/.git/worktrees' (cannot hold the mountpoint directory open)" "$ERR"; then
+		ok "the unopenable mountpoint is skipped with a per-target message"
+	else
+		ko "expected the cannot-hold skip on stderr, got: $(cat "$ERR")"
+	fi
+	if [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/bin"; then
+		ok "the run carries on to the next target"
+	else
+		ko "expected only $ws/proj/bin to be mounted; log was: $(cat "$LOG")"
+	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -845,7 +947,7 @@ escaped() {
 # mounted workspace is confined to it by rename(2)'s EXDEV and a mount root's
 # EBUSY, which a hermetic test cannot model, so neither is swept here.
 race_case() {
-	local mode="" verb=swapped shape comp label point ws dest n=0 fired=0 bad=0 out slug_tree after_tree
+	local mode="" verb=swapped shape comp label point ws dest target n=0 fired=0 bad=0 out slug_tree before_tree after_tree
 	if [ "$1" = rename ]; then
 		mode=rename
 		verb=renamed
@@ -919,6 +1021,7 @@ race_case() {
 	fi
 }
 
+race_case single ""
 race_case single proj
 race_case single proj/bin
 race_case multi .claude

@@ -5,8 +5,8 @@
 # entrypoint-core.sh deliberately skips shadowing — self-hosted (--isolated)
 # and the image-store WRITER role.  Both containers hold CAP_SYS_ADMIN, and
 # shadow-mounts.sh validates only "under /workspace/, not depth-1, inside a
-# mounted workspace" (never emptiness), so an unguarded hand-run would successfully tmpfs-mask real
-# content rather than fail safe.
+# mounted workspace" (never emptiness), so an unguarded hand-run would
+# successfully tmpfs-mask real content rather than fail safe.
 #
 # Runs directly against the repo copy — no image build, no sudo, no mounts.
 # detect-shadows.sh and sudo are shimmed on PATH so a guard regression is

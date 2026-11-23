@@ -54,7 +54,11 @@ TMPFS_SIZE=2g
 #   * after each step the kernel's cwd (readlink /proc/self/cwd — never $PWD or
 #     the `pwd` builtin, which bash derives from the path string) must equal the
 #     parent's physical path plus <name>; anything else means <name> was a
-#     symlink or was swapped, and the target is refused.
+#     symlink or was swapped, and the target is refused.  The one tolerance is a
+#     direct child of the parent whose name differs only in case: on a
+#     case-insensitive host bind mount the kernel may report `Bin` for a
+#     requested `bin`, and a child of the held directory is inside it whatever
+#     its spelling.
 #   * `mount --no-canonicalize`: by default util-linux rewrites "." back into an
 #     absolute path, which the kernel would walk again.
 #   * the first step, into /workspace/<slug>, must land on a mount root
@@ -87,6 +91,7 @@ enter_root() {
 #   after either, the cwd is wherever the failed step left it and must not be
 #   acted on.
 step_into() {
+	local cwd
 	created=0
 	if [ ! -e "$1" ] && [ ! -L "$1" ]; then
 		[ "${2:-}" = create ] || return 1
@@ -100,8 +105,13 @@ step_into() {
 		[ -L "$1" ] && return 2
 		return 1
 	fi
-	[ "$(readlink /proc/self/cwd)" = "$held/$1" ] || return 2
-	held="$held/$1"
+	cwd="$(readlink /proc/self/cwd)"
+	if [ "$cwd" != "$held/$1" ]; then
+		if [ "${cwd%/*}" != "$held" ] || [ "${cwd,,}" != "${held,,}/${1,,}" ]; then
+			return 2
+		fi
+	fi
+	held="$cwd"
 }
 
 # enter_slug <slug> — from the held workspace root, hold workspace <slug>, which
@@ -156,8 +166,15 @@ bind_git_worktrees() {
 	# cases the caller's tmpfs path is the honest choice.  These checks are the
 	# only SILENT return-1 paths: "no durable volume" is a normal launch mode,
 	# not a fault.  The bind source sits inside that node-writable volume, so it
-	# is reached by the same held walk as the target.
-	walk_to "$wt" || return 1
+	# is reached by the same held walk as the target.  A walk refused for a
+	# symlinked or swapped component is not silent: a mounted .worktrees cannot
+	# be swapped, so tmpfs is still the right answer, but a symlinked .worktrees
+	# is not followed to whatever volume it may point at, and that is reported.
+	walk_to "$wt" || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		echo "shadow-mounts: not binding durable metadata for '$dst': a component of '$wt' is a symlink or was swapped while being entered; falling back to tmpfs." >&2
+	fi
+	[ "$rc" -eq 0 ] || return 1
 	mountpoint -q . 2>/dev/null || return 1
 	case "$(findmnt -nro FSTYPE -T . 2>/dev/null || true)" in
 	tmpfs | '') return 1 ;;
@@ -170,6 +187,7 @@ bind_git_worktrees() {
 	# ephemeral-metadata mismatch this bind exists to prevent (worktrees that
 	# survive a container recycle while their registrations vanish), and make it
 	# indistinguishable from a normal no-volume launch.
+	rc=0
 	step_into .gitworktrees create || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		warn_bind_broken "$wt" "$dst" "cannot create or enter durable metadata dir '$wt/.gitworktrees' safely"
@@ -218,10 +236,9 @@ adopt_owner() {
 }
 
 # refuse_swapped <target> <component> — the per-target refusal for a component
-# that did not resolve to itself.  On a case-insensitive host bind mount a
-# literal spelled in another case than the directory on disk can land here too.
+# that did not resolve to itself.
 refuse_swapped() {
-	echo "shadow-mounts: refusing to shadow '$1' ('$2' is a symlink, was swapped while being entered, or differs in case from its name on disk)." >&2
+	echo "shadow-mounts: refusing to shadow '$1' ('$2' is a symlink or was swapped while being entered)." >&2
 }
 
 # shadow_one <target> — validate, walk to, and mount one target.  Returns 0 for
@@ -285,7 +302,7 @@ shadow_one() {
 		return 0
 		;;
 	*)
-		echo "shadow-mounts: skipping '$target' (no workspace '$held/${parts[0]}')." >&2
+		echo "shadow-mounts: skipping '$target' ('$held/${parts[0]}' is not an existing workspace directory)." >&2
 		return 0
 		;;
 	esac
@@ -342,7 +359,12 @@ shadow_one() {
 	# when one is present; otherwise fall through to the tmpfs path below.
 	case "$resolved_target" in
 	*/.git/worktrees)
-		exec {dst_fd}<.
+		# Guarded like the bind source's descriptor: a failed open skips this
+		# one target rather than aborting the run under set -e.
+		if ! exec {dst_fd}<.; then
+			echo "shadow-mounts: skipping '$target' (cannot hold the mountpoint directory open)." >&2
+			return 0
+		fi
 		if bind_git_worktrees "$resolved_target" "$dst_fd"; then
 			exec {dst_fd}<&-
 			mounted=$((mounted + 1))

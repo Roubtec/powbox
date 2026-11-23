@@ -20,7 +20,9 @@
 # one for a symlink between the helper's validation and its use.  The race
 # sweep at the end swaps a component at every point the helper calls out to a
 # shimmed tool and asserts that nothing was created, chowned or mounted outside
-# the workspace root.
+# the workspace root.  A second sweep renames a plain directory made directly
+# under the root (not a mounted workspace) out of the root at every point, which
+# the helper must refuse before it can follow the directory away.
 #
 # The privileged end-to-end path (real root, real tmpfs, a real bind-mounted
 # checkout) is covered in the smoke tier by scripts/smoke-test-worktree-metadata.sh.
@@ -41,6 +43,10 @@
 #     `at-<tool>` line with the physical location the kernel would act on at that
 #     moment — following symlinks the way that call would — which is what tells
 #     a relocated mount from a correct one whatever the call shape.
+#   * Every fixture workspace reset_fixture makes is registered as a mount root
+#     (the mountpoint shim answers yes for it), as every real /workspace/<slug>
+#     is; `reset_fixture <case> unmounted` makes the plain-directory kind node
+#     can create itself.
 #   * `stat` is shimmed specifically so different ancestors can report different
 #     owners — that is what makes "the DEEPEST existing ancestor" assertable at
 #     all, since an unprivileged test cannot create differently-owned dirs.
@@ -161,6 +167,8 @@ REAL_REALPATH="$(command -v realpath)"
 # when $RACE_AT names "<tool>:<pre|post>:<n>" — the n-th call of that tool, just
 # before or just after it runs — it replaces $RACE_SWAP with a symlink to
 # $RACE_DEST (moving any real directory there aside, still inside the root), once.
+# RACE_MODE=rename instead renames $RACE_SWAP to $RACE_DEST (out of the root),
+# and RACE_MODE=plant creates $RACE_SWAP as a plain directory (a parallel run).
 SHIM_LIB="$WORK_ROOT/shimlib.bash"
 cat >"$SHIM_LIB" <<'LIB'
 phys_follow() {
@@ -185,6 +193,16 @@ race_point() {
 	fi
 	[ "$RACE_AT" = "$1:$2:$n" ] || return 0
 	[ ! -e "$RACE_DIR/fired" ] || return 0
+	case "${RACE_MODE:-}" in
+	rename)
+		mv -- "$RACE_SWAP" "$RACE_DEST" 2>/dev/null && : >"$RACE_DIR/fired"
+		return 0
+		;;
+	plant)
+		"$REAL_MKDIR" -- "$RACE_SWAP" 2>/dev/null && : >"$RACE_DIR/fired"
+		return 0
+		;;
+	esac
 	if [ -e "$RACE_SWAP" ] || [ -L "$RACE_SWAP" ]; then
 		mv -- "$RACE_SWAP" "$RACE_SWAP.displaced" 2>/dev/null || return 0
 	fi
@@ -280,9 +298,9 @@ exit 0
 SHIM
 
 # mountpoint -q <path>: true only when the PHYSICAL path is listed in
-# $MOUNTPOINTS, ONE PER LINE (not whitespace-separated — a TMPDIR containing a
-# space would otherwise split a fixture path into two entries and silently stop
-# matching).
+# $MOUNTPOINTS or in the $SLUG_MOUNTS file (the registered fixture workspaces),
+# ONE PER LINE (not whitespace-separated — a TMPDIR containing a space would
+# otherwise split a fixture path into two entries and silently stop matching).
 cat >"$BIN/mountpoint" <<'SHIM'
 #!/usr/bin/env bash
 . "$SHIM_LIB"
@@ -294,6 +312,11 @@ if [ -n "${MOUNTPOINTS:-}" ]; then
 		[ -n "$m" ] || continue
 		[ "$m" = "$target" ] && exit 0
 	done <<<"$MOUNTPOINTS"
+fi
+if [ -f "$SLUG_MOUNTS" ]; then
+	while IFS= read -r m; do
+		[ "$m" = "$target" ] && exit 0
+	done <"$SLUG_MOUNTS"
 fi
 exit 1
 SHIM
@@ -364,6 +387,7 @@ run_sut() {
 		OWNER_MAP="${OWNER_MAP:-}" \
 		DEFAULT_OWNER="${DEFAULT_OWNER:-1000:1000}" \
 		MOUNTPOINTS="${MOUNTPOINTS:-}" \
+		SLUG_MOUNTS="$SLUG_MOUNTS" \
 		FAKE_CHOWN_FAIL="${FAKE_CHOWN_FAIL:-}" \
 		FAKE_FINDMNT_FSTYPE="${FAKE_FINDMNT_FSTYPE:-}" \
 		FAKE_NODE_UID="$FAKE_NODE_UID" \
@@ -372,6 +396,7 @@ run_sut() {
 		RACE_DIR="${RACE_DIR:-}" \
 		RACE_SWAP="${RACE_SWAP:-}" \
 		RACE_DEST="${RACE_DEST:-}" \
+		RACE_MODE="${RACE_MODE:-}" \
 		bash "$SUT" "$@" >/dev/null 2>"$ERR" || true
 }
 
@@ -406,11 +431,18 @@ before() {
 	[ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
 }
 
-# reset_fixture <case> — a fresh workspace dir under the relocated root.
+# reset_fixture <case> [unmounted] — a fresh workspace dir under the relocated
+# root, registered as a mount root unless `unmounted`.  A file, not a variable:
+# callers run this in a command substitution.
+SLUG_MOUNTS="$WORK_ROOT/slug-mounts"
+: >"$SLUG_MOUNTS"
 reset_fixture() {
 	local ws="$WS_ROOT/$1"
 	rm -rf "$ws"
 	mkdir -p "$ws"
+	if [ "${2:-}" != unmounted ] && ! grep -qxF -- "$ws" "$SLUG_MOUNTS"; then
+		printf '%s\n' "$ws" >>"$SLUG_MOUNTS"
+	fi
 	printf '%s' "$ws"
 }
 
@@ -696,6 +728,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "Test: a target in a plain directory under the root, not a mounted workspace, is refused"
+# node owns /workspace and can make a directory there; unlike a real workspace it
+# is no mount, so node could rename it out of /workspace mid-run (see the rename
+# sweep below).  The helper must refuse before it creates anything.
+ws="$(reset_fixture unmounted unmounted)"
+mkdir -p "$ws/proj"
+OWNER_MAP=""
+run_sut unmounted "$ws/proj/bin"
+if [ "$(count chown)" = "0" ] && [ "$(count mount)" = "0" ] && [ -z "$(calls at-mkdir)" ] && [ ! -e "$ws/proj/bin" ]; then
+	ok "nothing was created, chowned or mounted"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG")"
+fi
+if grep -qF "is a plain directory, not a mounted workspace" "$ERR"; then
+	ok "the refusal says the workspace is not a mount"
+else
+	ko "expected the not-a-mounted-workspace refusal on stderr, got: $(cat "$ERR")"
+fi
+ws="$(reset_fixture absent)"
+rmdir "$ws"
+run_sut absent "$ws/proj/bin"
+if [ ! -e "$ws" ] && [ "$(count mount)" = "0" ]; then
+	ok "a missing workspace is not created"
+else
+	ko "expected the missing workspace to stay missing; log was: $(cat "$LOG")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a component created concurrently just before the helper's mkdir is entered"
+# A parallel run (two shadow-refresh.sh, say) can create a missing component
+# between the helper's existence test and its mkdir.  The helper must enter it
+# like any existing component, through the same verified step, rather than skip
+# the target.
+ws="$(reset_fixture plant)"
+mkdir -p "$ws/proj"
+RACE_DIR="$WORK_ROOT/race-plant"
+mkdir -p "$RACE_DIR"
+RACE_MODE=plant RACE_AT="mkdir:pre:1" RACE_SWAP="$ws/proj/bin" \
+	run_sut plant "$ws/proj/bin"
+RACE_DIR=""
+if [ -e "$WORK_ROOT/race-plant/fired" ] && [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/bin"; then
+	ok "the concurrently created mountpoint is still mounted, in place"
+else
+	ko "expected one mount at $ws/proj/bin after the plant; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+if [ "$(count chown)" = "0" ]; then
+	ok "a component this run did not create is not chowned by it"
+else
+	ko "expected no chown of the planted component, got: $(calls chown)"
+fi
+
+# ---------------------------------------------------------------------------
 echo "Test: a component swapped for a symlink right after validation is refused"
 # The canonical race: the target validates (realpath, the helper's second call)
 # and THEN its existing intermediate <ws>/proj becomes a symlink out of the root.
@@ -717,7 +801,7 @@ if [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$E
 else
 	ko "expected no effect at all; log was: $(cat "$LOG"); elsewhere holds: $(ls -A "$ELSEWHERE/swapnow")"
 fi
-if grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+if grep -qF "is a symlink, was swapped while being entered" "$ERR"; then
 	ok "the refusal names the swapped component"
 else
 	ko "expected the swapped-component refusal on stderr, got: $(cat "$ERR")"
@@ -732,7 +816,7 @@ echo "Test: race sweep — a component swapped at ANY call-out never escapes the
 # chown, mount target and bind source still lands under the root, and that
 # nothing appeared outside it.  A point the helper never reaches for a given
 # shape simply does not fire; each component must be swapped at least once.
-RACE_POINTS="realpath:post:2 mountpoint:pre:1 mountpoint:pre:2 stat:pre:1 mkdir:pre:1 mkdir:post:1 mkdir:pre:2 mkdir:post:2 mkdir:pre:3 mkdir:post:3 chown:pre:1 chown:pre:2 chown:pre:3 findmnt:pre:1 mount:pre:1"
+RACE_POINTS="realpath:post:2 mountpoint:pre:1 mountpoint:pre:2 mountpoint:pre:3 mountpoint:pre:4 stat:pre:1 mkdir:pre:1 mkdir:post:1 mkdir:pre:2 mkdir:post:2 mkdir:pre:3 mkdir:post:3 chown:pre:1 chown:pre:2 chown:pre:3 findmnt:pre:1 mount:pre:1"
 
 # escaped — print every logged location outside the root (nothing on success).
 escaped() {
@@ -753,15 +837,33 @@ escaped() {
 	done <"$LOG"
 }
 
-# race_case <shape> <component-relative-to-ws> — one sweep over RACE_POINTS.
+# race_case [rename] <shape> <component-relative-to-ws> — one sweep over
+# RACE_POINTS.  By default the component is swapped for a symlink out of the root.
+# With `rename`, the fixture is an UNMOUNTED plain directory directly under the
+# root, and the component ("" — that directory itself) is renamed out of the root
+# instead.  Only that directory can be renamed out in reality: everything below a
+# mounted workspace is confined to it by rename(2)'s EXDEV and a mount root's
+# EBUSY, which a hermetic test cannot model, so neither is swept here.
 race_case() {
-	local shape="$1" comp="$2" point ws dest n=0 fired=0 bad=0 out
+	local mode="" verb=swapped shape comp label point ws dest n=0 fired=0 bad=0 out slug_tree after_tree
+	if [ "$1" = rename ]; then
+		mode=rename
+		verb=renamed
+		shift
+	fi
+	shape="$1"
+	comp="$2"
+	label="${comp:-the workspace dir}"
 	for point in $RACE_POINTS; do
 		n=$((n + 1))
-		ws="$(reset_fixture "race-$shape")"
 		dest="$ELSEWHERE/race-$shape"
 		rm -rf "$dest"
-		mkdir -p "$dest/sub"
+		if [ "$mode" = rename ]; then
+			ws="$(reset_fixture "rename-$shape" unmounted)"
+		else
+			ws="$(reset_fixture "race-$shape")"
+			mkdir -p "$dest/sub"
+		fi
 		MOUNTPOINTS=""
 		FAKE_FINDMNT_FSTYPE=""
 		case "$shape" in
@@ -777,31 +879,43 @@ race_case() {
 			target="$ws/.git/worktrees"
 			;;
 		esac
-		RACE_DIR="$WORK_ROOT/race-$shape-$n"
+		RACE_DIR="$WORK_ROOT/race-$mode$shape-$n"
 		rm -rf "$RACE_DIR"
 		mkdir -p "$RACE_DIR"
 		before_tree="$(find "$ELSEWHERE" -print | LC_ALL=C sort)"
-		RACE_AT="$point" RACE_SWAP="$ws/$comp" RACE_DEST="$dest" \
-			run_sut "race-$shape-$n" "$target"
+		slug_tree="$(cd "$ws" && find . -print | LC_ALL=C sort)"
+		RACE_MODE="$mode" RACE_AT="$point" RACE_SWAP="$ws${comp:+/$comp}" RACE_DEST="$dest" \
+			run_sut "race-$mode$shape-$n" "$target"
 		[ -e "$RACE_DIR/fired" ] || continue
 		fired=$((fired + 1))
 		out="$(escaped)"
 		if [ -n "$out" ]; then
 			bad=$((bad + 1))
-			ko "$shape, $comp swapped at $point: acted outside the root: $out"
+			ko "$shape, $label $verb at $point: acted outside the root: $out"
 		fi
-		if [ "$(find "$ELSEWHERE" -print | LC_ALL=C sort)" != "$before_tree" ]; then
+		# A renamed workspace must arrive outside exactly as it left, and
+		# nothing else outside the root may change.
+		if [ "$mode" = rename ]; then
+			if [ "$(cd "$dest" && find . -print | LC_ALL=C sort)" != "$slug_tree" ]; then
+				bad=$((bad + 1))
+				ko "$shape, $label renamed at $point: created something in the renamed directory outside the root"
+			fi
+			after_tree="$(find "$ELSEWHERE" -path "$dest" -prune -o -print | LC_ALL=C sort)"
+		else
+			after_tree="$(find "$ELSEWHERE" -print | LC_ALL=C sort)"
+		fi
+		if [ "$after_tree" != "$before_tree" ]; then
 			bad=$((bad + 1))
-			ko "$shape, $comp swapped at $point: created something outside the root"
+			ko "$shape, $label $verb at $point: created something outside the root"
 		fi
 	done
 	MOUNTPOINTS=""
 	FAKE_FINDMNT_FSTYPE=""
 	RACE_DIR=""
 	if [ "$fired" -eq 0 ]; then
-		ko "$shape, $comp: no race point fired, so the sweep tested nothing"
+		ko "$shape, $label: no race point fired, so the sweep tested nothing"
 	elif [ "$bad" -eq 0 ]; then
-		ok "$shape: $comp swapped at $fired call-outs, nothing escaped the root"
+		ok "$shape: $label $verb at $fired call-outs, nothing escaped the root"
 	fi
 }
 
@@ -813,6 +927,9 @@ race_case gitwt .git
 race_case gitwt .git/worktrees
 race_case gitwt .worktrees
 race_case gitwt .worktrees/.gitworktrees
+race_case rename single ""
+race_case rename multi ""
+race_case rename gitwt ""
 
 echo ""
 echo "Results: $pass passed, $fail failed."

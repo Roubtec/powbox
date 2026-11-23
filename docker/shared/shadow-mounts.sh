@@ -45,10 +45,10 @@ TMPFS_SIZE=2g
 # is node-writable and node may run this helper at any time, so a path validated
 # below can be re-pointed through a swapped-in symlink before it is used.  No
 # validated path string is therefore ever handed to mkdir, chown or mount:
-# the helper walks down from the root-owned /workspace one component at a time
-# with the directory it reached as its cwd, and acts only on that held directory
-# ("." — or /proc/self/fd/N for the bind source).  A later swap of the path
-# cannot move a directory the process already holds.  Three details carry it:
+# the helper walks down from /workspace one component at a time with the
+# directory it reached as its cwd, and acts only on that held directory ("." —
+# or /proc/self/fd/N for the bind source).  A later swap of the path cannot move
+# a directory the process already holds.  Four details carry it:
 #   * `cd -P -- ./<name>` is one relative chdir; a plain `cd` makes bash chdir
 #     the whole absolute logical path again (and may consult CDPATH).
 #   * after each step the kernel's cwd (readlink /proc/self/cwd — never $PWD or
@@ -57,12 +57,20 @@ TMPFS_SIZE=2g
 #     symlink or was swapped, and the target is refused.
 #   * `mount --no-canonicalize`: by default util-linux rewrites "." back into an
 #     absolute path, which the kernel would walk again.
-# node can still rename a held directory within the workspace's own mount, so a
-# mount or chown follows the directory to its new name — but rename(2) does not
-# cross mounts, so it cannot carry either outside /workspace.
+#   * the first step, into /workspace/<slug>, must land on a mount root
+#     (`mountpoint -q .`), and it never creates.  Every real workspace is one —
+#     the dir-mounted bind, the self-hosted agent-ws-* volume, Stage 6's fixture
+#     bind — while a directory node makes under its own /workspace never is.
+# That last check is what keeps a held directory inside /workspace: node can
+# still rename one, and a mount or chown then follows it to its new name, but
+# rename(2) never crosses mounts and a mount root cannot itself be renamed
+# (EBUSY), so whatever lies below a mounted <slug> stays below it.  Without the
+# check, `/workspace/evil/x` could be carried to /tmp/evil/x mid-run, since
+# /workspace, /tmp and /home/node share the container's root filesystem.
 
-# enter_root — hold the workspace root.  Every component of /workspace itself is
-# root-owned, so this one absolute chdir is the only one the walk trusts.
+# enter_root — hold the workspace root.  /workspace is node-owned, but its name
+# sits in the root-owned /, so node cannot re-point it: this one absolute chdir
+# is the only one the walk trusts.
 enter_root() {
 	cd -P -- "$workspace_root" 2>/dev/null || return 1
 	held="$workspace_root"
@@ -73,15 +81,20 @@ enter_root() {
 #   Hold <name>, a child of the held directory.  With `create`, an absent <name>
 #   is made first: a mkdir of one relative name never follows a symlink and never
 #   creates anywhere but the held directory.  Sets $created to 1 when this call
-#   made it.  Returns 1 when <name> cannot be created or entered (a file, say)
-#   and 2 when it is a symlink or was swapped while being entered; after either,
-#   the cwd is wherever the failed step left it and must not be acted on.
+#   made it; a <name> that appears concurrently (a parallel run) is entered like
+#   any existing one.  Returns 1 when <name> cannot be created or entered (a
+#   file, say) and 2 when it is a symlink or was swapped while being entered;
+#   after either, the cwd is wherever the failed step left it and must not be
+#   acted on.
 step_into() {
 	created=0
 	if [ ! -e "$1" ] && [ ! -L "$1" ]; then
 		[ "${2:-}" = create ] || return 1
-		mkdir -- "$1" 2>/dev/null || return 1
-		created=1
+		if mkdir -- "$1" 2>/dev/null; then
+			created=1
+		elif [ ! -e "$1" ] && [ ! -L "$1" ]; then
+			return 1
+		fi
 	fi
 	if ! cd -P -- "./$1" 2>/dev/null; then
 		[ -L "$1" ] && return 2
@@ -91,14 +104,23 @@ step_into() {
 	held="$held/$1"
 }
 
-# walk_to <path> — hold an existing <path> under the workspace root, creating
-# nothing.  Same return codes as step_into.
+# enter_slug <slug> — from the held workspace root, hold workspace <slug>, which
+# must already exist and be a mount root.  step_into's return codes, plus 3 when
+# it is a plain directory rather than a mount.
+enter_slug() {
+	step_into "$1" || return
+	mountpoint -q . 2>/dev/null || return 3
+}
+
+# walk_to <path> — hold an existing <path> below a workspace, creating nothing.
+# Same return codes as enter_slug.
 walk_to() {
 	local -a parts
 	local part
 	enter_root || return 1
 	mapfile -d / -t parts < <(printf '%s' "${1#"$workspace_root"/}")
-	for part in "${parts[@]}"; do
+	enter_slug "${parts[0]}" || return
+	for part in "${parts[@]:1}"; do
 		step_into "$part" || return
 	done
 }
@@ -156,7 +178,10 @@ bind_git_worktrees() {
 	# Durable metadata dir inside the volume, owned by node (git runs as node).
 	chown "$NODE_UID:$NODE_GID" . 2>/dev/null || true
 
-	exec {src_fd}<.
+	if ! exec {src_fd}<.; then
+		warn_bind_broken "$wt" "$dst" "cannot hold '$wt/.gitworktrees' open"
+		return 1
+	fi
 	if ! cd -P -- "/proc/self/fd/$dst_fd" 2>/dev/null; then
 		exec {src_fd}<&-
 		warn_bind_broken "$wt" "$dst" "cannot re-enter the held mountpoint '$dst'"
@@ -190,6 +215,13 @@ adopt_owner() {
 		return 0
 	fi
 	chown "$owner" . 2>/dev/null || chown_failed=1
+}
+
+# refuse_swapped <target> <component> — the per-target refusal for a component
+# that did not resolve to itself.  On a case-insensitive host bind mount a
+# literal spelled in another case than the directory on disk can land here too.
+refuse_swapped() {
+	echo "shadow-mounts: refusing to shadow '$1' ('$2' is a symlink, was swapped while being entered, or differs in case from its name on disk)." >&2
 }
 
 # shadow_one <target> — validate, walk to, and mount one target.  Returns 0 for
@@ -232,15 +264,33 @@ shadow_one() {
 		;;
 	esac
 
-	# Walk to the target, creating what is missing.  mapfile -d / keeps a
-	# newline inside a component rather than splitting on it.
+	# Walk to the target: into its workspace, then down, creating what is
+	# missing.  mapfile -d / keeps a newline inside a component rather than
+	# splitting on it.
 	if ! enter_root; then
 		echo "shadow-mounts: cannot enter the workspace root '$workspace_root'." >&2
 		exit 1
 	fi
 	mapfile -d / -t parts < <(printf '%s' "${resolved_target#"$workspace_root"/}")
+	rc=0
+	enter_slug "${parts[0]}" || rc=$?
+	case "$rc" in
+	0) ;;
+	2)
+		refuse_swapped "$target" "$held/${parts[0]}"
+		return 0
+		;;
+	3)
+		echo "shadow-mounts: refusing to shadow '$target' ('$held' is a plain directory, not a mounted workspace)." >&2
+		return 0
+		;;
+	*)
+		echo "shadow-mounts: skipping '$target' (no workspace '$held/${parts[0]}')." >&2
+		return 0
+		;;
+	esac
 	last=$((${#parts[@]} - 1))
-	for i in "${!parts[@]}"; do
+	for ((i = 1; i <= last; i++)); do
 		part="${parts[$i]}"
 		# The held directory at the first absent component is the deepest
 		# ancestor that already exists: read its owner before anything is
@@ -256,7 +306,7 @@ shadow_one() {
 		case "$rc" in
 		0) ;;
 		2)
-			echo "shadow-mounts: refusing to shadow '$target' ('$held/$part' is a symlink or was swapped while being entered)." >&2
+			refuse_swapped "$target" "$held/$part"
 			return 0
 			;;
 		*)

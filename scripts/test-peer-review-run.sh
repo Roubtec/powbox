@@ -260,10 +260,10 @@ run() {
 		if [ -n "${RUN_CWD:-}" ]; then cd "$RUN_CWD" || exit 99; fi
 		if [ -n "${RUN_ULIMIT_V:-}" ]; then ulimit -v "$RUN_ULIMIT_V" || exit 99; fi
 		if [ -n "${RUN_TIMEOUT:-}" ]; then
-			PATH="$rpath" CODEX_HOME="$d/codex-home" timeout "$RUN_TIMEOUT" bash "$HELPER" "$@"
+			PATH="$rpath" CODEX_HOME="$d/codex-home" XDG_CONFIG_HOME="$d/xdg" timeout "$RUN_TIMEOUT" bash "$HELPER" "$@"
 			exit $?
 		fi
-		PATH="$rpath" CODEX_HOME="$d/codex-home" bash "$HELPER" "$@"
+		PATH="$rpath" CODEX_HOME="$d/codex-home" XDG_CONFIG_HOME="$d/xdg" bash "$HELPER" "$@"
 	) 2>"$d/err")"
 	RUN_RC=$?
 	RUN_ERR="$(cat "$d/err" 2>/dev/null || true)"
@@ -3559,6 +3559,10 @@ assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)"
 #   18g  a refused fallback is not retried again (two-attempt cap)
 #   18h  an empty model catalog is unavailable, not a refused model: no
 #        fallback attempt
+#   18i  a configured proxy that does not answer is unavailable before Muse is
+#        launched, with any credentials in its URL kept out of the reason
+#   18j  a configured proxy that answers lets the review run; with no proxy
+#        configured there is no probe at all
 make_muse_fake() { # <case-dir> <body run after argv and the prompt are recorded>
 	cat >"$1/bin/muse" <<MUSEFAKE
 #!/usr/bin/env bash
@@ -3685,6 +3689,70 @@ assert_eq "18h: an empty model catalog is unavailable" "$(jqf "$RUN_RESULT" .out
 assert_eq "18h: the floor model is not tried" "$(jqf "$RUN_RESULT" .attempts)" 1
 assert_eq "18h: exactly one provider launch" "$(cat "$d/calls")" 1
 assert_contains "18h: the reason names the empty catalog" "$(jqf "$RUN_RESULT" .reason)" "model catalog is empty"
+
+# muse_proxy_case <case-dir> <proxy URL> — writes the Muse settings file the
+# helper reads (under the per-case XDG_CONFIG_HOME that run() sets).
+muse_proxy_case() {
+	mkdir -p "$1/xdg/muse"
+	printf '{"schema_version": 1, "endpoint_transport": {"proxy": "%s"}}\n' "$2" >"$1/xdg/muse/settings.json"
+}
+# make_curl_fake <case-dir> <exit code> — a fake `curl` that records its argv and
+# exits with the given code. On success it first sleeps a second, so a case can
+# see the probe counted in elapsedSeconds. On failure it echoes its -x value
+# back, as curl's proxy-syntax errors do, beside curl's timeout message.
+make_curl_fake() {
+	cat >"$1/bin/curl" <<CURLFAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$1/curl-argv"
+if [ "$2" = 0 ]; then sleep 1; exit 0; fi
+px=""; while [ \$# -gt 0 ]; do [ "\$1" = -x ] && px="\$2"; shift; done
+echo "curl: (28) Failed to connect to 192.0.2.1 port 8888 after 5002 ms: Timeout was reached (proxy '\$px')" >&2
+exit $2
+CURLFAKE
+	chmod +x "$1/bin/curl"
+}
+# curl_arg_after <case-dir> <flag> — the probe argument that followed <flag>.
+curl_arg_after() { grep -A1 -x -- "$2" "$1/curl-argv" | sed -n 2p; }
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+make_curl_fake "$d" 28
+muse_proxy_case "$d" "http://user:s3cret@192.0.2.1:8888"
+# A --timeout above the cap, so the --max-time assertion below pins min(t, 10)
+# rather than a pass-through of std_args' own 10.
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse 20)
+assert_eq "18i: an unreachable proxy is unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
+assert_eq "18i: not retried" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "18i: muse is never launched" "$([ -e "$d/calls" ] && echo launched || echo none)" none
+assert_contains "18i: the probe goes through the configured proxy" " $(tr '\n' ' ' <"$d/curl-argv")" " -x http://user:s3cret@192.0.2.1:8888 "
+assert_contains "18i: the reason names the proxy" "$(jqf "$RUN_RESULT" .reason)" "http://192.0.2.1:8888"
+assert_contains "18i: the reason carries curl's message" "$(jqf "$RUN_RESULT" .reason)" "Timeout was reached"
+assert_not_contains "18i: the proxy password stays out of the result" "$RUN_OUT" "s3cret"
+assert_contains "18i: curl's echo of the proxy is kept, redacted" "$(jqf "$RUN_RESULT" .reason)" "(proxy 'http://192.0.2.1:8888')"
+assert_eq "18i: -q comes first, so no ~/.curlrc applies" "$(head -1 "$d/curl-argv")" "-q"
+assert_eq "18i: NO_PROXY cannot route the probe around the proxy" "$(grep -cx -- --noproxy "$d/curl-argv"):$(curl_arg_after "$d" --noproxy)" "1:"
+assert_eq "18i: the probe is capped at 10s" "$(curl_arg_after "$d" --max-time)" 10
+assert_eq "18i: the probe asks Muse's API" "$(tail -1 "$d/curl-argv")" "https://api.meta.ai/muse-code/config"
+assert_eq "18i: no fail-on-error flag, so a 401 still counts as an answer" "$(grep -cxE -- '-f|--fail|--fail-with-body' "$d/curl-argv")" 0
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+make_curl_fake "$d" 0
+muse_proxy_case "$d" "http://192.0.2.1:8888"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18j: a reachable proxy lets the review run" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "18j: the proxy was probed" "$([ -e "$d/curl-argv" ] && echo probed || echo none)" probed
+assert_eq "18j: the probe's second is counted in elapsedSeconds" "$(jqf "$RUN_RESULT" '.elapsedSeconds >= 1')" true
+
+d="$(new_case)"
+make_muse_fake "$d" 'printf "VERDICT: PASS\n"; exit 0'
+make_curl_fake "$d" 28
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18j: with no proxy configured the review runs" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "18j: and nothing is probed" "$([ -e "$d/curl-argv" ] && echo probed || echo none)" none
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

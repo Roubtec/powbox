@@ -11,8 +11,9 @@ The observations were made with Muse 1.4.20 in November 2026. Muse changes quick
 - **Logged out:** `muse usage` exits non-zero. Run `muse login` once from any container; the login lives on the shared `muse-config` volume.
 - **Allowance exhausted:** `muse usage` succeeds but shows the window or the weekly allowance at or near 100%. Reviews then fail with what `peer-review-run` reports as an authentication or usage/quota problem. Wait for the reset or raise the plan.
 - **No models served:** `muse usage` succeeds with allowance to spare, yet a bare `muse` exits with `failed to fetch model catalog: model catalog has no visible models`. With an explicit `--model`, Muse warns `model catalog has no visible models; continuing with model …` and the server then refuses every model with `does not exist or you lack access`, contributor variants included. Retrying with another model does not help. See the next section.
+- **Proxy unreachable:** Muse's settings name a forward proxy, and `peer-review-run` reports that it `could not reach api.meta.ai through Muse's configured proxy`, with curl's error. The helper probes the proxy before launching Muse because `muse exec` does not fail on a proxy that never answers; it retries for many minutes instead. Check that the proxy machine is up and that `curl -x <proxy> https://api.meta.ai/muse-code/config` answers from the container (an HTTP 401 there is fine). See the [tailnet proxy guide](tailnet-proxy-guide.md).
 
-A cheap end-to-end probe that separates all three is a one-word prompt, run from a scratch directory:
+A cheap end-to-end probe that separates the first three is a one-word prompt, run from a scratch directory:
 
 ```bash
 printf 'Reply with the single word: hello\n' > prompt.md

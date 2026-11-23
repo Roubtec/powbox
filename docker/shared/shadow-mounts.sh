@@ -32,10 +32,12 @@ mounted=0
 # Per-mount tmpfs size cap.  Each shadowed directory gets its own tmpfs with
 # this ceiling; tmpfs allocates lazily, so the cap bounds the worst case rather
 # than reserving memory up front.  When the limit is hit, pnpm install gets a
-# clear ENOSPC error rather than silently eating RAM.  The default is sized to
+# clear ENOSPC error rather than silently eating RAM.  The cap is sized to
 # hold several git worktrees sharing one .worktrees mount (each with its own
-# node_modules).  Override via SHADOW_TMPFS_SIZE (any value mount -o size= takes).
-TMPFS_SIZE="${SHADOW_TMPFS_SIZE:-2g}"
+# node_modules).  Deliberately not read from the environment: sudo resets the
+# caller's environment for this grant, and a value that reached the root-run
+# `mount -o` string would need validating as a size first (task 081b).
+TMPFS_SIZE=2g
 
 # warn_bind_broken <wt> <dst> <reason>
 #   Loud stderr diagnostic for the case where a persistent .worktrees volume was

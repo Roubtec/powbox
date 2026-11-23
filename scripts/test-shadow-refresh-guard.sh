@@ -12,6 +12,11 @@
 # detect-shadows.sh and sudo are shimmed on PATH so a guard regression is
 # caught as an attempted call instead of an actual mount.
 #
+# The sudo shim also refuses any request to preserve the caller's environment.
+# The real grant has no SETENV and no env_keep, so it refuses one whenever a
+# named variable is set in the session, and the caller then mounts nothing at
+# all (task 081b); the shim refuses unconditionally so the test needs no setup.
+#
 # Usage: scripts/test-shadow-refresh-guard.sh
 set -euo pipefail
 
@@ -39,6 +44,16 @@ mkdir -p "$SHIM_DIR"
 cat >"$SHIM_DIR/sudo" <<EOF
 #!/usr/bin/env bash
 echo "sudo \$*" >>"$CALL_LOG"
+for arg in "\$@"; do
+	case "\$arg" in
+	-E | --preserve-env | --preserve-env=*)
+		echo "sudo: sorry, you are not allowed to preserve the environment" >&2
+		exit 1
+		;;
+	-*) ;;
+	*) break ;;
+	esac
+done
 exit 0
 EOF
 
@@ -96,6 +111,25 @@ run_case "image-store writer role skips without mounting" skip POWBOX_IMAGE_STOR
 run_case "dir-mounted (both unset) still shadows" proceed POWBOX_UNRELATED=1
 run_case "self-hosted=0 still shadows" proceed POWBOX_SELF_HOSTED=0
 run_case "writer role spelled differently still shadows" proceed POWBOX_IMAGE_STORE_ROLE=reader
+
+# --- the caller's environment never rides along ------------------------------
+run_case "SHADOW_TMPFS_SIZE set in the session still shadows" proceed SHADOW_TMPFS_SIZE=4g
+
+# entrypoint-core.sh cannot run hermetically, so pin both callers statically:
+# the grant would refuse an env-preserving sudo there just as the shim does.
+ENTRYPOINT="$SCRIPT_DIR/../docker/shared/entrypoint-core.sh"
+env_sudo_re='sudo[^|;&]*(-E|--preserve-env)[^|;&]*shadow-mounts\.sh'
+if grep -Eq "$env_sudo_re" "$REFRESH" "$ENTRYPOINT"; then
+	echo "FAIL: a shadow-mounts.sh caller asks sudo to preserve the environment"
+	grep -En "$env_sudo_re" "$REFRESH" "$ENTRYPOINT"
+	fail=$((fail + 1))
+elif ! grep -q 'sudo /usr/local/bin/shadow-mounts.sh' "$ENTRYPOINT"; then
+	echo "FAIL: entrypoint-core.sh no longer calls 'sudo /usr/local/bin/shadow-mounts.sh' (update this check)"
+	fail=$((fail + 1))
+else
+	echo "ok: no shadow-mounts.sh caller asks sudo to preserve the environment"
+	pass=$((pass + 1))
+fi
 
 echo
 echo "passed: $pass  failed: $fail"

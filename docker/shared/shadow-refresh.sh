@@ -61,7 +61,7 @@ if [ ${#all_targets[@]} -eq 0 ]; then
 	exit 0
 fi
 
-sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${all_targets[@]}" || {
+sudo /usr/local/bin/shadow-mounts.sh "${all_targets[@]}" || {
 	status=$?
 	echo "shadow-refresh.sh: failed to mount shadow directories." >&2
 	echo "Hint: ensure the container has mount permissions (CAP_SYS_ADMIN in compose.shared.yml)." >&2

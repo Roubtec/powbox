@@ -670,7 +670,7 @@ shadow:
 
 These directories are gitignored and absent on a fresh checkout. `.claude/worktrees` and `.git/worktrees` are literal shadow paths, so they are auto-created and container-localized at startup — no manual `mkdir` or `shadow-refresh.sh` needed. (Literal paths under `.git/` are only auto-created when `.git` is a real directory — the normal main checkout. If the container's workspace is itself a *linked* worktree, where `.git` is a file pointing into the main repo, the `.git/worktrees` entry is skipped with a diagnostic instead of creating a bogus `.git/` tree.)
 
-**`.worktrees` is a volume, not tmpfs — and its git metadata rides along.** The launcher mounts the per-container `agent-wt-<agent>-<project>` ext4 volume at `.worktrees` (it also holds the pnpm store at `.worktrees/.pnpm-store`), so worktree `pnpm install` **hardlinks** from the store instead of copying — installs drop from a full ~425 MB–1.1 GB copy to tens of MB, with no shared 2 GB cap, and many worktrees install concurrently. The `.worktrees` line in `.powbox.yml` is then a harmless fallback (tmpfs only if launched without the volume). `.git/worktrees` is **bind-mounted from `.worktrees/.gitworktrees` inside that same volume**, so per-worktree git administrative metadata shares the working trees' durability: a linked worktree — including its uncommitted changes — survives a container stop/recreate, and `git status` still works after recycle, instead of the working dir surviving while its metadata (formerly tmpfs) was discarded. The bind stays container-local: it hides the host's own `.git/worktrees` and keeps container registrations off the host. Only `.claude/worktrees` (harness-native working trees) stays a tmpfs shadow under the `SHADOW_TMPFS_SIZE` cap (see [Configuration](#configuration)). Without the volume (the fallback launch) `.git/worktrees` falls back to tmpfs too.
+**`.worktrees` is a volume, not tmpfs — and its git metadata rides along.** The launcher mounts the per-container `agent-wt-<agent>-<project>` ext4 volume at `.worktrees` (it also holds the pnpm store at `.worktrees/.pnpm-store`), so worktree `pnpm install` **hardlinks** from the store instead of copying — installs drop from a full ~425 MB–1.1 GB copy to tens of MB, with no shared 2 GB cap, and many worktrees install concurrently. The `.worktrees` line in `.powbox.yml` is then a harmless fallback (tmpfs only if launched without the volume). `.git/worktrees` is **bind-mounted from `.worktrees/.gitworktrees` inside that same volume**, so per-worktree git administrative metadata shares the working trees' durability: a linked worktree — including its uncommitted changes — survives a container stop/recreate, and `git status` still works after recycle, instead of the working dir surviving while its metadata (formerly tmpfs) was discarded. The bind stays container-local: it hides the host's own `.git/worktrees` and keeps container registrations off the host. Only `.claude/worktrees` (harness-native working trees) stays a tmpfs shadow under the per-mount size cap (see [Configuration](#configuration)). Without the volume (the fallback launch) `.git/worktrees` falls back to tmpfs too.
 
 **Discipline.** Commit and push often. Uncommitted changes in a worktree now survive a container recycle (its metadata is durable), but only the common `.git` syncs to the **host** — so push committed work to the remote and `git pull` on the host to make it visible there.
 
@@ -712,11 +712,10 @@ Because those subpackage shadows come back **empty** after a restart while the p
 
 ### Configuration
 
-Each tmpfs mount is capped at **2 GB** by default.
+Each tmpfs mount is capped at **2 GB**.
 Because tmpfs allocates lazily, this ceiling bounds the worst case and does not reserve memory up front — an empty or lightly used mount costs almost nothing.
-Override the per-mount limit by exporting `SHADOW_TMPFS_SIZE` (any value accepted by `mount -o size=`, e.g. `4g`, `512m`) before launching the container.
-Both `shadow-mounts.sh` invocations (`entrypoint-core.sh` and `shadow-refresh.sh`) pass `--preserve-env=SHADOW_TMPFS_SIZE` to sudo so the override is honoured.
-If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error — raise the limit and re-run.
+There is no runtime override: `shadow-mounts.sh` runs as root through a sudo grant that passes none of the caller's environment, so it has no channel to receive one, and keeping it that way means no caller-supplied value reaches its root-run `mount -o` string.
+If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error; to raise the cap, edit `TMPFS_SIZE` in `docker/shared/shadow-mounts.sh` and rebuild the image.
 
 ### Security
 

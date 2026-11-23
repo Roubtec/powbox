@@ -360,7 +360,7 @@ if [ "${POWBOX_SELF_HOSTED:-}" != "1" ] && [ "${POWBOX_IMAGE_STORE_ROLE:-}" != "
 		_dir="${_dir%/}"
 		mapfile -t _targets < <(detect-shadows.sh "$_dir" 2> >(grep -Ex "$_shadow_stderr_allow" >&2 || true) || true)
 		if [ "${#_targets[@]}" -gt 0 ]; then
-			if sudo --preserve-env=SHADOW_TMPFS_SIZE /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
+			if sudo /usr/local/bin/shadow-mounts.sh "${_targets[@]}"; then
 				# The subpackage node_modules just (re)mounted above are ephemeral tmpfs:
 				# empty at every container start. The ROOT node_modules, however, is a
 				# persistent named volume, so it still carries pnpm's workspace-state

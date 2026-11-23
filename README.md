@@ -721,6 +721,7 @@ If a mount fills up, `pnpm install` will fail with a clear `ENOSPC` error; to ra
 
 `shadow-mounts.sh` is a root-owned, immutable script invoked via scoped sudo.
 It refuses to mount outside `/workspace/`.
+It reaches each target by walking down from `/workspace` one directory at a time and creates, chowns and mounts only the directory it holds, so a path component swapped for a symlink mid-run cannot redirect it outside the workspace (see [docs/entrypoint-and-runtime.md](docs/entrypoint-and-runtime.md)).
 tmpfs mounts are container-namespace-scoped and invisible to the host — not an escape vector.
 
 The container requires **`CAP_SYS_ADMIN`** (granted in `compose.shared.yml`) because Docker's default seccomp profile blocks the `mount` syscall without it.

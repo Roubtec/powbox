@@ -167,7 +167,7 @@ The last command prints host A's address, which is `100.a.b.c` below. If host A 
 
 Do not pass `--exit-node` or `--accept-routes` on host A for this setup. Neither is needed, and both change what host A's traffic does outside the tailnet.
 
-**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw`, first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. For this check, also allow TCP 9999 on `tailscale0` for a moment, so that only the tailnet policy can block it. Then start the listeners, one on the granted port and one on a port the policy denies. Both serve an empty temporary directory: `http.server` otherwise serves the directory it starts in, hidden files such as `.ssh/` included, to host A and to every device the member grant lets in. On host B, in one shell:
+**Check:** prove the policy with two throwaway listeners on host B. If host B runs its own firewall, such as `ufw` or `firewalld` (on by default on Fedora; Stage 4 shows its commands), first allow TCP 8888 inbound on the `tailscale0` interface only; the proxy in Stage 4 needs that too. For this check, also allow TCP 9999 on `tailscale0` for a moment, so that only the tailnet policy can block it. Then start the listeners, one on the granted port and one on a port the policy denies. Both serve an empty temporary directory: `http.server` otherwise serves the directory it starts in, hidden files such as `.ssh/` included, to host A and to every device the member grant lets in. On host B, in one shell:
 
 ```bash
 d="$(mktemp -d)"                                                  # empty, so no host files are served
@@ -194,9 +194,17 @@ Install tinyproxy from the distribution. On Debian and Ubuntu:
 sudo apt-get install tinyproxy
 ```
 
+On Fedora:
+
+```bash
+sudo dnf install tinyproxy
+```
+
+Fedora differs from Debian in three places below, each noted where it applies: its packaged configuration sets no log file, so tinyproxy logs to the systemd journal; it enables no `ConnectPort` line; and Fedora runs `firewalld` by default.
+
 The configuration below keeps tinyproxy's default regular-expression filter type, so it does not depend on the `FilterType` directive that newer releases add.
 
-Edit `/etc/tinyproxy/tinyproxy.conf`. Keep the packaged `User`, `Group`, `LogFile` and `PidFile` lines, delete the packaged `Allow 127.0.0.1` and `Allow ::1` lines, and make sure these lines are present. `ConnectPort 443` must be the only uncommented `ConnectPort` line: some packaged configurations also enable `ConnectPort 563`, and with no `ConnectPort` line at all, tinyproxy tunnels to any port.
+Edit `/etc/tinyproxy/tinyproxy.conf`. Keep the packaged `User` and `Group` lines, and the `LogFile` and `PidFile` lines where the package has them (Debian's does; Fedora's leaves both commented out, so leave them that way and read the journal instead). Delete the packaged `Allow 127.0.0.1` and `Allow ::1` lines, and make sure these lines are present. `ConnectPort 443` must be the only uncommented `ConnectPort` line: some packaged configurations also enable `ConnectPort 563`, and with no `ConnectPort` line at all, tinyproxy tunnels to any port. Fedora's configuration has both lines commented out, so there `ConnectPort 443` has to be added.
 
 ```text
 Port 8888
@@ -224,7 +232,7 @@ Then create `/etc/tinyproxy/filter` with one rule per line. The rules are POSIX 
 
 A request for a host given as a bare IP address is matched against that address, so with this filter no IP-addressed destination is reachable through the proxy. That includes the devices on your home LAN.
 
-`Listen` binds only an address that already exists, so tinyproxy fails to start if it comes up before Tailscale has assigned the address. Debian's unit does not restart on failure, so add a drop-in with `sudo systemctl edit tinyproxy`:
+`Listen` binds only an address that already exists, so tinyproxy fails to start if it comes up before Tailscale has assigned the address. Neither Debian's nor Fedora's unit restarts on failure, and Fedora's orders tinyproxy only after `network.target`, so add a drop-in with `sudo systemctl edit tinyproxy`:
 
 ```ini
 [Unit]
@@ -243,6 +251,25 @@ sudo systemctl enable tinyproxy
 sudo systemctl restart tinyproxy
 ```
 
+If it does not start, `sudo journalctl -u tinyproxy` says why. On Fedora, which runs SELinux in enforcing mode, also look for a denial with `sudo ausearch -m avc -ts recent`.
+
+On a host running `firewalld`, as Fedora does by default, the zone that covers `tailscale0` must accept TCP 8888. An interface without a zone of its own falls under the default zone. Find the zone and what it accepts:
+
+```bash
+sudo firewall-cmd --get-zone-of-interface=tailscale0   # "no zone" means the default zone
+sudo firewall-cmd --get-default-zone
+sudo firewall-cmd --zone=<zone> --list-all
+```
+
+Fedora Workstation's default zone, `FedoraWorkstation`, already accepts TCP and UDP ports 1025 to 65535, so 8888 needs no change there. In a zone that does not accept it, such as Fedora Server's `FedoraServer`, open it:
+
+```bash
+sudo firewall-cmd --permanent --zone=<zone> --add-port=8888/tcp
+sudo firewall-cmd --reload
+```
+
+`Listen` already keeps the proxy off the LAN, so the port being open in a zone that also covers the LAN exposes nothing there. Do not move `tailscale0` into a new zone just for the proxy: on a machine that also offers an exit node or subnet routes, a zone change affects that forwarded traffic too.
+
 **Check:** on host B, `sudo ss -ltnp | grep 8888` shows tinyproxy listening on `100.x.y.z:8888` and on no other address. Then, on host A:
 
 ```bash
@@ -254,7 +281,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -x http://100.x.y.z:8888 https://api.m
 curl -sS -o /dev/null -x http://100.x.y.z:8888 https://example.com/
 ```
 
-On host B, `/var/log/tinyproxy/tinyproxy.log` shows `Proxying refused on filtered domain "example.com"` for the second request. To check `Allow`, run the first request on host B itself: it also fails with a 403, and the log shows `Unauthorized connection from "100.x.y.z"`, because host B is not host A.
+On host B, tinyproxy's log (`/var/log/tinyproxy/tinyproxy.log` on Debian, `sudo journalctl -u tinyproxy` on Fedora) shows `Proxying refused on filtered domain "example.com"` for the second request. To check `Allow`, run the first request on host B itself: it also fails with a 403, and the log shows `Unauthorized connection from "100.x.y.z"`, because host B is not host A.
 
 tinyproxy reads the filter file only when it starts or reloads, so after every later edit of `/etc/tinyproxy/filter` run `sudo systemctl restart tinyproxy` on host B. A restart works whatever reload signal the packaged unit uses.
 
@@ -409,4 +436,4 @@ Each limit can be removed on its own, in any order:
 - **Powbox:** delete the line from `.powbox-egress`, stop running containers and relaunch them. Containers created afterwards carry the default policy again.
 - **Muse:** remove the `endpoint_transport` member from `~/.config/muse/settings.json`.
 - **Tailnet:** remove the `tag:powbox-host` grant, or remove host A from the tailnet on the **Machines** page.
-- **Proxy:** `sudo systemctl disable --now tinyproxy` on host B.
+- **Proxy:** `sudo systemctl disable --now tinyproxy` on host B, and close any firewall port you opened for it.

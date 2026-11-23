@@ -860,6 +860,21 @@ if [ "$(count mount)" = "0" ] && grep -qF "is a symlink or was swapped while bei
 else
 	ko "expected the swapped-component refusal and no mount; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
 fi
+# The tolerance is for a direct child only.  <ws>/proj swapped for a symlink to
+# <root>/CASEELSE/proj matches 'caseelse/proj' ignoring case, but its parent is
+# a different directory: a plain one node could make under the root itself.
+ws="$(reset_fixture caseelse)"
+mkdir -p "$ws/proj" "$WS_ROOT/CASEELSE/proj"
+RACE_DIR="$WORK_ROOT/race-caseelse"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj" RACE_DEST="$WS_ROOT/CASEELSE/proj" \
+	run_sut caseelse "$ws/proj/bin"
+if [ -e "$RACE_DIR/fired" ] && [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$WS_ROOT/CASEELSE/proj")" ] && grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "a case variant under another parent is refused, with nothing created or mounted"
+else
+	ko "expected the swapped-component refusal and no effect; log was: $(cat "$LOG"); stderr: $(cat "$ERR"); CASEELSE/proj holds: $(ls -A "$WS_ROOT/CASEELSE/proj")"
+fi
+RACE_DIR=""
 
 # ---------------------------------------------------------------------------
 echo "Test: a symlinked .worktrees is not followed for the durable bind, and says so"

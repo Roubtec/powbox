@@ -58,7 +58,8 @@ TMPFS_SIZE=2g
 #     direct child of the parent whose name differs only in case: on a
 #     case-insensitive host bind mount the kernel may report `Bin` for a
 #     requested `bin`, and a child of the held directory is inside it whatever
-#     its spelling.
+#     its spelling.  The case folding is the locale's: under C only ASCII
+#     letters fold, so a non-ASCII case variant is refused, the safe direction.
 #   * `mount --no-canonicalize`: by default util-linux rewrites "." back into an
 #     absolute path, which the kernel would walk again.
 #   * the first step, into /workspace/<slug>, must land on a mount root
@@ -87,9 +88,10 @@ enter_root() {
 #   creates anywhere but the held directory.  Sets $created to 1 when this call
 #   made it; a <name> that appears concurrently (a parallel run) is entered like
 #   any existing one.  Returns 1 when <name> cannot be created or entered (a
-#   file, say) and 2 when it is a symlink or was swapped while being entered;
-#   after either, the cwd is wherever the failed step left it and must not be
-#   acted on.
+#   file, say) and 2 when it is a symlink or was swapped while being entered,
+#   unless it landed on a direct child of the held directory whose name differs
+#   only in case (the tolerance above), which returns 0.  After 1 or 2 the cwd
+#   is wherever the failed step left it and must not be acted on.
 step_into() {
 	local cwd
 	created=0

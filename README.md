@@ -1112,12 +1112,13 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 21-suite set is `test-apt-get-wrapper.sh`,
+  routed to the smoke test. The current 22-suite set is `test-apt-get-wrapper.sh`,
   `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
   `test-egress-allow-list.sh`,
   `test-image-store-writer-gate.sh`, `test-launcher-tail-reread.sh`,
-  `test-layer-sets.sh`, `test-peer-review-run.sh`,
+  `test-layer-sets.sh`, `test-ownership-negative-control.sh`,
+  `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,
   `test-seed-marker-source.sh`,
   `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
@@ -1179,7 +1180,12 @@ workflows keep cost proportional to the change:
   once, against the `browser` image, because the Bash umbrella never invokes the
   PowerShell mirror and this runner is the only automated configuration where
   its Stage 6 mountpoint-ownership assertions have teeth (see
-  [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror"). What
+  [docs/smoke-tests.md](docs/smoke-tests.md) → "The PowerShell mirror").
+  Two last steps run `scripts/smoke-test-ownership-negative-control.sh` once
+  per Stage 6 driver: against a derived image whose `shadow-mounts.sh` no
+  longer chowns the mountpoint it creates, each driver's host-side ownership
+  assertion must fail, so that coverage is checked in both directions (see
+  [docs/smoke-tests.md](docs/smoke-tests.md) → "What each stage is for"). What
   triggers it is the workflow's `paths:` filter, which is the authoritative
   list; in summary, it covers the image's build inputs (`docker/**`,
   Dockerfiles, `compose*.yml`, `docker-bake.hcl`), the `build.*` entrypoints,

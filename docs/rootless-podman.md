@@ -85,6 +85,11 @@ A neat security property falls out of this: rootless Podman NATs nested
 containers' outbound traffic through *this* container's network namespace, so
 nested containers **inherit the egress firewall** (`init-firewall.sh`) — they
 reach the public internet but not your LAN/host, exactly like the agent itself.
+They inherit the user's egress exceptions (`.powbox-egress`, README "Egress
+Firewall") the same way, with no extra wiring: whatever the agent container may
+reach, its nested containers may reach too. The trust model is the README's
+accident-grade one: the exceptions are fixed at container creation, which stops
+a mistaken or casual widening, not a determined agent.
 
 The known ceiling (when to graduate to a full Ubuntu VM): GUI apps, phone
 emulators, or a non-headless browser. Track that separately.

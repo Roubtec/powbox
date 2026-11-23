@@ -573,6 +573,309 @@ function Write-Powbox-LocalConfigIgnoreWarning ([string]$Workspace) {
   }
 }
 
+# Egress exceptions: the gitignored .powbox-egress in the powbox checkout (see
+# .powbox-egress.example), applied to every container this checkout launches.
+# It is never read from a workspace: under -Isolated the launcher works on
+# arbitrary clones, and a committed file there must not be able to widen egress.
+# A malformed line is a hard error, since launching under a different policy than
+# the one written would be worse than not launching. Twin of launch-agent.sh's
+# powbox_egress_load and the grammar in docker/shared/egress-rules.sh (which the
+# bash launcher and the in-container firewall share); the two must agree on what
+# is valid, the canonical form, the blocked ranges and the hash, and
+# scripts/test-egress-allow-list.sh holds them to the same fixtures.
+$script:PowboxEgressBlockedV4 = @("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10")
+$script:PowboxEgressBlockedV6 = @("fc00::/7", "fe80::/10")
+
+# ASCII-only, like the bash side's `LC_ALL=C tr`: ToLowerInvariant would also fold
+# characters such as the Kelvin sign into ASCII letters.
+function ConvertTo-Powbox-AsciiLower ([string]$Value) {
+  return [regex]::Replace($Value, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
+}
+
+# Dotted quad, no leading zeros -> [int64], or $null.
+function ConvertFrom-Powbox-EgressV4 ([string]$Address) {
+  if ($Address -cnotmatch '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\z') { return $null }
+  [int64]$value = 0
+  foreach ($octet in $Address.Split('.')) {
+    if ($octet -cnotmatch '^(0|[1-9][0-9]*)\z') { return $null }
+    $n = [int64]$octet
+    if ($n -gt 255) { return $null }
+    $value = $value * 256 + $n
+  }
+  return $value
+}
+
+function Add-Powbox-EgressV6Groups ([string]$Text, [System.Collections.Generic.List[int64]]$Into) {
+  if ($Text -eq '') { return $true }
+  if ($Text.StartsWith(':', [StringComparison]::Ordinal) -or $Text.EndsWith(':', [StringComparison]::Ordinal)) { return $false }
+  foreach ($group in $Text.Split(':')) {
+    if ($group -cnotmatch '^[0-9a-f]{1,4}\z') { return $false }
+    $Into.Add([Convert]::ToInt64($group, 16))
+  }
+  return $true
+}
+
+# Colon-separated groups (lowercase hex) -> eight [int64] groups, or $null. One
+# `::` may stand for one or more zero groups; dotted-quad and zone forms are refused.
+function ConvertFrom-Powbox-EgressV6 ([string]$Address) {
+  if ($Address -cnotmatch '^[0-9a-f:]{2,39}\z') { return $null }
+  $groups = [System.Collections.Generic.List[int64]]::new()
+  $at = $Address.IndexOf('::', [StringComparison]::Ordinal)
+  if ($at -ge 0) {
+    $head = $Address.Substring(0, $at)
+    $tail = $Address.Substring($at + 2)
+    if ($tail.Contains('::')) { return $null }
+    $headGroups = [System.Collections.Generic.List[int64]]::new()
+    $tailGroups = [System.Collections.Generic.List[int64]]::new()
+    if (-not (Add-Powbox-EgressV6Groups $head $headGroups)) { return $null }
+    if (-not (Add-Powbox-EgressV6Groups $tail $tailGroups)) { return $null }
+    $fill = 8 - $headGroups.Count - $tailGroups.Count
+    if ($fill -lt 1) { return $null }
+    $groups.AddRange($headGroups)
+    for ($i = 0; $i -lt $fill; $i++) { $groups.Add(0) }
+    $groups.AddRange($tailGroups)
+  }
+  else {
+    if (-not (Add-Powbox-EgressV6Groups $Address $groups)) { return $null }
+    if ($groups.Count -ne 8) { return $null }
+  }
+  return , ([int64[]]$groups.ToArray())
+}
+
+# Validate one rule. Returns Rule (canonical "proto,address/prefix,port"), Family
+# (4 or 6), Prefix and the parsed address, or Error saying why it is invalid.
+function Test-Powbox-EgressRule ([string]$Proto, [string]$Destination, [string]$Port) {
+  $p = ConvertTo-Powbox-AsciiLower $Proto
+  $d = ConvertTo-Powbox-AsciiLower $Destination
+  $n = ConvertTo-Powbox-AsciiLower $Port
+  $fail = { param($why) [pscustomobject]@{ Rule = ""; Error = $why } }
+
+  # Regex and [string]::Equals with Ordinal, not -ceq: a culture-aware comparison
+  # ignores zero-width characters, so 'tcp' plus one would pass as 'tcp'.
+  if ($p -cnotmatch '^(tcp|udp)\z') { return (& $fail "protocol '$Proto' is not tcp or udp") }
+  if ($n -cnotmatch '^any\z') {
+    if ($n -cnotmatch '^[1-9][0-9]{0,4}\z' -or [int64]$n -gt 65535) {
+      return (& $fail "port '$Port' is not a number from 1 to 65535 or 'any'")
+    }
+  }
+
+  $slash = $d.IndexOf('/', [StringComparison]::Ordinal)
+  $address = $d
+  $prefixText = ""
+  if ($slash -ge 0) {
+    $address = $d.Substring(0, $slash)
+    $prefixText = $d.Substring($slash + 1)
+    if ($prefixText -cnotmatch '^(0|[1-9][0-9]{0,2})\z') {
+      return (& $fail "destination '$Destination' has an invalid prefix length")
+    }
+  }
+  $v4 = $null
+  $v6 = $null
+  if ($address.Contains(':')) {
+    $family = 6
+    $max = 128
+    $v6 = ConvertFrom-Powbox-EgressV6 $address
+    if ($null -eq $v6) { return (& $fail "destination '$Destination' is not an IPv6 address or CIDR") }
+  }
+  else {
+    $family = 4
+    $max = 32
+    $v4 = ConvertFrom-Powbox-EgressV4 $address
+    if ($null -eq $v4) { return (& $fail "destination '$Destination' is not an IPv4 address or CIDR") }
+  }
+  if ($prefixText.Length -eq 0) { $prefixText = "$max" }
+  $prefix = [int]$prefixText
+  if ($prefix -eq 0) { return (& $fail "destination '$Destination' is a /0, which would open every address; it is not allowed") }
+  if ($prefix -gt $max) { return (& $fail "destination '$Destination' has a prefix longer than /$max") }
+
+  # A set host bit would make iptables widen the rule to the whole network
+  # silently, which is rarely what was meant: refuse it rather than guess.
+  $hostBits = $false
+  if ($family -eq 4) {
+    $hostBits = ($v4 -band (([int64]1 -shl (32 - $prefix)) - 1)) -ne 0
+  }
+  else {
+    for ($i = 0; $i -lt 8; $i++) {
+      $start = $i * 16
+      if ($start -ge $prefix) { $bits = 16 }
+      elseif ($start + 16 -gt $prefix) { $bits = $start + 16 - $prefix }
+      else { continue }
+      if (($v6[$i] -band (([int64]1 -shl $bits) - 1)) -ne 0) { $hostBits = $true }
+    }
+  }
+  if ($hostBits) { return (& $fail "destination '$Destination' has host bits set beyond /$prefix") }
+
+  return [pscustomobject]@{
+    Rule = "$p,$address/$prefix,$n"; Error = ""; Family = $family; Prefix = $prefix; V4 = $v4; V6 = $v6
+  }
+}
+
+function Test-Powbox-EgressOverlap ([object]$Parsed, [string]$Range) {
+  $rangeSlash = $Range.IndexOf('/', [StringComparison]::Ordinal)
+  $rangePrefix = [int]($Range.Substring($rangeSlash + 1))
+  $rangeAddress = $Range.Substring(0, $rangeSlash)
+  $m = [Math]::Min($Parsed.Prefix, $rangePrefix)
+  if ($Parsed.Family -eq 4) {
+    $theirs = ConvertFrom-Powbox-EgressV4 $rangeAddress
+    return (($Parsed.V4 -shr (32 - $m)) -eq ($theirs -shr (32 - $m)))
+  }
+  $theirs = ConvertFrom-Powbox-EgressV6 $rangeAddress
+  for ($i = 0; $i -lt 8; $i++) {
+    $bits = $m - $i * 16
+    if ($bits -le 0) { break }
+    if ($bits -gt 16) { $bits = 16 }
+    if (($Parsed.V6[$i] -shr (16 - $bits)) -ne ($theirs[$i] -shr (16 - $bits))) { return $false }
+  }
+  return $true
+}
+
+# "" for a rule that opens part of a blocked range, "outside" for one that touches
+# no blocked range (the default already allows it), or "broad <range>" for one
+# covering at least half of a blocked range.
+function Get-Powbox-EgressNote ([object]$Parsed) {
+  $ranges = if ($Parsed.Family -eq 4) { $script:PowboxEgressBlockedV4 } else { $script:PowboxEgressBlockedV6 }
+  $overlapped = $false
+  foreach ($range in $ranges) {
+    if (Test-Powbox-EgressOverlap $Parsed $range) {
+      $overlapped = $true
+      if ($Parsed.Prefix -le ([int]($range.Substring($range.IndexOf('/', [StringComparison]::Ordinal) + 1)) + 1)) { return "broad $range" }
+    }
+  }
+  if (-not $overlapped) { return "outside" }
+  return ""
+}
+
+# Rules: the canonical, sorted, deduplicated rules joined by `;` (the
+# POWBOX_EGRESS_ALLOW value: no spaces or quotes, so it survives native-argument
+# passing in Windows PowerShell 5.1); Hash: its SHA-256. Both are "" with no rules.
+function Read-Powbox-EgressRules ([string]$File) {
+  $none = [pscustomobject]@{ Rules = ""; Hash = "" }
+  # One path lookup decides whether the file is there, so its name matches as
+  # the file system matches names: case-insensitively on a default Windows or
+  # macOS volume, exactly on Linux, as launch-agent.sh's [ -e ] and [ -L ] do.
+  # File.GetAttributes looks a final symbolic link up without needing its
+  # target: on Windows (PowerShell 5.1 and pwsh 7) GetFileAttributesEx returns
+  # the link's own attributes, and pwsh 7 elsewhere uses lstat, taking only the
+  # Directory bit from a target that exists. So a link to a missing file is
+  # found here, where Windows PowerShell 5.1's Test-Path would report it absent
+  # and launch with no rules, and a link to a directory is rejected below, as
+  # launch-agent.sh's [ -f ] rejects it. A Windows directory link or junction
+  # carries the Directory bit itself, so a dangling one is rejected there too,
+  # as not a regular file rather than as a link to a missing file.
+  try { $attributes = [System.IO.File]::GetAttributes($File) }
+  catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $none }
+  if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+    Write-Error "$File is not a regular file."
+    exit 1
+  }
+  # Opening follows the link: a missing target is the error launch-agent.sh
+  # gives, and any other failure (a link loop, access denied) ends the launch
+  # too. A named pipe on Linux or macOS is not told apart from a file here, so
+  # opening it waits for a writer, where launch-agent.sh rejects it outright.
+  try { $bytes = [System.IO.File]::ReadAllBytes($File) }
+  catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      Write-Error "$File is a symbolic link to a missing file."
+    }
+    else {
+      Write-Error "$File disappeared while it was being read."
+    }
+    exit 1
+  }
+  catch {
+    Write-Error "$File cannot be read: $($_.Exception.GetBaseException().Message)"
+    exit 1
+  }
+  $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+  # Ordinal checks throughout: a culture-aware StartsWith treats U+FEFF as ignorable
+  # and matches it at the start of any text.
+  if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+  $rules = [System.Collections.Generic.List[string]]::new()
+  $lineNo = 0
+  foreach ($raw in $text.Split("`n")) {
+    $lineNo++
+    # Anywhere on the line, comment included, as launch-agent.sh rejects it.
+    if ($raw.IndexOf([char]0) -ge 0) {
+      Write-Error "$File line ${lineNo}: holds a NUL byte."
+      exit 1
+    }
+    $line = $raw
+    $hash = $line.IndexOf('#', [StringComparison]::Ordinal)
+    if ($hash -ge 0) { $line = $line.Substring(0, $hash) }
+    if ($line.EndsWith("`r", [StringComparison]::Ordinal)) { $line = $line.Substring(0, $line.Length - 1) }
+    $line = $line.Trim([char[]]@(' ', "`t"))
+    if ($line.Length -eq 0) { continue }
+    $fields = @($line -split '[ \t]+')
+    if ($fields.Count -ne 3) {
+      Write-Error "$File line ${lineNo}: expected '<proto> <destination> <port>'."
+      exit 1
+    }
+    $parsed = Test-Powbox-EgressRule -Proto $fields[0] -Destination $fields[1] -Port $fields[2]
+    if ($parsed.Error -ne "") {
+      Write-Error "$File line ${lineNo}: $($parsed.Error)."
+      exit 1
+    }
+    $note = Get-Powbox-EgressNote $parsed
+    if ($note -eq "outside") {
+      Write-Powbox-Warning "$File line ${lineNo}: $($fields[1]) is outside every blocked range; the default policy already allows it, so this rule changes nothing."
+    }
+    elseif ($note.StartsWith("broad ", [StringComparison]::Ordinal)) {
+      Write-Powbox-Warning "$File line ${lineNo}: $($fields[1]) reopens at least half of the blocked range $($note.Substring(6)); check that this is intended."
+    }
+    $rules.Add($parsed.Rule)
+  }
+  if ($rules.Count -eq 0) { return $none }
+  $sorted = $rules.ToArray()
+  [array]::Sort($sorted, [StringComparer]::Ordinal)
+  $unique = [System.Collections.Generic.List[string]]::new()
+  foreach ($rule in $sorted) {
+    if ($unique.Count -eq 0 -or -not [string]::Equals($unique[$unique.Count - 1], $rule, [StringComparison]::Ordinal)) { $unique.Add($rule) }
+  }
+  $joined = $unique -join ';'
+  return [pscustomobject]@{
+    Rules = $joined
+    Hash  = (Get-Powbox-HashHexFromByteArray ([System.Text.Encoding]::UTF8.GetBytes($joined)))
+  }
+}
+
+# Before an existing container is reused, compare its powbox.egress-hash label with
+# this launch's hash (no label and no rules both mean "none", so a container from
+# before this feature is not recreated needlessly). A stopped mismatch is removed
+# for recreation ("removed"), or refused under -Resume, which restarts the
+# container as it is. A running one is refused rather than attached with a
+# warning: attaching would keep a removed exception open in a session the user
+# believes is back on the default policy. Returns "keep" or "removed".
+function Confirm-Powbox-EgressReuse ([string]$ContainerName, [bool]$Running, [string]$DesiredHash, [string]$Mode) {
+  $existing = docker container inspect --format '{{with .Config.Labels}}{{with index . `powbox.egress-hash`}}{{.}}{{end}}{{end}}' $ContainerName 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Cannot read the egress exceptions container $ContainerName was created with."
+    exit 1
+  }
+  $existing = (@($existing) -join "`n").TrimEnd("`r", "`n")
+  if ([string]::Equals($existing, $DesiredHash, [StringComparison]::Ordinal)) { return "keep" }
+  if ($Running) {
+    Write-Error "Container $ContainerName is running with different egress exceptions than .powbox-egress now lists. Stop the container first, then relaunch to apply them."
+    exit 1
+  }
+  if ($Mode -eq "resume") {
+    Write-Error "Container $ContainerName was created with different egress exceptions than .powbox-egress now lists, and -Resume would restart it unchanged. Relaunch without -Resume to recreate it."
+    exit 1
+  }
+  $was = if ($existing -eq "") { "none" } else { $existing }
+  $now = if ($DesiredHash -eq "") { "none" } else { $DesiredHash }
+  Write-Host "Egress exceptions changed (was '$was', now '$now'); recreating container."
+  docker rm $ContainerName *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker container inspect $ContainerName *> $null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Error "Failed to remove container $ContainerName after detecting an egress-exception change."
+      exit 1
+    }
+  }
+  $global:LASTEXITCODE = 0
+  return "removed"
+}
+
 # Canonical "host/owner/repo" key for a repo spec (lowercased, .git stripped, any
 # userinfo removed) so different repos sharing a basename get distinct identities,
 # while the SAME repo expressed different ways (owner/repo slug, https URL,
@@ -889,6 +1192,20 @@ if ($env:POWBOX_PRINT_IDENTITY -eq "1") {
   exit 0
 }
 
+$rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+$egress = Read-Powbox-EgressRules (Join-Path $rootDir ".powbox-egress")
+$egressRules = $egress.Rules
+$egressHash = $egress.Hash
+
+# Internal/testing hook: print the normalized egress exceptions and exit before
+# touching Docker.
+if ($env:POWBOX_PRINT_EGRESS -eq "1") {
+  Write-Output "EGRESS_RULES=$egressRules"
+  Write-Output "EGRESS_HASH=$egressHash"
+  exit 0
+}
+
 $ctxConfigPresent = $false
 if (-not $Isolated) {
   Write-Powbox-LocalConfigIgnoreWarning $resolvedProject
@@ -922,7 +1239,6 @@ if ($env:POWBOX_PRINT_CTX -eq "1") {
   exit 0
 }
 
-$rootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $composeShared = Join-Path $rootDir "compose.shared.yml"
 $composeOverlay = Join-Path $rootDir "compose.agent.yml"
 $composeFuse = Join-Path $rootDir "compose.fuse.yml"
@@ -991,6 +1307,7 @@ if ($Resume) {
     Write-Error "No persisted container named $containerName was found. Start it once normally, or with -Persist if you want to be explicit."
     exit 1
   }
+  $null = Confirm-Powbox-EgressReuse -ContainerName $containerName -Running $containerRunning -DesiredHash $egressHash -Mode "resume"
   if (@($Ctx).Count -gt 0) {
     Write-Host "Note: -Ctx is ignored with -Resume; container will resume with its existing mounts. Omit -Resume to apply ctx changes." -ForegroundColor Yellow
   }
@@ -1067,6 +1384,15 @@ if ($Isolated -and $Ref -ne "" -and -not $Reclone) {
   docker volume inspect $workspaceVolume *> $null
   if ($LASTEXITCODE -eq 0) {
     Write-Host "Note: -Ref '$Ref' applies only to a fresh clone; $containerName keeps the existing checkout in its workspace volume. Use -Reclone to re-clone at this ref, or switch branches inside the container." -ForegroundColor Yellow
+  }
+}
+
+# Egress exceptions are frozen at creation too. Unlike the ctx check below, this
+# runs on every reuse, so a deleted .powbox-egress cannot leave an exception live.
+# Every later check can only recreate, never bring a container back.
+if (-not $Volatile -and $containerExists) {
+  if ((Confirm-Powbox-EgressReuse -ContainerName $containerName -Running $containerRunning -DesiredHash $egressHash -Mode "reuse") -eq "removed") {
+    $containerExists = $false
   }
 }
 
@@ -1656,6 +1982,11 @@ if ((",$podmanDevices," -like "*,fuse,*") -and (Test-PowboxImageStoreWriterWante
 $envArgs = @("--name", $containerName, "--label", "powbox.continue=$continueLabel", "--label", "powbox.podman-devices=$podmanDevices", "-e", "CONTAINER_NAME=$containerName", "-e", "PRIMARY_AGENT=$Agent")
 if ($ctxDesiredPresent) {
   $envArgs += @("--label", "powbox.ctx-hash=$ctxHash")
+}
+# No rules: neither label nor variable, which is what a container from before
+# egress exceptions carries too.
+if ($egressRules -ne "") {
+  $envArgs += @("--label", "powbox.egress-hash=$egressHash", "-e", "POWBOX_EGRESS_ALLOW=$egressRules")
 }
 # Point pnpm at the co-located store only when this project actually mounts the
 # worktrees volume the store lives in (dir-mounted JS/powbox project) or in

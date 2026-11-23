@@ -224,6 +224,7 @@ RUN TYPST_VERSION=0.13.1 \
 COPY --chmod=755 \
     docker/shared/cid \
     docker/shared/init-firewall.sh \
+    docker/shared/egress-rules.sh \
     docker/shared/shadow-mounts.sh \
     docker/shared/detect-shadows.sh \
     docker/shared/shadow-refresh.sh \

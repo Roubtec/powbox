@@ -93,7 +93,9 @@ Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store
 
 ## Network
 
-Private/local networks (10.x, 172.16.x, 192.168.x, link-local) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+Private/local networks (10.x, 172.16.x, 192.168.x, link-local, IPv6 unique-local) and CGNAT (100.64.0.0/10, which includes Tailscale addresses) are blocked by the container firewall. Public internet is fully open for npm, GitHub, web research, and API calls.
+
+The user may have opened a few exceptions to that block. `$POWBOX_EGRESS_ALLOW` lists them as `proto,destination,port` entries separated by `;`, and is unset when there are none. They are fixed when the container is created: re-running `sudo init-firewall.sh` re-applies the same set and cannot add to it. That guards against an accidental widening, not a determined one, so treat the list as the user's policy: when you need another destination, ask the user to add it to `.powbox-egress` rather than working around the firewall.
 
 ## Installing additional packages
 

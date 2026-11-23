@@ -31,9 +31,9 @@ What decides the filter appears to be the network a request comes from, not the 
 - A fresh `muse login` approved through a VPN exiting in the VPS's own country changed nothing, and the residential network is in a different country with no visible difference in policy.
 - Codex and Claude run without trouble on that same VPS, so nothing powbox does on the network side is involved.
 
-The most likely explanation is that datacenter address space is filtered. That is unconfirmed and unpublished; Meta support could clarify it for a specific account, given the request IDs Muse prints on failing runs. Expect GitHub-hosted Actions runners to be filtered too, since they also run on datacenter networks.
+Routing only Muse's traffic through a residential connection later confirmed that the network decides it. On 2026-11-23, with Muse 1.4.25, the same login in the same VPS container got no models over the VPS's own connection and was served normally through a forward proxy on a home machine. Why the network matters is still unpublished. Filtering of datacenter address space remains the most likely explanation, and Meta support could clarify it for a specific account, given the request IDs Muse prints on failing runs. Expect GitHub-hosted Actions runners to be filtered too, since they also run on datacenter networks.
 
-Two ways around it were considered. One is sending only Muse's traffic out through a residential connection the user owns, using the configurable egress exceptions and the [tailnet proxy guide](tailnet-proxy-guide.md). The other is running Muse reviews from a self-hosted runner on a residential network; that plan was drafted but is kept outside `main` while the proxy route is tried.
+The way around it that works is to send only Muse's model traffic out through a residential connection you own: a forward proxy on a home machine, reached over a tailnet, opened in powbox with an egress exception and set as Muse's `endpoint_transport.proxy`. The [tailnet proxy guide](tailnet-proxy-guide.md) walks through the setup. Running Muse on a machine that sits on a residential network, such as a self-hosted Actions runner, would also avoid the filter, but it needs a dedicated machine for something the proxy already solves.
 
 ## Settings and contributor mode
 

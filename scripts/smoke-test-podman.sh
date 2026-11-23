@@ -138,6 +138,11 @@ info=$(podman info --format "{{.Host.Security.Rootless}}|{{.Host.CgroupManager}}
 # firewall driver; without it every bridge network / published port dies at start.
 grep -Eqr "firewall_driver.*iptables" /etc/containers/containers.conf.d/ || fail "firewall_driver=iptables drop-in missing (netavark would try nft)"
 
+# The drop-in routes conmon through the wrapper that keeps its `oom` markers out
+# of the directory a container was started from (conmon-wrapper.sh).
+conmon_path=$(podman info --format "{{.Host.Conmon.Path}}" 2>/dev/null) || fail "podman info (conmon path) failed"
+[ "$conmon_path" = /usr/local/libexec/powbox-conmon ] || fail "podman uses conmon [$conmon_path], want the /usr/local/libexec/powbox-conmon wrapper"
+
 # The compose subcommand (the reason for the trixie/Podman-5 base bump; absent on
 # Podman < 4.7) must exist, or "podman compose" / "docker compose" both break.
 podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missing (Podman < 4.7?)"
@@ -189,6 +194,15 @@ trap cleanup EXIT
 cid=$(podman run --quiet -d --network smoke-net -p 127.0.0.1:8099:8099 docker.io/library/alpine sleep 30) || fail "podman run -d -p on a bridge network failed (netavark firewall_driver / route_localnet regression?)"
 sleep 2
 podman ps --filter "id=$cid" --filter status=running -q | grep -q . || fail "published-port container did not stay running: $(podman logs "$cid" 2>&1 | tail -3)"
+
+# A running conmon sits in the persist directory, not in the directory of the shell
+# that started it, so an `oom` marker it writes cannot land in a checkout.
+conmon_pid=$(podman inspect --format "{{.State.ConmonPid}}" "$cid") || fail "podman inspect (conmon pid) failed"
+conmon_cwd=$(readlink "/proc/$conmon_pid/cwd") || fail "cannot read the cwd of conmon pid $conmon_pid"
+case "$conmon_cwd" in
+*/persist/"$cid") ;;
+*) fail "conmon runs in [$conmon_cwd], want the container persist directory (conmon wrapper not applied?)" ;;
+esac
 
 # 4. Compose exec-form health check. Motivating regression (Kalm2 SPIRE overlay):
 # podman-compose left a distroless exec-form health check stuck at "starting". The

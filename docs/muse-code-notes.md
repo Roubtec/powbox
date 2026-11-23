@@ -11,8 +11,9 @@ The observations were made with Muse 1.4.20 in November 2026. Muse changes quick
 - **Logged out:** `muse usage` exits non-zero. Run `muse login` once from any container; the login lives on the shared `muse-config` volume.
 - **Allowance exhausted:** `muse usage` succeeds but shows the window or the weekly allowance at or near 100%. Reviews then fail with what `peer-review-run` reports as an authentication or usage/quota problem. Wait for the reset or raise the plan.
 - **No models served:** `muse usage` succeeds with allowance to spare, yet a bare `muse` exits with `failed to fetch model catalog: model catalog has no visible models`. With an explicit `--model`, Muse warns `model catalog has no visible models; continuing with model …` and the server then refuses every model with `does not exist or you lack access`, contributor variants included. Retrying with another model does not help. See the next section.
+- **Proxy unreachable:** Muse's settings name a forward proxy, and `peer-review-run` reports that it `could not reach api.meta.ai through Muse's configured proxy`, with curl's error. The helper probes the proxy before launching Muse because `muse exec` does not fail on a proxy that never answers; it retries for many minutes instead. Check that the proxy machine is up and that `curl -x <proxy> https://api.meta.ai/muse-code/config` answers from the container (an HTTP 401 there is fine). See the [tailnet proxy guide](tailnet-proxy-guide.md).
 
-A cheap end-to-end probe that separates all three is a one-word prompt, run from a scratch directory:
+A cheap end-to-end probe that separates the first three is a one-word prompt, run from a scratch directory:
 
 ```bash
 printf 'Reply with the single word: hello\n' > prompt.md
@@ -31,9 +32,9 @@ What decides the filter appears to be the network a request comes from, not the 
 - A fresh `muse login` approved through a VPN exiting in the VPS's own country changed nothing, and the residential network is in a different country with no visible difference in policy.
 - Codex and Claude run without trouble on that same VPS, so nothing powbox does on the network side is involved.
 
-The most likely explanation is that datacenter address space is filtered. That is unconfirmed and unpublished; Meta support could clarify it for a specific account, given the request IDs Muse prints on failing runs. Expect GitHub-hosted Actions runners to be filtered too, since they also run on datacenter networks.
+Routing only Muse's traffic through a residential connection later confirmed that the network decides it. On 2026-11-23, with Muse 1.4.25, the same login in the same VPS container got no models over the VPS's own connection and was served normally through a forward proxy on a home machine. Why the network matters is still unpublished. Filtering of datacenter address space remains the most likely explanation, and Meta support could clarify it for a specific account, given the request IDs Muse prints on failing runs. Expect GitHub-hosted Actions runners to be filtered too, since they also run on datacenter networks.
 
-Two ways around it were considered. One is sending only Muse's traffic out through a residential connection the user owns, using the configurable egress exceptions and the [tailnet proxy guide](tailnet-proxy-guide.md). The other is running Muse reviews from a self-hosted runner on a residential network; that plan was drafted but is kept outside `main` while the proxy route is tried.
+The way around it that works is to send only Muse's model traffic out through a residential connection you own: a forward proxy on a home machine, reached over a tailnet, opened in powbox with an egress exception and set as Muse's `endpoint_transport.proxy`. The [tailnet proxy guide](tailnet-proxy-guide.md) walks through the setup. Running Muse on a machine that sits on a residential network, such as a self-hosted Actions runner, would also avoid the filter, but it needs a dedicated machine for something the proxy already solves.
 
 ## Settings and contributor mode
 

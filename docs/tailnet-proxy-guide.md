@@ -390,7 +390,7 @@ If the file does not exist yet, create it with `{"schema_version": 1, "endpoint_
 Two limits of what was confirmed:
 
 - The setting belongs to Muse's model-endpoint transport. Whether other Muse requests, such as `muse login` or `muse usage`, also use it was not established. The probe above is what shows whether reviews work.
-- With the setting persisted, Muse fails in any container on host A that cannot reach the proxy: one created before the `.powbox-egress` rule, one on an older base image, or any container while host B is offline. `peer-review-run` then reports Muse as unavailable. Remove the setting to go back to direct connections.
+- With the setting persisted, Muse cannot work in any container on host A that cannot reach the proxy: one created before the `.powbox-egress` rule, one on an older base image, or any container while host B is offline. Muse itself does not fail fast there. A proxy that refuses the connection ends the run quickly, but one that never answers, such as an offline host B, leaves `muse exec` retrying for many minutes on its cached model catalog. `peer-review-run` therefore probes the configured proxy before it launches Muse, and reports Muse as unavailable within about ten seconds when no request to `api.meta.ai` gets an answer through the proxy. Remove the setting to go back to direct connections.
 
 ## Native Linux: the host reaches the proxy but containers do not
 

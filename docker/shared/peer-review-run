@@ -183,7 +183,10 @@
 # exports MUSE_CONTRIBUTOR_MODE=0 or =1 for the run. A logged-in account whose
 # model catalog comes back empty ("model catalog has no visible models", seen
 # from some networks) can run no model at all, so it is `unavailable` with no
-# model-fallback attempt.
+# model-fallback attempt. When Muse's settings name a forward proxy
+# (`endpoint_transport.proxy`), the proxy is probed before Muse is launched, and
+# an unreachable one is `unavailable` within seconds: Muse itself does not fail
+# on it, but retries its connections for many minutes on a cached catalog.
 #
 # This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
 # and no peer outcome is required for publication.
@@ -199,7 +202,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,189p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,192p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -1571,6 +1574,42 @@ build_cmd_muse() {
 	LIVE=0
 }
 
+# The forward proxy Muse's settings file names (`endpoint_transport.proxy`, the
+# setting the tailnet proxy guide uses), or nothing. Muse honors
+# XDG_CONFIG_HOME for that file, so the same path is resolved here.
+muse_configured_proxy() {
+	local settings="${XDG_CONFIG_HOME:-${HOME:-}/.config}/muse/settings.json"
+	[ -r "$settings" ] || return 0
+	jq -r '.endpoint_transport.proxy // empty | strings' "$settings" 2>/dev/null || true
+}
+
+# 0 when a request to Muse's API got an HTTP answer through the proxy: the probe
+# sends no credentials, so a 401 is the expected reply. Anything else fails: a
+# proxy that cannot be reached or refuses the CONNECT, but also a TLS or
+# transport error beyond it, which Muse would hit as well; curl's own message is left in MUSE_PROXY_ERR, redacted like the URL because curl can echo
+# the proxy string back. Capped at min(--timeout, 10s). `-q` (which must come
+# first) skips any ~/.curlrc, whose `fail` would turn the expected 401 into a
+# false failure, and `--noproxy ''` stops NO_PROXY from sending the probe
+# around the proxy it is testing. Without curl the probe is skipped and the
+# review runs as it would have without it.
+MUSE_PROXY_ERR=""
+muse_proxy_reachable() {
+	local proxy="$1" budget err
+	command -v curl >/dev/null 2>&1 || return 0
+	budget=$(awk -v t="$TIMEOUT" 'BEGIN{print (t < 10) ? t : 10}')
+	err="$(curl -q -sS -o /dev/null --connect-timeout 5 --max-time "$budget" \
+		--noproxy '' -x "$proxy" https://api.meta.ai/muse-code/config 2>&1)" && return 0
+	err="${err//"$proxy"/"$(redact_proxy "$proxy")"}"
+	MUSE_PROXY_ERR="$(redact_proxy "$err" | tr '\n' ' ' | sed 's/ *$//')"
+	return 1
+}
+
+# Text fit for the result's reason: the user:password part of any URL in it is
+# dropped.
+redact_proxy() {
+	printf '%s' "$1" | sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]*@#\1#g'
+}
+
 # --- progress forwarding -----------------------------------------------------
 # Forward newly-appended provider stdout lines to STDERR as normalized progress
 # events, without a second supervised process: the poll loop calls this each
@@ -1889,14 +1928,30 @@ run_attempt() {
 		return 0
 	fi
 
-	# Start the attempt clock BEFORE build_cmd. Both adapters run the bounded
-	# provider help capability probe (once per run, on the first
+	# Muse behind a forward proxy: probe the proxy before launching. One that
+	# never answers (its host is offline, or a tailnet peer is down) does not
+	# make `muse exec` fail; it retries every connection for many minutes, so
+	# the review would only end as a `timeout` after the whole budget, and then
+	# be retried. The probe turns that into a prompt `unavailable`.
+	#
+	# Start the attempt clock BEFORE that probe and build_cmd. Both adapters run
+	# the bounded provider help capability probe (once per run, on the first
 	# attempt) — real wall time the caller waited. elapsedSeconds is the contract's
-	# TOTAL wall time across all attempts, so the probe must be COUNTED; timing from
-	# after build_cmd would silently drop it (a slow-but-successful probe made the
+	# TOTAL wall time across all attempts, so the probes must be COUNTED; timing from
+	# after build_cmd would silently drop them (a slow-but-successful probe made the
 	# reported elapsedSeconds far shorter than the real wall time).
-	local start end child pgid rc timed_out=0 leader_start
+	local start end child pgid rc timed_out=0 leader_start muse_proxy
 	start=$(date +%s.%N)
+	if [ "$PROVIDER" = muse ] && muse_proxy="$(muse_configured_proxy)" && [ -n "$muse_proxy" ]; then
+		if ! muse_proxy_reachable "$muse_proxy"; then
+			ATT_OUTCOME=unavailable
+			ATT_ELAPSED=$(awk -v a="$(date +%s.%N)" -v b="$start" 'BEGIN{printf "%.3f", (a-b)}')
+			ATT_REASON="could not reach api.meta.ai through Muse's configured proxy $(redact_proxy "$muse_proxy"): ${MUSE_PROXY_ERR:-no response}"
+			write_meta "$dir" "$attempt_no" "unavailable-proxy"
+			return 0
+		fi
+	fi
+
 	case "$PROVIDER" in
 	claude) build_cmd_claude ;;
 	codex) build_cmd_codex "$dir" ;;

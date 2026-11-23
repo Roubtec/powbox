@@ -8,6 +8,8 @@ We want a higher concurrency ceiling to be a **powbox image default**, seeded no
 
 ## Findings (Codex 0.144.1, verified against the shipped binary)
 
+Deferred note: Branch `task/023-codex-concurrency-seed` implements this already. It has been left unmerged because the guidance on Codex best-practices is actively changing. Revisit when the guidance settles and the benefits of seeding a higher concurrency ceiling are clear.
+
 The build ships **two** mutually exclusive multi-agent subsystems:
 
 | | v1 — `[agents]` | v2 — `features.multi_agent_v2` |
@@ -23,10 +25,12 @@ Decisive constraints:
   `agents.max_threads cannot be set when features.multi_agent_v2 is enabled`.
   So a config may set the v1 `[agents]` block **or** enable v2 — never both, or Codex refuses to launch.
 - **Enabling v2 is a single additive line:** `codex features enable multi_agent_v2` writes exactly
+
   ```toml
   [features]
   multi_agent_v2 = true
   ```
+
   which validates clean and preserves the rest of the config (verified by diffing against a copy of a real `config.toml`). v2 then rides its built-in defaults (≥8 threads) with no tuning keys required.
 - **Forward-compat risk for the v1 seed:** if a future Codex flips `multi_agent_v2` on-by-default, any baked `[agents]` block becomes a hard startup error via the exclusion above. The v1 option is only safe while v2 stays opt-in.
 - **v2 is still "under development":** enabling it bakes a pre-release feature; Codex prints an unstable-feature warning at start unless `suppress_unstable_features_warning = true` is also set.

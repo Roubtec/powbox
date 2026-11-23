@@ -396,6 +396,8 @@ cp .powbox-egress.example .powbox-egress
 echo 'tcp 100.101.102.103 3128' >> .powbox-egress
 ```
 
+For the tailnet case end to end, see [docs/tailnet-proxy-guide.md](docs/tailnet-proxy-guide.md). It takes containers on a remote host to one forward-proxy port on a home machine, with Tailscale on the host, a tailnet policy that grants that one port, and a tinyproxy filter that forwards only to chosen destinations. It also shows where each limit is enforced, and covers host VPNs and Docker Desktop.
+
 Each line is `<proto> <destination> <port>`, separated by whitespace, like a hosts file. `proto` is `tcp` or `udp`; `destination` is an IPv4 or IPv6 address (one host) or a CIDR whose host bits are zero; `port` is one port number or `any`, so several ports on one host take several lines. `#` starts a comment, and blank lines are ignored; a UTF-8 BOM and CRLF line endings are accepted. Hostnames, ICMP, port ranges, and IPv6 written with an embedded dotted quad or a zone (`%eth0`) are not supported.
 
 A malformed line stops the launch with a message that names the file and line, since launching with a different policy than the one written would be worse than not launching; a `/0` is refused outright. A rule that looks like a mistake rather than a policy warns and is kept: a destination outside every blocked range (the default already allows it, so the rule does nothing), or one that reopens at least half of a blocked range.

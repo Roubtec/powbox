@@ -43,6 +43,8 @@ name: Native Linux CI - Tier 1 (image build + smoke)
 # PowerShell Stage 6 driver directly, because commands/smoke-test.sh never
 # invokes the .ps1 mirror and this runner is the only automated place where its
 # mountpoint-ownership assertions are not vacuous. See that step's own comment.
+# Two final steps run a negative control against both Stage 6 drivers, proving
+# those assertions go red when shadow-mounts.sh stops chowning the mountpoint.
 #
 # NOTE (branch protection): Tier 1 intentionally does not run on every PR — it
 # is path-gated, base-branch-gated (only PRs targeting main, see `on:` below),
@@ -515,3 +517,20 @@ jobs:
             exit 1
           fi
           echo "PowerShell Stage 6 driver: all 3 mountpoint-ownership assertions ran with real teeth."
+
+      # Negative control for the two Stage 6 runs above (task 053c): they prove
+      # the mountpoint-ownership assertions PASS, these prove they can FAIL. The
+      # harness builds a derived image whose shadow-mounts.sh skips only the
+      # mountpoint's own chown, runs one unchanged driver against it, and passes
+      # only when that driver's host-side ownership assertion is what went red,
+      # after Container A's intermediate-directory check passed. Both drivers,
+      # because each implements those assertions natively, so a blindness in
+      # one would not show in the other. They run here because this runner is
+      # where the assertions have teeth; the harness's own teeth probe makes
+      # any other outcome exit 2, which fails the step. The derived image is
+      # removed when each step ends, so no later step can pick it up.
+      - name: Negative control - Bash Stage 6 driver fails without the mountpoint chown
+        run: ./scripts/smoke-test-ownership-negative-control.sh run powbox-agent:latest sh
+
+      - name: Negative control - PowerShell Stage 6 driver fails without the mountpoint chown
+        run: ./scripts/smoke-test-ownership-negative-control.sh run powbox-agent:latest ps1

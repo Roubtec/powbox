@@ -8,7 +8,7 @@
 # CLI, Mermaid CLI, Playwright CLI) that the `browser` set installs too. Each
 # sits in its own delimited block below, so a copy can be trimmed by deleting a
 # block together with that tool's probes in smoke-probes.txt and its notes in
-# agent-notes.md (and, for Podman or PostgreSQL, the file the block copies).
+# agent-notes.md (and, for Podman or PostgreSQL, the files the block copies).
 # CI never builds it: Tier 1 exercises the layer-set chain through the smaller
 # `browser` set, Tier 0 only checks this directory against the contract below,
 # and the maintainer builds this set by hand and fixes it when an install
@@ -362,6 +362,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # new directory too, dropping the search bit and making Podman fail to read its
 # system config ("open .../10-powbox.conf: permission denied").
 COPY --chmod=644 containers.conf /etc/containers/containers.conf.d/10-powbox.conf
+
+# The conmon wrapper the drop-in's conmon_path selects. It stays off PATH:
+# nothing but Podman should start conmon.
+COPY --chmod=755 conmon-wrapper.sh /usr/local/libexec/powbox-conmon
 
 # The shared image-store seeder. The launcher (scripts/launch-agent.{sh,ps1})
 # runs `seed-image-store.sh seed` in a short-lived writer container; see

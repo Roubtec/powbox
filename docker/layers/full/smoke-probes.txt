@@ -102,9 +102,9 @@ pg-dev-up check >/dev/null
 # Rootless Podman: the engine, the docker shim and podman-compose; the helpers
 # the engine runs (the uid/gid mappers, fuse-overlayfs, slirp4netns, pasta,
 # crun, catatonit, and netavark and aardvark-dns off PATH); the image-store
-# seeder; the engine drop-in and the docker-shim notice marker; the node
-# user's subordinate id ranges; and the XDG_RUNTIME_DIR the entrypoint
-# prepares. Stage 3 tests the engine itself, and checks that the image's
+# seeder; the engine drop-in, the conmon wrapper it selects and the docker-shim
+# notice marker; the node user's subordinate id ranges; and the XDG_RUNTIME_DIR
+# the entrypoint prepares. Stage 3 tests the engine itself, and checks that the image's
 # powbox.podman label agrees with the binary, but runs only on an image that
 # has podman, so these probes are what fail a full image that lost part of it.
 command -v podman >/dev/null
@@ -114,6 +114,7 @@ for t in newuidmap newgidmap fuse-overlayfs slirp4netns pasta crun catatonit; do
 [ -x /usr/lib/podman/netavark ] && [ -x /usr/lib/podman/aardvark-dns ]
 command -v seed-image-store.sh >/dev/null
 [ -r /etc/containers/containers.conf.d/10-powbox.conf ] && [ -e /etc/containers/nodocker ]
+[ -x /usr/local/libexec/powbox-conmon ] && grep -q "^conmon_path = .*/usr/local/libexec/powbox-conmon" /etc/containers/containers.conf.d/10-powbox.conf
 grep -q "^node:" /etc/subuid && grep -q "^node:" /etc/subgid
 [ "$XDG_RUNTIME_DIR" = /home/node/.local/run ]
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Unit tests for the mountpoint-ownership decision logic in
-# docker/shared/shadow-mounts.sh.
+# Unit tests for the mountpoint-ownership decision logic and the path-swap
+# safety of docker/shared/shadow-mounts.sh.
 #
 # What is under test
 # ------------------
@@ -8,12 +8,21 @@
 # ever runs via sudo), so on a native-Linux bind mount the directory outlives the
 # container as a root-owned 0755 dir once the tmpfs goes away — and the host user
 # can then neither populate nor remove it (e.g. a later host `dotnet build`
-# writing into bin/obj).  The fix is the chown block: every component the mkdir
+# writing into bin/obj).  The fix is the chown: every component the helper
 # creates inherits the uid:gid of the DEEPEST ALREADY-EXISTING ancestor, before
 # the mount goes on top, with at most ONE warning per run when that fails.
 # BOTH routes to a mount are covered: the ordinary tmpfs one and the
 # `.git/worktrees` durable-BIND branch, which reaches its mount through
 # bind_git_worktrees and could otherwise lose the chown unnoticed.
+#
+# The second half is the path-swap race (task 081a): node may run the helper
+# with any path and owns every component below /workspace/<slug>, so it can swap
+# one for a symlink between the helper's validation and its use.  The race
+# sweep at the end swaps a component at every point the helper calls out to a
+# shimmed tool and asserts that nothing was created, chowned or mounted outside
+# the workspace root.  A second sweep renames a plain directory made directly
+# under the root (not a mounted workspace) out of the root at every point, which
+# the helper must refuse before it can follow the directory away.
 #
 # The privileged end-to-end path (real root, real tmpfs, a real bind-mounted
 # checkout) is covered in the smoke tier by scripts/smoke-test-worktree-metadata.sh.
@@ -26,15 +35,25 @@
 #     The rewrite is verified (see relocate below) — a rename of that assignment
 #     makes this suite FATAL rather than silently testing an unrelocated copy.
 #   * `id`, `stat`, `chown`, `mount`, `mountpoint` and `findmnt` are replaced by
-#     PATH shims that LOG their argv and answer from fixtures.  Real `mkdir`,
-#     `dirname` and `realpath` are kept, so the directory walk is the real one.
+#     PATH shims that LOG their argv and answer from fixtures.  `mkdir` and
+#     `realpath` get pass-through shims that only add the race hook; the real
+#     binaries still do the work, so the directory walk is the real one.
+#   * The helper acts on its held cwd ("." and /proc/self/fd/N), so argv alone no
+#     longer says WHERE a chown or mount lands.  Each shim therefore also logs an
+#     `at-<tool>` line with the physical location the kernel would act on at that
+#     moment — following symlinks the way that call would — which is what tells
+#     a relocated mount from a correct one whatever the call shape.
+#   * Every fixture workspace reset_fixture makes is registered as a mount root
+#     (the mountpoint shim answers yes for it), as every real /workspace/<slug>
+#     is; `reset_fixture <case> unmounted` makes the plain-directory kind node
+#     can create itself.
 #   * `stat` is shimmed specifically so different ancestors can report different
 #     owners — that is what makes "the DEEPEST existing ancestor" assertable at
 #     all, since an unprivileged test cannot create differently-owned dirs.
 #
-# Needs only bash + coreutils.  No image, no Docker, no root.  $TMPDIR may contain
-# spaces, quotes, '#', '&' or backslashes; ':' and newlines are refused up front
-# (see the WORK_ROOT guard).
+# Needs only bash + coreutils + /proc.  No image, no Docker, no root.  $TMPDIR may
+# contain spaces, quotes, '#', '&' or backslashes; ':' and newlines are refused up
+# front (see the WORK_ROOT guard).
 #
 # Usage: scripts/test-shadow-mounts-chown.sh
 #   SHADOW_MOUNTS_SH=<path>  test that copy instead of ../docker/shared/shadow-mounts.sh
@@ -69,7 +88,7 @@ trap 'rm -rf "$WORK_ROOT"' EXIT
 # quotes, '#', '&' and backslashes — everything below is written to survive those.
 # Exactly two characters it genuinely cannot carry, so refuse LOUDLY rather than
 # misbehave: ':' would split the PATH entry that puts the shims in front, and a
-# newline cannot survive the one-record-per-line fixture files.
+# newline cannot survive the one-record-per-line fixture and log files.
 NL='
 '
 case "$WORK_ROOT" in
@@ -79,9 +98,11 @@ case "$WORK_ROOT" in
 	;;
 esac
 
-# The relocated /workspace.
+# The relocated /workspace, and a sibling tree standing in for everything
+# outside it (what a swapped-in symlink points at in the race sweep).
 WS_ROOT="$WORK_ROOT/workspace"
-mkdir -p "$WS_ROOT"
+ELSEWHERE="$WORK_ROOT/elsewhere"
+mkdir -p "$WS_ROOT" "$ELSEWHERE"
 
 # Fake uid/gid for the `node` user the script looks up with `id -u node`.
 FAKE_NODE_UID=4001
@@ -133,8 +154,65 @@ fi
 BIN="$WORK_ROOT/bin"
 mkdir -p "$BIN"
 
-# Every shim appends "<tool> <argv...>" to $SHIM_LOG, so a test can assert the
-# exact emitted sequence and its ORDER (chown must precede mount).
+# The real binaries the pass-through shims (and the shim library) delegate to,
+# looked up before the shim dir goes on PATH.  The library must never call a
+# shimmed name itself, or resolving a location would bump a race counter.
+REAL_MKDIR="$(command -v mkdir)"
+REAL_REALPATH="$(command -v realpath)"
+
+# Sourced by every shim.  phys_follow / phys_nofollow print the physical path a
+# call would act on right now: from the shim's cwd (the helper's, inherited), with
+# /proc/self/fd/N resolving through the descriptor the shim inherited, and with
+# or without following a final-component symlink.  race_point is the race hook:
+# when $RACE_AT names "<tool>:<pre|post>:<n>" — the n-th call of that tool, just
+# before or just after it runs — it replaces $RACE_SWAP with a symlink to
+# $RACE_DEST (moving any real directory there aside, still inside the root), once.
+# RACE_MODE=rename instead renames $RACE_SWAP to $RACE_DEST (out of the root),
+# and RACE_MODE=plant creates $RACE_SWAP as a plain directory (a parallel run).
+SHIM_LIB="$WORK_ROOT/shimlib.bash"
+cat >"$SHIM_LIB" <<'LIB'
+phys_follow() {
+	"$REAL_REALPATH" -m -- "$1"
+}
+phys_nofollow() {
+	local base
+	base="$(basename -- "$1")"
+	case "$base" in
+	. | .. | /) phys_follow "$1" ;;
+	*) printf '%s/%s\n' "$(phys_follow "$(dirname -- "$1")")" "$base" ;;
+	esac
+}
+race_point() {
+	[ -n "${RACE_AT:-}" ] || return 0
+	local f="$RACE_DIR/count.$1" n
+	if [ "$2" = pre ]; then
+		n=$(($(cat "$f" 2>/dev/null || echo 0) + 1))
+		echo "$n" >"$f"
+	else
+		n="$(cat "$f" 2>/dev/null || echo 0)"
+	fi
+	[ "$RACE_AT" = "$1:$2:$n" ] || return 0
+	[ ! -e "$RACE_DIR/fired" ] || return 0
+	case "${RACE_MODE:-}" in
+	rename)
+		mv -- "$RACE_SWAP" "$RACE_DEST" 2>/dev/null && : >"$RACE_DIR/fired"
+		return 0
+		;;
+	plant)
+		"$REAL_MKDIR" -- "$RACE_SWAP" 2>/dev/null && : >"$RACE_DIR/fired"
+		return 0
+		;;
+	esac
+	if [ -e "$RACE_SWAP" ] || [ -L "$RACE_SWAP" ]; then
+		# Named per race dir: a swapped workspace's displaced copy outlives
+		# reset_fixture, and mv would nest a second one inside the first.
+		mv -T -- "$RACE_SWAP" "$RACE_SWAP.displaced-${RACE_DIR##*/}" 2>/dev/null || return 0
+	fi
+	ln -s -- "$RACE_DEST" "$RACE_SWAP" 2>/dev/null && : >"$RACE_DIR/fired"
+	return 0
+}
+LIB
+
 cat >"$BIN/id" <<'SHIM'
 #!/usr/bin/env bash
 if [ "$1" = "-u" ] && [ "$2" = "node" ]; then printf '%s\n' "$FAKE_NODE_UID"; exit 0; fi
@@ -144,10 +222,10 @@ if [ "$1" = "-g" ] && [ "$2" = "node" ]; then printf '%s\n' "$FAKE_NODE_GID"; ex
 exec /usr/bin/id "$@"
 SHIM
 
-# stat: answer `-c %u:%g <path>` from $OWNER_MAP; anything unlisted falls back to
-# $DEFAULT_OWNER.  Other invocations go to the real stat.  Fails (like the real
-# stat on a missing path) when the path is listed as "MISSING", which drives the
-# chown_failed branch.
+# stat: answer `-c %u:%g <path>` from $OWNER_MAP, keyed by the PHYSICAL path (so
+# "." finds the held directory); anything unlisted falls back to $DEFAULT_OWNER.
+# Other invocations go to the real stat.  Fails (like the real stat on a missing
+# path) when the path is listed as "MISSING", which drives the chown_failed branch.
 #
 # Record format: one per line, OWNER FIRST — "<uid>:<gid> <path>" (or
 # "MISSING <path>").  Owner-first, split on the FIRST space, path = the whole
@@ -159,14 +237,17 @@ SHIM
 # at all — hence the WORK_ROOT guard near the top.
 cat >"$BIN/stat" <<'SHIM'
 #!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point stat pre
 if [ "$1" = "-c" ] && [ "$2" = "%u:%g" ] && [ "$#" -eq 3 ]; then
-	printf 'stat %s\n' "$3" >>"$SHIM_LOG"
+	where="$(phys_nofollow "$3")"
+	printf 'stat %s\n' "$where" >>"$SHIM_LOG"
 	if [ -n "${OWNER_MAP:-}" ] && [ -f "$OWNER_MAP" ]; then
 		while IFS= read -r rec; do
 			[ -n "$rec" ] || continue
 			o="${rec%% *}"
 			p="${rec#* }"
-			if [ "$p" = "$3" ]; then
+			if [ "$p" = "$where" ]; then
 				[ "$o" = "MISSING" ] && exit 1
 				printf '%s\n' "$o"
 				exit 0
@@ -181,32 +262,63 @@ SHIM
 
 # chown: log and succeed, or fail when FAKE_CHOWN_FAIL is set (the warn-once
 # case).  An unprivileged test cannot really chown to a foreign uid, so the
-# assertion is on the argv the script emits.
+# assertion is on what the script emits: the argv, plus "at-chown <owner> <where>".
 cat >"$BIN/chown" <<'SHIM'
 #!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point chown pre
 printf 'chown %s\n' "$*" >>"$SHIM_LOG"
+nofollow=0
+args=()
+for a in "$@"; do
+	case "$a" in
+	-h) nofollow=1 ;;
+	-*) ;;
+	*) args+=("$a") ;;
+	esac
+done
+if [ "$nofollow" = 1 ]; then where="$(phys_nofollow "${args[-1]}")"; else where="$(phys_follow "${args[-1]}")"; fi
+printf 'at-chown %s %s\n' "${args[0]}" "$where" >>"$SHIM_LOG"
 [ -n "${FAKE_CHOWN_FAIL:-}" ] && exit 1
 exit 0
 SHIM
 
+# mount: log argv, then "at-mount <where>" for the target (mount(2) follows
+# symlinks there) and, for --bind, "at-bindsrc <where>" for the source.
 cat >"$BIN/mount" <<'SHIM'
 #!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point mount pre
 printf 'mount %s\n' "$*" >>"$SHIM_LOG"
+printf 'at-mount %s\n' "$(phys_follow "${!#}")" >>"$SHIM_LOG"
+for a in "$@"; do
+	if [ "$a" = --bind ]; then
+		printf 'at-bindsrc %s\n' "$(phys_follow "${@: -2:1}")" >>"$SHIM_LOG"
+	fi
+done
 exit 0
 SHIM
 
-# mountpoint -q <path>: true only for paths listed in $MOUNTPOINTS, ONE PER LINE
-# (not whitespace-separated — a TMPDIR containing a space would otherwise split a
-# fixture path into two entries and silently stop matching).
+# mountpoint -q <path>: true only when the PHYSICAL path is listed in
+# $MOUNTPOINTS or in the $SLUG_MOUNTS file (the registered fixture workspaces),
+# ONE PER LINE (not whitespace-separated — a TMPDIR containing a space would
+# otherwise split a fixture path into two entries and silently stop matching).
 cat >"$BIN/mountpoint" <<'SHIM'
 #!/usr/bin/env bash
-target="${!#}"
+. "$SHIM_LIB"
+race_point mountpoint pre
+target="$(phys_follow "${!#}")"
 printf 'mountpoint %s\n' "$target" >>"$SHIM_LOG"
 if [ -n "${MOUNTPOINTS:-}" ]; then
 	while IFS= read -r m; do
 		[ -n "$m" ] || continue
 		[ "$m" = "$target" ] && exit 0
 	done <<<"$MOUNTPOINTS"
+fi
+if [ -f "$SLUG_MOUNTS" ]; then
+	while IFS= read -r m; do
+		[ "$m" = "$target" ] && exit 0
+	done <"$SLUG_MOUNTS"
 fi
 exit 1
 SHIM
@@ -218,11 +330,41 @@ SHIM
 # reporting nothing — is read as "no persistent volume" and falls back to tmpfs.
 cat >"$BIN/findmnt" <<'SHIM'
 #!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point findmnt pre
 printf 'findmnt %s\n' "$*" >>"$SHIM_LOG"
+prev=""
+for a in "$@"; do
+	[ "$prev" = -T ] && printf 'at-findmnt %s\n' "$(phys_follow "$a")" >>"$SHIM_LOG"
+	prev="$a"
+done
 if [ -n "${FAKE_FINDMNT_FSTYPE:-}" ]; then
 	printf '%s\n' "$FAKE_FINDMNT_FSTYPE"
 fi
 exit 0
+SHIM
+
+# Pass-through shims: the real tool does the work; the shim only offers the race
+# hook a moment just before and just after it, and logs where mkdir creates.
+cat >"$BIN/mkdir" <<'SHIM'
+#!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point mkdir pre
+printf 'at-mkdir %s\n' "$(phys_nofollow "${!#}")" >>"$SHIM_LOG"
+rc=0
+"$REAL_MKDIR" "$@" || rc=$?
+race_point mkdir post
+exit "$rc"
+SHIM
+
+cat >"$BIN/realpath" <<'SHIM'
+#!/usr/bin/env bash
+. "$SHIM_LIB"
+race_point realpath pre
+rc=0
+"$REAL_REALPATH" "$@" || rc=$?
+race_point realpath post
+exit "$rc"
 SHIM
 
 chmod +x "$BIN"/*
@@ -241,13 +383,22 @@ run_sut() {
 	: >"$LOG"
 	PATH="$BIN:$PATH" \
 		SHIM_LOG="$LOG" \
+		SHIM_LIB="$SHIM_LIB" \
+		REAL_MKDIR="$REAL_MKDIR" \
+		REAL_REALPATH="$REAL_REALPATH" \
 		OWNER_MAP="${OWNER_MAP:-}" \
 		DEFAULT_OWNER="${DEFAULT_OWNER:-1000:1000}" \
 		MOUNTPOINTS="${MOUNTPOINTS:-}" \
+		SLUG_MOUNTS="$SLUG_MOUNTS" \
 		FAKE_CHOWN_FAIL="${FAKE_CHOWN_FAIL:-}" \
 		FAKE_FINDMNT_FSTYPE="${FAKE_FINDMNT_FSTYPE:-}" \
 		FAKE_NODE_UID="$FAKE_NODE_UID" \
 		FAKE_NODE_GID="$FAKE_NODE_GID" \
+		RACE_AT="${RACE_AT:-}" \
+		RACE_DIR="${RACE_DIR:-}" \
+		RACE_SWAP="${RACE_SWAP:-}" \
+		RACE_DEST="${RACE_DEST:-}" \
+		RACE_MODE="${RACE_MODE:-}" \
 		bash "$SUT" "$@" >/dev/null 2>"$ERR" || true
 }
 
@@ -261,11 +412,39 @@ count() {
 	calls "$1" | grep -c . || true
 }
 
-# reset_fixture <case> — a fresh workspace dir under the relocated root.
+# has <line> — the log holds exactly this line (fixed string, whole line).
+has() {
+	grep -qxF -- "$1" "$LOG"
+}
+
+# line_of <line> — the 1-based log line number of its first exact occurrence.
+# `|| true`: with `set -o pipefail` a grep that matches nothing would fail the
+# substitution and abort the suite under `set -e` — exactly the state a
+# regression puts us in, so the assertion must be allowed to run and REPORT it.
+line_of() {
+	grep -nxF -- "$1" "$LOG" | head -n1 | cut -d: -f1 || true
+}
+
+# before <line-a> <line-b> — both are logged, and a comes first.
+before() {
+	local a b
+	a="$(line_of "$1")"
+	b="$(line_of "$2")"
+	[ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+
+# reset_fixture <case> [unmounted] — a fresh workspace dir under the relocated
+# root, registered as a mount root unless `unmounted`.  A file, not a variable:
+# callers run this in a command substitution.
+SLUG_MOUNTS="$WORK_ROOT/slug-mounts"
+: >"$SLUG_MOUNTS"
 reset_fixture() {
 	local ws="$WS_ROOT/$1"
 	rm -rf "$ws"
 	mkdir -p "$ws"
+	if [ "${2:-}" != unmounted ] && ! grep -qxF -- "$ws" "$SLUG_MOUNTS"; then
+		printf '%s\n' "$ws" >>"$SLUG_MOUNTS"
+	fi
 	printf '%s' "$ws"
 }
 
@@ -286,20 +465,20 @@ else
 	ko "expected 1 chown, got $(count chown):"
 	calls chown
 fi
-if calls chown | grep -qF -- "chown -h 4242:4242 $ws/proj/bin"; then
+if has "at-chown 4242:4242 $ws/proj/bin"; then
 	ok "the created mountpoint is chowned to the existing parent's uid:gid"
 else
-	ko "expected 'chown -h 4242:4242 $ws/proj/bin', got: $(calls chown)"
+	ko "expected 'at-chown 4242:4242 $ws/proj/bin', got: $(calls at-chown)"
 fi
-if calls stat | grep -qF "stat $ws/proj"; then
+if has "stat $ws/proj"; then
 	ok "ownership is read from the deepest EXISTING ancestor (<ws>/proj)"
 else
 	ko "expected the owner probe to stat <ws>/proj, got: $(calls stat)"
 fi
-if [ "$(count mount)" = "1" ] && calls mount | grep -qF -- "-t tmpfs"; then
-	ok "the target is then tmpfs-mounted"
+if [ "$(count mount)" = "1" ] && calls mount | grep -qF -- "-t tmpfs" && has "at-mount $ws/proj/bin"; then
+	ok "the target is then tmpfs-mounted, at the target"
 else
-	ko "expected one tmpfs mount, got: $(calls mount)"
+	ko "expected one tmpfs mount at $ws/proj/bin, got: $(calls mount) $(calls at-mount)"
 fi
 if calls mount | grep -qF "uid=$FAKE_NODE_UID,gid=$FAKE_NODE_GID"; then
 	ok "the tmpfs is mounted with the node uid/gid"
@@ -308,16 +487,19 @@ else
 fi
 # The chown must land on the underlying directory, so it has to happen BEFORE
 # the mount — afterwards it would re-own the tmpfs root instead.
-# `|| true` on both: with `set -o pipefail` a grep that matches nothing fails the
-# whole substitution and would abort the suite under `set -e` — which is exactly
-# the state a regression puts us in, so the assertion below must be allowed to
-# run and REPORT it rather than killing the run.
-chown_line="$(grep -n '^chown ' "$LOG" | head -n1 | cut -d: -f1 || true)"
-mount_line="$(grep -n '^mount ' "$LOG" | head -n1 | cut -d: -f1 || true)"
-if [ -n "$chown_line" ] && [ -n "$mount_line" ] && [ "$chown_line" -lt "$mount_line" ]; then
+if before "at-chown 4242:4242 $ws/proj/bin" "at-mount $ws/proj/bin"; then
 	ok "the chown is emitted BEFORE the mount (owns the dir, not the tmpfs root)"
 else
 	ko "expected chown before mount; log was: $(cat "$LOG")"
+fi
+# The mount must act on the directory the helper holds, never on a path the
+# kernel would walk again: "." as the target, and util-linux told not to turn
+# it back into an absolute path (its default), or a component swapped after the
+# walk would redirect the mount.
+if calls mount | grep -q -- '--no-canonicalize .* \.$'; then
+	ok "the tmpfs targets the held directory ('.') with --no-canonicalize"
+else
+	ko "expected 'mount --no-canonicalize … .', got: $(calls mount)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -334,13 +516,13 @@ else
 	ko "expected 2 chowns, got $(count chown): $(calls chown)"
 fi
 for d in "$ws/.claude" "$ws/.claude/worktrees"; do
-	if calls chown | grep -qF -- "chown -h 4242:4242 $d"; then
+	if has "at-chown 4242:4242 $d"; then
 		ok "created level $d inherits 4242:4242"
 	else
-		ko "no 'chown -h 4242:4242 $d' in: $(calls chown)"
+		ko "no 'at-chown 4242:4242 $d' in: $(calls at-chown)"
 	fi
 done
-if calls stat | grep -qF "stat $ws" && ! calls stat | grep -qxF "stat $WS_ROOT"; then
+if has "stat $ws" && ! has "stat $WS_ROOT"; then
 	ok "ownership comes from <ws> (the deepest existing ancestor), not the workspace root"
 else
 	ko "owner probe read the wrong ancestor: $(calls stat)"
@@ -380,7 +562,7 @@ echo "Test: the durable .git/worktrees BIND branch chowns the created mountpoint
 # Driving this branch is also what makes the findmnt shim reachable at all: it
 # answers the fstype probe that chooses durable-bind over tmpfs.
 ws="$(reset_fixture gitwt)"
-mkdir -p "$ws/.git"
+mkdir -p "$ws/.git" "$ws/.worktrees"
 OWNER_MAP="$WORK_ROOT/owners-gitwt"
 printf '%s %s\n' 4242:4242 "$ws/.git" 7:7 "$ws" >"$OWNER_MAP"
 # .worktrees is a mountpoint (it stands in for the persistent volume) but the
@@ -391,39 +573,43 @@ run_sut gitwt "$ws/.git/worktrees"
 MOUNTPOINTS=""
 FAKE_FINDMNT_FSTYPE=""
 OWNER_MAP=""
-if calls findmnt | grep -qF -- "-T $ws/.worktrees"; then
+if has "at-findmnt $ws/.worktrees"; then
 	ok "the durable-bind branch really was entered (findmnt probed the .worktrees fstype)"
 else
-	ko "findmnt was not reached, so this case never exercised the bind branch: $(calls findmnt)"
+	ko "findmnt was not reached, so this case never exercised the bind branch: $(calls at-findmnt)"
 fi
-if calls chown | grep -qF -- "chown -h 4242:4242 $ws/.git/worktrees"; then
+if has "at-chown 4242:4242 $ws/.git/worktrees"; then
 	ok "the created .git/worktrees mountpoint inherits its existing .git parent's ownership"
 else
-	ko "expected 'chown -h 4242:4242 $ws/.git/worktrees', got: $(calls chown)"
+	ko "expected 'at-chown 4242:4242 $ws/.git/worktrees', got: $(calls at-chown)"
 fi
-if calls mount | grep -qF -- "mount --bind $ws/.worktrees/.gitworktrees $ws/.git/worktrees"; then
+if calls mount | grep -qF -- "--bind" && has "at-bindsrc $ws/.worktrees/.gitworktrees" && has "at-mount $ws/.git/worktrees"; then
 	ok "the mount is the durable bind from the volume, not a tmpfs"
 else
-	ko "expected a --bind of the volume's .gitworktrees, got: $(calls mount)"
+	ko "expected a --bind of the volume's .gitworktrees over .git/worktrees, got: $(calls mount) $(calls at-bindsrc) $(calls at-mount)"
 fi
 if ! calls mount | grep -qF -- "-t tmpfs"; then
 	ok "the target did not silently fall back to tmpfs"
 else
 	ko "the target fell back to tmpfs: $(calls mount)"
 fi
+# Both ends are held: the source through a descriptor, the target as the cwd.
+if calls mount | grep -q -- '--no-canonicalize --bind /proc/self/fd/[0-9][0-9]* \.$'; then
+	ok "the bind passes the held source as /proc/self/fd/N and the held target as '.', uncanonicalized"
+else
+	ko "expected 'mount --no-canonicalize --bind /proc/self/fd/N .', got: $(calls mount)"
+fi
 # bind_git_worktrees separately chowns its bind SOURCE to node (git runs as node).
-# That is a different chown with a different target and no -h; assert it explicitly
-# so the two are never conflated, and so a future change to either is visible here.
-if calls chown | grep -qF -- "chown $FAKE_NODE_UID:$FAKE_NODE_GID $ws/.worktrees/.gitworktrees"; then
+# That is a different chown with a different target; assert it explicitly so the
+# two are never conflated, and so a future change to either is visible here.
+if has "at-chown $FAKE_NODE_UID:$FAKE_NODE_GID $ws/.worktrees/.gitworktrees"; then
 	ok "the bind SOURCE is still chowned to node, distinct from the mountpoint chown"
 else
-	ko "expected the bind source to be chowned to node, got: $(calls chown)"
+	ko "expected the bind source to be chowned to node, got: $(calls at-chown)"
 fi
 # Same ordering invariant as the tmpfs path: the mountpoint chown must land on the
 # underlying directory, so it has to precede the bind that covers it.
-chown_line="$(grep -n '^chown -h ' "$LOG" | head -n1 | cut -d: -f1 || true)"
-mount_line="$(grep -n '^mount ' "$LOG" | head -n1 | cut -d: -f1 || true)"
-if [ -n "$chown_line" ] && [ -n "$mount_line" ] && [ "$chown_line" -lt "$mount_line" ]; then
+if before "at-chown 4242:4242 $ws/.git/worktrees" "at-mount $ws/.git/worktrees"; then
 	ok "on the bind branch too the chown is emitted BEFORE the mount"
 else
 	ko "expected chown before mount on the bind branch; log was: $(cat "$LOG")"
@@ -440,10 +626,25 @@ if [ "$(count chown)" = "0" ]; then
 else
 	ko "expected no chown, got: $(calls chown)"
 fi
-if [ "$(count mount)" = "1" ]; then
+if [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/bin"; then
 	ok "it is still mounted"
 else
-	ko "expected one mount, got: $(calls mount)"
+	ko "expected one mount at $ws/proj/bin, got: $(calls mount) $(calls at-mount)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a target reached through a symlink is shadowed at its resolved location"
+# A .powbox.yml literal may go through a symlink that exists at validation time;
+# the helper resolves it once and then walks the physical path, as before.
+ws="$(reset_fixture legitlink)"
+mkdir -p "$ws/real"
+ln -s real "$ws/link"
+OWNER_MAP=""
+run_sut legitlink "$ws/link/bin"
+if has "at-mount $ws/real/bin" && has "at-chown 1000:1000 $ws/real/bin" && [ "$(count mount)" = "1" ]; then
+	ok "the mount and the chown land on the resolved <ws>/real/bin"
+else
+	ko "expected the resolved location to be created, chowned and mounted; log was: $(cat "$LOG")"
 fi
 
 # ---------------------------------------------------------------------------
@@ -527,6 +728,326 @@ if [ ! -e "$WORK_ROOT/outside/bin" ]; then
 else
 	ko "the out-of-root target was created: $WORK_ROOT/outside/bin"
 fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a target in a plain directory under the root, not a mounted workspace, is refused"
+# node owns /workspace and can make a directory there; unlike a real workspace it
+# is no mount, so node could rename it out of /workspace mid-run (see the rename
+# sweep below).  The helper must refuse before it creates anything.
+ws="$(reset_fixture unmounted unmounted)"
+mkdir -p "$ws/proj"
+OWNER_MAP=""
+run_sut unmounted "$ws/proj/bin"
+if [ "$(count chown)" = "0" ] && [ "$(count mount)" = "0" ] && [ -z "$(calls at-mkdir)" ] && [ ! -e "$ws/proj/bin" ]; then
+	ok "nothing was created, chowned or mounted"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG")"
+fi
+if grep -qF "is a plain directory, not a mounted workspace" "$ERR"; then
+	ok "the refusal says the workspace is not a mount"
+else
+	ko "expected the not-a-mounted-workspace refusal on stderr, got: $(cat "$ERR")"
+fi
+ws="$(reset_fixture absent)"
+rmdir "$ws"
+run_sut absent "$ws/proj/bin"
+if [ ! -e "$ws" ] && [ "$(count mount)" = "0" ]; then
+	ok "a missing workspace is not created"
+else
+	ko "expected the missing workspace to stay missing; log was: $(cat "$LOG")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a component created concurrently just before the helper's mkdir is entered"
+# A parallel run (two shadow-refresh.sh, say) can create a missing component
+# between the helper's existence test and its mkdir.  The helper must enter it
+# like any existing component, through the same verified step, rather than skip
+# the target.
+ws="$(reset_fixture plant)"
+mkdir -p "$ws/proj"
+RACE_DIR="$WORK_ROOT/race-plant"
+mkdir -p "$RACE_DIR"
+RACE_MODE=plant RACE_AT="mkdir:pre:1" RACE_SWAP="$ws/proj/bin" \
+	run_sut plant "$ws/proj/bin"
+RACE_DIR=""
+if [ -e "$WORK_ROOT/race-plant/fired" ] && [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/bin"; then
+	ok "the concurrently created mountpoint is still mounted, in place"
+else
+	ko "expected one mount at $ws/proj/bin after the plant; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+if [ "$(count chown)" = "0" ]; then
+	ok "a component this run did not create is not chowned by it"
+else
+	ko "expected no chown of the planted component, got: $(calls chown)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a component swapped for a symlink right after validation is refused"
+# The canonical race: the target validates (realpath, the helper's second call)
+# and THEN its existing intermediate <ws>/proj becomes a symlink out of the root.
+# A path-string helper would create, chown and mount through it.
+ws="$(reset_fixture swapnow)"
+mkdir -p "$ws/proj" "$ELSEWHERE/swapnow"
+RACE_DIR="$WORK_ROOT/race-swapnow"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj" RACE_DEST="$ELSEWHERE/swapnow" \
+	run_sut swapnow "$ws/proj/bin"
+RACE_DIR=""
+if [ -e "$WORK_ROOT/race-swapnow/fired" ]; then
+	ok "the swap happened between validation and use"
+else
+	ko "the race hook never fired, so this case tested nothing"
+fi
+if [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$ELSEWHERE/swapnow")" ]; then
+	ok "nothing was mounted, chowned or created"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG"); elsewhere holds: $(ls -A "$ELSEWHERE/swapnow")"
+fi
+if grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "the refusal names the swapped component"
+else
+	ko "expected the swapped-component refusal on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a workspace swapped for a symlink to a mount outside the root is refused"
+# Every other component is swapped by the sweep below; this pins the first step,
+# into /workspace/<slug>, against a symlink whose target is itself a mount root
+# (as /tmp can be), so the mount-root check alone would not refuse it.
+ws="$(reset_fixture swapslug)"
+mkdir -p "$ws/proj" "$ELSEWHERE/swapslug/proj"
+MOUNTPOINTS="$ELSEWHERE/swapslug"
+RACE_DIR="$WORK_ROOT/race-swapslug"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws" RACE_DEST="$ELSEWHERE/swapslug" \
+	run_sut swapslug "$ws/proj/bin"
+RACE_DIR=""
+MOUNTPOINTS=""
+if [ -e "$WORK_ROOT/race-swapslug/fired" ] && [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$ELSEWHERE/swapslug/proj")" ]; then
+	ok "nothing was mounted, chowned or created through the swapped workspace"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG"); elsewhere holds: $(ls -A "$ELSEWHERE/swapslug/proj")"
+fi
+if grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "the refusal names the swapped workspace"
+else
+	ko "expected the swapped-component refusal on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a component the kernel reports in another case is still shadowed"
+# On a case-insensitive host bind mount, an existing on-disk 'Bin' can be what
+# the kernel reports for the literal 'bin' detect-shadows emits.  A symlink
+# bin -> Bin, made after validation, produces exactly that cwd hermetically.
+ws="$(reset_fixture caseins)"
+mkdir -p "$ws/proj/Bin" "$ws/proj/Other"
+RACE_DIR="$WORK_ROOT/race-caseins"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj/bin" RACE_DEST="$ws/proj/Bin" \
+	run_sut caseins "$ws/proj/bin"
+if [ -e "$RACE_DIR/fired" ] && [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/Bin" && [ ! -s "$ERR" ]; then
+	ok "the directory reported as 'Bin' is mounted for the literal 'bin', without a refusal"
+else
+	ko "expected one mount at $ws/proj/Bin and no stderr; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+RACE_DIR="$WORK_ROOT/race-caseins-other"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj/obj" RACE_DEST="$ws/proj/Other" \
+	run_sut caseins-other "$ws/proj/obj"
+RACE_DIR=""
+if [ "$(count mount)" = "0" ] && grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "a sibling with a different name is still refused"
+else
+	ko "expected the swapped-component refusal and no mount; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+# The tolerance is for a direct child only.  <ws>/proj swapped for a symlink to
+# <root>/CASEELSE/proj matches 'caseelse/proj' ignoring case, but its parent is
+# a different directory: a plain one node could make under the root itself.
+ws="$(reset_fixture caseelse)"
+mkdir -p "$ws/proj" "$WS_ROOT/CASEELSE/proj"
+RACE_DIR="$WORK_ROOT/race-caseelse"
+mkdir -p "$RACE_DIR"
+RACE_AT="realpath:post:2" RACE_SWAP="$ws/proj" RACE_DEST="$WS_ROOT/CASEELSE/proj" \
+	run_sut caseelse "$ws/proj/bin"
+if [ -e "$RACE_DIR/fired" ] && [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(ls -A "$WS_ROOT/CASEELSE/proj")" ] && grep -qF "is a symlink or was swapped while being entered" "$ERR"; then
+	ok "a case variant under another parent is refused, with nothing created or mounted"
+else
+	ko "expected the swapped-component refusal and no effect; log was: $(cat "$LOG"); stderr: $(cat "$ERR"); CASEELSE/proj holds: $(ls -A "$WS_ROOT/CASEELSE/proj")"
+fi
+RACE_DIR=""
+
+# ---------------------------------------------------------------------------
+echo "Test: a symlinked .worktrees is not followed for the durable bind, and says so"
+# A mounted .worktrees cannot be swapped, so tmpfs is the right outcome here;
+# what must not happen is a silent fallback that looks like a no-volume launch.
+ws="$(reset_fixture wtlink)"
+mkdir -p "$ws/.git" "$ws/realwt"
+ln -s realwt "$ws/.worktrees"
+MOUNTPOINTS="$ws/realwt"
+FAKE_FINDMNT_FSTYPE=ext4
+run_sut wtlink "$ws/.git/worktrees"
+MOUNTPOINTS=""
+FAKE_FINDMNT_FSTYPE=""
+if ! calls mount | grep -qF -- "--bind" && [ "$(count mount)" = "1" ] && has "at-mount $ws/.git/worktrees" && [ ! -e "$ws/realwt/.gitworktrees" ]; then
+	ok "the target falls back to tmpfs and nothing is made behind the symlink"
+else
+	ko "expected one tmpfs mount at $ws/.git/worktrees and no bind; log was: $(cat "$LOG")"
+fi
+if grep -qF "not binding durable metadata for '$ws/.git/worktrees'" "$ERR"; then
+	ok "the refused .worktrees walk is reported on stderr"
+else
+	ko "expected the refused-walk note on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: a .git/worktrees mountpoint that cannot be held open skips only that target"
+# The held descriptor is an open(2) of '.', which needs read permission: a
+# write+search-only directory makes it fail without exhausting descriptors.
+# Root ignores the mode, so the case cannot be staged there.
+if [ "$(/usr/bin/id -u)" = 0 ]; then
+	ok "skipped: running as root, where a mode-0300 directory can still be opened"
+else
+	ws="$(reset_fixture dstfd)"
+	mkdir -p "$ws/.git/worktrees" "$ws/proj"
+	chmod 0300 "$ws/.git/worktrees"
+	run_sut dstfd "$ws/.git/worktrees" "$ws/proj/bin"
+	chmod 0755 "$ws/.git/worktrees"
+	if grep -qF "skipping '$ws/.git/worktrees' (cannot hold the mountpoint directory open)" "$ERR"; then
+		ok "the unopenable mountpoint is skipped with a per-target message"
+	else
+		ko "expected the cannot-hold skip on stderr, got: $(cat "$ERR")"
+	fi
+	if [ "$(count mount)" = "1" ] && has "at-mount $ws/proj/bin"; then
+		ok "the run carries on to the next target"
+	else
+		ko "expected only $ws/proj/bin to be mounted; log was: $(cat "$LOG")"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+echo "Test: race sweep — a component swapped at ANY call-out never escapes the root"
+# For each target shape and each component of it (existing, about to be created,
+# the mountpoint itself, and on the bind branch the source side too), swap that
+# component for a symlink out of the root at every point the helper calls a
+# shimmed tool — just before or just after — and require that every mkdir,
+# chown, mount target and bind source still lands under the root, and that
+# nothing appeared outside it.  A point the helper never reaches for a given
+# shape simply does not fire; each component must be swapped at least once.
+RACE_POINTS="realpath:post:2 mountpoint:pre:1 mountpoint:pre:2 mountpoint:pre:3 mountpoint:pre:4 stat:pre:1 mkdir:pre:1 mkdir:post:1 mkdir:pre:2 mkdir:post:2 mkdir:pre:3 mkdir:post:3 chown:pre:1 chown:pre:2 chown:pre:3 findmnt:pre:1 mount:pre:1"
+
+# escaped — print every logged location outside the root (nothing on success).
+escaped() {
+	local rec where
+	while IFS= read -r rec; do
+		case "$rec" in
+		at-mkdir\ * | at-mount\ * | at-bindsrc\ *) where="${rec#* }" ;;
+		at-chown\ *)
+			where="${rec#* }"
+			where="${where#* }"
+			;;
+		*) continue ;;
+		esac
+		case "$where" in
+		"$WS_ROOT"/*) ;;
+		*) printf '%s\n' "$rec" ;;
+		esac
+	done <"$LOG"
+}
+
+# race_case [rename] <shape> <component-relative-to-ws> — one sweep over
+# RACE_POINTS.  By default the component is swapped for a symlink out of the root.
+# With `rename`, the fixture is an UNMOUNTED plain directory directly under the
+# root, and the component ("" — that directory itself) is renamed out of the root
+# instead.  Only that directory can be renamed out in reality: everything below a
+# mounted workspace is confined to it by rename(2)'s EXDEV and a mount root's
+# EBUSY, which a hermetic test cannot model, so neither is swept here.
+race_case() {
+	local mode="" verb=swapped shape comp label point ws dest target n=0 fired=0 bad=0 out slug_tree before_tree after_tree
+	if [ "$1" = rename ]; then
+		mode=rename
+		verb=renamed
+		shift
+	fi
+	shape="$1"
+	comp="$2"
+	label="${comp:-the workspace dir}"
+	for point in $RACE_POINTS; do
+		n=$((n + 1))
+		dest="$ELSEWHERE/race-$shape"
+		rm -rf "$dest"
+		if [ "$mode" = rename ]; then
+			ws="$(reset_fixture "rename-$shape" unmounted)"
+		else
+			ws="$(reset_fixture "race-$shape")"
+			mkdir -p "$dest/sub"
+		fi
+		MOUNTPOINTS=""
+		FAKE_FINDMNT_FSTYPE=""
+		case "$shape" in
+		single)
+			mkdir -p "$ws/proj"
+			target="$ws/proj/bin"
+			;;
+		multi) target="$ws/.claude/worktrees" ;;
+		gitwt)
+			mkdir -p "$ws/.git" "$ws/.worktrees"
+			MOUNTPOINTS="$ws/.worktrees"
+			FAKE_FINDMNT_FSTYPE=ext4
+			target="$ws/.git/worktrees"
+			;;
+		esac
+		RACE_DIR="$WORK_ROOT/race-$mode$shape-$n"
+		rm -rf "$RACE_DIR"
+		mkdir -p "$RACE_DIR"
+		before_tree="$(find "$ELSEWHERE" -print | LC_ALL=C sort)"
+		slug_tree="$(cd "$ws" && find . -print | LC_ALL=C sort)"
+		RACE_MODE="$mode" RACE_AT="$point" RACE_SWAP="$ws${comp:+/$comp}" RACE_DEST="$dest" \
+			run_sut "race-$mode$shape-$n" "$target"
+		[ -e "$RACE_DIR/fired" ] || continue
+		fired=$((fired + 1))
+		out="$(escaped)"
+		if [ -n "$out" ]; then
+			bad=$((bad + 1))
+			ko "$shape, $label $verb at $point: acted outside the root: $out"
+		fi
+		# A renamed workspace must arrive outside exactly as it left, and
+		# nothing else outside the root may change.
+		if [ "$mode" = rename ]; then
+			if [ "$(cd "$dest" && find . -print | LC_ALL=C sort)" != "$slug_tree" ]; then
+				bad=$((bad + 1))
+				ko "$shape, $label renamed at $point: created something in the renamed directory outside the root"
+			fi
+			after_tree="$(find "$ELSEWHERE" -path "$dest" -prune -o -print | LC_ALL=C sort)"
+		else
+			after_tree="$(find "$ELSEWHERE" -print | LC_ALL=C sort)"
+		fi
+		if [ "$after_tree" != "$before_tree" ]; then
+			bad=$((bad + 1))
+			ko "$shape, $label $verb at $point: created something outside the root"
+		fi
+	done
+	MOUNTPOINTS=""
+	FAKE_FINDMNT_FSTYPE=""
+	RACE_DIR=""
+	if [ "$fired" -eq 0 ]; then
+		ko "$shape, $label: no race point fired, so the sweep tested nothing"
+	elif [ "$bad" -eq 0 ]; then
+		ok "$shape: $label $verb at $fired call-outs, nothing escaped the root"
+	fi
+}
+
+race_case single ""
+race_case single proj
+race_case single proj/bin
+race_case multi .claude
+race_case multi .claude/worktrees
+race_case gitwt .git
+race_case gitwt .git/worktrees
+race_case gitwt .worktrees
+race_case gitwt .worktrees/.gitworktrees
+race_case rename single ""
+race_case rename multi ""
+race_case rename gitwt ""
 
 echo ""
 echo "Results: $pass passed, $fail failed."

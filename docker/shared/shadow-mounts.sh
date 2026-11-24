@@ -20,8 +20,10 @@
 # Security: this script is root-owned, immutable inside the image, and
 # listed in /etc/sudoers.d/node — the node user can only invoke it
 # through sudo, and it refuses to act on any path outside /workspace/.  Both the
-# bind source and destination are validated under /workspace/.  tmpfs and bind
-# mounts are container-namespace-scoped and invisible to the host.
+# bind source and destination are validated under /workspace/, and both are
+# then reached by the held-directory walk below, so a path node swaps after
+# validation cannot redirect a mkdir, chown or mount.  tmpfs and bind mounts are
+# container-namespace-scoped and invisible to the host.
 set -euo pipefail
 
 NODE_UID="$(id -u node)"
@@ -39,6 +41,102 @@ mounted=0
 # `mount -o` string would need validating as a size first (task 081b).
 TMPFS_SIZE=2g
 
+# Held-directory walking (task 081a).  Every component below /workspace/<slug>
+# is node-writable and node may run this helper at any time, so a path validated
+# below can be re-pointed through a swapped-in symlink before it is used.  No
+# validated path string is therefore ever handed to mkdir, chown or mount:
+# the helper walks down from /workspace one component at a time with the
+# directory it reached as its cwd, and acts only on that held directory ("." —
+# or /proc/self/fd/N for the bind source).  A later swap of the path cannot move
+# a directory the process already holds.  Four details carry it:
+#   * `cd -P -- ./<name>` is one relative chdir; a plain `cd` makes bash chdir
+#     the whole absolute logical path again (and may consult CDPATH).
+#   * after each step the kernel's cwd (readlink /proc/self/cwd — never $PWD or
+#     the `pwd` builtin, which bash derives from the path string) must equal the
+#     parent's physical path plus <name>; anything else means <name> was a
+#     symlink or was swapped, and the target is refused.  The one tolerance is a
+#     direct child of the parent whose name differs only in case: on a
+#     case-insensitive host bind mount the kernel may report `Bin` for a
+#     requested `bin`, and a child of the held directory is inside it whatever
+#     its spelling.  The case folding is the locale's: under C only ASCII
+#     letters fold, so a non-ASCII case variant is refused, the safe direction.
+#   * `mount --no-canonicalize`: by default util-linux rewrites "." back into an
+#     absolute path, which the kernel would walk again.
+#   * the first step, into /workspace/<slug>, must land on a mount root
+#     (`mountpoint -q .`), and it never creates.  Every real workspace is one —
+#     the dir-mounted bind, the self-hosted agent-ws-* volume, Stage 6's fixture
+#     bind — while a directory node makes under its own /workspace never is.
+# That last check is what keeps a held directory inside /workspace: node can
+# still rename one, and a mount or chown then follows it to its new name, but
+# rename(2) never crosses mounts and a mount root cannot itself be renamed
+# (EBUSY), so whatever lies below a mounted <slug> stays below it.  Without the
+# check, `/workspace/evil/x` could be carried to /tmp/evil/x mid-run, since
+# /workspace, /tmp and /home/node share the container's root filesystem.
+
+# enter_root — hold the workspace root.  /workspace is node-owned, but its name
+# sits in the root-owned /, so node cannot re-point it: this one absolute chdir
+# is the only one the walk trusts.
+enter_root() {
+	cd -P -- "$workspace_root" 2>/dev/null || return 1
+	held="$workspace_root"
+	[ "$(readlink /proc/self/cwd)" = "$held" ]
+}
+
+# step_into <name> [create]
+#   Hold <name>, a child of the held directory.  With `create`, an absent <name>
+#   is made first: a mkdir of one relative name never follows a symlink and never
+#   creates anywhere but the held directory.  Sets $created to 1 when this call
+#   made it; a <name> that appears concurrently (a parallel run) is entered like
+#   any existing one.  Returns 1 when <name> cannot be created or entered (a
+#   file, say) and 2 when it is a symlink or was swapped while being entered,
+#   unless it landed on a direct child of the held directory whose name differs
+#   only in case (the tolerance above), which returns 0.  After 1 or 2 the cwd
+#   is wherever the failed step left it and must not be acted on.
+step_into() {
+	local cwd
+	created=0
+	if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+		[ "${2:-}" = create ] || return 1
+		if mkdir -- "$1" 2>/dev/null; then
+			created=1
+		elif [ ! -e "$1" ] && [ ! -L "$1" ]; then
+			return 1
+		fi
+	fi
+	if ! cd -P -- "./$1" 2>/dev/null; then
+		[ -L "$1" ] && return 2
+		return 1
+	fi
+	cwd="$(readlink /proc/self/cwd)"
+	if [ "$cwd" != "$held/$1" ]; then
+		if [ "${cwd%/*}" != "$held" ] || [ "${cwd,,}" != "${held,,}/${1,,}" ]; then
+			return 2
+		fi
+	fi
+	held="$cwd"
+}
+
+# enter_slug <slug> — from the held workspace root, hold workspace <slug>, which
+# must already exist and be a mount root.  step_into's return codes, plus 3 when
+# it is a plain directory rather than a mount.
+enter_slug() {
+	step_into "$1" || return
+	mountpoint -q . 2>/dev/null || return 3
+}
+
+# walk_to <path> — hold an existing <path> below a workspace, creating nothing.
+# Same return codes as enter_slug.
+walk_to() {
+	local -a parts
+	local part
+	enter_root || return 1
+	mapfile -d / -t parts < <(printf '%s' "${1#"$workspace_root"/}")
+	enter_slug "${parts[0]}" || return
+	for part in "${parts[@]:1}"; do
+		step_into "$part" || return
+	done
+}
+
 # warn_bind_broken <wt> <dst> <reason>
 #   Loud stderr diagnostic for the case where a persistent .worktrees volume was
 #   detected but the durable .git/worktrees bind could not be established.  The
@@ -50,28 +148,37 @@ warn_bind_broken() {
 	echo "shadow-mounts: WARNING: persistent .worktrees volume found at '$1' but the durable .git/worktrees bind failed ($3); falling back to EPHEMERAL tmpfs for '$2' — linked-worktree metadata will NOT survive container recreation." >&2
 }
 
-# bind_git_worktrees <dst>
-#   <dst> is a resolved, /workspace-validated path ending in /.git/worktrees whose
-#   mountpoint dir already exists.  Bind the co-located persistent worktrees
-#   volume's .gitworktrees subdir over it so per-worktree git metadata persists.
-#   Returns 0 when it bound the durable metadata; returns 1 (caller falls back to
-#   tmpfs) when there is no persistent .worktrees volume to co-locate into — or,
-#   with a LOUD stderr warning, when a persistent volume IS present but the
-#   durable bind could not be established, so a broken bind never masquerades as
-#   the normal no-volume fallback.
+# bind_git_worktrees <dst> <dst-fd>
+#   <dst> is the resolved, /workspace-validated path ending in /.git/worktrees
+#   that the caller holds as fd <dst-fd> (its mountpoint dir already exists).
+#   Bind the co-located persistent worktrees volume's .gitworktrees subdir over
+#   it so per-worktree git metadata persists.  Returns 0 when it bound the
+#   durable metadata; returns 1 (caller falls back to tmpfs) when there is no
+#   persistent .worktrees volume to co-locate into — or, with a LOUD stderr
+#   warning, when a persistent volume IS present but the durable bind could not
+#   be established, so a broken bind never masquerades as the normal no-volume
+#   fallback.  Leaves the cwd anywhere: the caller re-enters <dst-fd>.
 bind_git_worktrees() {
-	local dst="$1"
-	local ws="${dst%/.git/worktrees}" # /workspace/<slug>
-	local wt="$ws/.worktrees"
+	local dst="$1" dst_fd="$2" src_fd rc=0
+	local wt="${dst%/.git/worktrees}/.worktrees"
 
 	# Only bind when .worktrees is a PERSISTENT container-local mount (the
 	# launcher's agent-wt-* volume): a plain unmounted dir or the tmpfs fallback
 	# would make the "durable" metadata just as ephemeral as tmpfs, so in those
-	# cases the caller's tmpfs path is the honest choice.  These two checks are
-	# the only SILENT return-1 paths: "no durable volume" is a normal launch
-	# mode, not a fault.
-	mountpoint -q "$wt" 2>/dev/null || return 1
-	case "$(findmnt -nro FSTYPE -T "$wt" 2>/dev/null || true)" in
+	# cases the caller's tmpfs path is the honest choice.  These checks are the
+	# only SILENT return-1 paths: "no durable volume" is a normal launch mode,
+	# not a fault.  The bind source sits inside that node-writable volume, so it
+	# is reached by the same held walk as the target.  A walk refused for a
+	# symlinked or swapped component is not silent: a mounted .worktrees cannot
+	# be swapped, so tmpfs is still the right answer, but a symlinked .worktrees
+	# is not followed to whatever volume it may point at, and that is reported.
+	walk_to "$wt" || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		echo "shadow-mounts: not binding durable metadata for '$dst': a component of '$wt' is a symlink or was swapped while being entered; falling back to tmpfs." >&2
+	fi
+	[ "$rc" -eq 0 ] || return 1
+	mountpoint -q . 2>/dev/null || return 1
+	case "$(findmnt -nro FSTYPE -T . 2>/dev/null || true)" in
 	tmpfs | '') return 1 ;;
 	esac
 
@@ -82,40 +189,72 @@ bind_git_worktrees() {
 	# ephemeral-metadata mismatch this bind exists to prevent (worktrees that
 	# survive a container recycle while their registrations vanish), and make it
 	# indistinguishable from a normal no-volume launch.
-	local src="$wt/.gitworktrees"
-	local rsrc
-	rsrc="$(realpath -m -- "$src")" || {
-		warn_bind_broken "$wt" "$dst" "cannot resolve bind source '$src'"
+	rc=0
+	step_into .gitworktrees create || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		warn_bind_broken "$wt" "$dst" "cannot create or enter durable metadata dir '$wt/.gitworktrees' safely"
 		return 1
-	}
-	# Defence in depth: the bind SOURCE must also resolve under /workspace/.
-	case "$rsrc" in
-	"$workspace_root"/*) ;;
-	*)
-		warn_bind_broken "$wt" "$dst" "bind source '$rsrc' resolves outside /workspace/"
-		return 1
-		;;
-	esac
-
+	fi
 	# Durable metadata dir inside the volume, owned by node (git runs as node).
-	mkdir -p "$rsrc" || {
-		warn_bind_broken "$wt" "$dst" "cannot create durable metadata dir '$rsrc'"
-		return 1
-	}
-	chown "$NODE_UID:$NODE_GID" "$rsrc" 2>/dev/null || true
+	chown "$NODE_UID:$NODE_GID" . 2>/dev/null || true
 
-	mount --bind "$rsrc" "$dst" || {
-		warn_bind_broken "$wt" "$dst" "mount --bind '$rsrc' -> '$dst' failed"
+	if ! exec {src_fd}<.; then
+		warn_bind_broken "$wt" "$dst" "cannot hold '$wt/.gitworktrees' open"
 		return 1
-	}
-	echo "Worktree metadata: bound durable $rsrc -> $dst"
+	fi
+	if ! cd -P -- "/proc/self/fd/$dst_fd" 2>/dev/null; then
+		exec {src_fd}<&-
+		warn_bind_broken "$wt" "$dst" "cannot re-enter the held mountpoint '$dst'"
+		return 1
+	fi
+	if ! mount --no-canonicalize --bind "/proc/self/fd/$src_fd" .; then
+		exec {src_fd}<&-
+		warn_bind_broken "$wt" "$dst" "mount --bind '$wt/.gitworktrees' -> '$dst' failed"
+		return 1
+	fi
+	exec {src_fd}<&-
+	echo "Worktree metadata: bound durable $wt/.gitworktrees -> $dst"
 	return 0
 }
 
-for target in "$@"; do
+# adopt_owner — give the held directory, which this run just created as root,
+# the owner of the deepest directory that already existed ($owner).  A
+# mountpoint we had to create is created by ROOT (this helper only ever runs via
+# sudo), so on a native-Linux bind mount it outlives the container as a
+# root-owned mode-755 directory once the tmpfs goes away — and the host user can
+# then neither populate nor remove it (e.g. a subsequent host `dotnet build`
+# writing into bin/obj). Only the tmpfs itself was ever node-owned, and it exists
+# only while the container runs. For a bind-mounted checkout the deepest
+# existing ancestor's owner is the tree's host owner, and for a container-local
+# volume it is node either way. heal-workspace-perms.sh has already run by this
+# point in entrypoint-core.sh, so a root-owned checkout is node-owned here rather
+# than inheriting root. Never fatal: a failed chown leaves today's behaviour.
+adopt_owner() {
+	if [ -z "$owner" ]; then
+		chown_failed=1
+		return 0
+	fi
+	chown "$owner" . 2>/dev/null || chown_failed=1
+}
+
+# refuse_swapped <target> <component> — the per-target refusal for a component
+# that did not resolve to itself.
+refuse_swapped() {
+	echo "shadow-mounts: refusing to shadow '$1' ('$2' is a symlink or was swapped while being entered)." >&2
+}
+
+# shadow_one <target> — validate, walk to, and mount one target.  Returns 0 for
+# a refused or skipped target so the loop carries on; a failed tmpfs mount still
+# aborts the run under set -e.
+shadow_one() {
+	local target="$1" resolved_target part i last dst_fd rc
+	local -a parts
+	owner=""
+	chown_failed=0
+
 	if ! resolved_target="$(realpath -m -- "$target")"; then
 		echo "shadow-mounts: refusing to shadow '$target' (unable to resolve path)." >&2
-		continue
+		return 0
 	fi
 
 	# Validate: must resolve to a path under /workspace/.
@@ -123,7 +262,7 @@ for target in "$@"; do
 	"$workspace_root"/*) ;;
 	*)
 		echo "shadow-mounts: refusing to shadow '$target' (must resolve under /workspace/)." >&2
-		continue
+		return 0
 		;;
 	esac
 
@@ -140,107 +279,116 @@ for target in "$@"; do
 	*/*) ;;
 	*)
 		echo "shadow-mounts: refusing to shadow '$target' (resolves to the workspace '$resolved_target' itself, not a directory inside it)." >&2
-		continue
+		return 0
 		;;
 	esac
 
+	# Walk to the target: into its workspace, then down, creating what is
+	# missing.  mapfile -d / keeps a newline inside a component rather than
+	# splitting on it.
+	if ! enter_root; then
+		echo "shadow-mounts: cannot enter the workspace root '$workspace_root'." >&2
+		exit 1
+	fi
+	mapfile -d / -t parts < <(printf '%s' "${resolved_target#"$workspace_root"/}")
+	rc=0
+	enter_slug "${parts[0]}" || rc=$?
+	case "$rc" in
+	0) ;;
+	2)
+		refuse_swapped "$target" "$held/${parts[0]}"
+		return 0
+		;;
+	3)
+		echo "shadow-mounts: refusing to shadow '$target' ('$held' is a plain directory, not a mounted workspace)." >&2
+		return 0
+		;;
+	*)
+		echo "shadow-mounts: skipping '$target' ('$held/${parts[0]}' is not an existing workspace directory)." >&2
+		return 0
+		;;
+	esac
+	last=$((${#parts[@]} - 1))
+	for ((i = 1; i <= last; i++)); do
+		part="${parts[$i]}"
+		# The held directory at the first absent component is the deepest
+		# ancestor that already exists: read its owner before anything is
+		# created beneath it.
+		if [ -z "$owner" ] && [ "$chown_failed" = 0 ] && [ ! -e "$part" ] && [ ! -L "$part" ]; then
+			owner="$(stat -c '%u:%g' . 2>/dev/null)" || {
+				owner=""
+				chown_failed=1
+			}
+		fi
+		rc=0
+		step_into "$part" create || rc=$?
+		case "$rc" in
+		0) ;;
+		2)
+			refuse_swapped "$target" "$held/$part"
+			return 0
+			;;
+		*)
+			# Not fatal: a path whose parent is a file (e.g. a literal under a .git
+			# that is itself a file in a linked worktree) must not abort the whole
+			# loop and leave the remaining directories unshadowed.
+			echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
+			return 0
+			;;
+		esac
+		# A created ancestor of the mountpoint; the mountpoint is chowned below.
+		if [ "$created" = 1 ] && [ "$i" -lt "$last" ]; then adopt_owner; fi
+	done
+	# The mountpoint itself, while it is still the bare directory: chowned BEFORE
+	# the mount, or it would re-own the tmpfs root instead.
+	if [ "$created" = 1 ]; then adopt_owner; fi
+
+	# One warning per run, not per directory: on a Windows/FUSE bind mount chown
+	# is expected to be a no-op or EPERM, and a repo full of never-built projects
+	# would otherwise print dozens of identical lines at every container start.
+	if [ "$chown_failed" = 1 ] && [ "${chown_warned:-0}" != 1 ]; then
+		chown_warned=1
+		echo "shadow-mounts: warning: could not give one or more created mountpoint directories the host ownership of their parent tree; on a native-Linux bind mount they may be left root-owned on the host after the container stops." >&2
+	fi
+
 	# Skip if already a mountpoint (handles re-runs and shadow-refresh.sh) — this
 	# covers both a prior tmpfs shadow and a prior durable .git/worktrees bind.
-	if mountpoint -q "$resolved_target" 2>/dev/null; then
-		continue
-	fi
-
-	# Remember which components mkdir -p is about to create, plus the deepest
-	# ancestor that already exists, so the new ones can inherit its ownership
-	# (see the chown below).  Computed BEFORE the mkdir, while they are absent.
-	new_dirs=()
-	deepest_existing="$resolved_target"
-	while [ ! -e "$deepest_existing" ] && [ "$deepest_existing" != "/" ]; do
-		new_dirs+=("$deepest_existing")
-		deepest_existing="$(dirname "$deepest_existing")"
-	done
-
-	# Non-fatal under set -e: a path whose parent is a file (e.g. a literal
-	# under a .git that is itself a file in a linked worktree) must not abort
-	# the whole loop and leave the remaining directories unshadowed.
-	if ! mkdir -p "$resolved_target" 2>/dev/null; then
-		echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
-		continue
-	fi
-
-	# A mountpoint we had to create is created by ROOT (this helper only ever runs
-	# via sudo), so on a native-Linux bind mount it outlives the container as a
-	# root-owned mode-755 directory once the tmpfs goes away — and the host user
-	# can then neither populate nor remove it (e.g. a subsequent host `dotnet
-	# build` writing into bin/obj). Only the tmpfs itself was ever node-owned, and
-	# it exists only while the container runs. So hand every component we just
-	# created the uid/gid of the deepest ancestor that already existed: for a
-	# bind-mounted checkout that is the tree's host owner, and for a container-local
-	# volume it is node either way. heal-workspace-perms.sh has already run by this
-	# point in entrypoint-core.sh, so a root-owned checkout is node-owned here
-	# rather than inheriting root. Pre-existing for .powbox.yml literals; the .NET
-	# scan is what makes it automatic and per-project, hence the fix. Must happen
-	# BEFORE the mount below, or it would chown the tmpfs root instead of the
-	# directory underneath it. Never fatal: a failed chown leaves today's behaviour.
-	if [ "${#new_dirs[@]}" -gt 0 ]; then
-		chown_failed=0
-		if owner="$(stat -c '%u:%g' "$deepest_existing" 2>/dev/null)"; then
-			for new_dir in "${new_dirs[@]}"; do
-				# Re-validate each directory AFTER the mkdir: skip one that is now a
-				# symlink, and require the resolved path to still land under /workspace
-				# — the same containment the target itself was validated against above.
-				# This NARROWS the mkdir→chown window rather than closing it: `chown -h`
-				# declines to dereference only the FINAL component, so a swap of an
-				# intermediate one between this check and the chown would still be
-				# followed, and the mkdir above and the mount below traverse the very
-				# same attacker-mutable path after the containment check. With apt-get
-				# no longer a route to root, these swaps are the known remaining one
-				# through this helper; winning one takes a deliberately written race,
-				# which the accident-guard model the firewall serves accepts for now.
-				# Closing them all needs fd-relative walking rather than another
-				# path check, tracked as task 081a.
-				if [ -L "$new_dir" ]; then
-					chown_failed=1
-					continue
-				fi
-				if ! resolved_new="$(realpath -e -- "$new_dir" 2>/dev/null)"; then
-					chown_failed=1
-					continue
-				fi
-				case "$resolved_new" in
-				"$workspace_root"/*) ;;
-				*)
-					chown_failed=1
-					continue
-					;;
-				esac
-				chown -h "$owner" "$resolved_new" 2>/dev/null || chown_failed=1
-			done
-		else
-			chown_failed=1
-		fi
-		# One warning per run, not per directory: on a Windows/FUSE bind mount chown
-		# is expected to be a no-op or EPERM, and a repo full of never-built projects
-		# would otherwise print dozens of identical lines at every container start.
-		if [ "${chown_failed:-0}" = 1 ] && [ "${chown_warned:-0}" != 1 ]; then
-			chown_warned=1
-			echo "shadow-mounts: warning: could not give one or more created mountpoint directories the host ownership of their parent tree; on a native-Linux bind mount they may be left root-owned on the host after the container stops." >&2
-		fi
+	if mountpoint -q . 2>/dev/null; then
+		return 0
 	fi
 
 	# .git/worktrees gets a durable bind from the persistent .worktrees volume
 	# when one is present; otherwise fall through to the tmpfs path below.
 	case "$resolved_target" in
 	*/.git/worktrees)
-		if bind_git_worktrees "$resolved_target"; then
-			mounted=$((mounted + 1))
-			continue
+		# Guarded like the bind source's descriptor: a failed open skips this
+		# one target rather than aborting the run under set -e.
+		if ! exec {dst_fd}<.; then
+			echo "shadow-mounts: skipping '$target' (cannot hold the mountpoint directory open)." >&2
+			return 0
 		fi
+		if bind_git_worktrees "$resolved_target" "$dst_fd"; then
+			exec {dst_fd}<&-
+			mounted=$((mounted + 1))
+			return 0
+		fi
+		# The bind attempt walked elsewhere: return to the held mountpoint
+		# through its descriptor, which no path swap can redirect.
+		if ! cd -P -- "/proc/self/fd/$dst_fd" 2>/dev/null; then
+			exec {dst_fd}<&-
+			echo "shadow-mounts: skipping '$target' (lost the held mountpoint directory)." >&2
+			return 0
+		fi
+		exec {dst_fd}<&-
 		;;
 	esac
 
-	mount -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755,size=$TMPFS_SIZE" tmpfs "$resolved_target"
+	mount --no-canonicalize -t tmpfs -o "uid=$NODE_UID,gid=$NODE_GID,mode=755,size=$TMPFS_SIZE" tmpfs .
 	mounted=$((mounted + 1))
+}
+
+for target in "$@"; do
+	shadow_one "$target"
 done
 
 if [ "$mounted" -gt 0 ]; then

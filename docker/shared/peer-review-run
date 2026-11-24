@@ -7,7 +7,7 @@
 # carries only when it was built with it, through the same interface. The helper owns the mechanics that peer reviews previously required
 # by hand: a private owner-only artifact directory, literal (never shell-eval'd)
 # prompt handling, read-only provider execution, process-group supervision with
-# a timeout, a retry-once policy for transient failures, result parsing, and
+# a timeout, a bounded retry policy for transient failures, result parsing, and
 # process reaping on every exit path.
 #
 # Usage:
@@ -15,7 +15,7 @@
 #                   --worktree <ABS_DIR> \
 #                   --prompt-file <FILE> \
 #                   --artifact-root <ABS_DIR> \
-#                   [--base <REF>] [--timeout <SECONDS>] \
+#                   [--base <REF>] [--timeout <SECONDS>] [--attempts <N>] \
 #                   [--model <ID>] [--effort <LEVEL>]
 #
 #   --provider       claude | codex — the PEER that reviews (the opposite agent),
@@ -31,7 +31,14 @@
 #                    SESSION_DIR for the honest same-UID traversal residual).
 #   --base           optional base/reference metadata (recorded, not injected).
 #   --timeout        wall-clock seconds before the provider tree is reaped
-#                    (default 900).
+#                    (default 900). PER ATTEMPT, not for the whole run: see
+#                    "Budgeting the wait" below before raising it.
+#   --attempts       how many attempts the run may make, 1 to 5 (default 2).
+#                    Only a TRANSIENT failure is retried, and an exhausted
+#                    timeout is one, so the worst case is every attempt running
+#                    to its deadline. `--attempts 1` trades the retry for one
+#                    long attempt, which suits a slow reviewer: a retry starts
+#                    the review again from nothing.
 #   --model          model the PEER reviews with. Default: `opus` for claude.
 #                    For codex with no --model, the ROOT top-level `model` in
 #                    ${CODEX_HOME:-~/.codex}/config.toml is recovered and passed
@@ -59,9 +66,9 @@
 #                    not exist or the account lacks access, the run's second
 #                    attempt uses `muse-wonder-1.0`, which every plan includes.
 #                    That fallback is one more alternative route through the
-#                    two-attempt budget, so a run that took it has no transient
-#                    retry left. An explicit --model is used as given, with no
-#                    fallback.
+#                    attempt budget, so at the default two a run that took it
+#                    has no transient retry left. An explicit --model is used
+#                    as given, with no fallback.
 #   --effort         reasoning effort: low | medium | high | xhigh | max
 #                    (`max` is not offered by codex). Default: high, for EVERY
 #                    provider.
@@ -85,27 +92,51 @@
 # per-invocation and never write back to the shared configuration.
 #
 # Timeout and retry: an exhausted supervised deadline is a TRANSIENT attempt
-# result, so a first timeout starts the helper's one retry in a fresh attempt
-# directory. Two attempts is the whole budget — the transient retry and the
-# Claude login-to-env-credential fallback are alternative routes through it,
-# never additive — and a final attempt that also exhausts its deadline stays
+# result, so a timeout starts a retry in a fresh attempt directory while the
+# budget lasts. `--attempts` is the whole budget (default two) — the transient
+# retry and the two fallbacks (Claude login-to-env-credential, Muse
+# preferred-to-floor model) are alternative routes through it, never additive —
+# and a final attempt that also exhausts its deadline stays
 # `timeout`: that is the most specific terminal class the vocabulary has for
 # deadline exhaustion, and retry exhaustion is carried by `attempts`, `retried`
-# and `reason` rather than by collapsing it into the generic `failed`. EVERY
-# route into attempt two — the non-timeout transient retry, the timeout retry
-# and the Claude login-to-env-credential fallback — shares ONE precondition: the
+# and `reason` rather than by collapsing it into the generic `failed`.
+#
+# One exception to "never additive": at `--attempts 1` a fallback is still taken
+# once. It is not a retry of a failure but the same review relaunched on the
+# credential or model the account does have, and without it a single-attempt
+# Muse run on a plan lacking the preferred model could never review at all. The
+# attempt after that fallback is the last.
+#
+# EVERY route into a further attempt shares ONE precondition: the
 # finished attempt's OWN reap must CONFIRM its process tree is gone. Where it
-# could not, no second attempt runs, because starting one beside a provider
+# could not, no further attempt runs, because starting one beside a provider
 # process known to be live is the single way this budget could put two peer
 # reviews on the machine at once, and a fresh attempt directory isolates
-# artifacts, not processes. A suppressed run keeps the outcome its one attempt
-# earned (`failed`, `timeout`, `unavailable`) at attempts:1 / retried:false, and
-# its `reason` states the suppression instead of claiming a retry or a reap that
-# did not happen. The Claude fallback is the costly one — a run that might have
+# artifacts, not processes. A suppressed run keeps the outcome its last attempt
+# earned (`failed`, `timeout`, `unavailable`), counts only the attempts it made,
+# and its `reason` states the suppression instead of claiming a retry or a reap
+# that did not happen. The Claude fallback is the costly one — a run that might have
 # authenticated on the env credential ends `unavailable` — so its reason states
 # that the env credential was never tried, which is a different result from an
 # `unavailable` both credentials produced. The capability help probe's reap is
 # not an attempt's reap and suppresses nothing.
+#
+# Budgeting the wait: a caller that waits for this helper in one blocking call
+# must size that wait for the WORST case, which is every attempt running to its
+# deadline:
+#
+#   attempts x (timeout + ~5s to reap) + ~10s for the capability probe
+#
+# Agent harnesses cap a foreground tool call (Claude Code's Bash tool at 600
+# seconds), and a helper killed by that cap emits no result and may leave its
+# provider running, so the product has to fit under the cap with room for the
+# caller's own setup and parsing. Under a 600-second cap that is `--attempts 2
+# --timeout 260` (the usual pairing), `--attempts 1 --timeout 540` for a slow
+# reviewer, or `--attempts 3 --timeout 170` for a flaky one. The default
+# `--timeout 900` fits no such cap at any attempt count: it is for callers that
+# wait without one. At `--attempts 1` add the refused launch that precedes a
+# fallback; providers refuse a credential or a model within seconds, but nothing
+# bounds that launch below the timeout.
 #
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
@@ -194,6 +225,7 @@ set -uo pipefail
 
 readonly SCHEMA="powbox.peer-review-run/v1"
 readonly DEFAULT_TIMEOUT=900
+readonly DEFAULT_ATTEMPTS=2
 
 # EX_USAGE-style exit for the helper's OWN errors (never a peer outcome).
 EX_USAGE=64
@@ -202,7 +234,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,192p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,223p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -918,6 +950,7 @@ PROMPT_FILE=""
 ARTIFACT_ROOT=""
 BASE=""
 TIMEOUT="$DEFAULT_TIMEOUT"
+MAX_ATTEMPTS="$DEFAULT_ATTEMPTS"
 # Empty means "not requested"; the provider-specific defaults are resolved after
 # --provider is known (see the strength-knob validation below).
 MODEL=""
@@ -952,6 +985,10 @@ while [ $# -gt 0 ]; do
 	--timeout)
 		TIMEOUT="${2:-}"
 		shift 2 || die_usage "--timeout needs a value"
+		;;
+	--attempts)
+		MAX_ATTEMPTS="${2:-}"
+		shift 2 || die_usage "--attempts needs a value"
 		;;
 	--model)
 		MODEL="${2:-}"
@@ -1097,6 +1134,13 @@ case "$TIMEOUT" in
 '' | *[!0-9.]* | '.' | *.*.*) die_usage "--timeout must be a positive number of seconds (got '$TIMEOUT')" ;;
 esac
 awk -v t="$TIMEOUT" 'BEGIN{exit !(t>0)}' || die_usage "--timeout must be > 0 (got '$TIMEOUT')"
+# Same placement for --attempts. The ceiling is a guardrail, not a tuning limit:
+# every attempt can run to the full timeout, so a typo here multiplies both the
+# wait and the quota a struggling provider is asked for.
+case "$MAX_ATTEMPTS" in
+1 | 2 | 3 | 4 | 5) ;;
+*) die_usage "--attempts must be a whole number from 1 to 5 (got '$MAX_ATTEMPTS')" ;;
+esac
 
 [ -n "$WORKTREE" ] || die_usage "--worktree is required"
 case "$WORKTREE" in
@@ -2249,7 +2293,7 @@ write_meta() {
 # credentials cleared — see build_cmd_claude), and if that attempt comes back
 # `unavailable` (an auth/usage failure that yields no verdict) while an env
 # credential IS available, retry ONCE in key mode (env credentials left intact)
-# — subject, like every route into attempt two, to the shared reap precondition
+# — subject, like every route into a further attempt, to the shared reap precondition
 # below: a login attempt whose own process tree could not be confirmed gone
 # starts no fallback. EITHER credential may be expired; if neither authenticates,
 # the peer stays `unavailable`. Codex is unaffected (CODEX_API_KEY is a
@@ -2276,7 +2320,7 @@ else
 	CLAUDE_AUTH_MODE=key
 fi
 
-# --- run with retry-once for transient failures ------------------------------
+# --- run within the attempt budget -------------------------------------------
 ATTEMPTS=0
 RETRIED=false
 # Total wall time across ALL attempts. ATT_ELAPSED is per-attempt and would be
@@ -2284,151 +2328,205 @@ RETRIED=false
 # using elapsedSeconds for diagnostics or scheduling — so the emitted value is
 # the accumulated sum, not the final attempt alone.
 TOTAL_ELAPSED=0
+# How the attempts so far ended, so the terminal reason asserts only what
+# happened: attempts can be DIFFERENT transient classes (a reset connection then
+# a slow provider is an ordinary flaky run), and a fallback attempt is neither.
+TRANSIENT_ATTEMPTS=0
+TIMEOUT_ATTEMPTS=0
+# The route the latest attempt was launched by; empty for attempt one.
+LAST_ROUTE=""
 
-run_attempt 1
-ATTEMPTS=1
-TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
-
-# WHICH route would spend attempt two — resolved BEFORE anything acts on it, and
-# separately from taking it, because that is what makes the reap precondition
-# below ONE decision rather than a copy per route. A route added here cannot
-# reach `run_attempt 2` without inheriting the gate.
-#
-# The routes are mutually exclusive by construction (an `unavailable` attempt is
-# never `timeout` and never transient), so the order only fixes which predicate
-# is read first, not which of two applicable routes wins.
-RETRY_ROUTE=""
-if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
-	RETRY_ROUTE=claude-fallback
-elif [ "$PROVIDER" = muse ] && [ "$ATT_MODEL_DENIED" = 1 ] && [ -n "$MUSE_MODEL_FALLBACK" ]; then
-	# The preferred Muse model is not in this account's plan: spend the second
-	# attempt on the floor model. Like the Claude fallback, an alternative route
-	# through the same two-attempt budget, never an extra attempt.
-	RETRY_ROUTE=muse-model-fallback
-elif [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_OUTCOME" = timeout ]; then
-	RETRY_ROUTE=timeout
-elif [ "$ATT_TRANSIENT" = 1 ]; then
-	RETRY_ROUTE=transient
+# The budget spelled as the reasons spell it. Two keeps its words because that
+# is the default every existing caller reads.
+if [ "$MAX_ATTEMPTS" = 2 ]; then
+	CAP_PHRASE="two-attempt cap"
+	ALL_PHRASE="both attempts"
+	COUNT_PHRASE="two attempts"
+else
+	CAP_PHRASE="${MAX_ATTEMPTS}-attempt cap"
+	ALL_PHRASE="all ${MAX_ATTEMPTS} attempts"
+	COUNT_PHRASE="${MAX_ATTEMPTS} attempts"
 fi
 
-# THE GATE, shared by every route above: an attempt whose OWN reap could not
-# confirm its process tree was gone starts no second attempt, because attempt two
-# would run beside a provider process known to be live and a fresh attempt
-# directory isolates artifacts, not processes. Decided HERE, ahead of every
-# route's stderr announcement and ahead of the branch that increments ATTEMPTS,
-# so a suppressed run neither claims a retry on the streamed channel nor needs
-# its attempt count corrected afterwards.
-#
-# ATT_REAP_CONFIRMED is ATTEMPT-scoped and fail-closed; the run-global REAP_WARN
-# is deliberately NOT read, because the capability help probe raises it from
-# inside attempt one before any provider is launched, which has nothing to do
-# with the finished attempt's tree.
-RETRY_SUPPRESSED=0
-if [ -n "$RETRY_ROUTE" ] && [ "$ATT_REAP_CONFIRMED" = 0 ]; then
-	RETRY_SUPPRESSED=1
-fi
+while :; do
+	ATTEMPTS=$((ATTEMPTS + 1))
+	# Every attempt gets a brand-new attempt directory (never a reused one).
+	run_attempt "$ATTEMPTS"
+	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
+	if [ "$ATTEMPTS" -gt 1 ]; then
+		RETRIED=true
+	fi
+	if [ "$ATT_TRANSIENT" = 1 ]; then
+		TRANSIENT_ATTEMPTS=$((TRANSIENT_ATTEMPTS + 1))
+		if [ "$ATT_OUTCOME" = timeout ]; then
+			TIMEOUT_ATTEMPTS=$((TIMEOUT_ATTEMPTS + 1))
+		fi
+	fi
 
-if [ "$RETRY_SUPPRESSED" = 1 ]; then
-	# Per-route normalization: run_attempt() leaves a transient reason optimistic
-	# ("...; retrying") and each route promised a different second attempt, so the
-	# correction lands here, where that route's retry used to be.
+	# WHICH route would spend the next attempt — resolved BEFORE anything acts on
+	# it, and separately from taking it, because that is what makes the budget
+	# and the reap precondition below ONE decision each rather than a copy per
+	# route. A route added here cannot reach another `run_attempt` without
+	# inheriting both.
+	#
+	# The routes are mutually exclusive by construction (an `unavailable` attempt
+	# is never `timeout` and never transient), so the order only fixes which
+	# predicate is read first, not which of two applicable routes wins. Each
+	# fallback also disarms itself when taken, so neither can be chosen twice.
+	RETRY_ROUTE=""
+	if [ "$PROVIDER" = claude ] && [ "$CLAUDE_AUTH_MODE" = login ] && [ "$ATT_OUTCOME" = unavailable ] && [ "$ATT_BINARY_MISSING" = 0 ] && [ "$CLAUDE_HAS_KEY" = 1 ]; then
+		# The login attempt could not AUTHENTICATE the peer (expired session, or a
+		# session limit). Gated on ATT_BINARY_MISSING=0: a missing `claude` binary
+		# is also `unavailable`, but switching auth mode cannot fix it, so it must
+		# not trigger a pointless further attempt or a misleading retry note.
+		RETRY_ROUTE=claude-fallback
+	elif [ "$PROVIDER" = muse ] && [ "$ATT_MODEL_DENIED" = 1 ] && [ -n "$MUSE_MODEL_FALLBACK" ]; then
+		# The preferred Muse model is not in this account's plan: spend the next
+		# attempt on the floor model.
+		RETRY_ROUTE=muse-model-fallback
+	elif [ "$ATT_TRANSIENT" = 1 ] && [ "$ATT_OUTCOME" = timeout ]; then
+		RETRY_ROUTE=timeout
+	elif [ "$ATT_TRANSIENT" = 1 ]; then
+		RETRY_ROUTE=transient
+	fi
+	if [ -z "$RETRY_ROUTE" ]; then
+		break
+	fi
+
+	# THE BUDGET. A fallback is an alternative route through it, never an extra
+	# attempt — except at `--attempts 1`, where one is still taken (see "Timeout
+	# and retry" in the header): it relaunches the same review on the credential
+	# or model the account does have rather than retrying a failure.
+	ATTEMPT_BUDGET="$MAX_ATTEMPTS"
 	case "$RETRY_ROUTE" in
-	timeout)
-		printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
-		ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
-		;;
-	transient)
-		printf '{"event":"note","provider":"%s","message":"transient retry suppressed; the failed attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
-		ATT_REASON="provider hit a transient failure (exit ${ATT_EXIT}); the retry was suppressed because reaping could not confirm that attempt's process tree was gone"
-		;;
-	claude-fallback)
-		# The one suppression that costs a recoverable path: the env credential
-		# might have authenticated. The reason must therefore not read like the
-		# ordinary both-credentials-tried `unavailable` a caller already knows.
-		# It says which credential the outcome belongs to rather than calling that
-		# credential failed: an `unavailable` login covers a VALID session that hit
-		# a usage/quota limit, so "one failed credential" would mislabel it.
-		printf '{"event":"note","provider":"claude","message":"env-credential fallback suppressed; the unavailable attempt process tree could not be confirmed reaped"}\n' >&2
-		ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this outcome is the login credential's alone, not both credentials)"
-		;;
-	muse-model-fallback)
-		printf '{"event":"note","provider":"muse","message":"model fallback suppressed; the refused attempt process tree could not be confirmed reaped"}\n' >&2
-		ATT_REASON="${ATT_REASON}; the fallback to '${MUSE_MODEL_FALLBACK}' was suppressed because reaping could not confirm that attempt's process tree was gone, so that model was never tried"
+	claude-fallback | muse-model-fallback)
+		if [ "$ATTEMPT_BUDGET" -lt 2 ]; then
+			ATTEMPT_BUDGET=2
+		fi
 		;;
 	esac
-elif [ "$RETRY_ROUTE" = muse-model-fallback ]; then
-	printf '{"event":"note","provider":"muse","message":"preferred model %s is not available to this account; retrying with %s"}\n' "$MODEL" "$MUSE_MODEL_FALLBACK" >&2
-	MODEL="$MUSE_MODEL_FALLBACK"
-	MUSE_MODEL_FALLBACK=""
-	run_attempt 2
-	ATTEMPTS=2
-	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
-	RETRIED=true
-	if [ "$ATT_TRANSIENT" = 1 ]; then
-		if [ "$ATT_OUTCOME" = timeout ]; then
-			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the model-fallback attempt; attempt cap reached, not retried further"
-		else
-			ATT_REASON="provider failed transiently on the model-fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
-		fi
-	fi
-elif [ "$RETRY_ROUTE" = claude-fallback ]; then
-	# The login attempt could not AUTHENTICATE the peer (expired session, or a
-	# session limit) — fall back to the documented env-credential path ONCE, in a
-	# brand-new attempt dir. Gated on ATT_BINARY_MISSING=0: a missing `claude`
-	# binary is also `unavailable`, but switching auth mode cannot fix it, so it
-	# must not trigger a pointless second attempt or a misleading retry note. This
-	# is a DISTINCT retry from the transient allowlist below (an auth failure is
-	# not transient), and the route resolution above makes them mutually exclusive
-	# — total attempts stay capped at 2. The key-mode result then stands as-is; if
-	# it too is `unavailable`, neither credential authenticated and we give up.
-	printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the env-credential fallback (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"}\n' >&2
-	CLAUDE_AUTH_MODE=key
-	run_attempt 2
-	ATTEMPTS=2
-	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
-	RETRIED=true
-	if [ "$ATT_TRANSIENT" = 1 ]; then
-		# The env-credential fallback attempt ITSELF failed transiently. The
-		# 2-attempt cap means no further retry, so correct the per-attempt reason
-		# (run_attempt leaves it optimistic) to reflect that this was the last try.
-		if [ "$ATT_OUTCOME" = timeout ]; then
-			ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the env-credential fallback attempt; attempt cap reached, not retried further"
-		else
-			ATT_REASON="provider failed transiently on the env-credential fallback attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
-		fi
-	fi
-elif [ -n "$RETRY_ROUTE" ]; then
-	# Attempt one's class, captured before run_attempt 2 overwrites the ATT_*
-	# state. The two attempts can be DIFFERENT transient classes now that a
-	# deadline is transient too (a reset connection then a slow provider is an
-	# ordinary flaky run), so the terminal reason below must not assert a
-	# first-attempt timeout that never happened.
-	FIRST_ATT_OUTCOME="$ATT_OUTCOME"
-	# Retry ONCE, with a brand-new attempt directory (never reuse the first).
-	printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
-	run_attempt 2
-	ATTEMPTS=2
-	TOTAL_ELAPSED=$(awk -v a="$TOTAL_ELAPSED" -v b="$ATT_ELAPSED" 'BEGIN{printf "%.3f", a+b}')
-	RETRIED=true
-	if [ "$ATT_TRANSIENT" = 1 ]; then
-		if [ "$ATT_OUTCOME" = timeout ]; then
-			# The last allowed attempt also exhausted its supervised deadline.
-			# `timeout` is the most specific terminal class the outcome vocabulary
-			# has for that, so it is kept rather than collapsed into `failed`; the
-			# exhaustion itself is carried by attempts/retried and this reason. The
-			# wording claims no reap, so a survivor annotation cannot contradict it.
-			if [ "$FIRST_ATT_OUTCOME" = timeout ]; then
-				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on both attempts; timeout retry exhausted, two-attempt cap reached"
+	if [ "$ATTEMPTS" -ge "$ATTEMPT_BUDGET" ]; then
+		# No attempt left. run_attempt() leaves a transient reason optimistic
+		# ("...; retrying"), so the correction lands here. A fallback route that
+		# is out of budget needs none: that attempt's own outcome and reason
+		# already say what the provider answered.
+		case "$RETRY_ROUTE" in
+		timeout | transient)
+			if [ "$ATTEMPTS" = 1 ]; then
+				# `--attempts 1`: the only attempt, never retried.
+				if [ "$ATT_OUTCOME" = timeout ]; then
+					ATT_REASON="${ATT_REASON}; not retried (--attempts 1)"
+				else
+					ATT_REASON="provider hit a transient failure (exit ${ATT_EXIT}); not retried (--attempts 1)"
+				fi
+			elif [ "$LAST_ROUTE" = muse-model-fallback ] || [ "$LAST_ROUTE" = claude-fallback ]; then
+				# The fallback attempt ITSELF failed transiently, on the last attempt
+				# the budget allows.
+				FALLBACK_NAME="model-fallback"
+				if [ "$LAST_ROUTE" = claude-fallback ]; then
+					FALLBACK_NAME="env-credential fallback"
+				fi
+				if [ "$ATT_OUTCOME" = timeout ]; then
+					ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the ${FALLBACK_NAME} attempt; attempt cap reached, not retried further"
+				else
+					ATT_REASON="provider failed transiently on the ${FALLBACK_NAME} attempt (exit ${ATT_EXIT}); attempt cap reached, not retried further"
+				fi
+			elif [ "$ATT_OUTCOME" = timeout ]; then
+				# The last allowed attempt also exhausted its supervised deadline.
+				# `timeout` is the most specific terminal class the outcome vocabulary
+				# has for that, so it is kept rather than collapsed into `failed`; the
+				# exhaustion itself is carried by attempts/retried and this reason. The
+				# wording claims no reap, so a survivor annotation cannot contradict it,
+				# and it claims a timeout only of the attempts that had one.
+				if [ "$TIMEOUT_ATTEMPTS" = "$ATTEMPTS" ]; then
+					ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on ${ALL_PHRASE}; timeout retry exhausted, ${CAP_PHRASE} reached"
+				elif [ "$TRANSIENT_ATTEMPTS" = "$ATTEMPTS" ]; then
+					ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the final attempt after a transient failure; retry exhausted, ${CAP_PHRASE} reached"
+				else
+					ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the final attempt; retry exhausted, ${CAP_PHRASE} reached"
+				fi
 			else
-				ATT_REASON="provider exceeded the ${TIMEOUT}s timeout on the final attempt after a transient failure; retry exhausted, two-attempt cap reached"
+				# The last allowed attempt failed transiently → exhausted.
+				ATT_OUTCOME=failed
+				if [ "$TRANSIENT_ATTEMPTS" = "$ATTEMPTS" ]; then
+					ATT_REASON="provider failed on ${COUNT_PHRASE} (retry exhausted); last exit ${ATT_EXIT}"
+				else
+					ATT_REASON="provider failed transiently on the final attempt (retry exhausted, ${CAP_PHRASE} reached); last exit ${ATT_EXIT}"
+				fi
 			fi
-		else
-			# Both attempts failed transiently → exhausted.
-			ATT_OUTCOME=failed
-			ATT_REASON="provider failed on two attempts (retry exhausted); last exit ${ATT_EXIT}"
-		fi
+			;;
+		esac
+		break
 	fi
-fi
+
+	# THE GATE, shared by every route above: an attempt whose OWN reap could not
+	# confirm its process tree was gone starts no further attempt, because the
+	# next one would run beside a provider process known to be live and a fresh
+	# attempt directory isolates artifacts, not processes. Decided HERE, ahead of
+	# every route's stderr announcement and of the next pass that increments
+	# ATTEMPTS, so a suppressed run neither claims a retry on the streamed channel
+	# nor needs its attempt count corrected afterwards.
+	#
+	# ATT_REAP_CONFIRMED is ATTEMPT-scoped and fail-closed; the run-global
+	# REAP_WARN is deliberately NOT read, because the capability help probe raises
+	# it from inside attempt one before any provider is launched, which has
+	# nothing to do with the finished attempt's tree.
+	if [ "$ATT_REAP_CONFIRMED" = 0 ]; then
+		# Per-route normalization: run_attempt() leaves a transient reason
+		# optimistic ("...; retrying") and each route promised a different next
+		# attempt, so the correction lands here, where that route's retry would be.
+		case "$RETRY_ROUTE" in
+		timeout)
+			printf '{"event":"note","provider":"%s","message":"timeout retry suppressed; the timed-out attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+			ATT_REASON="${ATT_REASON}; the timeout retry was suppressed because reaping could not confirm that attempt's process tree was gone"
+			;;
+		transient)
+			printf '{"event":"note","provider":"%s","message":"transient retry suppressed; the failed attempt process tree could not be confirmed reaped"}\n' "$PROVIDER" >&2
+			ATT_REASON="provider hit a transient failure (exit ${ATT_EXIT}); the retry was suppressed because reaping could not confirm that attempt's process tree was gone"
+			;;
+		claude-fallback)
+			# The one suppression that costs a recoverable path: the env credential
+			# might have authenticated. The reason must therefore not read like the
+			# ordinary both-credentials-tried `unavailable` a caller already knows.
+			# It says which credential the outcome belongs to rather than calling that
+			# credential failed: an `unavailable` login covers a VALID session that hit
+			# a usage/quota limit, so "one failed credential" would mislabel it.
+			printf '{"event":"note","provider":"claude","message":"env-credential fallback suppressed; the unavailable attempt process tree could not be confirmed reaped"}\n' >&2
+			ATT_REASON="${ATT_REASON}; the env-credential fallback was suppressed because reaping could not confirm that attempt's process tree was gone, so the env credential was never tried (this outcome is the login credential's alone, not both credentials)"
+			;;
+		muse-model-fallback)
+			printf '{"event":"note","provider":"muse","message":"model fallback suppressed; the refused attempt process tree could not be confirmed reaped"}\n' >&2
+			ATT_REASON="${ATT_REASON}; the fallback to '${MUSE_MODEL_FALLBACK}' was suppressed because reaping could not confirm that attempt's process tree was gone, so that model was never tried"
+			;;
+		esac
+		break
+	fi
+
+	# Take the route: announce it, change what the next attempt runs with, loop.
+	case "$RETRY_ROUTE" in
+	muse-model-fallback)
+		printf '{"event":"note","provider":"muse","message":"preferred model %s is not available to this account; retrying with %s"}\n' "$MODEL" "$MUSE_MODEL_FALLBACK" >&2
+		MODEL="$MUSE_MODEL_FALLBACK"
+		MUSE_MODEL_FALLBACK=""
+		;;
+	claude-fallback)
+		# Fall back to the documented env-credential path ONCE. This is a DISTINCT
+		# route from the transient allowlist (an auth failure is not transient).
+		# The key-mode result then stands as-is; if it too is `unavailable`,
+		# neither credential authenticated and we give up.
+		printf '{"event":"note","provider":"claude","message":"login peer unavailable; retrying with the env-credential fallback (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN)"}\n' >&2
+		CLAUDE_AUTH_MODE=key
+		;;
+	*)
+		if [ "$MAX_ATTEMPTS" = 2 ]; then
+			printf '{"event":"note","provider":"%s","message":"transient failure; retrying once"}\n' "$PROVIDER" >&2
+		else
+			printf '{"event":"note","provider":"%s","message":"transient failure; retrying (attempt %d of %d)"}\n' "$PROVIDER" "$((ATTEMPTS + 1))" "$MAX_ATTEMPTS" >&2
+		fi
+		;;
+	esac
+	LAST_ROUTE="$RETRY_ROUTE"
+done
 
 # --- emit the versioned result ----------------------------------------------
 # If any reap reported a survivor after SIGKILL, the "leave no live peer process"

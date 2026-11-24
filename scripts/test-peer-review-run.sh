@@ -127,6 +127,14 @@ set -uo pipefail
 #       unprivileged), which also pins the NEGATIVE boundary the suppression must
 #       not cross on either the timeout or the transient route: a
 #       capability-probe survivor suppresses nothing
+#  (19) --attempts — the budget is the caller's: 1 never retries a timeout or a
+#       transient failure, 3 retries twice, exhaustion reasons name the budget
+#       they ran out of and claim a timeout only of the attempts that had one,
+#       the Muse model fallback and the Claude env-credential fallback are still
+#       taken at 1 with the attempt after them the last, at 3 a fallback leaves
+#       a transient retry, the reap gate stops a larger budget as it stops the
+#       default, and a value outside 1 to 5 is a usage error that creates
+#       nothing
 #
 # Runs directly against the repo copy of the helper; the smoke test overrides
 # PEER_REVIEW_RUN with the baked /usr/local/bin/peer-review-run to exercise the
@@ -3753,6 +3761,164 @@ make_curl_fake "$d" 28
 run "$d" $(std_args "$d" muse)
 assert_eq "18j: with no proxy configured the review runs" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_eq "18j: and nothing is probed" "$([ -e "$d/curl-argv" ] && echo probed || echo none)" none
+
+# --- (19) --attempts: the attempt budget is the caller's ----------------------
+# The default budget of two is what every case above runs under, unchanged. These
+# cover the other values:
+#   19a  --attempts 1 never retries a timeout
+#   19b  --attempts 1 never retries a transient failure
+#   19c  --attempts 3 retries twice and recovers on the third
+#   19d  --attempts 3 exhausted by timeouts names its own cap
+#   19e  --attempts 3 exhausted by transient failures ends failed
+#   19f  --attempts 1 still takes the Muse model fallback
+#   19g  ...and the attempt after that fallback is the last
+#   19h  at --attempts 3 a fallback leaves one transient retry
+#   19i  ...and a reason that claims a timeout only of the attempts that had one
+#   19j  --attempts 1 still takes the Claude env-credential fallback
+#   19k  the reap gate stops a larger budget just as it stops the default
+#   19l  an invalid --attempts is a usage error that creates nothing
+# COUNTING_CODEX runs $BODY once per launch after counting it in $CALLS.
+make_counting_codex() { # <case-dir> <body; $n is this launch's number, $last the result file>
+	cat >"$1/bin/codex" <<CODEXFAKE
+#!/usr/bin/env bash
+if [ "\$1" = exec ] && [ "\$2" = --help ]; then echo "--json"; exit 0; fi
+last=""; while [ \$# -gt 0 ]; do case "\$1" in --output-last-message) last="\$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+n=\$(cat "$1/calls" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"$1/calls"
+$2
+CODEXFAKE
+	chmod +x "$1/bin/codex"
+}
+RESET='echo "error sending request: connection reset by peer" >&2; exit 1'
+
+d="$(new_case)"
+make_counting_codex "$d" 'sleep 60'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1) --attempts 1
+assert_eq "19a: a lone timeout is terminal" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "19a: one attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "19a: retried false" "$(jqf "$RUN_RESULT" .retried)" false
+assert_eq "19a: the provider was launched once" "$(cat "$d/calls")" 1
+assert_eq "19a: one attempt directory" "$(attempt_dir_count "$d/artifacts")" 1
+assert_contains "19a: reason says why nothing was retried" "$(jqf "$RUN_RESULT" .reason)" "not retried (--attempts 1)"
+assert_not_contains "19a: reason claims no cap of attempts it never had" "$(jqf "$RUN_RESULT" .reason)" "attempt cap"
+assert_not_contains "19a: stderr announces no retry" "$RUN_ERR" "retrying"
+
+d="$(new_case)"
+make_counting_codex "$d" "$RESET"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --attempts 1
+assert_eq "19b: a lone transient failure is failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "19b: one attempt" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "19b: the provider was launched once" "$(cat "$d/calls")" 1
+assert_contains "19b: reason says why nothing was retried" "$(jqf "$RUN_RESULT" .reason)" "not retried (--attempts 1)"
+assert_not_contains "19b: reason promises no retry" "$(jqf "$RUN_RESULT" .reason)" "; retrying"
+assert_not_contains "19b: stderr announces no retry" "$RUN_ERR" "retrying"
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_counting_codex "$d" 'if [ "$n" -lt 3 ]; then '"$RESET"'; fi; printf "VERDICT: PASS\n" >"$last"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --attempts 3
+assert_eq "19c: the third attempt's review is the outcome" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "19c: three attempts" "$(jqf "$RUN_RESULT" .attempts)" 3
+assert_eq "19c: retried true" "$(jqf "$RUN_RESULT" .retried)" true
+assert_eq "19c: every attempt kept its own directory" "$(retained_attempts "$d/artifacts")" "1 2 3"
+assert_contains "19c: the second attempt is announced against the budget" "$RUN_ERR" "retrying (attempt 2 of 3)"
+assert_contains "19c: the third attempt is announced against the budget" "$RUN_ERR" "retrying (attempt 3 of 3)"
+assert_not_contains "19c: nothing says the retry is the only one" "$RUN_ERR" "retrying once"
+
+d="$(new_case)"
+make_counting_codex "$d" 'sleep 60'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1) --attempts 3
+assert_eq "19d: three timeouts stay terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "19d: three attempts" "$(jqf "$RUN_RESULT" .attempts)" 3
+assert_eq "19d: the provider was launched three times" "$(cat "$d/calls")" 3
+assert_contains "19d: reason counts the timeouts it had" "$(jqf "$RUN_RESULT" .reason)" "on all 3 attempts"
+assert_contains "19d: reason names its own cap" "$(jqf "$RUN_RESULT" .reason)" "3-attempt cap reached"
+assert_eq "19d: elapsedSeconds totals all three deadlines" "$(jqf "$RUN_RESULT" '.elapsedSeconds >= 3')" true
+
+d="$(new_case)"
+make_counting_codex "$d" "$RESET"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex) --attempts 3
+assert_eq "19e: three transient failures end failed" "$(jqf "$RUN_RESULT" .outcome)" failed
+assert_eq "19e: three attempts" "$(jqf "$RUN_RESULT" .attempts)" 3
+assert_contains "19e: reason counts the attempts" "$(jqf "$RUN_RESULT" .reason)" "provider failed on 3 attempts (retry exhausted)"
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; printf "VERDICT: ISSUES\n- a.py:1 - minor - x\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse) --attempts 1
+assert_eq "19f: the floor model still reviews at --attempts 1" "$(jqf "$RUN_RESULT" .outcome)" issues
+assert_eq "19f: the refused launch and the fallback" "$(jqf "$RUN_RESULT" .attempts)" 2
+assert_eq "19f: the result reports the model that reviewed" "$(jqf "$RUN_RESULT" .model)" muse-wonder-1.0
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; sleep 60'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse 1) --attempts 1
+assert_eq "19g: a fallback that times out is terminal" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "19g: nothing follows the fallback attempt" "$(cat "$d/calls")" 2
+assert_contains "19g: reason names the fallback attempt as the last" "$(jqf "$RUN_RESULT" .reason)" "on the model-fallback attempt; attempt cap reached"
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; if [ "$n" -lt 3 ]; then '"$RESET"'; fi; printf "VERDICT: PASS\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse) --attempts 3
+assert_eq "19h: the retry after the fallback recovers" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "19h: refused, failed, passed" "$(jqf "$RUN_RESULT" .attempts)" 3
+assert_contains "19h: the retry stays on the floor model" " $(tr '\n' ' ' <"$d/argv.3")" " --model muse-wonder-1.0 "
+
+d="$(new_case)"
+# shellcheck disable=SC2016 # expanded by the fake, not here
+make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; sleep 60'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse 1) --attempts 3
+assert_eq "19i: refused then two timeouts is terminal timeout" "$(jqf "$RUN_RESULT" .outcome)" timeout
+assert_eq "19i: three attempts" "$(jqf "$RUN_RESULT" .attempts)" 3
+assert_contains "19i: reason names the cap" "$(jqf "$RUN_RESULT" .reason)" "on the final attempt; retry exhausted, 3-attempt cap reached"
+assert_not_contains "19i: reason claims no timeout of the refused attempt" "$(jqf "$RUN_RESULT" .reason)" "all 3 attempts"
+assert_not_contains "19i: reason calls the refusal no transient failure" "$(jqf "$RUN_RESULT" .reason)" "after a transient failure"
+
+d="$(new_case)"
+make_claude_env_fake "$d"
+mkdir -p "$d/claude-cfg"
+printf '{"claudeAiOauth":{"accessToken":"expired"}}\n' >"$d/claude-cfg/.credentials.json"
+ARGV_LOG="$d/argv" STDIN_LOG="$d/stdin" ENV_LOG="$d/envlog"
+export ARGV_LOG STDIN_LOG ENV_LOG MODE=login_fails
+export CLAUDE_CONFIG_DIR="$d/claude-cfg"
+export ANTHROPIC_API_KEY="fallback-key-authenticates"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" claude) --attempts 1
+unset ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR MODE ARGV_LOG STDIN_LOG ENV_LOG
+assert_eq "19j: the env credential still reviews at --attempts 1" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "19j: the refused login and the fallback" "$(jqf "$RUN_RESULT" .attempts)" 2
+
+d="$(new_case)"
+make_counting_codex "$d" 'sleep 60'
+export PRR_TEST_REAP_FAIL=timeout
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex 1) --attempts 3
+unset PRR_TEST_REAP_FAIL
+assert_eq "19k: an unconfirmed reap ends a three-attempt run at one" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "19k: the provider was launched once" "$(cat "$d/calls")" 1
+assert_contains "19k: reason states the suppression" "$(jqf "$RUN_RESULT" .reason)" "the timeout retry was suppressed"
+
+for bad in 0 6 -1 1.5 two ""; do
+	d="$(new_case)"
+	make_counting_codex "$d" 'exit 0'
+	# shellcheck disable=SC2046
+	run "$d" $(std_args "$d" codex) --attempts "$bad"
+	assert_eq "19l: --attempts '$bad' is a usage error" "$RUN_RC" 64
+	assert_contains "19l: --attempts '$bad' is named in the message" "$RUN_ERR" "--attempts must be a whole number from 1 to 5"
+	assert_eq "19l: --attempts '$bad' creates nothing under the artifact root" "$(find "$d/artifacts" -mindepth 1 | wc -l | tr -d ' ')" 0
+	assert_absent "19l: --attempts '$bad' launches no provider" "$d/calls"
+done
 
 if [ "$fails" -ne 0 ]; then
 	echo "peer-review-run unit test: $fails/$checks checks FAILED." >&2

@@ -13,12 +13,15 @@
 #     (the .ps1 half when pwsh is installed). A fake `docker` stands in for the
 #     engine and plays Container A; a fake `stat` reports the three created
 #     mountpoints as root-owned, which is what the mutation leaves on a rootful
-#     host. It must accept only that run, and reject a run that passed (chown
+#     host (as another owner when the suite itself runs as root). It must accept only that run, and reject a run that passed (chown
 #     intact), a run whose assertions are blind (stat returns one sentinel for
 #     every path), and a Container A abort; a self-skip and a rootless note are
 #     inconclusive, never a pass;
 #   * the teeth probe's decision, and that every driver and Container A string
-#     the classifier anchors on still occurs in its source file.
+#     the classifier anchors on still occurs in its source file;
+#   * that `run` refuses without jq and the image-config check never passes on
+#     an unreadable config, and that the .ps1 wrapper's exit status follows
+#     `pwsh -File` (a driver's own `exit N` is forwarded).
 # shellcheck disable=SC2016 # single-quoted shell text here is literal by design
 set -uo pipefail
 
@@ -133,6 +136,11 @@ echo "== classifier against the real drivers =="
 
 REAL_STAT="$(command -v stat)"
 REAL_ID="$(command -v id)"
+# The owner the fakes report for what the container's root created: root on a
+# real rootful host. Run as root, the real stat reads the fixture's ancestors as
+# 0:0 too, so report another owner then, or nothing could tell them apart.
+FOREIGN=0:0
+[ "$("$REAL_ID" -u)" != 0 ] || FOREIGN=1:1
 FAKE="$TMP/bin"
 mkdir -p "$FAKE"
 
@@ -203,7 +211,7 @@ case "\${FAKE_STAT:-real}" in
 unchowned)
 	case "\$path" in
 	*/proj/bin | */.claude/worktrees | */.git/worktrees)
-		echo 0:0
+		echo $FOREIGN
 		exit 0
 		;;
 	esac
@@ -285,7 +293,7 @@ cp "$TMP/teeth-docker" "$TMP/teethbin/docker"
 cat >"$TMP/teethbin/stat" <<EOF
 #!/usr/bin/env bash
 case "\${FAKE_TEETH:-same}:\${!#}" in
-root:*/created) echo 0:0; exit 0 ;;
+root:*/created) echo $FOREIGN; exit 0 ;;
 esac
 exec "$REAL_STAT" "\$@"
 EOF
@@ -303,6 +311,77 @@ teeth() {
 }
 teeth "root-created dir lands root-owned" 0 FAKE_TEETH=root
 teeth "root-created dir lands with its parent's owner" 2 FAKE_TEETH=same
+
+echo "== jq and the image-config check =="
+
+# run checks for jq before it touches the engine; PATH holds only what the
+# harness's own preamble needs.
+mkdir -p "$TMP/nojqbin"
+ln -s "$(command -v dirname)" "$TMP/nojqbin/dirname"
+rc=0
+env PATH="$TMP/nojqbin" "$(command -v bash)" "$HARNESS" run img sh >"$TMP/nojq.out" 2>&1 || rc=$?
+if [ "$rc" = 1 ] && grep -qF 'NEGATIVE CONTROL FAILED: jq is not installed' "$TMP/nojq.out"; then
+	ok "run refuses without jq"
+else
+	bad "run did not refuse without jq (exit $rc)" "$(cat "$TMP/nojq.out")"
+fi
+
+# verify_derived against a fake engine whose two images differ only by the
+# mutation, with a jq that is missing (127) or prints nothing: the config check
+# must fail, not compare two empty strings equal.
+mkdir -p "$TMP/cfgbin"
+cat >"$TMP/cfgbin/docker" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+image) echo '{"User":"node"}' ;;
+run)
+	echo '755 0:0'
+	case "\$*" in
+	*" base -c "*) cat "$SHADOW_MOUNTS" ;;
+	*) cat "$TMP/sm.sh" ;;
+	esac
+	;;
+esac
+EOF
+chmod +x "$TMP/cfgbin/docker"
+cfg_case() {
+	local name="$1" jq_body="$2" want="$3" rc=0
+	printf '#!/usr/bin/env bash\n%s\n' "$jq_body" >"$TMP/cfgbin/jq"
+	chmod +x "$TMP/cfgbin/jq"
+	mkdir -p "$TMP/cfg-$name"
+	env PATH="$TMP/cfgbin:$PATH" bash -c '. "$1"; verify_derived base tag "$2"' _ "$HARNESS" "$TMP/cfg-$name" >"$TMP/cfg-$name.out" 2>&1 || rc=$?
+	if [ "$rc" = "$want" ]; then
+		ok "verify_derived, $name: exit $rc"
+	else
+		bad "verify_derived, $name: expected exit $want, got $rc" "$(cat "$TMP/cfg-$name.out")"
+	fi
+}
+cfg_case "jq works" 'exec cat' 0
+cfg_case "jq missing" 'exit 127' 1
+cfg_case "jq prints nothing" 'exit 0' 1
+
+echo "== .ps1 wrapper exit status =="
+
+if command -v pwsh >/dev/null 2>&1; then
+	bash -c '. "$1"; write_ps1_wrapper "$2"' _ "$HARNESS" "$TMP/wrapper.ps1"
+	# wrap_case <name> <driver body> <expected rc> [expected output line]
+	wrap_case() {
+		local name="$1" body="$2" want="$3" line="${4:-}" rc=0
+		printf 'param([string]$Image)\n%s\n' "$body" >"$TMP/drv-$name.ps1"
+		pwsh -NoProfile -File "$TMP/wrapper.ps1" -Driver "$TMP/drv-$name.ps1" -Image img >"$TMP/wrap-$name.out" 2>&1 || rc=$?
+		if [ "$rc" = "$want" ] && { [ -z "$line" ] || grep -qxF -- "$line" "$TMP/wrap-$name.out"; }; then
+			ok "wrapper, $name: exit $rc"
+		else
+			bad "wrapper, $name: expected exit $want, got $rc" "$(cat "$TMP/wrap-$name.out")"
+		fi
+	}
+	wrap_case "driver exits 3" 'exit 3' 3
+	wrap_case "driver ends normally after a failing native command" '& false' 0
+	wrap_case "driver ends normally" 'Write-Host done' 0
+	wrap_case "driver throws" 'throw "FAIL: one line"' 1 "FAIL: one line"
+else
+	printf '  skip  pwsh unavailable - the .ps1 wrapper is not checked here\n'
+fi
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -156,8 +156,13 @@ read_baked() {
 	docker run --rm --entrypoint /bin/sh "$1" -c 'stat -c "%a %u:%g" "$1" && cat "$1"' sh "$BAKED_SHADOW_MOUNTS" >"$2"
 }
 
+# Fails, rather than printing nothing, when the config cannot be read: two empty
+# strings would compare equal and pass the only-difference check vacuously.
 config_of() {
-	docker image inspect --format '{{json .Config}}' "$1" | jq -S -c '{User, Entrypoint, Cmd, Env, WorkingDir, Labels}'
+	local cfg
+	cfg="$(docker image inspect --format '{{json .Config}}' "$1" | jq -S -c '{User, Entrypoint, Cmd, Env, WorkingDir, Labels}')" || return 1
+	[ -n "$cfg" ] || return 1
+	printf '%s' "$cfg"
 }
 
 build_derived() {
@@ -177,7 +182,7 @@ EOF
 }
 
 verify_derived() {
-	local base="$1" tag="$2" work="$3"
+	local base="$1" tag="$2" work="$3" base_cfg tag_cfg
 	read_baked "$base" "$work/base.baked" || failed "cannot read $BAKED_SHADOW_MOUNTS from $base"
 	read_baked "$tag" "$work/derived.baked" || failed "cannot read $BAKED_SHADOW_MOUNTS from $tag"
 	[ "$(head -n 1 "$work/base.baked")" = "$(head -n 1 "$work/derived.baked")" ] || failed "the mutated $BAKED_SHADOW_MOUNTS has mode/owner '$(head -n 1 "$work/derived.baked")', not the baked '$(head -n 1 "$work/base.baked")'"
@@ -186,14 +191,31 @@ verify_derived() {
 	[ "$(count_lines "$MOUNTPOINT_CHOWN" "$work/base.sh")" = 1 ] || failed "$base's $BAKED_SHADOW_MOUNTS does not hold exactly one mountpoint chown"
 	grep -vxF -- "$MOUNTPOINT_CHOWN" "$work/base.sh" >"$work/expected.sh" || true
 	cmp -s "$work/expected.sh" "$work/derived.sh" || failed "$tag's $BAKED_SHADOW_MOUNTS is not $base's minus exactly the mountpoint chown line"
-	[ "$(config_of "$base")" = "$(config_of "$tag")" ] || failed "$tag's image config (user, entrypoint, cmd, env, workdir, labels) differs from $base's, so the mutation is not the only difference"
+	base_cfg="$(config_of "$base")" || failed "cannot read $base's image config with docker image inspect and jq"
+	tag_cfg="$(config_of "$tag")" || failed "cannot read $tag's image config with docker image inspect and jq"
+	[ "$base_cfg" = "$tag_cfg" ] || failed "$tag's image config (user, entrypoint, cmd, env, workdir, labels) differs from $base's, so the mutation is not the only difference"
 	echo "  ok: $tag differs from $base only by the removed mountpoint chown in $BAKED_SHADOW_MOUNTS"
 }
 
+# Write the try/catch wrapper the .ps1 driver runs under. pwsh's error view wraps
+# a terminating error at the console width and colours it, which no line anchor
+# survives; the wrapper writes the driver's own message on one line instead. Its
+# exit status follows `pwsh -File`, as the positive Tier 1 step runs the driver:
+# a driver's own `exit N` is forwarded (it does not end the wrapper, and $? turns
+# false), while a driver that ends normally exits 0 even when its last native
+# command left a non-zero $LASTEXITCODE.
+write_ps1_wrapper() {
+	cat >"$1" <<'EOF'
+param([Parameter(Mandatory = $true)][string]$Driver, [Parameter(Mandatory = $true)][string]$Image)
+try { & $Driver -Image $Image; $ok = $? }
+catch { [Console]::Out.WriteLine($_.Exception.Message); exit 1 }
+if ($ok) { exit 0 }
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+exit 1
+EOF
+}
+
 # Run one Stage 6 driver exactly as the control does; returns its exit status.
-# The .ps1 goes through a try/catch wrapper because pwsh's error view wraps a
-# terminating error at the console width and colours it, which no line anchor
-# survives; the wrapper writes the driver's own message on one line instead.
 cmd_drive() {
 	local driver="$1" image="$2" log="$3" marker="$4" rc wrapper
 	: >"$marker"
@@ -208,12 +230,7 @@ cmd_drive() {
 	ps1)
 		command -v pwsh >/dev/null 2>&1 || inconclusive "pwsh is not installed, so the PowerShell driver cannot run."
 		wrapper="$(mktemp "${TMPDIR:-/tmp}/powbox-negctl-XXXXXX.ps1")"
-		cat >"$wrapper" <<'EOF'
-param([Parameter(Mandatory = $true)][string]$Driver, [Parameter(Mandatory = $true)][string]$Image)
-try { & $Driver -Image $Image }
-catch { [Console]::Out.WriteLine($_.Exception.Message); exit 1 }
-exit 0
-EOF
+		write_ps1_wrapper "$wrapper"
 		set +e
 		POWBOX_SMOKE_REQUIRE_IMAGE=1 POWBOX_SMOKE_SKIP_MARKER="$marker" \
 			pwsh -NoProfile -File "$wrapper" -Driver "$ROOT_DIR/scripts/smoke-test-worktree-metadata.ps1" -Image "$image" 2>&1 | tee "$log"
@@ -254,6 +271,7 @@ cmd_run() {
 	local image="$1" driver="$2" tag="${POWBOX_NEGCTL_TAG:-powbox-negctl-ownership:mutated}" work rc
 	case "$driver" in sh | ps1) ;; *) usage ;; esac
 	[ "$tag" != "$image" ] || failed "the derived tag must differ from the image under test ($image)"
+	command -v jq >/dev/null 2>&1 || failed "jq is not installed; it is required to check that the derived image's config matches $image's"
 	docker image inspect "$image" >/dev/null 2>&1 || failed "image '$image' not found; build it first"
 	if [ "$driver" = ps1 ]; then
 		command -v pwsh >/dev/null 2>&1 || inconclusive "pwsh is not installed, so the PowerShell driver cannot run."

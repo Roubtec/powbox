@@ -329,10 +329,10 @@ shadow_one() {
 			return 0
 			;;
 		*)
-			# Not fatal: a path whose parent is a file (e.g. a literal under a .git
-			# that is itself a file in a linked worktree) must not abort the whole
-			# loop and leave the remaining directories unshadowed.
-			echo "shadow-mounts: skipping '$target' (cannot create directory — parent may be a file)." >&2
+			# Not fatal: a component that exists as a file (e.g. the .git of a linked
+			# worktree, under which a literal names a path) or cannot be created must
+			# not abort the whole loop and leave the remaining directories unshadowed.
+			echo "shadow-mounts: skipping '$target' (cannot create or enter '$held/$part' — it is not a directory or could not be created)." >&2
 			return 0
 			;;
 		esac

@@ -279,8 +279,12 @@ cmd_run() {
 	echo "Stage 6 ownership negative control ($driver driver, image: $image, derived: $tag)"
 	check_teeth "$image"
 	work="$(mktemp -d "${TMPDIR:-/tmp}/powbox-negctl-XXXXXX")"
+	# Expand now (the paths are fixed for this run), each value pre-quoted by
+	# printf %q so a $TMPDIR or tag holding a quote cannot break the cleanup.
+	printf -v q_tag '%q' "$tag"
+	printf -v q_work '%q' "$work"
 	# shellcheck disable=SC2064 # expand now: the paths are fixed for this run
-	trap "docker image rm -f '$tag' >/dev/null 2>&1 || true; rm -f '$work'/*; rmdir '$work' 2>/dev/null || true" EXIT
+	trap "docker image rm -f $q_tag >/dev/null 2>&1 || true; rm -f $q_work/*; rmdir $q_work 2>/dev/null || true" EXIT
 	build_derived "$image" "$tag" "$work"
 	verify_derived "$image" "$tag" "$work"
 	rc=0

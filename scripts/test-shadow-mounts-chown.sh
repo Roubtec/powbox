@@ -835,6 +835,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "Test: a workspace root swapped for a symlink after it was resolved is refused"
+# enter_root trusts one absolute chdir, into the root the helper resolved at
+# startup, and then checks the kernel's view of its cwd against it.  The real
+# /workspace sits in the root-owned / and cannot be re-pointed by node; the
+# relocated root here can, which is what lets this pin that check: the root is
+# swapped right after the target validates (realpath, the helper's second call;
+# the first resolves the root itself at startup), and the helper must refuse the
+# run at the root rather than walk the tree the symlink leads to, which mirrors
+# the workspace so the walk would otherwise go on.
+ws="$(reset_fixture swaproot)"
+mkdir -p "$ws/proj" "$ELSEWHERE/swaproot/${ws##*/}/proj"
+RACE_DIR="$WORK_ROOT/race-swaproot"
+mkdir -p "$RACE_DIR"
+before_tree="$(find "$ELSEWHERE" -print | LC_ALL=C sort)"
+RACE_AT="realpath:post:2" RACE_SWAP="$WS_ROOT" RACE_DEST="$ELSEWHERE/swaproot" \
+	run_sut swaproot "$ws/proj/bin"
+RACE_DIR=""
+# Put the real root back before asserting, so a failure here cannot cascade
+# into every later case: the hook moved it aside within $WORK_ROOT.
+if [ -L "$WS_ROOT" ]; then
+	rm -f -- "$WS_ROOT"
+	mv -T -- "$WS_ROOT.displaced-race-swaproot" "$WS_ROOT"
+fi
+if [ -e "$WORK_ROOT/race-swaproot/fired" ]; then
+	ok "the root was swapped after the helper resolved it"
+else
+	ko "the race hook never fired, so this case tested nothing"
+fi
+if [ "$(count mount)" = "0" ] && [ "$(count chown)" = "0" ] && [ -z "$(calls at-mkdir)" ] && [ "$(find "$ELSEWHERE" -print | LC_ALL=C sort)" = "$before_tree" ]; then
+	ok "nothing was mounted, chowned or created through the swapped root"
+else
+	ko "expected no effect at all; log was: $(cat "$LOG"); stderr: $(cat "$ERR")"
+fi
+if grep -qF "cannot enter the workspace root" "$ERR"; then
+	ok "the refusal is the root check's own, not a later step's"
+else
+	ko "expected the cannot-enter-the-workspace-root refusal on stderr, got: $(cat "$ERR")"
+fi
+
+# ---------------------------------------------------------------------------
 echo "Test: a component the kernel reports in another case is still shadowed"
 # On a case-insensitive host bind mount, an existing on-disk 'Bin' can be what
 # the kernel reports for the literal 'bin' detect-shadows emits.  A symlink

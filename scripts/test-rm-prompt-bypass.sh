@@ -4,9 +4,14 @@
 #   1. entrypoint-agent.sh exports CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1
 #      into the environment the CMD is exec'd with on the Claude primary-agent
 #      path only, and leaves a value already in the launch environment alone.
+#      It exports CLAUDE_CODE_ENABLE_CFC=0 beside it on the same terms, because
+#      the waiver also lifts Claude in Chrome's safeguards, so Claude in Chrome
+#      must default off wherever the waiver is on.
 #   2. the settings.json that entrypoint-claude-hook.sh seeds into a fresh config
 #      dir, and every seed JSON fragment it merges from, carry nothing that makes
-#      that variable inert. A third set of cases proves the check itself has teeth.
+#      that variable inert, and no `env` entry for CLAUDE_CODE_ENABLE_CFC, which
+#      Claude Code also reads from settings and could turn Claude in Chrome back
+#      on. A third set of cases proves the check itself has teeth.
 #
 # Claude Code reads the variable only from its launch environment, so the export
 # cannot be seeded into the shared claude-config volume; and it is silently inert
@@ -33,6 +38,7 @@ REPO_DIR="$SCRIPT_DIR/.."
 ENTRYPOINT="${ENTRYPOINT_AGENT:-$REPO_DIR/docker/shared/entrypoint-agent.sh}"
 HOOK="${CLAUDE_HOOK:-$REPO_DIR/docker/shared/entrypoint-claude-hook.sh}"
 VAR=CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS
+CFC=CLAUDE_CODE_ENABLE_CFC
 
 for f in "$ENTRYPOINT" "$HOOK"; do
 	if [ ! -f "$f" ]; then
@@ -70,7 +76,7 @@ case "$WORK_ROOT" in
 esac
 
 # --- Group 1: the export ------------------------------------------------------
-echo "Group 1: $VAR export (entrypoint: $ENTRYPOINT)"
+echo "Group 1: $VAR and $CFC exports (entrypoint: $ENTRYPOINT)"
 
 STUB="$WORK_ROOT/stub-bin"
 mkdir -p "$STUB" "$WORK_ROOT/claude-config" "$WORK_ROOT/codex-config"
@@ -81,6 +87,11 @@ cat >"$STUB/entrypoint-core.sh" <<'EOF'
 		printf 'var=set:%s\n' "$CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
 	else
 		printf 'var=unset\n'
+	fi
+	if [ "${CLAUDE_CODE_ENABLE_CFC+set}" = set ]; then
+		printf 'cfc=set:%s\n' "$CLAUDE_CODE_ENABLE_CFC"
+	else
+		printf 'cfc=unset\n'
 	fi
 	printf 'primary=%s\n' "${PRIMARY_AGENT:-}"
 	printf 'argv=%s\n' "$*"
@@ -106,13 +117,13 @@ if [ "$relocated" -ne 3 ] || grep -q '/usr/local/bin/' "$SUT"; then
 	exit 1
 fi
 
-# run_entrypoint <label> <expected var line> <env assignment>...
+# run_entrypoint <label> <expected var value> <expected cfc value> <env assignment>...
 run_entrypoint() {
-	local label="$1" want="$2" out
-	shift 2
+	local label="$1" want="$2" want_cfc="$3" out
+	shift 3
 	out="$WORK_ROOT/out.$pass.$fail"
 	rm -f "$out"
-	if ! env -u "$VAR" -u PRIMARY_AGENT \
+	if ! env -u "$VAR" -u "$CFC" -u PRIMARY_AGENT \
 		CLAUDE_CONFIG_DIR="$WORK_ROOT/claude-config" \
 		CODEX_CONFIG_DIR="$WORK_ROOT/codex-config" \
 		RM_BYPASS_TEST_OUT="$out" \
@@ -133,15 +144,21 @@ run_entrypoint() {
 	else
 		ko "$label: expected var=$want, got $(grep '^var=' "$out")"
 	fi
+	if grep -qxF "cfc=$want_cfc" "$out"; then
+		ok "$label: cfc=$want_cfc"
+	else
+		ko "$label: expected cfc=$want_cfc, got $(grep '^cfc=' "$out")"
+	fi
 }
 
-run_entrypoint "PRIMARY_AGENT unset (defaults to claude)" "set:1"
-run_entrypoint "PRIMARY_AGENT=claude" "set:1" PRIMARY_AGENT=claude
-run_entrypoint "PRIMARY_AGENT unknown (falls back to claude)" "set:1" PRIMARY_AGENT=bogus
-run_entrypoint "PRIMARY_AGENT=codex" "unset" PRIMARY_AGENT=codex
-run_entrypoint "claude, launch env already sets a value" "set:custom" PRIMARY_AGENT=claude "$VAR=custom"
-run_entrypoint "claude, launch env sets it empty" "set:" PRIMARY_AGENT=claude "$VAR="
-run_entrypoint "codex, launch env value passes through untouched" "set:1" PRIMARY_AGENT=codex "$VAR=1"
+run_entrypoint "PRIMARY_AGENT unset (defaults to claude)" "set:1" "set:0"
+run_entrypoint "PRIMARY_AGENT=claude" "set:1" "set:0" PRIMARY_AGENT=claude
+run_entrypoint "PRIMARY_AGENT unknown (falls back to claude)" "set:1" "set:0" PRIMARY_AGENT=bogus
+run_entrypoint "PRIMARY_AGENT=codex" "unset" "unset" PRIMARY_AGENT=codex
+run_entrypoint "claude, launch env already sets a value" "set:custom" "set:0" PRIMARY_AGENT=claude "$VAR=custom"
+run_entrypoint "claude, launch env sets it empty" "set:" "set:0" PRIMARY_AGENT=claude "$VAR="
+run_entrypoint "claude, launch env turns Claude in Chrome on" "set:1" "set:1" PRIMARY_AGENT=claude "$CFC=1"
+run_entrypoint "codex, launch env values pass through untouched" "set:1" "set:1" PRIMARY_AGENT=codex "$VAR=1" "$CFC=1"
 
 # --- Group 2: the seeded settings ---------------------------------------------
 # Prints one line per setting that would make the variable inert. PreToolUse is
@@ -157,13 +174,19 @@ def inert_rule: type == "string" and (split("(")[0] | . == "Bash" or . == "Edit"
 	| map(tostring) | join("."))
 '
 
-# check_clean <label> <file>: the file is valid JSON with no inert-making setting.
+# Prints the settings `env` key that would override the launch-time CFC=0.
+CHROME_FILTER='(.env? // {}) | objects | keys[] | select(ascii_upcase == "CLAUDE_CODE_ENABLE_CFC") | "env." + .'
+
+# check_clean <label> <file>: the file is valid JSON with no inert-making setting
+# and no Claude in Chrome override.
 check_clean() {
-	local label="$1" file="$2" found
+	local label="$1" file="$2" found chrome
 	if ! found="$(jq -r "$INERT_FILTER" "$file" 2>&1)"; then
 		ko "$label: not valid JSON ($found)"
 	elif [ -n "$found" ]; then
 		ko "$label: makes $VAR inert: $(printf '%s' "$found" | tr '\n' ';')"
+	elif chrome="$(jq -r "$CHROME_FILTER" "$file")" && [ -n "$chrome" ]; then
+		ko "$label: overrides the $CFC=0 launch default: $chrome"
 	else
 		ok "$label"
 	fi
@@ -247,6 +270,23 @@ expect_clean "an allow rule on Bash" '{"permissions":{"allow":["Bash(rm:*)","Rea
 expect_clean "ask/deny rules on other tools" '{"permissions":{"ask":["WebFetch"],"deny":["mcp__github__merge_pull_request"]}}'
 expect_clean "other hook events" '{"hooks":{"PostToolUse":[],"Stop":[]},"statusLine":{"type":"command","command":"true"}}'
 expect_clean "an empty settings object" '{}'
+
+# expect_chrome <label> <json> <flagged|clean>
+expect_chrome() {
+	local file="$WORK_ROOT/probe.json" found
+	printf '%s\n' "$2" >"$file"
+	found="$(jq -r "$CHROME_FILTER" "$file")"
+	if [ "$3" = flagged ] && [ -n "$found" ]; then
+		ok "flags $1"
+	elif [ "$3" = clean ] && [ -z "$found" ]; then
+		ok "accepts $1"
+	else
+		ko "$1: expected $3, the check printed '$found'"
+	fi
+}
+expect_chrome "a settings env entry for $CFC" '{"env":{"CLAUDE_CODE_ENABLE_CFC":"1"}}' flagged
+expect_chrome "a settings env entry for $CFC in another case" '{"env":{"claude_code_enable_cfc":"true"}}' flagged
+expect_chrome "other settings env entries" '{"env":{"DISABLE_TELEMETRY":"1"}}' clean
 
 echo ""
 echo "Results: $pass passed, $fail failed."

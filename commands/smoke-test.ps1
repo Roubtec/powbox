@@ -229,9 +229,11 @@ else {
 
 # Stage 0k - rm-prompt waiver unit test against the BAKED entrypoint, Claude hook and
 # Claude seed dir. The suite checks that entrypoint-agent.sh exports
-# CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1 on the Claude primary path only,
-# and that the settings.json the hook seeds into a fresh config dir carries none of the
-# settings that silently make that variable inert. Like the other Stage 0 entries the
+# CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1, and CLAUDE_CODE_ENABLE_CFC=0
+# beside it (the waiver also lifts Claude in Chrome's safeguards, so Chrome defaults
+# off), on the Claude primary path only, and that the settings.json the hook seeds into
+# a fresh config dir carries none of the settings that silently make that variable
+# inert and no env override for CLAUDE_CODE_ENABLE_CFC. Like the other Stage 0 entries the
 # Bash suite runs INSIDE the image (no host bash on Windows). Tier 0 runs it against
 # the /repo source. Whether the running CLI honors the variable needs a logged-in
 # session and stays a host check (docs/smoke-tests.md).

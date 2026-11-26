@@ -362,8 +362,11 @@ All shared volumes are marked `external` in the Compose files and pre-created by
 
 `--dangerously-skip-permissions` does not cover every command: Claude Code still prompts before removing a critical path (`/`, a top-level directory, `$HOME`, the working directory or a parent of it) and before any `rm` it flags `Dangerous rm operation not ruled out`, such as a glob directly under a variable (`"$DIR"/*`), a path built from `$(pwd)` or `$(git rev-parse --show-toplevel)`, or an `rm` inside `bash -c`. An unattended session, or a background subagent, then waits on that prompt indefinitely.
 On a Claude-primary launch, `entrypoint-agent.sh` therefore exports `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` into the environment `claude` starts with, which lifts those prompts in bypass mode (Claude Code 2.1.311 or later); the container is the safety boundary, and an agent may delete work in progress inside it. A value already in the container's environment is left as it is, and a Codex-primary launch does not set it, since Codex has its own approval model.
+The waiver covers the launched session and its in-process subagents, not every `claude` in the container: Claude Code marks the shell its Bash tool spawns with `CLAUDE_CODE_CHILD_SESSION=1` and ignores the variable in such a child session, so a `claude -p` an agent starts from its shell (including `peer-review-run`'s Claude peer) keeps the `rm` prompts. A `claude` you start yourself in a `--shell` session is not a child session and gets the waiver.
 Claude Code reads the variable only from its launch environment and ignores it in a settings `env` block, so it cannot travel through the shared `claude-config` volume, and a container started on an older image gets it only by relaunching on a rebuilt one.
-It is also silently inert while any settings file carries a `PermissionRequest` hook, an `ask` or `deny` rule on `Bash`, `Edit` or `Read`, a `PreToolUse` hook that answers `ask`, or `blockReadsOutsideWorkingDirectories`/`blockWritesOutsideWorkingDirectories`. powbox seeds none of these, and `scripts/test-rm-prompt-bypass.sh` (Tier 0 on the source, smoke Stage 0k on the baked files) fails if a seed ever adds one; a rule you add to `~/.claude/settings.json` yourself switches the waiver off for every container sharing that volume. Claude Code's startup output says which case applies: "is set, so dangerous rm commands can run without a prompt" or "has no effect in this session".
+It is also silently inert while any settings file or installed plugin carries a `PermissionRequest` hook, an `ask` or `deny` rule on `Bash`, `Edit` or `Read`, a `PreToolUse` hook that answers `ask`, or `blockReadsOutsideWorkingDirectories`/`blockWritesOutsideWorkingDirectories`. powbox seeds none of these, and `scripts/test-rm-prompt-bypass.sh` (Tier 0 on the source, smoke Stage 0k on the baked files) fails if a seed ever adds one; a rule you add to `~/.claude/settings.json` yourself, or a plugin you install that ships such a hook, switches the waiver off for every container sharing that volume. Claude Code's startup output says which case applies: "is set, so dangerous rm commands can run without a prompt" or "has no effect in this session".
+
+**Claude in Chrome.** The same variable reaches outside the container: in bypass mode it also lets Claude in Chrome act in any Chrome connected to your account without auto mode's safety check, a permission prompt, or the extension's site permissions, and Claude Code says so in a second startup line ("Claude in Chrome actions in any Chrome connected to your account can run without…"), which still appears with Chrome off. powbox therefore keeps Claude in Chrome off by default: the same Claude-primary branch exports `CLAUDE_CODE_ENABLE_CFC=0` (again keeping a value already in the container's environment), which every `claude` in the container inherits, and which outranks the "Enabled by default" setting of `/chrome` and suppresses Claude Code's offer to switch Chrome on. `claude --chrome` still turns it on for one session, because Claude Code ranks the flag above the variable (read from the Claude Code 2.1.332 binary, as is the child-session rule above). The residual is that session: with Chrome on and the waiver set, Claude in Chrome runs with none of those three safeguards against your real browser and its signed-in sites, so start a session with `--chrome` only when you mean to, or start it with the waiver unset (`env -u CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS claude --chrome …`) to keep them. The suite and Stage 0k also fail if the export goes missing or a seeded settings file sets `CLAUDE_CODE_ENABLE_CFC` in its `env` block.
 
 ### Shell
 
@@ -1030,6 +1033,7 @@ Inside the container:
 whoami
 echo "$CLAUDE_CONFIG_DIR"
 echo "$CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+echo "$CLAUDE_CODE_ENABLE_CFC"
 claude --version
 gh --version
 pnpm config get store-dir
@@ -1041,7 +1045,7 @@ Expected results:
 
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
-- `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS` is `1` (see [`rm` prompts under bypass mode](#rm-prompts-under-bypass-mode))
+- `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS` is `1` and `CLAUDE_CODE_ENABLE_CFC` is `0` (see [`rm` prompts under bypass mode](#rm-prompts-under-bypass-mode))
 - the pnpm store is per-container at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`

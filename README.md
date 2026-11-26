@@ -769,7 +769,7 @@ With other flags:
 - `--persist` / `-Persist` — the stopped container is still replaced, but the fresh one is kept on exit instead of removed, so later default launches reuse it.
 - `--detach` / `-Detach` — the fresh container runs in the background and is still removed when it exits; add `--persist` to keep it. A default launch while it runs attaches to it.
 - `--resume` / `-Resume` — refused before anything is touched: resuming restarts the existing container as created, which contradicts replacing it.
-- `--isolated` — a named instance is replaced like a dir-mounted container, and its `agent-ws-*` volume keeps the checkout, so the fresh container starts on the same working tree (add `--reclone` to wipe it and clone again). An unnamed instance gets a new name every launch, so there is nothing to replace. The `agent-ws-*` volume outlives the volatile container; `agent-prune-volumes` drops it once no container uses it.
+- `--isolated` — a named instance is replaced like a dir-mounted container, and its `agent-ws-*` volume keeps the checkout, so the fresh container starts on the same working tree (add `--reclone` to wipe it and clone again). An unnamed instance gets a new name every launch, so there is nothing to replace. The `agent-ws-*` volume outlives the volatile container; `agent-prune-volumes` drops it once no container uses it, and any unpushed work in that checkout is lost then, so push before pruning.
 
 ## Resuming Sessions
 
@@ -1040,7 +1040,7 @@ After launching each agent at least once, `docker volume ls` should show one cop
 ## Runtime Sanity Check
 
 Launch an interactive shell with `--shell --volatile` to verify the container environment.
-This replaces a stopped container for that project and removes the shell's container on exit (see [Volatile Containers](#volatile-containers)); stop a running one first.
+This replaces a stopped container for that project, losing anything in its writable layer such as `apt-get` packages (named volumes are kept), and removes the shell's container on exit (see [Volatile Containers](#volatile-containers)); stop a running one first.
 
 ### Claude
 

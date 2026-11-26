@@ -133,11 +133,11 @@ export_agent_env "$PRIMARY_AGENT"
 # the permission prompt, the extension's site permissions) for any Chrome linked
 # to the account, which reaches outside the container. So Claude in Chrome
 # defaults off here: CLAUDE_CODE_ENABLE_CFC=0 is the only off switch every
-# `claude` in the container sees, including one typed in a --shell session, since
-# --no-chrome would bind only the image CMD and the "Enabled by default" setting
-# lives in Claude Code's lock-guarded .claude.json on the shared volume. Claude
-# Code ranks --chrome above the variable, so `claude --chrome` still turns it on
-# for one session (Claude Code 2.1.332).
+# `claude` started through this entrypoint sees, including one typed in a
+# --shell session, since --no-chrome would bind only the image CMD and the
+# "Enabled by default" setting lives in Claude Code's lock-guarded .claude.json on
+# the shared volume. Claude Code ranks --chrome above the variable, so
+# `claude --chrome` still turns it on for one session (Claude Code 2.1.332).
 if [ "$PRIMARY_AGENT" = claude ]; then
 	export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS="${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS-1}"
 	export CLAUDE_CODE_ENABLE_CFC="${CLAUDE_CODE_ENABLE_CFC-0}"

@@ -358,6 +358,13 @@ Either agent can be started first in a clean Docker environment.
 
 All shared volumes are marked `external` in the Compose files and pre-created by the launch scripts on first use.
 
+### `rm` prompts under bypass mode
+
+`--dangerously-skip-permissions` does not cover every command: Claude Code still prompts before removing a critical path (`/`, a top-level directory, `$HOME`, the working directory or a parent of it) and before any `rm` it flags `Dangerous rm operation not ruled out`, such as a glob directly under a variable (`"$DIR"/*`), a path built from `$(pwd)` or `$(git rev-parse --show-toplevel)`, or an `rm` inside `bash -c`. An unattended session, or a background subagent, then waits on that prompt indefinitely.
+On a Claude-primary launch, `entrypoint-agent.sh` therefore exports `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` into the environment `claude` starts with, which lifts those prompts in bypass mode (Claude Code 2.1.311 or later); the container is the safety boundary, and an agent may delete work in progress inside it. A value already in the container's environment is left as it is, and a Codex-primary launch does not set it, since Codex has its own approval model.
+Claude Code reads the variable only from its launch environment and ignores it in a settings `env` block, so it cannot travel through the shared `claude-config` volume, and a container started on an older image gets it only by relaunching on a rebuilt one.
+It is also silently inert while any settings file carries a `PermissionRequest` hook, an `ask` or `deny` rule on `Bash`, `Edit` or `Read`, a `PreToolUse` hook that answers `ask`, or `blockReadsOutsideWorkingDirectories`/`blockWritesOutsideWorkingDirectories`. powbox seeds none of these, and `scripts/test-rm-prompt-bypass.sh` (Tier 0 on the source, smoke Stage 0k on the baked files) fails if a seed ever adds one; a rule you add to `~/.claude/settings.json` yourself switches the waiver off for every container sharing that volume. Claude Code's startup output says which case applies: "is set, so dangerous rm commands can run without a prompt" or "has no effect in this session".
+
 ### Shell
 
 The default shell (`$SHELL`) is **bash**. The agent harnesses' Bash tools spawn `$SHELL` non-interactively, and the models' command prior is bash/POSIX — word-splitting on unquoted expansions, 0-indexed arrays — so running those one-shot calls under zsh just wasted turns on no-word-split and 1-indexed-array surprises. The agent path gains nothing from zsh's interactive features, so bash is the right default for it.
@@ -1001,7 +1008,7 @@ Smoke test the built image with:
 ./commands/smoke-test.sh
 ```
 
-The run is layered: a hermetic tier of eight unit-suite entries (Stages 0a, 0b, 0d and 0f–0j, over eight distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — seven entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
+The run is layered: a hermetic tier of nine unit-suite entries (Stages 0a, 0b, 0d and 0f–0k, over nine distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — eight entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
 An image built from a [layer set](#layer-sets) also runs the probes that set ships in `docker/layers/<set>/smoke-probes.txt` (Stage 1b), picked by the image's `powbox.layers.set` label; each committed set (`full`, `browser`) must keep that file, and a set of your own may delete it to opt out. The `pg-dev-up` and Podman stages run only when the image has `pg-dev-up` or `podman` on its `PATH` and are otherwise reported as not applicable, which is listed apart from skips and does not make the run partial; a presence probe, in the core list or in a set's probe file, is what fails an image that lost a tool it should have.
 Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with a narrow exception the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the orientation the scripts do not give you: what each stage is for, which entries run the `/repo` source and which the baked artifact, which stages reach the network and what a failed pull or clone costs, and which self-skips the banner cannot see. For what an individual stage asserts, read that stage's script.
 
@@ -1022,6 +1029,7 @@ Inside the container:
 ```bash
 whoami
 echo "$CLAUDE_CONFIG_DIR"
+echo "$CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
 claude --version
 gh --version
 pnpm config get store-dir
@@ -1033,6 +1041,7 @@ Expected results:
 
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
+- `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS` is `1` (see [`rm` prompts under bypass mode](#rm-prompts-under-bypass-mode))
 - the pnpm store is per-container at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
@@ -1113,7 +1122,7 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 22-suite set is `test-apt-get-wrapper.sh`,
+  routed to the smoke test. The current 23-suite set is `test-apt-get-wrapper.sh`,
   `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
   `test-egress-allow-list.sh`,
@@ -1121,7 +1130,7 @@ workflows keep cost proportional to the change:
   `test-layer-sets.sh`, `test-ownership-negative-control.sh`,
   `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,
-  `test-seed-marker-source.sh`,
+  `test-rm-prompt-bypass.sh`, `test-seed-marker-source.sh`,
   `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
   `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
   `test-stage-agent-template.sh`, `test-sync-codex-skills.sh`,

@@ -14,23 +14,26 @@ The smoke tier needs a real built image and, in places, a relaunchable container
 
 ## Layering
 
-The run has two tiers: a **Stage 0 tier** of eight hermetic unit-suite entries (Stages 0a, 0b, 0d and 0f–0j, over eight distinct `scripts/test-*.sh` files), then **six image/host stages** that exercise the built image and the host.
+The run has two tiers: a **Stage 0 tier** of nine hermetic unit-suite entries (Stages 0a, 0b, 0d and 0f–0k, over nine distinct `scripts/test-*.sh` files), then **six image/host stages** that exercise the built image and the host.
 An image built from a layer set adds a seventh, Stage 1b, which runs the probes the set ships (see [Layer-set probes](#layer-set-probes-stage-1b)), and Stages 2 and 3 run only on an image that has the tool they test (see [Not applicable](#not-applicable-capability-gated-stages)).
 
 "Hermetic" is a narrow claim: a Stage 0 entry needs no root, no host database, no nested container engine, no relaunch cycle, and no network.
-It does **not** mean container-free. All eight entries `docker run --rm … "$IMAGE"` so the suite executes inside the image.
+It does **not** mean container-free. All nine entries `docker run --rm … "$IMAGE"` so the suite executes inside the image.
 
 ## Host source vs. baked artifact
 
 Tier 0 is the primary home for hermetic `/repo` source suites, so Stage 0 no longer repeats any of those exact targets.
 
-Seven entries point the suite at a **baked** artifact under `/usr/local/bin/`, so a stale or behaviorally broken installed copy is caught by a real suite instead of being waved through by Stage 1's `command -v` presence probe.
+Eight entries point the suite at a **baked** artifact under `/usr/local/bin/` (Stage 0k also at the baked Claude seed dir, `/home/node/.agent-container/claude`), so a stale or behaviorally broken installed copy is caught by a real suite instead of being waved through by Stage 1's `command -v` presence probe.
 Stage 0i is the exception: `test-pnpm-shadow-wrapper.sh` validates the `/repo` source and is explicitly routed out of Tier 0 because it requires the image's writable `/workspace` production root.
 The suite still self-skips when invoked directly on a generic host without that root, but both smoke umbrellas set `POWBOX_TEST_REQUIRE_WORKSPACE=1`, so an image-present Stage 0i fails if the promised production root cannot accept its fixture.
 
 The source-versus-baked detect-shadows split shipped by task 053 is therefore deliberate: Tier 0 validates the checkout immediately, while Stage 0g validates what the image installed.
-The same two-target shape now applies to sensitive-host-path, worktree orphan safety, peer-review-run and shadow-mounts; the source-only Podman Compose invariant suite stays solely in Tier 0, and the build-staged helpers vendored from agent-skills stay solely in Tier 1 — `gh-review-threads` (Stage 0b) and the `dc-enter`/`dc-remove` pair (Stage 0j).
+The same two-target shape now applies to sensitive-host-path, worktree orphan safety, peer-review-run, shadow-mounts and the `rm`-prompt waiver; the source-only Podman Compose invariant suite stays solely in Tier 0, and the build-staged helpers vendored from agent-skills stay solely in Tier 1 — `gh-review-threads` (Stage 0b) and the `dc-enter`/`dc-remove` pair (Stage 0j).
 Which suite each entry runs and which environment override selects the baked path are documented per stage in `commands/smoke-test.sh`.
+
+Stage 0k (`scripts/test-rm-prompt-bypass.sh`) proves the waiver is wired, not that Claude Code honors it: that the baked entrypoint exports `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` on the Claude primary path only, and that the `settings.json` the baked hook seeds into a fresh config dir carries none of the settings that make the variable inert.
+What the running CLI does with it shows only in a logged-in session, which no smoke stage has, so it stays a manual host check on a rebuilt image: Claude Code's startup output must say the variable "is set, so dangerous rm commands can run without a prompt" rather than "has no effect in this session", a background subagent must run `d=$(mktemp -d); rm -rf "$d"/*`, `rm -rf "$(pwd)/probe"` and `bash -c 'rm -rf "$0"/x' "$d"` in a scratch directory without a prompt, and adding an `ask` rule on `Bash` must turn the startup line into "has no effect".
 
 ## What each stage is for
 
@@ -100,7 +103,7 @@ An entry naming a skip variable (or, on the PowerShell mirror, a `-Skip*` switch
 An entry naming no skip control was decided at runtime by the host or the working tree: there is nothing set to unset, and it comes back only when the host can provide what the stage needs — or, for a Stage 1b entry naming a layer-set directory missing from the working tree, when that directory is there (see [Layer-set probes](#layer-set-probes-stage-1b)).
 
 Five of the six image/host stages are gated by independent environment variables — `POWBOX_SMOKE_SKIP_DB` (Stage 2), `POWBOX_SMOKE_SKIP_PODMAN` (Stage 3), `POWBOX_SMOKE_SKIP_SELFHOSTED` (Stage 4), `POWBOX_SMOKE_SKIP_DIRMOUNT` (Stage 5), and `POWBOX_SMOKE_SKIP_WORKTREE_META` (Stage 6).
-Setting all five leaves the Stage 0 tier plus Stage 1 (and Stage 1b for an image built from a layer set) — no host database, no nested engine, no relaunch cycle — though the eight Stage 0 entries and Stage 1 itself still start throwaway containers from the image.
+Setting all five leaves the Stage 0 tier plus Stage 1 (and Stage 1b for an image built from a layer set) — no host database, no nested engine, no relaunch cycle — though the nine Stage 0 entries and Stage 1 itself still start throwaway containers from the image.
 Stage 1 has no skip variable of its own: it is the residue that remains when all five are set, and a missing image makes it fail and abort the run before any later stage executes, so there is nothing to gain from skipping it.
 Stage 1b has none either: whether it runs is decided by the image's label and the set's probe file (see [Layer-set probes](#layer-set-probes-stage-1b)).
 
@@ -143,7 +146,7 @@ See README "Continuous Integration" for the trigger paths and caching.
 
 `commands/smoke-test.ps1` runs the same inventory wherever `pwsh` runs, including a native-Linux host, and takes `-SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta` plus `-RequireImage` in place of the environment variables.
 
-Its eight Stage 0 entries match the Bash targets.
+Its nine Stage 0 entries match the Bash targets.
 Stage 6 mirrors the mountpoint-ownership assertions too (task 053a): both drivers hand each container the same shared inner script — `scripts/smoke-test-worktree-metadata-container-a.bash` (task 053a) and `scripts/smoke-test-worktree-metadata-container-b.bash` (task 053b) — so neither half can drift, while each driver implements the ~40 host-side lines natively.
 The PowerShell driver reads both files with an explicit `-Encoding UTF8`, which is required rather than tidy: Windows PowerShell 5.1 decodes a BOM-less file with the system ANSI codepage, so a non-ASCII byte in a shared file (Container B's script has one, an em dash) would otherwise reach `bash -c` mangled from the PowerShell driver and intact from the Bash one — drift reintroduced through the loader rather than through a second copy.
 Both drivers also fail closed on an empty shared file, so a truncated checkout cannot hand the container a no-op payload that exits 0 and reads as a pass.

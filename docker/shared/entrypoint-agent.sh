@@ -119,4 +119,17 @@ done
 # runs its setup hook plus firewall/git/shadow setup and finally execs the CMD.
 export_agent_env "$PRIMARY_AGENT"
 
+# Bypass mode still prompts for some `rm` commands (critical paths, and the
+# "Dangerous rm operation not ruled out" class), and an unattended session waits
+# on such a prompt indefinitely; this variable lifts both. Claude Code reads it
+# only from the launch environment, never from a settings `env` block, so it
+# cannot be seeded into the shared claude-config volume and has to be set here.
+# A value already in the container's environment is left alone. Any
+# PermissionRequest hook, an ask/deny rule on Bash, Edit or Read, a PreToolUse
+# hook answering "ask", or either block*OutsideWorkingDirectories setting makes
+# it inert; scripts/test-rm-prompt-bypass.sh keeps those out of the seed.
+if [ "$PRIMARY_AGENT" = claude ]; then
+	export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS="${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS-1}"
+fi
+
 exec /usr/local/bin/entrypoint-core.sh "$@"

@@ -227,6 +227,31 @@ else {
   }
 }
 
+# Stage 0k - rm-prompt waiver unit test against the BAKED entrypoint, Claude hook,
+# Claude seed dir and reg.exe stub. The suite checks that entrypoint-agent.sh exports
+# CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1, and CLAUDE_CODE_ENABLE_CFC=0
+# beside it (the waiver also lifts Claude in Chrome's safeguards, so Chrome defaults
+# off), on the Claude primary path only, and that the settings.json the hook seeds into
+# a fresh config dir carries none of the settings that silently make that variable
+# inert and no env override for CLAUDE_CODE_ENABLE_CFC. It also fails an image without
+# the root-owned /mnt/c/Windows/System32/reg.exe stub, whose "not found" answer keeps
+# the variable from going inert on a Docker Desktop / WSL2-kernel host, or whose
+# installed claude no longer spawns that path. Like the other Stage 0 entries the
+# Bash suite runs INSIDE the image (no host bash on Windows). Tier 0 runs it against
+# the /repo source. Whether the running CLI honors the variable needs a logged-in
+# session and stays a host check (docs/smoke-tests.md).
+if (-not $imagePresent) {
+  Write-Warning "Skipping rm-prompt waiver unit test (Stage 0k) - image '$Image' not found (no native bash on Windows to run it hermetically)."
+  $skipped.Add("Stage 0k: rm-prompt waiver unit test (image absent)")
+}
+else {
+  Write-Host "Running rm-prompt waiver unit test (baked entrypoint, hook, seed dir and reg.exe stub in $Image) ..."
+  docker run --rm -v "${rootDir}:/repo:ro" -e ENTRYPOINT_AGENT=/usr/local/bin/entrypoint-agent.sh -e CLAUDE_HOOK=/usr/local/bin/entrypoint-claude-hook.sh -e CLAUDE_SEED_DIR=/home/node/.agent-container/claude -e WSL_REG_STUB=/mnt/c/Windows/System32/reg.exe --entrypoint /bin/bash $Image /repo/scripts/test-rm-prompt-bypass.sh
+  if ($LASTEXITCODE -ne 0) {
+    throw "rm-prompt waiver unit test failed. See container output above."
+  }
+}
+
 # Stage 1 - tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. Probes for the

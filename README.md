@@ -59,7 +59,7 @@ Re-run `agent-update` any time to pick up newer agent releases or a refreshed ba
 - `.powbox-layers.example`: template for the gitignored `.powbox-layers` selector that names the layer set to build (absent: none)
 - `.powbox-egress.example`: template for the gitignored `.powbox-egress` list of [egress exceptions](#egress-exceptions-powbox-egress) every launched container allows (absent: the default firewall policy)
 - `compose.shared.yml`: common runtime service and shared volumes
-- `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys and `PRIMARY_AGENT`, all on a single `agent` service pointing at `powbox-agent:latest`
+- `compose.agent.yml`: agent runtime overlay — mounts both config volumes and passes both API keys, `PRIMARY_AGENT` and the `POWBOX_WSL_REGISTRY_STUB` opt-out, all on a single `agent` service pointing at `powbox-agent:latest`
 - `compose.selfhosted.yml`: [self-hosted mode](#self-hosted-mode---isolated) overlay — replaces the host workspace bind mount with a per-instance named volume the container clones into itself (added to the `-f` chain only with `--isolated`)
 - `docker-bake.hcl`: named Bake targets for `base`, `layers`, and `agent`, plus the `all` and `default` groups (base and agent only; the build scripts bake each target on its own and bake `layers` only when a set is selected)
 - `commands/`: user-facing host commands for launch, smoke-test, volume pruning, session history reset, and baked-skill refresh
@@ -357,6 +357,20 @@ That only happens when the link resolves to a file powbox can still prove is its
 Either agent can be started first in a clean Docker environment.
 
 All shared volumes are marked `external` in the Compose files and pre-created by the launch scripts on first use.
+
+### `rm` prompts under bypass mode
+
+`--dangerously-skip-permissions` does not cover every command: Claude Code still prompts before removing a critical path (`/`, a top-level directory, `$HOME`, the working directory or a parent of it) and before any `rm` it flags `Dangerous rm operation not ruled out`, such as a glob directly under a variable (`"$DIR"/*`), a path built from `$(pwd)` or `$(git rev-parse --show-toplevel)`, or an `rm` inside `bash -c`. An unattended session, or a background subagent, then waits on that prompt indefinitely.
+On a Claude-primary launch, `entrypoint-agent.sh` therefore exports `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` into the environment `claude` starts with, which lifts those prompts in bypass mode (Claude Code 2.1.311 or later); the container is the safety boundary, and an agent may delete work in progress inside it. A value already in the container's environment is left as it is, and a Codex-primary launch does not set it, since Codex has its own approval model.
+The waiver covers the launched session and its in-process subagents, not every `claude` in the container: Claude Code marks the shell its Bash tool spawns with `CLAUDE_CODE_CHILD_SESSION=1` and ignores the variable in such a child session, so a `claude -p` an agent starts from its shell (including `peer-review-run`'s Claude peer) keeps the `rm` prompts. A `claude` you start yourself in a `--shell` session is not a child session and gets the waiver.
+Claude Code reads the variable only from its launch environment and ignores it in a settings `env` block, so it cannot travel through the shared `claude-config` volume, and a container started on an older image gets it only by relaunching on a rebuilt one.
+It is also silently inert while any settings file or installed plugin carries a `PermissionRequest` hook, an `ask` or `deny` rule on `Bash`, `Edit` or `Read`, a `PreToolUse` hook that answers `ask`, or `blockReadsOutsideWorkingDirectories`/`blockWritesOutsideWorkingDirectories`. powbox seeds none of these, and `scripts/test-rm-prompt-bypass.sh` (Tier 0 on the source, smoke Stage 0k on the baked files) fails if a seed ever adds one; a rule you add to `~/.claude/settings.json` yourself, or a plugin you install that ships such a hook, switches the waiver off for every container sharing that volume. Claude Code's startup output says which case applies: "is set, so dangerous rm commands can run without a prompt" or "has no effect in this session".
+
+**Docker Desktop and other WSL2 kernels.** Claude Code decides it runs on WSL when `/proc/version` names `microsoft` or `wsl` (or `WSL_DISTRO_NAME` is set), and Docker Desktop's WSL2 backend runs every container on such a kernel (`…-microsoft-standard-WSL2`), so a powbox container on a Windows host looks like WSL to it; no setting or variable turns that detection off. On WSL, Claude Code reads Windows admin policy (`HKLM` and `HKCU\SOFTWARE\Policies\ClaudeCode`) by running `/mnt/c/Windows/System32/reg.exe`, a container has no such file, and while that read goes unanswered the waiver stays inert, which the startup line reports as "has no effect while the Windows registry cannot be read for managed settings".
+The agent image therefore bakes a root-owned stub at that path (`docker/shared/wsl-reg-stub.sh`) that answers every query the way `reg.exe` answers an absent key, so Claude Code concludes there is no ClaudeCode policy and the waiver applies. The claim is true of everything the container can reach, but it would also mask a ClaudeCode policy an administrator set on the Windows host, which Claude Code would otherwise fail closed on rather than read; and it relies on a path and a message hard-coded in Claude Code (2.1.332), which Stage 0k checks the installed binary still contains. A real mount at `/mnt/c` hides the stub, so a real `reg.exe` there wins.
+To turn the stub off, set `POWBOX_WSL_REGISTRY_STUB=0` on the host (`$env:POWBOX_WSL_REGISTRY_STUB = '0'` in PowerShell, `export POWBOX_WSL_REGISTRY_STUB=0` in bash) before the launch that creates the container. Compose passes it in like the API keys, but only when the container is created: a launch that reuses an existing container (the default) keeps the value it was created with, so after changing it remove the stopped container (`docker rm` with the name `agent-list` shows) and launch again. Setting it for a single `claude` in a `--shell` session (`POWBOX_WSL_REGISTRY_STUB=0 claude`) works on any container. Either way the stub then answers as unreadable, and the waiver stays off just as it would without the stub. Only the exact value `0` turns it off (`off` or `false` leave it on), and the startup line shows which answer Claude Code got. Codex never runs the stub, and Claude Code runs it only on a WSL-looking kernel, so it is never run on a native-Linux host, and in a Codex-primary container only by a `claude` started there, such as a peer review, which gets the same "no policy" answer.
+
+**Claude in Chrome.** The same variable reaches outside the container: in bypass mode it also lets Claude in Chrome act in any Chrome connected to your account without auto mode's safety check, a permission prompt, or the extension's site permissions, and Claude Code says so in a second startup line ("Claude in Chrome actions in any Chrome connected to your account can run without…"), which still appears with Chrome off. powbox therefore keeps Claude in Chrome off by default: the same Claude-primary branch exports `CLAUDE_CODE_ENABLE_CFC=0` (again keeping a value already in the container's environment), which every `claude` started through the container's entrypoint inherits (a `claude` started with `docker exec` gets neither variable, so it keeps the `rm` prompts and Chrome's safeguards), and which outranks the "Enabled by default" setting of `/chrome` and suppresses Claude Code's offer to switch Chrome on. `claude --chrome` still turns it on for one session, because Claude Code ranks the flag above the variable (read from the Claude Code 2.1.332 binary, as is the child-session rule above). The residual is that session: with Chrome on and the waiver set, Claude in Chrome runs with none of those three safeguards against your real browser and its signed-in sites, so start a session with `--chrome` only when you mean to, or start it with the waiver unset (`env -u CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS claude --chrome …`) to keep them. An `env.CLAUDE_CODE_ENABLE_CFC` you write into `~/.claude/settings.json` yourself overrides the export, so it turns Chrome back on by default, with the waiver set, for every container sharing that volume. The suite and Stage 0k also fail if the export goes missing or a seeded settings file sets `CLAUDE_CODE_ENABLE_CFC` in its `env` block.
 
 ### Shell
 
@@ -822,6 +836,7 @@ Both libraries honour the same variables:
 | `POWBOX_CD_AFTER_LAUNCH` | `1` | When `cc`/`cx` is called with an explicit project path, cd into that path after the container exits. Set to `0` (or `false`/`no`/`off`) to stay in the original directory. |
 | `POWBOX_MUSE_VERSION` | unset (`none`) | Standing opt-in for baking the optional Muse Code reviewer: `latest` or a full release id. Read by `build.sh`/`build.ps1` when no `--muse-version`/`-MuseVersion` is passed; when it is unset too, the build keeps whatever the existing `powbox-agent:latest` was built with. See [Optional third harness](#optional-third-harness-muse-code-reviewer-only). |
 | `POWBOX_PODMAN` | `auto` | Whether to pass the host devices rootless Podman needs into the agent: `/dev/fuse` (fuse-overlayfs `overlay` storage driver; absence falls back to the slower `vfs`) and `/dev/net/tun` (nested-container networking; absence breaks default `podman run`). `auto` attaches each device when the launcher's host shell can see it; `on` forces both (use when the Docker daemon/VM has them but the host shell doesn't, e.g. Docker Desktop); `off` skips both. (`POWBOX_FUSE` is a deprecated alias for this variable.) |
+| `POWBOX_WSL_REGISTRY_STUB` | unset (stub on) | Set to `0` (exactly) to make the image's `reg.exe` stub answer Claude Code's Windows policy read as unreadable, which keeps the `rm`-prompt waiver off on a Docker Desktop (WSL2-kernel) host; read when the container is created, so a reused container keeps its old value until it is removed and recreated. See [`rm` prompts under bypass mode](#rm-prompts-under-bypass-mode). |
 
 Export/assign these before sourcing the library — or before calling `cc`/`cx` — to change behavior without editing the script.
 
@@ -1001,7 +1016,7 @@ Smoke test the built image with:
 ./commands/smoke-test.sh
 ```
 
-The run is layered: a hermetic tier of eight unit-suite entries (Stages 0a, 0b, 0d and 0f–0j, over eight distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — seven entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
+The run is layered: a hermetic tier of nine unit-suite entries (Stages 0a, 0b, 0d and 0f–0k, over nine distinct `scripts/test-*.sh` files) that needs no root, host database, nested engine, relaunch cycle or network but runs inside the image — eight entries target **baked** artifacts and Stage 0i targets the routed pnpm-wrapper source under its required `/workspace` contract — then six image/host stages: tool presence and key image config, a `pg-dev-up` functional test plus the daemon-backed scoped suite, the rootless-Podman engine, self-hosted (`--isolated`) launch, native-Linux dir-mount ownership, and the durable worktree-metadata recreate lifecycle.
 An image built from a [layer set](#layer-sets) also runs the probes that set ships in `docker/layers/<set>/smoke-probes.txt` (Stage 1b), picked by the image's `powbox.layers.set` label; each committed set (`full`, `browser`) must keep that file, and a set of your own may delete it to opt out. The `pg-dev-up` and Podman stages run only when the image has `pg-dev-up` or `podman` on its `PATH` and are otherwise reported as not applicable, which is listed apart from skips and does not make the run partial; a presence probe, in the core list or in a set's probe file, is what fails an image that lost a tool it should have.
 Stages self-skip rather than fail when the host cannot provide what they need (no `/dev/net/tun`, no root-owned fixture, no `mount --bind` privilege), and five of the six — Stages 2 through 6 — can be skipped explicitly with `POWBOX_SMOKE_SKIP_DB`, `POWBOX_SMOKE_SKIP_PODMAN`, `POWBOX_SMOKE_SKIP_SELFHOSTED`, `POWBOX_SMOKE_SKIP_DIRMOUNT`, or `POWBOX_SMOKE_SKIP_WORKTREE_META` (PowerShell: `.\commands\smoke-test.ps1 -SkipDb -SkipPodman -SkipSelfHosted -SkipDirMount -SkipWorktreeMeta`); Stage 1 has no skip variable, being the presence sweep the later stages assume and the residue that remains when all five are set — an end-of-run banner lists the skips so a partial run is not reported as a full one, with a narrow exception the chapter below names. See [docs/smoke-tests.md](docs/smoke-tests.md) for the orientation the scripts do not give you: what each stage is for, which entries run the `/repo` source and which the baked artifact, which stages reach the network and what a failed pull or clone costs, and which self-skips the banner cannot see. For what an individual stage asserts, read that stage's script.
 
@@ -1022,6 +1037,9 @@ Inside the container:
 ```bash
 whoami
 echo "$CLAUDE_CONFIG_DIR"
+echo "$CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+echo "$CLAUDE_CODE_ENABLE_CFC"
+ls -l /mnt/c/Windows/System32/reg.exe
 claude --version
 gh --version
 pnpm config get store-dir
@@ -1033,6 +1051,7 @@ Expected results:
 
 - user is `node`
 - `CLAUDE_CONFIG_DIR` is `/home/node/.claude`
+- `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS` is `1`, `CLAUDE_CODE_ENABLE_CFC` is `0`, and `/mnt/c/Windows/System32/reg.exe` is the stub, `-rwxr-xr-x` and owned by `root` (see [`rm` prompts under bypass mode](#rm-prompts-under-bypass-mode))
 - the pnpm store is per-container at `/workspace/<project>-<hash>/.worktrees/.pnpm-store` (co-located with worktrees so installs hardlink)
 - working directory is `/workspace/<project>-<hash>`
 - `node_modules` is writable by `node`
@@ -1113,7 +1132,7 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 22-suite set is `test-apt-get-wrapper.sh`,
+  routed to the smoke test. The current 23-suite set is `test-apt-get-wrapper.sh`,
   `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
   `test-egress-allow-list.sh`,
@@ -1121,7 +1140,7 @@ workflows keep cost proportional to the change:
   `test-layer-sets.sh`, `test-ownership-negative-control.sh`,
   `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,
-  `test-seed-marker-source.sh`,
+  `test-rm-prompt-bypass.sh`, `test-seed-marker-source.sh`,
   `test-sensitive-host-path.sh`, `test-shadow-mounts-chown.sh`,
   `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
   `test-stage-agent-template.sh`, `test-sync-codex-skills.sh`,

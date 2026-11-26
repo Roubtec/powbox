@@ -119,4 +119,31 @@ done
 # runs its setup hook plus firewall/git/shadow setup and finally execs the CMD.
 export_agent_env "$PRIMARY_AGENT"
 
+# Bypass mode still prompts for some `rm` commands (critical paths, and the
+# "Dangerous rm operation not ruled out" class), and an unattended session waits
+# on such a prompt indefinitely; this variable lifts both. Claude Code reads it
+# only from the launch environment, never from a settings `env` block, so it
+# cannot be seeded into the shared claude-config volume and has to be set here.
+# A value already in the container's environment is left alone. Any
+# PermissionRequest hook, an ask/deny rule on Bash, Edit or Read, a PreToolUse
+# hook answering "ask", or either block*OutsideWorkingDirectories setting makes
+# it inert; scripts/test-rm-prompt-bypass.sh keeps those out of the seed. So
+# does an unanswered Windows policy read on a kernel Claude Code takes for WSL,
+# such as Docker Desktop's, which the image's reg.exe stub answers
+# (docker/shared/wsl-reg-stub.sh).
+#
+# The same variable also lifts Claude in Chrome's safeguards (auto mode's check,
+# the permission prompt, the extension's site permissions) for any Chrome linked
+# to the account, which reaches outside the container. So Claude in Chrome
+# defaults off here: CLAUDE_CODE_ENABLE_CFC=0 is the only off switch every
+# `claude` started through this entrypoint sees, including one typed in a
+# --shell session, since --no-chrome would bind only the image CMD and the
+# "Enabled by default" setting lives in Claude Code's lock-guarded .claude.json on
+# the shared volume. Claude Code ranks --chrome above the variable, so
+# `claude --chrome` still turns it on for one session (Claude Code 2.1.332).
+if [ "$PRIMARY_AGENT" = claude ]; then
+	export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS="${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS-1}"
+	export CLAUDE_CODE_ENABLE_CFC="${CLAUDE_CODE_ENABLE_CFC-0}"
+fi
+
 exec /usr/local/bin/entrypoint-core.sh "$@"

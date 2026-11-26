@@ -213,6 +213,32 @@ else
 	skipped+=("Stage 0j: disposable-clone helper unit test (image absent)")
 fi
 
+# Stage 0k — rm-prompt waiver against the BAKED entrypoint, Claude hook, Claude
+# seed dir and reg.exe stub. The suite checks that entrypoint-agent.sh exports
+# CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1, and CLAUDE_CODE_ENABLE_CFC=0
+# beside it (the waiver also lifts Claude in Chrome's safeguards, so Chrome defaults
+# off), on the Claude primary path only, and that the settings.json the hook seeds
+# into a fresh config dir carries none of the settings that silently make that
+# variable inert and no env override for CLAUDE_CODE_ENABLE_CFC, so a future change
+# cannot drop either default unnoticed. It also fails an image without the
+# root-owned /mnt/c/Windows/System32/reg.exe stub, whose "not found" answer keeps
+# the variable from going inert on a Docker Desktop / WSL2-kernel host, or whose
+# installed claude no longer spawns that path. Tier 0 runs it against the /repo
+# source. Whether the running CLI honors the variable needs a logged-in session and
+# stays a host check (docs/smoke-tests.md).
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "Running rm-prompt waiver unit test (baked entrypoint, hook, seed dir and reg.exe stub in $IMAGE) ..."
+	docker run --rm -v "${ROOT_DIR}:/repo:ro" \
+		-e ENTRYPOINT_AGENT=/usr/local/bin/entrypoint-agent.sh \
+		-e CLAUDE_HOOK=/usr/local/bin/entrypoint-claude-hook.sh \
+		-e CLAUDE_SEED_DIR=/home/node/.agent-container/claude \
+		-e WSL_REG_STUB=/mnt/c/Windows/System32/reg.exe \
+		--entrypoint /bin/bash "$IMAGE" /repo/scripts/test-rm-prompt-bypass.sh
+else
+	echo "WARNING: skipping rm-prompt waiver unit test (Stage 0k) — image '$IMAGE' absent."
+	skipped+=("Stage 0k: rm-prompt waiver unit test (image absent)")
+fi
+
 # Stage 1 — tool presence + key image config: every expected CLI resolves and
 # runs, and pnpm ships package-import-method=auto (not the old forced copy) so
 # worktree installs can hardlink from a co-located store. Probes for the

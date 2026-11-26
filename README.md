@@ -609,7 +609,7 @@ If the desired set differs (including switching paths, aliases, modes, CLI/confi
 Persistent state in named volumes (agent config, GitHub CLI, pnpm store, etc.) is unaffected by this recreation.
 
 Omitting `--ctx` and having no effective `ctx:` key is treated as "keep whatever is already mounted" — the container is reused as-is without recreation.
-To explicitly clear a previously mounted context on a stopped container, use `ctx: []`; use `--volatile` when you want a fresh container regardless of labels.
+To explicitly clear a previously mounted context on a stopped container, use `ctx: []`; use `--volatile` when you want a fresh container regardless of labels (it replaces the stopped container; see [Volatile Containers](#volatile-containers)).
 
 Using the explicit `--resume` / `-Resume` flag always resumes the container exactly as originally created — any `--ctx` / `-Ctx` value or configured `ctx:` is ignored, and launcher migrations for frozen mounts or environment (including persistent `NUGET_PACKAGES` / `PLAYWRIGHT_BROWSERS_PATH` wiring) are skipped (warnings are printed).
 To apply a ctx change, omit `--resume` and let the script auto-detect and recreate as needed.
@@ -755,6 +755,21 @@ The user-facing command surface lives at the repo root and in `commands/`:
 - `commands/reset-claude-history.*` for wiping Claude session history from the shared `claude-config` volume
 - `commands/update-skills.*` for re-seeding the image-baked skills onto the `claude-config` / `codex-config` volumes, with `--prune`/`--adopt-all` to drop obsolete seeds and resolve unmarked name-collisions (its in-container worker is `docker/shared/update-skills-incontainer.sh`; the shared copy logic and `.powbox-seeded` marker live in `docker/shared/seed-skills.sh`, also used by the entrypoint hooks)
 - `commands/check-updates.*` for checking whether newer agent releases are available
+
+## Volatile Containers
+
+By default a launch keeps one persistent container per project and agent and reuses it; `--volatile` / `-Volatile` instead starts a fresh container and removes it when it exits.
+Both use the same deterministic container name, so a volatile launch **replaces** a stopped container of that name: it removes it with `docker rm` (and says so), then creates the fresh one.
+As on every other recreate, named volumes (agent config, GitHub CLI, `node_modules`, `.worktrees`, Podman storage, a self-hosted `agent-ws-*` workspace) are kept; the old container's writable layer, meaning anything written outside those volumes such as `apt-get` packages, is lost.
+A **running** container is never replaced: the launch refuses and asks you to stop it first, or to relaunch without `--volatile` to attach to it.
+Once the volatile container exits it is gone, so the next default launch creates a new persistent container.
+
+With other flags:
+
+- `--persist` / `-Persist` — the stopped container is still replaced, but the fresh one is kept on exit instead of removed, so later default launches reuse it.
+- `--detach` / `-Detach` — the fresh container runs in the background and is still removed when it exits; add `--persist` to keep it. A default launch while it runs attaches to it.
+- `--resume` / `-Resume` — refused before anything is touched: resuming restarts the existing container as created, which contradicts replacing it.
+- `--isolated` — a named instance is replaced like a dir-mounted container, and its `agent-ws-*` volume keeps the checkout, so the fresh container starts on the same working tree (add `--reclone` to wipe it and clone again). An unnamed instance gets a new name every launch, so there is nothing to replace. The `agent-ws-*` volume outlives the volatile container; `agent-prune-volumes` drops it once no container uses it.
 
 ## Resuming Sessions
 
@@ -1025,6 +1040,7 @@ After launching each agent at least once, `docker volume ls` should show one cop
 ## Runtime Sanity Check
 
 Launch an interactive shell with `--shell --volatile` to verify the container environment.
+This replaces a stopped container for that project and removes the shell's container on exit (see [Volatile Containers](#volatile-containers)); stop a running one first.
 
 ### Claude
 

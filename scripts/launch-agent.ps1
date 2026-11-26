@@ -40,6 +40,14 @@ if (-not $Isolated -and ($Repo -ne "" -or $Name -ne "" -or $Ref -ne "" -or $Recl
   exit 1
 }
 
+# -Resume restarts the existing container exactly as it was created, while
+# -Volatile replaces it with a fresh one that is removed on exit. Neither can win
+# quietly, so refuse the pair before touching Docker.
+if ($Volatile -and $Resume) {
+  Write-Error "-Volatile and -Resume contradict each other: -Resume restarts the existing container, -Volatile replaces it with a fresh one. Pass only one."
+  exit 1
+}
+
 # SHA256(input) truncated to 12 lowercase hex chars — the shared hash shape for
 # both the dir-mounted path hash and the self-hosted instance hash.
 function Get-Powbox-Hash12 ([string]$Value) {
@@ -1349,6 +1357,32 @@ if ($Resume) {
   exit $LASTEXITCODE
 }
 
+# -Volatile: replace a container that already holds this launch's name. Container
+# names are deterministic per project and agent, so the stopped container a default
+# launch leaves behind would otherwise make the final `run --name` fail with a name
+# conflict. Remove a stopped one, as the recreate paths below do; its named volumes
+# (config, node_modules, .worktrees, Podman storage, a self-hosted agent-ws-*
+# workspace) are kept, only its writable layer goes. A running one is refused rather
+# than killed, so a live session is never cut off. Every check below that reuses or
+# recreates a container is guarded on a non-volatile launch, and this block leaves
+# none for them anyway.
+if ($Volatile -and $containerExists) {
+  if ($containerRunning) {
+    Write-Error "Container $containerName is running; stop it before -Volatile (it replaces the container with a fresh one), or relaunch without -Volatile to attach to it."
+    exit 1
+  }
+  Write-Host "-Volatile: replacing the stopped container $containerName with a fresh one; its named volumes are kept."
+  docker rm $containerName *> $null
+  if ($LASTEXITCODE -ne 0) {
+    docker container inspect $containerName *> $null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Error "Failed to remove existing container $containerName."
+      exit 1
+    }
+  }
+  $containerExists = $false
+}
+
 # Self-hosted -Reclone: wipe and re-seed an existing named container's clone. A
 # reused container is started in place (reuse block below) and never re-runs the
 # prep/create flow, so -Reclone removes the stopped container to force that flow;
@@ -1434,7 +1468,7 @@ if (-not $Volatile -and $containerExists) {
     if ($LASTEXITCODE -ne 0) { $existingCtxDestinations = "" }
     $ctxDestinations = @($existingCtxDestinations -split "`r?`n" | Where-Object { $_ -eq "/ctx" -or $_.StartsWith("/ctx/") })
     if ($ctxDestinations.Count -gt 0) {
-      Write-Host "Note: container has ctx mounts from a previous session ($($ctxDestinations -join ', ')). Use -Volatile to start fresh or -Ctx/config ctx to change them."
+      Write-Host "Note: container has ctx mounts from a previous session ($($ctxDestinations -join ', ')). Use -Ctx/config ctx to change them (ctx: [] clears them), or -Volatile for a fresh container without them (stop it first if it is running)."
     }
   }
 }
@@ -1538,7 +1572,7 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
     $recreateStaleMounts = $false
     if ($mountWorkspaceVolumes) {
       if ($containerRunning) {
-        Write-Host "Note: container $containerName uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use -Volatile) to migrate to the per-agent volumes." -ForegroundColor Yellow
+        Write-Host "Note: container $containerName uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch to migrate to the per-agent volumes." -ForegroundColor Yellow
       }
       else {
         Write-Host "Container $containerName uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-$containerName and worktree installs hardlink from the co-located pnpm store."
@@ -1547,7 +1581,7 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
     }
     elseif ($mountWorktreesVolume) {
       if ($containerRunning) {
-        Write-Host "Note: container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); $worktreesOnlyCacheDescription and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use -Volatile) to fix the mounts." -ForegroundColor Yellow
+        Write-Host "Note: container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts (only .worktrees = agent-wt-$containerName, no node_modules volume); $worktreesOnlyCacheDescription and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch to fix the mounts." -ForegroundColor Yellow
       }
       else {
         Write-Host "Container $containerName does not match this ${worktreesOnlyRepoDescription}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-$containerName — persistent $worktreesOnlyCacheDescription + worktrees) and no node_modules mount."
@@ -1556,7 +1590,7 @@ if (-not $Isolated -and -not $Volatile -and $containerExists) {
     }
     else {
       if ($containerRunning) {
-        Write-Host "Note: container $containerName still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch (or use -Volatile) to drop the mounts and leave no host litter." -ForegroundColor Yellow
+        Write-Host "Note: container $containerName still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch to drop the mounts and leave no host litter." -ForegroundColor Yellow
       }
       else {
         Write-Host "Container $containerName mounts node_modules/.worktrees but this folder isn't a dev project; recreating it without those mounts so it leaves no host litter."
@@ -1611,7 +1645,7 @@ if (($Isolated -or $mountWorktreesVolume) -and -not $Volatile -and $containerExi
     if ($normalizedExisting -ceq $check.Expected) { continue }
     $existingDisplay = if (-not $existingFound) { "<unset>" } elseif ($existingValue -ceq "") { "<empty>" } else { $existingValue }
     if ($containerRunning) {
-      Write-Host "Note: container $containerName was created with $($check.Name)='$existingDisplay', but this launch expects '$($check.Expected)'. Container environment is fixed at creation; stop it and relaunch (or use -Volatile) to enable persistent $($check.Label)." -ForegroundColor Yellow
+      Write-Host "Note: container $containerName was created with $($check.Name)='$existingDisplay', but this launch expects '$($check.Expected)'. Container environment is fixed at creation; stop it and relaunch to enable persistent $($check.Label)." -ForegroundColor Yellow
       continue
     }
     Write-Host "Container $containerName was created with $($check.Name)='$existingDisplay'; recreating it with '$($check.Expected)' so $($check.Label) persist."
@@ -1640,7 +1674,7 @@ if (-not $Volatile -and $containerExists) {
   if ($LASTEXITCODE -ne 0) { $hasPodmanMount = "" }
   if ([string]::IsNullOrWhiteSpace($hasPodmanMount)) {
     if ($containerRunning) {
-      Write-Host "Note: container $containerName predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch (or use -Volatile) to enable persistent rootless Podman storage." -ForegroundColor Yellow
+      Write-Host "Note: container $containerName predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch to enable persistent rootless Podman storage." -ForegroundColor Yellow
     }
     else {
       Write-Host "Container $containerName predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
@@ -1677,7 +1711,7 @@ if (-not $Volatile -and $containerExists) {
   }
   if ($existingPodmanDevices -ne "" -and $existingPodmanDevices -ne $podmanDevices) {
     if ($containerRunning) {
-      Write-Host "Note: container $containerName is running with Podman devices '$existingPodmanDevices'; this launch resolves to '$podmanDevices'. The device set is fixed at container creation — stop it and relaunch (or use -Volatile) to apply the change." -ForegroundColor Yellow
+      Write-Host "Note: container $containerName is running with Podman devices '$existingPodmanDevices'; this launch resolves to '$podmanDevices'. The device set is fixed at container creation — stop it and relaunch to apply the change." -ForegroundColor Yellow
     }
     else {
       Write-Host "Podman device set changed (was '$existingPodmanDevices', now '$podmanDevices'); recreating container."
@@ -1870,11 +1904,14 @@ if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
 }
 
+# A volatile container is removed when it exits, attached or detached alike
+# (`compose run -d --rm` is supported; the image-store writer below uses it);
+# -Persist keeps it instead.
 $runArgs = @()
 if ($Detach) {
   $runArgs += "-d"
 }
-elseif ($Volatile -and -not $Persist) {
+if ($Volatile -and -not $Persist) {
   $runArgs += "--rm"
 }
 

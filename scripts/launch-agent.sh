@@ -115,6 +115,14 @@ if [ "$ISOLATED" != true ]; then
 	fi
 fi
 
+# --resume restarts the existing container exactly as it was created, while
+# --volatile replaces it with a fresh one that is removed on exit. Neither can
+# win quietly, so refuse the pair before touching Docker.
+if [ "$VOLATILE" = true ] && [ "$RESUME" = true ]; then
+	echo "Error: --volatile and --resume contradict each other: --resume restarts the existing container, --volatile replaces it with a fresh one. Pass only one." >&2
+	exit 1
+fi
+
 # In dir-mounted mode the positional is a host project directory and must exist;
 # in self-hosted mode it is re-interpreted as the repo spec (resolved below) and
 # is NOT a host path, so the directory checks/canonicalisation are skipped.
@@ -1512,6 +1520,30 @@ if [ "$RESUME" = true ]; then
 	exec docker start -ai "$CONTAINER_NAME"
 fi
 
+# --volatile: replace a container that already holds this launch's name.
+# Container names are deterministic per project and agent, so the stopped
+# container a default launch leaves behind would otherwise make the final
+# `run --name` fail with a name conflict. Remove a stopped one, as the recreate
+# paths below do; its named volumes (config, node_modules, .worktrees, Podman
+# storage, a self-hosted agent-ws-* workspace) are kept, only its writable layer
+# goes. A running one is refused rather than killed, so a live session is never
+# cut off. Every check below that reuses or recreates a container is guarded on
+# a non-volatile launch, and this block leaves none for them anyway.
+if [ "$VOLATILE" = true ] && [ "$CONTAINER_EXISTS" = true ]; then
+	if [ "$CONTAINER_RUNNING" = true ]; then
+		echo "Container ${CONTAINER_NAME} is running; stop it before --volatile (it replaces the container with a fresh one), or relaunch without --volatile to attach to it." >&2
+		exit 1
+	fi
+	echo "--volatile: replacing the stopped container ${CONTAINER_NAME} with a fresh one; its named volumes are kept."
+	if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
+		if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+			echo "Failed to remove existing container ${CONTAINER_NAME}." >&2
+			exit 1
+		fi
+	fi
+	CONTAINER_EXISTS=false
+fi
+
 # Self-hosted --reclone: wipe and re-seed an existing named container's clone.
 # A reused container is started in place (reuse block below) and never re-runs the
 # prep/create flow, so --reclone removes the stopped container to force that flow;
@@ -1582,7 +1614,7 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	else
 		EXISTING_CTX_DESTS="$(docker inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | awk '$0 == "/ctx" || index($0, "/ctx/") == 1 { print }' | paste -sd ', ' - || true)"
 		if [ -n "$EXISTING_CTX_DESTS" ]; then
-			echo "Note: container has ctx mounts from a previous session (${EXISTING_CTX_DESTS}). Use --volatile to start fresh or --ctx/config ctx to change them."
+			echo "Note: container has ctx mounts from a previous session (${EXISTING_CTX_DESTS}). Use --ctx/config ctx to change them (ctx: [] clears them), or --volatile for a fresh container without them (stop it first if it is running)."
 		fi
 	fi
 fi
@@ -1679,21 +1711,21 @@ if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" =
 		RECREATE_STALE_MOUNTS=0
 		if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
 			if [ "$CONTAINER_RUNNING" = true ]; then
-				echo "Note: container ${CONTAINER_NAME} uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch (or use --volatile) to migrate to the per-agent volumes." >&2
+				echo "Note: container ${CONTAINER_NAME} uses outdated workspace volumes (node_modules/.worktrees not keyed per-agent, or missing); it may share a writable node_modules/pnpm store with another agent and worktree installs won't hardlink. Stop it and relaunch to migrate to the per-agent volumes." >&2
 			else
 				echo "Container ${CONTAINER_NAME} uses outdated workspace volumes (not keyed per-agent); recreating it so node_modules/.worktrees use agent-{nm,wt}-${CONTAINER_NAME} and worktree installs hardlink from the co-located pnpm store."
 				RECREATE_STALE_MOUNTS=1
 			fi
 		elif [ "$MOUNT_WORKTREES_VOLUME" = true ]; then
 			if [ "$CONTAINER_RUNNING" = true ]; then
-				echo "Note: container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts (only .worktrees = agent-wt-${CONTAINER_NAME}, no node_modules volume); ${WORKTREES_ONLY_CACHE_DESCRIPTION} and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch (or use --volatile) to fix the mounts." >&2
+				echo "Note: container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts (only .worktrees = agent-wt-${CONTAINER_NAME}, no node_modules volume); ${WORKTREES_ONLY_CACHE_DESCRIPTION} and worktrees won't persist correctly or an empty node_modules/ keeps appearing in the host folder. Stop it and relaunch to fix the mounts." >&2
 			else
 				echo "Container ${CONTAINER_NAME} does not match this ${WORKTREES_ONLY_REPO_DESCRIPTION}'s expected mounts; recreating it with only the .worktrees volume (agent-wt-${CONTAINER_NAME} — persistent ${WORKTREES_ONLY_CACHE_DESCRIPTION} + worktrees) and no node_modules mount."
 				RECREATE_STALE_MOUNTS=1
 			fi
 		else
 			if [ "$CONTAINER_RUNNING" = true ]; then
-				echo "Note: container ${CONTAINER_NAME} still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch (or use --volatile) to drop the mounts and leave no host litter." >&2
+				echo "Note: container ${CONTAINER_NAME} still mounts node_modules/.worktrees, but this folder isn't a dev project — those mounts keep re-creating empty node_modules/.worktrees dirs in the host folder. Stop it and relaunch to drop the mounts and leave no host litter." >&2
 			else
 				echo "Container ${CONTAINER_NAME} mounts node_modules/.worktrees but this folder isn't a dev project; recreating it without those mounts so it leaves no host litter."
 				RECREATE_STALE_MOUNTS=1
@@ -1757,7 +1789,7 @@ if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
 			_existing_display="$_existing_value"
 		fi
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} was created with ${_cache_name}='${_existing_display}', but this launch expects '${_cache_expected}'. Container environment is fixed at creation; stop it and relaunch (or use --volatile) to enable persistent ${_cache_label}." >&2
+			echo "Note: container ${CONTAINER_NAME} was created with ${_cache_name}='${_existing_display}', but this launch expects '${_cache_expected}'. Container environment is fixed at creation; stop it and relaunch to enable persistent ${_cache_label}." >&2
 			continue
 		fi
 		echo "Container ${CONTAINER_NAME} was created with ${_cache_name}='${_existing_display}'; recreating it with '${_cache_expected}' so ${_cache_label} persist."
@@ -1785,7 +1817,7 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_PODMAN_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch (or use --volatile) to enable persistent rootless Podman storage." >&2
+			echo "Note: container ${CONTAINER_NAME} predates the per-container Podman storage volume; nested-container images and volumes won't persist and the podman devices (/dev/fuse, /dev/net/tun) aren't attached. Stop it and relaunch to enable persistent rootless Podman storage." >&2
 		else
 			echo "Container ${CONTAINER_NAME} predates the per-container Podman storage volume; recreating it so rootless Podman images and volumes persist."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
@@ -1813,7 +1845,7 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_PODMAN_DEVICES="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.podman-devices"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -n "$EXISTING_PODMAN_DEVICES" ] && [ "$EXISTING_PODMAN_DEVICES" != "$PODMAN_DEVICE_MODE" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
-			echo "Note: container ${CONTAINER_NAME} is running with Podman devices '${EXISTING_PODMAN_DEVICES}'; this launch resolves to '${PODMAN_DEVICE_MODE}'. The device set is fixed at container creation — stop it and relaunch (or use --volatile) to apply the change." >&2
+			echo "Note: container ${CONTAINER_NAME} is running with Podman devices '${EXISTING_PODMAN_DEVICES}'; this launch resolves to '${PODMAN_DEVICE_MODE}'. The device set is fixed at container creation — stop it and relaunch to apply the change." >&2
 		else
 			echo "Podman device set changed (was '${EXISTING_PODMAN_DEVICES}', now '${PODMAN_DEVICE_MODE}'); recreating container."
 			if ! docker rm "$CONTAINER_NAME" >/dev/null 2>&1; then
@@ -2003,10 +2035,14 @@ else
 		-lc "mkdir -p $PREP_PATHS && chown node:node $PREP_PATHS"
 fi
 
+# A volatile container is removed when it exits, attached or detached alike
+# (`compose run -d --rm` is supported; the image-store writer below uses it);
+# --persist keeps it instead.
 RUN_ARGS=()
 if [ "$DETACH" = true ]; then
 	RUN_ARGS+=(-d)
-elif [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
+fi
+if [ "$VOLATILE" = true ] && [ "$PERSIST" != true ]; then
 	RUN_ARGS+=(--rm)
 fi
 

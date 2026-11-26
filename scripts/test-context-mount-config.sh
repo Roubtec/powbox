@@ -190,9 +190,12 @@ run_ps_profile_cx_ctx() {
 		pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; cx "$env:POWBOX_TEST_WS" -Ctx "$env:POWBOX_TEST_CTX"' 2>&1
 }
 
+# Read the whole input instead of stopping at the first match: an early-exiting
+# consumer can close the pipe while printf is still writing, which pipefail
+# reports as a failure (and set -e then aborts the suite).
 value_of() {
 	local text="$1" key="$2"
-	printf '%s\n' "$text" | awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }'
+	printf '%s\n' "$text" | awk -v key="$key" '!found && index($0, key "=") == 1 { print substr($0, length(key) + 2); found = 1 }'
 }
 
 assert_eq() {
@@ -204,9 +207,11 @@ assert_eq() {
 	fi
 }
 
+# Match in-process: a `printf | grep -q` pipeline lets grep exit at the first
+# match while printf is still writing, which pipefail reports as a failure.
 assert_contains() {
 	local label="$1" text="$2" needle="$3"
-	if printf '%s' "$text" | grep -qF -- "$needle"; then
+	if [[ "$text" == *"$needle"* ]]; then
 		ok "$label"
 	else
 		ko "$label (missing '$needle')"
@@ -215,7 +220,7 @@ assert_contains() {
 
 assert_not_contains() {
 	local label="$1" text="$2" needle="$3"
-	if printf '%s' "$text" | grep -qF -- "$needle"; then
+	if [[ "$text" == *"$needle"* ]]; then
 		ko "$label (unexpected '$needle')"
 	else
 		ok "$label"

@@ -283,6 +283,14 @@ COPY --chmod=755 \
     docker/shared/wt-remove \
     /usr/local/bin/
 
+# Claude Code takes Docker Desktop's WSL2 kernel for WSL and then reads Windows
+# admin policy by running this hard-coded reg.exe path; with nothing there the
+# read goes unanswered and the rm waiver entrypoint-agent.sh exports stays inert.
+# The stub answers "no policy" (README "`rm` prompts under bypass mode"). No
+# --chown: it and the directories COPY creates for it stay root-owned, so node
+# cannot replace the answer. A real mount at /mnt/c hides it.
+COPY --chmod=755 docker/shared/wsl-reg-stub.sh /mnt/c/Windows/System32/reg.exe
+
 # The helpers below are NOT kept in-tree: the dev-skills plugin ships the same
 # files to non-powbox users, so agent-skills is their single source of truth and
 # the COPY below takes them from the staging clone that feeds the Codex palette

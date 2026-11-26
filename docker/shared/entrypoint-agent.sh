@@ -127,7 +127,10 @@ export_agent_env "$PRIMARY_AGENT"
 # A value already in the container's environment is left alone. Any
 # PermissionRequest hook, an ask/deny rule on Bash, Edit or Read, a PreToolUse
 # hook answering "ask", or either block*OutsideWorkingDirectories setting makes
-# it inert; scripts/test-rm-prompt-bypass.sh keeps those out of the seed.
+# it inert; scripts/test-rm-prompt-bypass.sh keeps those out of the seed. So
+# does an unanswered Windows policy read on a kernel Claude Code takes for WSL,
+# such as Docker Desktop's, which the image's reg.exe stub answers
+# (docker/shared/wsl-reg-stub.sh).
 #
 # The same variable also lifts Claude in Chrome's safeguards (auto mode's check,
 # the permission prompt, the extension's site permissions) for any Chrome linked

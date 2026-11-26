@@ -12,6 +12,12 @@
 #      that variable inert, and no `env` entry for CLAUDE_CODE_ENABLE_CFC, which
 #      Claude Code also reads from settings and could turn Claude in Chrome back
 #      on. A third set of cases proves the check itself has teeth.
+#   4. the reg.exe stub (docker/shared/wsl-reg-stub.sh) answers every query as
+#      "key not found" (stderr text plus exit 1), or as unreadable under
+#      POWBOX_WSL_REGISTRY_STUB=0, and the Dockerfile bakes it root-owned at the
+#      path Claude Code spawns when it takes the kernel for WSL. Docker Desktop's
+#      WSL2 kernel looks like WSL to it, and an unanswered policy read leaves the
+#      variable inert.
 #
 # Claude Code reads the variable only from its launch environment, so the export
 # cannot be seeded into the shared claude-config volume; and it is silently inert
@@ -30,17 +36,22 @@
 #   CLAUDE_HOOK=<path>       test that hook instead of ../docker/shared/entrypoint-claude-hook.sh
 #   CLAUDE_SEED_DIR=<dir>    seed from that dir instead of one assembled from
 #                            ../docker/claude/agent-container/ and the core template
-# commands/smoke-test.sh Stage 0k points all three at the BAKED copies in the image.
+#   WSL_REG_STUB=<path>      test that stub instead of ../docker/shared/wsl-reg-stub.sh;
+#                            at the baked path it must also be root-owned 0755 in
+#                            root-owned directories, and the installed claude must
+#                            still name that path and the not-found text
+# commands/smoke-test.sh Stage 0k points all four at the BAKED copies in the image.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$SCRIPT_DIR/.."
 ENTRYPOINT="${ENTRYPOINT_AGENT:-$REPO_DIR/docker/shared/entrypoint-agent.sh}"
 HOOK="${CLAUDE_HOOK:-$REPO_DIR/docker/shared/entrypoint-claude-hook.sh}"
+REG_STUB="${WSL_REG_STUB:-$REPO_DIR/docker/shared/wsl-reg-stub.sh}"
 VAR=CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS
 CFC=CLAUDE_CODE_ENABLE_CFC
 
-for f in "$ENTRYPOINT" "$HOOK"; do
+for f in "$ENTRYPOINT" "$HOOK" "$REG_STUB"; do
 	if [ ! -f "$f" ]; then
 		echo "FATAL: not found: $f" >&2
 		exit 1
@@ -287,6 +298,93 @@ expect_chrome() {
 expect_chrome "a settings env entry for $CFC" '{"env":{"CLAUDE_CODE_ENABLE_CFC":"1"}}' flagged
 expect_chrome "a settings env entry for $CFC in another case" '{"env":{"claude_code_enable_cfc":"true"}}' flagged
 expect_chrome "other settings env entries" '{"env":{"DISABLE_TELEMETRY":"1"}}' clean
+
+# --- Group 4: the reg.exe stub -----------------------------------------------
+echo "Group 4: the WSL reg.exe stub (stub: $REG_STUB)"
+
+# Claude Code 2.1.332 spawns this path and counts a policy read as answered only
+# on exit 0, or on exit 1 with this text on stderr.
+REG_EXE=/mnt/c/Windows/System32/reg.exe
+NOT_FOUND='unable to find the specified registry key or value'
+HKLM_QUERY=(query 'HKLM\SOFTWARE\Policies\ClaudeCode' /v Settings)
+HKCU_QUERY=(query 'HKCU\SOFTWARE\Policies\ClaudeCode' /v Settings)
+
+# run_stub <label> <answered|unreadable> <stub env value or "unset"> <arg>...
+run_stub() {
+	local label="$1" want="$2" value="$3" rc=0 out="$WORK_ROOT/reg.out" err="$WORK_ROOT/reg.err"
+	shift 3
+	if [ "$value" = unset ]; then
+		env -u POWBOX_WSL_REGISTRY_STUB "$REG_STUB" "$@" >"$out" 2>"$err" </dev/null || rc=$?
+	else
+		env POWBOX_WSL_REGISTRY_STUB="$value" "$REG_STUB" "$@" >"$out" 2>"$err" </dev/null || rc=$?
+	fi
+	if [ "$rc" -ne 1 ]; then
+		ko "$label: expected exit 1, got $rc"
+	elif [ -s "$out" ]; then
+		ko "$label: wrote to stdout: $(head -c 200 "$out")"
+	elif [ "$want" = answered ] && grep -qF "$NOT_FOUND" "$err"; then
+		ok "$label: answers not found"
+	elif [ "$want" = unreadable ] && [ ! -s "$err" ]; then
+		ok "$label: answers unreadable (exit 1, nothing on stderr)"
+	else
+		ko "$label: expected $want, stderr was '$(head -c 200 "$err")'"
+	fi
+}
+
+run_stub "HKLM policy query" answered unset "${HKLM_QUERY[@]}"
+run_stub "HKCU policy query" answered unset "${HKCU_QUERY[@]}"
+run_stub "parent-key query" answered unset query 'HKLM\SOFTWARE\Policies'
+run_stub "no arguments" answered unset
+run_stub "POWBOX_WSL_REGISTRY_STUB empty (compose passes it so when unset)" answered "" "${HKLM_QUERY[@]}"
+run_stub "POWBOX_WSL_REGISTRY_STUB=1" answered 1 "${HKLM_QUERY[@]}"
+run_stub "POWBOX_WSL_REGISTRY_STUB=0, HKLM" unreadable 0 "${HKLM_QUERY[@]}"
+run_stub "POWBOX_WSL_REGISTRY_STUB=0, HKCU" unreadable 0 "${HKCU_QUERY[@]}"
+
+if [ "$(head -n 1 "$REG_STUB")" = '#!/bin/sh' ]; then
+	ok "the stub is a POSIX sh script"
+else
+	ko "the stub's first line is '$(head -n 1 "$REG_STUB")', not #!/bin/sh"
+fi
+DOCKERFILE="$REPO_DIR/docker/agent/Dockerfile"
+if grep -qx "COPY --chmod=755 docker/shared/wsl-reg-stub.sh $REG_EXE" "$DOCKERFILE"; then
+	ok "the agent Dockerfile bakes the stub at $REG_EXE, root-owned"
+else
+	ko "the agent Dockerfile does not bake the stub with 'COPY --chmod=755 docker/shared/wsl-reg-stub.sh $REG_EXE' ($(grep -n 'wsl-reg-stub' "$DOCKERFILE" || echo 'no such line'))"
+fi
+
+if [ "$REG_STUB" = "$REG_EXE" ]; then
+	# node must not be able to change the answer, by editing the file or by
+	# replacing it through any directory above it.
+	for p in "$REG_EXE" /mnt/c/Windows/System32 /mnt/c/Windows /mnt/c; do
+		meta="$(stat -c '%u:%g:%a' "$p")"
+		if [ "$meta" = 0:0:755 ] && [ ! -w "$p" ]; then
+			ok "$p is root:root 755 and not writable by $(id -un)"
+		else
+			ko "$p is $meta (uid:gid:mode) and $([ -w "$p" ] || echo 'not ')writable by $(id -un); expected 0:0:755, not writable"
+		fi
+	done
+fi
+
+# The stub matters only while Claude Code still spawns that path and matches that
+# text; a release that changes either makes the waiver inert again on Docker
+# Desktop. In the image the installed claude is required; elsewhere it is optional.
+claude_bin=""
+if command -v claude >/dev/null 2>&1; then
+	claude_bin="$(readlink -f "$(command -v claude)")"
+fi
+if [ -n "$claude_bin" ]; then
+	for needle in "$REG_EXE" "$NOT_FOUND"; do
+		if grep -qaF "$needle" "$claude_bin"; then
+			ok "the installed claude ($claude_bin) still contains '$needle'"
+		else
+			ko "the installed claude ($claude_bin) no longer contains '$needle'; the stub no longer reaches Claude Code's policy read"
+		fi
+	done
+elif [ "$REG_STUB" = "$REG_EXE" ]; then
+	ko "no claude on PATH to check the stub's path and text against"
+else
+	echo "  skip no claude on PATH: the check that Claude Code still spawns $REG_EXE runs in the image (Stage 0k)"
+fi
 
 echo ""
 echo "Results: $pass passed, $fail failed."

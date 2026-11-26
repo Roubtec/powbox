@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for the launch-time rm-prompt waiver, in two groups:
+# Unit tests for the launch-time rm-prompt waiver, in four groups:
 #
 #   1. entrypoint-agent.sh exports CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1
 #      into the environment the CMD is exec'd with on the Claude primary-agent
@@ -11,7 +11,10 @@
 #      dir, and every seed JSON fragment it merges from, carry nothing that makes
 #      that variable inert, and no `env` entry for CLAUDE_CODE_ENABLE_CFC, which
 #      Claude Code also reads from settings and could turn Claude in Chrome back
-#      on. A third set of cases proves the check itself has teeth.
+#      on.
+#   3. group 2's checks have teeth: they flag sample settings that carry an
+#      inert-making entry or a CLAUDE_CODE_ENABLE_CFC env entry, and accept
+#      ones that do not.
 #   4. the reg.exe stub (docker/shared/wsl-reg-stub.sh) answers every query as
 #      "key not found" (stderr text plus exit 1), or as unreadable under
 #      POWBOX_WSL_REGISTRY_STUB=0, and the Dockerfile bakes it root-owned at the

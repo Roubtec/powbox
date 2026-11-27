@@ -404,7 +404,7 @@ cluster_record_value() {
 }
 
 # durable | nondurable. A cluster without a record predates it and ran with
-# full durability, so it stays durable and is never discarded.
+# full durability, so it stays durable.
 cluster_durability() {
 	if [ "$(cluster_record_value "$1" durability || true)" = nondurable ]; then
 		printf 'nondurable\n'
@@ -487,8 +487,8 @@ ram_full_hint() {
 # Remove the data directory of a stopped cluster that could not be started, but
 # only one pg-dev-up created as non-durable (its record says so) or that this
 # invocation's initdb just created, or one a failed initdb left empty. Anything
-# else is refused, so this can never delete a durable cluster or a directory
-# pg-dev-up did not make.
+# else is refused, so this can never delete a durable cluster that held data
+# or a directory pg-dev-up did not make.
 discard_cluster_dir() {
 	local d="${1:?}"
 	if [ -O "$d" ] && { [ "$d" = "$CREATED_DATADIR" ] ||
@@ -501,7 +501,8 @@ discard_cluster_dir() {
 
 # `up` could not initialize or start $PGDATA. A non-durable cluster held only
 # throwaway data and an unclean stop may have left it unstartable, so recreate
-# it empty rather than fail confusingly; a durable one is never discarded. A
+# it empty rather than fail confusingly; a durable one is never discarded unless
+# this same `up` had just initialized it, so it never held data. A
 # managed cluster that failed in RAM is recreated on disk, the RAM disk being
 # the likeliest culprit; an explicit PGDATA is recreated where it is.
 recover_unstartable_cluster() {

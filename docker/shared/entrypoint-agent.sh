@@ -28,8 +28,11 @@ export PRIMARY_AGENT
 # Populate the AGENT_* variables for the named agent. AGENT_BINARY, AGENT_LABEL,
 # and AGENT_ONESHOT feed the peer list rendered into each agent's instruction
 # file; AGENT_ONESHOT is a Markdown fragment describing the peer's
-# non-interactive one-shot invocation (the right form for delegated reviews and
-# other fire-and-collect sub-tasks).
+# non-interactive one-shot invocation for fire-and-collect sub-tasks. Reviews go
+# through peer-review-run, which the shared template names, so a fragment keeps
+# only what a raw launch needs. Every form ends in `< /dev/null` so it is safe to
+# background as printed: `codex exec` reads a piped stdin into its prompt and
+# never starts while that stdin stays open, and `claude -p` waits on it first.
 agent_env() {
 	case "$1" in
 	claude)
@@ -42,7 +45,7 @@ agent_env() {
 		AGENT_INSTRUCTION_FILE="CLAUDE.md"
 		AGENT_LABEL="Claude Code (Anthropic)"
 		# shellcheck disable=SC2016
-		AGENT_ONESHOT='One-shot: `claude -p "<prompt>"` prints the final answer on stdout (`--output-format json` for machine-readable output; `--model <alias>` / `--effort <level>` to pick strength). Print mode permits reads but denies Bash/Edit by default — right for review-type asks; add `--dangerously-skip-permissions` only when the sub-task must run commands or write.'
+		AGENT_ONESHOT='One-shot: `claude -p "<prompt>" < /dev/null` prints the final answer on stdout (`--output-format json` for machine-readable output; `--model <alias>` / `--effort <level>` to pick strength). Print mode permits reads but denies Bash/Edit by default; add `--dangerously-skip-permissions` only when the sub-task must run commands or write.'
 		;;
 	codex)
 		AGENT_CONFIG_DIR="${CODEX_CONFIG_DIR:-/home/node/.codex}"
@@ -54,7 +57,7 @@ agent_env() {
 		AGENT_INSTRUCTION_FILE="AGENTS.md"
 		AGENT_LABEL="Codex (OpenAI)"
 		# shellcheck disable=SC2016
-		AGENT_ONESHOT='One-shot: `codex exec --sandbox read-only -o <file> "<prompt>"` for read-only work like reviews (`codex review --base <branch>` is the purpose-built review form, run from the tree to review; note `--base` and a custom prompt are mutually exclusive); use `codex exec --dangerously-bypass-approvals-and-sandbox` only when the sub-task must write. `-m <model>` / `-c model_reasoning_effort=<level>` pick strength. Preflight with `codex login status` (non-zero exit = not logged in) — an unauthenticated `codex exec` burns ~30s of retries before failing.'
+		AGENT_ONESHOT='One-shot: `codex exec --sandbox read-only -o <file> "<prompt>" < /dev/null` for read-only work; that sandbox has no network, so put anything the sub-task needs from the network into the prompt; use `codex exec --dangerously-bypass-approvals-and-sandbox` in place of `--sandbox read-only` only when the sub-task must write. `-m <model>` / `-c model_reasoning_effort=<level>` pick strength. Preflight with `codex login status` (non-zero exit = not logged in) — an unauthenticated `codex exec` burns ~30s of retries before failing.'
 		;;
 	muse)
 		# Peer-only: Muse Code is never a PRIMARY_AGENT and has no setup hook, seed
@@ -63,7 +66,8 @@ agent_env() {
 		AGENT_BINARY="muse"
 		AGENT_AUTONOMY_FLAG="--yolo"
 		AGENT_LABEL="Muse Code (Meta) — optional reviewer; use it only when it is logged in"
-		AGENT_ONESHOT='One-shot: `muse exec --prompt-file <file> --disable-write --no-foreign-personal-context` prints only the final answer on stdout (`--json` for JSONL events, whose `run.terminal.completed` record carries the answer as `text`). `--disable-write` is the review form: it withholds the file-writing tools and tells the model the session is read-only, while the shell stays available for `git show` and the like — without it a headless run writes to the checkout unprompted. It is an instruction, not an enforced sandbox, so a review prompt should still say the checkout is shared with other agents and that builds, tests and file changes are out of scope. `--no-foreign-personal-context` stops it loading your own personal rules and skills. Strength: `--model muse-wonder-full-1.0` is the stronger model on plans that include it; a run that exits 1 within seconds saying the model `does not exist or you lack access` means the plan does not, so retry with `--model muse-wonder-1.0` (the default). `--effort <level>` sets reasoning effort (default high). Preflight with `muse usage` (non-zero exit = not logged in; otherwise it prints the plan tier and remaining allowance), but a successful `muse usage` does not prove models are served: a run that reports `model catalog has no visible models` means this login gets no models from this network, so treat Muse as unavailable and do not retry with another model. Contributor mode follows the saved Muse setting; pass `--contributor-mode on|off` only when the user asked for a per-run override.'
+		# shellcheck disable=SC2016
+		AGENT_ONESHOT='One-shot: `muse exec --prompt-file <file> --disable-write --no-foreign-personal-context < /dev/null` prints only the final answer on stdout. `--disable-write` withholds the file-writing tools and tells the model the session is read-only, while the shell stays available for `git show` and the like — without it a headless run writes to the checkout unprompted. It is an instruction, not an enforced sandbox, so a prompt should still say the checkout is shared with other agents and that builds, tests and file changes are out of scope. `--no-foreign-personal-context` stops it loading your own personal rules and skills. Preflight with `muse usage` (non-zero exit = not logged in; otherwise it prints the plan tier and remaining allowance), but a successful `muse usage` does not prove models are served: a run that reports `model catalog has no visible models` means this login gets no models from this network, so treat Muse as unavailable and do not retry with another model. Contributor mode follows the saved Muse setting; pass `--contributor-mode on|off` only when the user asked for a per-run override.'
 		;;
 	*)
 		echo "entrypoint-agent: unknown agent '$1'" >&2

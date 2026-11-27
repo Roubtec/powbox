@@ -219,6 +219,16 @@
 # an unreachable one is `unavailable` within seconds: Muse itself does not fail
 # on it, but retries its connections for many minutes on a cached catalog.
 #
+# Writing the prompt: assume the reviewer is offline. The codex read-only
+# sandbox has no network, the claude adapter gives the reviewer no shell or web
+# tool, and muse runs with its web tools disabled wherever its CLI offers that,
+# so a reviewer told to read a pull request's threads, a CI log or a linked
+# issue cannot be relied on to fetch it. Put whatever the review needs from the
+# network into the prompt file itself. Ask the reviewer to end its answer with a
+# bare `VERDICT: PASS` or `VERDICT: ISSUES` line: the verdict is read only from
+# such a line, never inferred from the prose, so a review without one reports
+# `verdict: none` rather than a pass or issues outcome.
+#
 # This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
 # and no peer outcome is required for publication.
 set -uo pipefail
@@ -234,7 +244,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,223p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,233p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {

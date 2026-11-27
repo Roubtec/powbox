@@ -15,7 +15,9 @@ The cluster runs as the unprivileged `node` user with trust auth on a loopback s
 POSTGRES_USER=myapp POSTGRES_PASSWORD=myapp POSTGRES_DB=myapp pg-dev-up
 ```
 
-Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up help`.
+Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up destroy` (stop and delete the cluster with its data), `pg-dev-up list`, `pg-dev-up help`.
+
+`up` records the role, password and database it set a cluster up with, next to the cluster's data, so a later `pg-dev-up url` or `status` from any shell describes that cluster, and `up` without `POSTGRES_*` reuses them. If your environment's `POSTGRES_*` disagree with the recorded values, `url` refuses and `status` says so: unset them, or run `up` with them to add that role or database. The password is kept in plain text in the owner-only data directory, which is fine for a trust-auth, loopback-only cluster inside the container.
 
 A cluster is **non-durable** by default: it runs with `fsync`, `synchronous_commit` and `full_page_writes` off, so a test suite never waits on a flush to stable storage. Its data does not survive an unclean stop, and a later `up` that cannot start such a leftover recreates it empty rather than failing. Where the container has RAM-backed storage (a tmpfs at `/run/pg-dev-up`, 2 GB shared by all clusters unless the container was launched with a larger `POWBOX_PG_RAM_SIZE`), a new cluster's data lives there and is lost when the container stops; without it, or when it has less than 256 MB free, the cluster goes on disk, still non-durable. When you want the data kept, create the cluster with `POWBOX_PG_DURABLE=1 pg-dev-up up` for a durable cluster on disk; the choice is recorded with the cluster, so later commands need not repeat it. `pg-dev-up status` says which kind a cluster is and where its data lives, and `pg-dev-up check` says whether RAM-backed storage is available. If a suite fails with `No space left on device` or `could not extend file` on a RAM-backed cluster, the RAM disk is full, which is not a bug in your tests: `status` says so, and stopping and deleting clusters you no longer need frees it.
 
@@ -28,3 +30,5 @@ pg-dev-up --worktree down                       # stops only this worktree's clu
 ```
 
 Outside a Git repo, pass an explicit identifier instead: `pg-dev-up --profile <id> up`. Explicit `PGDATA`/`PGPORT` still override the scoped defaults (`POWBOX_PG_SCOPED_ROOT` overrides the scoped temp root).
+
+`down` keeps a cluster's data, and a scoped cluster lives outside its worktree, so clusters outlive the work they served (one in RAM holds memory too). `pg-dev-up list` shows every cluster the helper knows about, whose worktree or profile it is (and whether that worktree still exists), whether it runs, and the command that removes it; `pg-dev-up --worktree destroy` removes this worktree's cluster, and `pg-dev-up --instance <key> destroy` one whose worktree is gone. `destroy` removes only a cluster pg-dev-up created and marked, never a directory an explicit `PGDATA` points it at otherwise. `wt-remove` mentions a cluster the removed worktree leaves behind, and `wt-bootstrap` lists those whose worktree is gone as `pgLeftovers`; neither removes one, since its data may be durable.

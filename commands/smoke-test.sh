@@ -454,6 +454,11 @@ out=$(psql "$DATABASE_URL" -tAc "SELECT current_user, current_database()")
 echo "psql SELECT -> $out"
 printf %s "$out" | grep -qxF "t|app" || { echo "FAIL: unexpected psql result: $out" >&2; exit 1; }
 pg-dev-up down >/dev/null
+# Task 089: a fresh shell without POSTGRES_* still gets the URL up recorded,
+# and destroy removes the cluster, so list no longer shows it.
+[ "$(env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB pg-dev-up url)" = "$url" ] || { echo "FAIL: url forgot the credentials up recorded" >&2; exit 1; }
+pg-dev-up destroy >/dev/null 2>&1 || { echo "FAIL: destroy failed" >&2; exit 1; }
+[ -z "$(pg-dev-up list --porcelain)" ] || { echo "FAIL: list still shows a cluster after destroy" >&2; exit 1; }
 # Scoped worktree isolation: two LINKED worktrees of ONE repo (they share a
 # common Git dir but have distinct toplevels — the real identity case) each get
 # an isolated cluster on a distinct allocated port, connect to their own db, and

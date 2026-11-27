@@ -178,6 +178,10 @@ No image was built.
     Write-Host "Staging the agent instruction template (layer set: $shownSet)..."
     & (Join-Path $rootDir "scripts/stage-agent-template.ps1") $script:LayersSet $rootDir
     if ($LASTEXITCODE -ne 0) { exit 1 }
+    # The on-demand reference directory, staged under the same rules
+    # (docs/agent-reference.md).
+    & (Join-Path $rootDir "scripts/stage-agent-reference.ps1") $script:LayersSet $rootDir
+    if ($LASTEXITCODE -ne 0) { exit 1 }
   }
 
   # Values the bake steps below fill in for the agent and layers targets.

@@ -180,7 +180,7 @@ fetch_repo() {
 	local label="$1" url="$2" head default glob
 	shift 2
 	head="$(git ls-remote --symref "$url" HEAD)" || die "cannot reach $url"
-	default="$(printf '%s\n' "$head" | awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2; exit }')"
+	default="$(awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2; exit }' <<<"$head")"
 	[ -n "$default" ] || die "cannot determine the default branch of $url"
 	local specs=("+refs/heads/${default}:refs/sweep/${label}/default")
 	for glob in 'learnings/*' "$@"; do

@@ -6,9 +6,9 @@
 # first match and closes the pipe, a producer still writing dies of SIGPIPE, and
 # the pipeline reports failure although the needle was there. A negated check
 # inverts this and passes when it should not. Every early-exiting consumer does
-# the same (`grep -q/-m/-l`, `head`, `read`, `awk … exit`, `sed … q`), whatever
-# the producer is, and whatever the size of its output: a small write only makes
-# the race rarer.
+# the same (`grep -q/-m/-l`, `head`, `read`, `cmp`, `awk … exit`, `sed … q`),
+# whatever the producer is, and whatever the size of its output: a small write
+# only makes the race rarer.
 #
 # How to comply, instead of piping into such a consumer:
 #   * a fixed string: match in-process, `[[ $text == *"$needle"* ]]`;
@@ -29,8 +29,12 @@
 # The scan is a line-local heuristic, not a shell parser: it joins lines that
 # end in `|` or `\`, skips comment lines, and reads `||` as no pipe. It cannot
 # see a consumer's `exit`/`q` on a later line of a multi-line quoted program, and
-# text inside a string can trip it; the escape covers the latter. This suite is
-# excluded from its own scan, because its fixtures are exactly the shape.
+# text inside a string can trip it; the escape covers the latter. It also misses
+# a consumer behind a subshell or option-taking wrapper (`( read x )`,
+# `sudo -u u grep -q`), a loop that `break`s out of `while read`, and an awk
+# program or grep `-e` pattern holding `|`, `;`, `&` or `)` before its `exit` or
+# `-q`. This suite is excluded from its own scan, because its fixtures are
+# exactly the shape.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,13 +60,14 @@ ko() {
 scan() {
 	awk '
 	function consumer_re(lead) {
-		lead = "\\|&?[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|command|env)[[:space:]]+)*"
+		lead = "\\|&?[[:space:]]*(\\{[[:space:]]+)?(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|command|env|sudo)[[:space:]]+)*"
 		return lead "(" \
 			"(grep|egrep|fgrep)[[:space:]]([^|;&)]*[[:space:]])?(-[A-Za-z]*[qlLm]|--(quiet|silent|max-count|files-with-matches|files-without-match))" \
 			"|head([[:space:]]|[)\"]|$)" \
 			"|read([[:space:]]|$)" \
 			"|awk[[:space:]][^|]*(^|[^A-Za-z0-9_])exit([^A-Za-z0-9_]|$)" \
-			"|sed([[:space:]][^|]*)?[[:space:];{'\'']q([0-9]|[[:space:];}'\'']|$)" \
+			"|cmp([[:space:]]|$)" \
+			"|sed([[:space:]][^|]*)?[[:space:];{'\''0-9/]q([0-9]|[[:space:];}'\''\")]|$)" \
 			")"
 	}
 	function flush() {
@@ -113,6 +118,13 @@ flagged=(
 	"cmd | awk '/x/ { print; exit }'"
 	"cmd | sed q"
 	"cmd | sed -n '/x/{p;q}'"
+	"x=\"\$(cmd | sed 1q)\""
+	"cmd | sed -n 1p\\;1q"
+	"cmd | sed '/re/q'"
+	"cmd | sed \"1q\""
+	"cmd | sudo grep -q foo"
+	"cmd | cmp -s - file"
+	"cmd | { read -r x; }"
 	"if ! cmd | grep -q foo; then :; fi"
 	"cmd | grep -q foo # early-exit-pipe-ok:"
 	"cmd | grep -q foo # early-exit-pipe-ok:   "
@@ -131,6 +143,11 @@ clean=(
 	"cmd | while IFS= read -r line; do :; done"
 	"cmd | awk '{ print \$1 }'"
 	"cmd | sed 's/q/x/'"
+	"cmd | sed 's/a/q/'"
+	"cmd | sed 's/a/q/g; s/1/2q/'"
+	"cmd | sed -n '\$q'"
+	"cmd | sed -e 's/^/  /'"
+	"cmd | cmpfoo"
 	"cmd | tail -n 2"
 	"cmd || grep -q foo file"
 	"# printf '%s' \"\$x\" | grep -q foo"

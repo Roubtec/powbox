@@ -131,10 +131,27 @@ origin_url() {
 	printf '%s\n' "$url"
 }
 
+# Label of an origin: the last name of its path (scp-like host: and trailing
+# slashes dropped, as git accepts `sample.git/`), less a .git suffix and
+# lowercased; for a work tree's own `.git` directory, the name of the work
+# tree. The label is a ref component and a directory name, so anything that
+# cannot be one is refused rather than fetched into a broken refspec.
 repo_label() {
-	local name="${1##*/}"
-	name="${name%.git}"
-	printf '%s\n' "$name" | tr '[:upper:]' '[:lower:]'
+	local path name
+	split_url "$1"
+	path="$URL_PATH"
+	while [[ $path == */ ]]; do path="${path%/}"; done
+	name="${path##*/}"
+	if [ "$name" = .git ] && [[ $path == */* ]]; then
+		path="${path%/*}"
+		while [[ $path == */ ]]; do path="${path%/}"; done
+		name="${path##*/}"
+	fi
+	name="$(printf '%s' "${name%.git}" | tr '[:upper:]' '[:lower:]')"
+	if [ -z "$name" ] || ! git check-ref-format "refs/sweep/${name}/default"; then
+		die "cannot name the repository of $1; give it an origin whose last path name is a plain name"
+	fi
+	printf '%s\n' "$name"
 }
 
 # Where delete can ask about a URL's open pull requests: `local` for a path
@@ -149,7 +166,7 @@ pr_target() {
 		return 0
 	fi
 	path="${URL_PATH#/}"
-	path="${path%/}"
+	while [[ $path == */ ]]; do path="${path%/}"; done
 	path="${path%.git}"
 	[ "$URL_HOST" != ssh.github.com ] || URL_HOST=github.com
 	if [[ $path =~ ^[^/]+/[^/]+$ ]] &&

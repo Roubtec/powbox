@@ -11,7 +11,8 @@
 #
 # Usage:
 #   pg-dev-up [up]      init (first run) + start, ensure role/db, print DATABASE_URL
-#   pg-dev-up status    report whether the dev cluster is running (exit 1 if not)
+#   pg-dev-up status    report whether the dev cluster is running (exit 1 if not),
+#                       and whether it is durable and where its data lives
 #   pg-dev-up url       print the DATABASE_URL for the configured role/db
 #   pg-dev-up down      stop the dev cluster ($PGDATA is kept for a later restart)
 #   pg-dev-up check     verify the server binaries are present (no daemon needed)
@@ -33,11 +34,31 @@
 # being inside a Git repository; outside one, pass `--profile <id>` with a stable
 # identifier rather than guessing. Two different worktrees (or profiles) receive
 # distinct data dirs and ports and stop independently. Ordinary `pg-dev-up up`
-# (no flag) keeps the UNSCOPED defaults: /tmp/pgdata on port 5432.
+# (no flag) keeps the UNSCOPED defaults: one cluster on port 5432 (data dir below).
+#
+# Durability and storage. A cluster is NON-DURABLE by default: it runs with
+# fsync, synchronous_commit and full_page_writes off, so a test suite never waits
+# on a flush to stable storage. Its data does not survive an unclean stop (a
+# crash, a killed container); that is the trade for a throwaway test database,
+# and a later `up` that cannot start such a leftover recreates it empty. Where
+# the container offers RAM-backed storage (a tmpfs at /run/pg-dev-up, which the
+# powbox launcher mounts with a size bound), a new non-durable cluster's data
+# lives there, which also spares the SSD; it is lost when the container stops.
+# Without that storage, or when it has too little room left, the cluster falls
+# back to disk, still non-durable. Set POWBOX_PG_DURABLE=1 when CREATING a
+# cluster to get a durable one on disk instead (full fsync, as before). The
+# choice is recorded in the data directory (pg-dev-up.cluster) and kept for the
+# cluster's life, so later commands need not repeat it; a cluster created before
+# that record existed counts as durable. `status` reports which kind it is.
 #
 # Environment overrides (defaults in parentheses):
-#   PGDATA            cluster data directory  (/tmp/pgdata; scoped: <root>/<key>/pgdata)
+#   PGDATA            cluster data directory  (RAM: /run/pg-dev-up/<uid>/pgdata, else /tmp/pgdata;
+#                                              scoped: /run/pg-dev-up/<uid>/<key>/pgdata, else <root>/<key>/pgdata)
 #   PGPORT            listen port             (5432; scoped: an allocated free port)
+#   POWBOX_PG_DURABLE 1 creates a durable cluster on disk (unset: non-durable)
+#   POWBOX_PG_RAM_ROOT          RAM-backed storage root (/run/pg-dev-up; the default
+#                               must be a tmpfs, an explicit value is trusted as RAM)
+#   POWBOX_PG_RAM_MIN_FREE_MB   free room a new cluster needs there, else disk (256)
 #   POSTGRES_USER     app role to ensure      (postgres)
 #   POSTGRES_PASSWORD app role password       (postgres)
 #   POSTGRES_DB       app database to ensure  (postgres)
@@ -107,6 +128,51 @@ esac
 INSTANCE_DIR=""
 PORT_FILE=""
 DATADIR_FILE=""
+SCOPE_KEY=""
+
+# Durability: requested only when a cluster is CREATED; an existing cluster keeps
+# the durability its pg-dev-up.cluster record names.
+DURABLE_REQUESTED=""
+case "${POWBOX_PG_DURABLE:-}" in
+	'' | 0 | no | false | off) : ;;
+	1 | yes | true | on) DURABLE_REQUESTED=yes ;;
+	*)
+		printf 'pg-dev-up: %s\n' "invalid POWBOX_PG_DURABLE '$POWBOX_PG_DURABLE' (use 1 for a durable cluster, or leave it unset)." >&2
+		exit 2
+		;;
+esac
+
+# RAM-backed storage. The default root is the tmpfs the launcher mounts
+# (compose.shared.yml); it only counts as RAM when it really is a tmpfs, so an
+# empty directory left in an image can never pass for one. An explicit
+# POWBOX_PG_RAM_ROOT is the caller's assertion and is trusted as RAM. The
+# root is world-writable (sticky) like /tmp, so each user keeps an owner-only
+# subdirectory in it.
+PG_RAM_ROOT_EXPLICIT=""
+[ -n "${POWBOX_PG_RAM_ROOT:-}" ] && PG_RAM_ROOT_EXPLICIT="yes"
+PG_RAM_ROOT="${POWBOX_PG_RAM_ROOT:-/run/pg-dev-up}"
+case "$PG_RAM_ROOT" in
+	/*) : ;;
+	*) PG_RAM_ROOT="$(realpath -m -- "$PG_RAM_ROOT")" ;;
+esac
+PG_RAM_ROOT="${PG_RAM_ROOT%/}"
+PG_RAM_BASE="$PG_RAM_ROOT/$(id -u)"
+# 256 MB holds a fresh cluster (~40 MB) plus the WAL a non-durable cluster keeps
+# (max_wal_size below) with room for test data; less than that and a suite would
+# soon hit "No space left on device", so a new cluster goes to disk instead.
+PG_RAM_MIN_FREE_MB="${POWBOX_PG_RAM_MIN_FREE_MB:-256}"
+case "$PG_RAM_MIN_FREE_MB" in
+	'' | *[!0-9]*)
+		printf 'pg-dev-up: %s\n' "invalid POWBOX_PG_RAM_MIN_FREE_MB '$PG_RAM_MIN_FREE_MB': must be a whole number of megabytes." >&2
+		exit 2
+		;;
+esac
+RAM_UNAVAILABLE_REASON=""
+UNSCOPED_DISK_PGDATA="/tmp/pgdata"
+# The record a cluster keeps about itself, inside its own data directory (the
+# server ignores unknown files there). Its presence also marks the directory as
+# one pg-dev-up created, which is what lets `up` discard a non-durable leftover.
+CLUSTER_RECORD="pg-dev-up.cluster"
 
 # Snapshot of the scoped port/datadir markers as they were BEFORE this `up` began
 # to touch them (captured by snapshot_scoped_markers, under the per-scope
@@ -132,7 +198,7 @@ STARTED_NEW_SERVER=""
 
 # These get their final values in configure_paths(), after the command and any
 # scope flag are known: scoped mode replaces the data dir / socket dir / port,
-# unscoped mode keeps the historical /tmp defaults.
+# unscoped mode keeps port 5432 and the /tmp socket dir.
 PGDATA="${PGDATA:-}"
 PGPORT="${PGPORT:-}"
 PG_SOCKDIR="/tmp"
@@ -202,6 +268,308 @@ require_bindir() {
 		log "PostgreSQL server binaries not found (expected /usr/lib/postgresql/*/bin)."
 		exit 1
 	fi
+}
+
+# --- durability + storage ---------------------------------------------------
+
+# Free megabytes (for an unprivileged writer) on the filesystem holding $1.
+fs_free_mb() {
+	local avail bsize
+	read -r avail bsize < <(stat -f -c '%a %S' -- "$1" 2>/dev/null) || return 1
+	printf '%s\n' "$((avail * bsize / 1048576))"
+}
+
+# "<used> MB of <size> MB used" for the filesystem holding $1.
+fs_usage_text() {
+	local total avail bsize
+	read -r total avail bsize < <(stat -f -c '%b %a %S' -- "$1" 2>/dev/null) || return 1
+	printf '%s MB of %s MB used\n' "$(((total - avail) * bsize / 1048576))" "$((total * bsize / 1048576))"
+}
+
+on_ram_fs() {
+	case "$(stat -f -c '%T' -- "$1" 2>/dev/null || true)" in
+		tmpfs | ramfs) return 0 ;;
+	esac
+	return 1
+}
+
+# ram | disk: where the data directory $1 lives (or would live).
+storage_of() {
+	case "$1/" in
+		"$PG_RAM_ROOT"/*)
+			printf 'ram\n'
+			return 0
+			;;
+	esac
+	if on_ram_fs "$1"; then printf 'ram\n'; else printf 'disk\n'; fi
+}
+
+# 0 if a NEW cluster may be placed in RAM; otherwise RAM_UNAVAILABLE_REASON says
+# why, so the disk fallback is never silent.
+ram_usable() {
+	local free
+	RAM_UNAVAILABLE_REASON=""
+	if [ ! -d "$PG_RAM_ROOT" ]; then
+		RAM_UNAVAILABLE_REASON="this container has no RAM-backed storage at $PG_RAM_ROOT"
+		return 1
+	fi
+	if [ -z "$PG_RAM_ROOT_EXPLICIT" ] && ! on_ram_fs "$PG_RAM_ROOT"; then
+		RAM_UNAVAILABLE_REASON="$PG_RAM_ROOT is not a tmpfs"
+		return 1
+	fi
+	if [ ! -w "$PG_RAM_ROOT" ] && [ ! -w "$PG_RAM_BASE" ]; then
+		RAM_UNAVAILABLE_REASON="$PG_RAM_ROOT is not writable"
+		return 1
+	fi
+	free="$(fs_free_mb "$PG_RAM_ROOT" || printf '0')"
+	if [ "$free" -lt "$PG_RAM_MIN_FREE_MB" ]; then
+		RAM_UNAVAILABLE_REASON="the RAM disk at $PG_RAM_ROOT has only $free MB free (a new cluster needs $PG_RAM_MIN_FREE_MB, POWBOX_PG_RAM_MIN_FREE_MB)"
+		return 1
+	fi
+}
+
+# The data directory pg-dev-up itself chooses for this cluster on storage $1
+# (ram | disk): the "managed" locations, as opposed to an explicit PGDATA.
+managed_datadir() {
+	if [ -n "$SCOPED" ]; then
+		if [ "$1" = ram ]; then printf '%s\n' "$PG_RAM_BASE/$SCOPE_KEY/pgdata"; else printf '%s\n' "$INSTANCE_DIR/pgdata"; fi
+	else
+		if [ "$1" = ram ]; then printf '%s\n' "$PG_RAM_BASE/pgdata"; else printf '%s\n' "$UNSCOPED_DISK_PGDATA"; fi
+	fi
+}
+
+is_managed_datadir() {
+	[ "$1" = "$(managed_datadir ram)" ] || [ "$1" = "$(managed_datadir disk)" ]
+}
+
+cluster_running_at() {
+	[ -f "$1/postmaster.pid" ] && "$BINDIR/pg_ctl" -D "$1" status >/dev/null 2>&1
+}
+
+# Set PGDATA to the managed location a NEW cluster gets: disk when durability
+# was requested, else RAM when usable, else disk. `quiet` suppresses the
+# fallback notice for read commands, which only report where a cluster would go.
+choose_fresh_datadir() {
+	if [ -n "$DURABLE_REQUESTED" ]; then
+		PGDATA="$(managed_datadir disk)"
+	elif ram_usable; then
+		PGDATA="$(managed_datadir ram)"
+	else
+		PGDATA="$(managed_datadir disk)"
+		[ "${1:-}" = quiet ] || log "No RAM-backed storage for this cluster ($RAM_UNAVAILABLE_REASON); its data goes on disk, still non-durable."
+	fi
+}
+
+# Resolve the data directory when no PGDATA was given and no scoped record
+# applies: a running managed cluster first, then an existing one (disk first, so
+# a durable cluster is always found again), else where a new one would go.
+resolve_managed_datadir() {
+	local d
+	for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
+		if cluster_running_at "$d"; then
+			PGDATA="$d"
+			return 0
+		fi
+	done
+	for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
+		if [ -s "$d/PG_VERSION" ]; then
+			PGDATA="$d"
+			return 0
+		fi
+	done
+	choose_fresh_datadir "${1:-}"
+}
+
+# Create the owner-only parents of a managed RAM data directory. The root is a
+# shared sticky tmpfs, so the per-user base must be ours and private.
+prepare_datadir_parent() {
+	case "$PGDATA/" in
+		"$PG_RAM_BASE"/*)
+			(umask 077 && mkdir -p "$(dirname "$PGDATA")") || return 1
+			enforce_owner_only "$PG_RAM_BASE"
+			[ -z "$SCOPED" ] || enforce_owner_only "$PG_RAM_BASE/$SCOPE_KEY"
+			;;
+	esac
+}
+
+cluster_record_value() {
+	local out
+	[ -f "$1/$CLUSTER_RECORD" ] || return 1
+	out="$(sed -n "s/^$2=//p" "$1/$CLUSTER_RECORD" 2>/dev/null || true)"
+	printf '%s\n' "${out%%$'\n'*}"
+}
+
+# durable | nondurable. A cluster without a record predates it and ran with
+# full durability, so it stays durable and is never discarded.
+cluster_durability() {
+	if [ "$(cluster_record_value "$1" durability || true)" = nondurable ]; then
+		printf 'nondurable\n'
+	else
+		printf 'durable\n'
+	fi
+}
+
+write_cluster_record() {
+	local durability=nondurable
+	[ -z "$DURABLE_REQUESTED" ] || durability=durable
+	printf 'format=1\ndurability=%s\ncreated=%s\n' "$durability" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$1/$CLUSTER_RECORD"
+}
+
+# Postmaster options. A non-durable cluster skips every flush to stable storage
+# (fsync, synchronous_commit) and full-page images in WAL, and keeps its WAL
+# small: with fsync off a checkpoint costs no flush, and a small max_wal_size
+# bounds how much RAM a cluster's WAL holds on a tmpfs (the default is 1 GB).
+server_options() {
+	local opts="-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR"
+	if [ "$(cluster_durability "$PGDATA")" = nondurable ]; then
+		opts+=" -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_wal_size=256MB -c min_wal_size=32MB"
+	fi
+	printf '%s\n' "$opts"
+}
+
+# Initialize $PGDATA if it holds no cluster yet, then start it. Every step's
+# failure is returned, not fatal, so cmd_up can recover a throwaway cluster.
+init_and_start() {
+	if [ ! -s "$PGDATA/PG_VERSION" ]; then
+		prepare_datadir_parent || return 1
+		if [ -n "$DURABLE_REQUESTED" ]; then
+			log "Initializing durable cluster at $PGDATA (trust auth, C locale, UTF8)…"
+		else
+			local where="on disk"
+			[ "$(storage_of "$PGDATA")" != ram ] || where="in RAM"
+			log "Initializing non-durable cluster $where at $PGDATA (trust auth, C locale, UTF8)…"
+		fi
+		mkdir -p "$PGDATA" || return 1
+		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null || return 1
+		write_cluster_record "$PGDATA" || return 1
+	fi
+	# Validate the effective port immediately before it is interpolated into the
+	# pg_ctl -o option string (pg_ctl runs -o through a shell). Covers an explicit
+	# PGPORT, an auto-allocated one, and a value reused from a recorded marker.
+	validate_port "$PGPORT"
+	log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
+	# Mark that we are about to bring a NEW postmaster live, BEFORE running
+	# pg_ctl. `pg_ctl -w start` can return non-zero on a startup TIMEOUT while
+	# the postmaster keeps coming up in the background — so the rollback trap
+	# must treat a failed start as possibly-live and stop it. Setting this only
+	# in scoped mode keeps unscoped behavior byte-for-byte (no rollback there).
+	[ -z "$SCOPED" ] || STARTED_NEW_SERVER=yes
+	# Close the scoped lock fds (8 = instance uplock, 9 = port lock) for the
+	# postmaster: it daemonizes and would otherwise inherit fd 8 and hold that
+	# advisory flock for its whole lifetime, deadlocking the next `up`.
+	"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
+		-o "$(server_options)" -w start >/dev/null 8>&- 9>&-
+}
+
+# When $1 sits in RAM and the RAM disk is (nearly) full, or its server log shows
+# a write that failed for lack of room, say so plainly: the suite then sees
+# "No space left on device" / "could not extend file", which is not a test bug.
+ram_full_hint() {
+	local free tail_text=""
+	[ "$(storage_of "$1")" = ram ] || return 0
+	[ -d "$PG_RAM_ROOT" ] || return 0
+	free="$(fs_free_mb "$PG_RAM_ROOT" || printf '0')"
+	[ ! -f "$1/server.log" ] || tail_text="$(tail -n 50 "$1/server.log" 2>/dev/null || true)"
+	if [ "$free" -lt 16 ] || [[ $tail_text == *"No space left on device"* ]]; then
+		log "THE RAM DISK IS FULL: $PG_RAM_ROOT ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown')). Database writes fail with 'No space left on device' — that is storage, not a test failure. Free room by stopping and deleting clusters you no longer need under $PG_RAM_BASE, relaunch the container with a larger POWBOX_PG_RAM_SIZE, or create the cluster on disk (an explicit PGDATA on disk, or POWBOX_PG_DURABLE=1)."
+	fi
+}
+
+# Remove the data directory of a cluster that could not be started, but only
+# one pg-dev-up created as non-durable (its record says so), or one a failed
+# initdb left empty. Anything else is refused, so this can never delete a
+# durable cluster or a directory pg-dev-up did not make.
+discard_cluster_dir() {
+	local d="${1:?}"
+	if cluster_running_at "$d"; then
+		"$BINDIR/pg_ctl" -D "$d" -m immediate -w stop >/dev/null 2>&1 || return 1
+	fi
+	if [ -s "$d/PG_VERSION" ] && [ "$(cluster_durability "$d")" = nondurable ] && [ -O "$d" ]; then
+		rm -rf -- "$d"
+	elif [ -d "$d" ]; then
+		rmdir -- "$d" 2>/dev/null
+	fi
+}
+
+# `up` could not initialize or start $PGDATA. A non-durable cluster held only
+# throwaway data and an unclean stop may have left it unstartable, so recreate
+# it empty rather than fail confusingly; a durable one is never discarded. A
+# managed cluster that failed in RAM is recreated on disk, the RAM disk being
+# the likeliest culprit; an explicit PGDATA is recreated where it is.
+recover_unstartable_cluster() {
+	local failed="$PGDATA" failed_storage
+	failed_storage="$(storage_of "$failed")"
+	ram_full_hint "$failed"
+	if cluster_running_at "$failed"; then
+		log "pg_ctl stopped waiting for the cluster at $failed to start; see $failed/server.log."
+		exit 1
+	fi
+	if port_listening "$PGPORT"; then
+		log "port $PGPORT is already in use by another process; the cluster at $failed was left as it is (free the port or set a different PGPORT)."
+		exit 1
+	fi
+	if [ -s "$failed/PG_VERSION" ] && [ "$(cluster_durability "$failed")" != nondurable ]; then
+		log "could not start the durable cluster at $failed; see $failed/server.log. pg-dev-up never discards a durable cluster."
+		exit 1
+	fi
+	[ ! -s "$failed/PG_VERSION" ] ||
+		log "Could not start the non-durable cluster at $failed (see its server.log); its data was throwaway, so recreating it empty."
+	if ! discard_cluster_dir "$failed"; then
+		log "could not clear $failed to recreate the cluster; remove it and run 'up' again."
+		exit 1
+	fi
+	if [ -z "$PGDATA_EXPLICIT" ] && is_managed_datadir "$failed"; then
+		if [ "$failed_storage" = ram ]; then
+			PGDATA="$(managed_datadir disk)"
+			log "Retrying on disk, still non-durable."
+		else
+			choose_fresh_datadir
+		fi
+	fi
+	if ! init_and_start; then
+		ram_full_hint "$PGDATA"
+		log "could not start a fresh cluster at $PGDATA either; see $PGDATA/server.log."
+		exit 1
+	fi
+}
+
+# A durability request must never be silently ignored: refuse to bring up an
+# existing non-durable cluster as if it were the durable one asked for.
+refuse_durability_mismatch() {
+	[ -n "$DURABLE_REQUESTED" ] || return 0
+	[ -s "$PGDATA/PG_VERSION" ] || return 0
+	[ "$(cluster_durability "$PGDATA")" = nondurable ] || return 0
+	log "POWBOX_PG_DURABLE=1 asks for a durable cluster, but the cluster at $PGDATA was created non-durable, and durability is fixed when a cluster is created. Stop it ('down'), delete $PGDATA, then run 'up' again with POWBOX_PG_DURABLE=1 (or give it another PGDATA)."
+	exit 1
+}
+
+# One line on what kind of cluster $PGDATA is, for status and up.
+describe_cluster() {
+	local storage text
+	if [ ! -s "$PGDATA/PG_VERSION" ]; then
+		if [ -n "$SCOPED" ] && [ -s "$DATADIR_FILE" ] && [ "$(storage_of "$PGDATA")" = ram ]; then
+			log "its data directory is gone (RAM-backed data does not survive a container restart); the next 'up' creates a fresh cluster."
+		elif [ -n "$SCOPED" ] && [ -s "$DATADIR_FILE" ]; then
+			log "its data directory is gone; the next 'up' creates a fresh cluster."
+		else
+			log "no cluster has been created at $PGDATA yet."
+		fi
+		return 0
+	fi
+	storage="$(storage_of "$PGDATA")"
+	if [ "$(cluster_durability "$PGDATA")" = nondurable ]; then
+		text="non-durable (fsync off; lost on an unclean stop)"
+	elif [ -f "$PGDATA/$CLUSTER_RECORD" ]; then
+		text="durable"
+	else
+		text="durable (created before pg-dev-up recorded durability)"
+	fi
+	if [ "$storage" = ram ]; then
+		text+=", data in RAM at $PGDATA (lost when the container stops; $PG_RAM_ROOT: $(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown'))"
+	else
+		text+=", data on disk at $PGDATA"
+	fi
+	log "cluster: $text"
 }
 
 # --- scoped-mode identity + port bookkeeping -------------------------------
@@ -339,6 +707,7 @@ resolve_scope() {
 		log "Run it from a repo/worktree, or pass an explicit id: pg-dev-up --profile <id> <command>"
 		exit 1
 	fi
+	SCOPE_KEY="$key"
 	INSTANCE_DIR="$SCOPED_ROOT/$key"
 	PORT_FILE="$INSTANCE_DIR/port"
 	DATADIR_FILE="$INSTANCE_DIR/datadir"
@@ -551,10 +920,19 @@ configure_paths() {
 		# unrelated unscoped cluster.
 		return 0
 	fi
-	# Unscoped path (and scoped check/help, which touch no cluster): historical
-	# /tmp defaults, byte-for-byte as before scoped mode existed.
-	PGDATA="${PGDATA:-/tmp/pgdata}"
+	# Unscoped path (and scoped check/help, which touch no cluster): port 5432,
+	# and the one unscoped cluster wherever it already is (RAM or disk), else
+	# where a new one goes. An explicit PGDATA is taken as given.
 	PGPORT="${PGPORT:-5432}"
+	if [ -z "$PGDATA_EXPLICIT" ]; then
+		if [ "$portmode" = none ]; then
+			PGDATA="$UNSCOPED_DISK_PGDATA"
+		elif [ "$portmode" = up ]; then
+			resolve_managed_datadir
+		else
+			resolve_managed_datadir quiet
+		fi
+	fi
 }
 
 pg_running() {
@@ -740,8 +1118,21 @@ cmd_up() {
 		# data and start a fresh default cluster on the recorded port. Adopt the
 		# recorded dir from the snapshot just taken UNDER the uplock, so a
 		# concurrent same-scope `up` can never feed this one a stale marker.
-		if [ -z "$PGDATA_EXPLICIT" ] && [ -n "$PRIOR_DATADIR_CONTENT" ]; then
-			PGDATA="$PRIOR_DATADIR_CONTENT"
+		#
+		# The one exception is a recorded MANAGED data dir whose data is gone — a
+		# RAM-backed one after a container restart, the marker here having outlived
+		# it on disk. There is nothing to resume, and its storage may no longer
+		# exist, so choose afresh exactly as for a new scope. A recorded explicit
+		# dir is reused even when empty: an explicit location stays authoritative.
+		if [ -z "$PGDATA_EXPLICIT" ]; then
+			if [ -n "$PRIOR_DATADIR_CONTENT" ] &&
+				{ [ -s "$PRIOR_DATADIR_CONTENT/PG_VERSION" ] || ! is_managed_datadir "$PRIOR_DATADIR_CONTENT"; }; then
+				PGDATA="$PRIOR_DATADIR_CONTENT"
+			else
+				[ -z "$PRIOR_DATADIR_CONTENT" ] ||
+					log "The data directory this scope recorded ($PRIOR_DATADIR_CONTENT) is gone; creating a fresh cluster."
+				resolve_managed_datadir
+			fi
 		fi
 		# Orphan guard: if this scope ALREADY recorded a DIFFERENT data dir whose
 		# server is still running, a new explicit PGDATA (one different from the
@@ -759,6 +1150,7 @@ cmd_up() {
 			log "this scope already has a running cluster at $PRIOR_DATADIR_CONTENT; starting a new one at $PGDATA would orphan it from scoped teardown. Stop it first (scoped 'down'), then 'up' again."
 			exit 1
 		fi
+		refuse_durability_mismatch
 		scoped_port_for_up
 		# If initialization or start fails below, roll the markers back to the snapshot
 		# just captured. The port reservation is written early (see allocate_port) to
@@ -768,11 +1160,7 @@ cmd_up() {
 		# resolution. Cleared once start succeeds.
 		trap 'rollback_scoped_markers' EXIT
 	fi
-	if [ ! -s "$PGDATA/PG_VERSION" ]; then
-		log "Initializing cluster at $PGDATA (trust auth, C locale, UTF8)…"
-		mkdir -p "$PGDATA"
-		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null
-	fi
+	[ -n "$SCOPED" ] || refuse_durability_mismatch
 	if pg_running; then
 		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
 		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
@@ -805,22 +1193,9 @@ cmd_up() {
 			log "scoped port $PGPORT is already in use by another process; refusing to start (free it or set a different PGPORT)."
 			exit 1
 		fi
-		# Validate the effective port immediately before it is interpolated into the
-		# pg_ctl -o option string (pg_ctl runs -o through a shell). Covers an explicit
-		# PGPORT, an auto-allocated one, and a value reused from a recorded marker.
-		validate_port "$PGPORT"
-		log "Starting PostgreSQL on $PG_HOST:$PGPORT…"
-		# Mark that we are about to bring a NEW postmaster live, BEFORE running
-		# pg_ctl. `pg_ctl -w start` can return non-zero on a startup TIMEOUT while
-		# the postmaster keeps coming up in the background — so the rollback trap
-		# must treat a failed start as possibly-live and stop it. Setting this only
-		# in scoped mode keeps unscoped behavior byte-for-byte (no rollback there).
-		[ -n "$SCOPED" ] && STARTED_NEW_SERVER=yes
-		# Close the scoped lock fds (8 = instance uplock, 9 = port lock) for the
-		# postmaster: it daemonizes and would otherwise inherit fd 8 and hold that
-		# advisory flock for its whole lifetime, deadlocking the next `up`.
-		"$BINDIR/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
-			-o "-p $PGPORT -h $PG_HOST -k $PG_SOCKDIR" -w start >/dev/null 8>&- 9>&-
+		if ! init_and_start; then
+			recover_unstartable_cluster
+		fi
 	fi
 	# Start (or an already-running detection) succeeded: NOW record the effective
 	# data dir and port so url/status/down resolve the exact server this `up`
@@ -842,6 +1217,7 @@ cmd_up() {
 			export_cmd="pg-dev-up --worktree url --export"
 		fi
 	fi
+	describe_cluster
 	log "Ready. DATABASE_URL printed below; export it with: eval \"\$($export_cmd)\""
 	print_url
 }
@@ -860,7 +1236,11 @@ cmd_down() {
 				restart="pg-dev-up --worktree up"
 			fi
 		fi
-		log "Stopped. Data kept at $PGDATA (run '$restart' to restart)."
+		if [ "$(storage_of "$PGDATA")" = ram ]; then
+			log "Stopped. Data kept in RAM at $PGDATA until the container stops (run '$restart' to restart)."
+		else
+			log "Stopped. Data kept at $PGDATA (run '$restart' to restart)."
+		fi
 	else
 		log "Not running."
 	fi
@@ -870,8 +1250,12 @@ cmd_status() {
 	require_bindir
 	if pg_running; then
 		log "running on $PG_HOST:$PGPORT (PGDATA=$PGDATA)"
+		describe_cluster
+		ram_full_hint "$PGDATA"
 	else
 		log "not running (PGDATA=$PGDATA)"
+		describe_cluster
+		ram_full_hint "$PGDATA"
 		return 1
 	fi
 }
@@ -880,6 +1264,11 @@ cmd_check() {
 	require_bindir
 	"$BINDIR/initdb" --version
 	"$BINDIR/postgres" --version
+	if ram_usable; then
+		log "RAM-backed storage: available at $PG_RAM_ROOT ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown'))."
+	else
+		log "RAM-backed storage: not available ($RAM_UNAVAILABLE_REASON); new clusters go on disk."
+	fi
 }
 
 # Print the header comment block as help. Derive its extent (line 2 through the

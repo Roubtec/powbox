@@ -257,6 +257,9 @@ No image was built."
 stage_agent_template() {
 	echo "Staging the agent instruction template (layer set: ${LAYERS_SET:-none})..."
 	"${ROOT_DIR}/scripts/stage-agent-template.sh" "$LAYERS_SET" "$ROOT_DIR"
+	# The on-demand reference directory, staged under the same rules
+	# (docs/agent-reference.md).
+	"${ROOT_DIR}/scripts/stage-agent-reference.sh" "$LAYERS_SET" "$ROOT_DIR"
 }
 
 # Values the bake steps below fill in for the agent and layers targets.

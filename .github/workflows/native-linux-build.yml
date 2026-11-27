@@ -105,6 +105,7 @@ on:
       - 'scripts/layers-*'
       - 'scripts/smoke-test*'
       - 'scripts/stage-agent-template.*'
+      - 'scripts/stage-agent-reference.*'
       # Source suites routed out of Tier 0 because they need a built/staged
       # helper or the image's /workspace contract.
       - 'scripts/test-gh-review-threads.sh'
@@ -273,6 +274,34 @@ jobs:
             fi
           done
           echo "Lean pass: both agents' seeded templates equal ${expected}."
+
+      # The on-demand agent reference directory (docs/agent-reference.md) is
+      # read straight from the image, so the bake is what has to hold: with no
+      # layer set it holds exactly the core files, byte for byte, readable by
+      # the image's default user. The staging itself is covered by
+      # scripts/test-stage-agent-reference.sh.
+      - name: Baked agent reference - lean image
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=docker/shared/agent-reference
+          baked=/usr/local/share/agent-reference
+          out="${RUNNER_TEMP}/agent-reference-lean"
+          mkdir -p "$out"
+          want="$(cd "$src" && LC_ALL=C ls -A)"
+          have="$(docker run --rm --entrypoint ls powbox-agent:latest -A "$baked" | LC_ALL=C sort)"
+          if [ "$have" != "$want" ]; then
+            echo "FAIL: ${baked} in the lean image lists [${have}], but ${src} holds [${want}]." >&2
+            exit 1
+          fi
+          while IFS= read -r name; do
+            docker run --rm --entrypoint cat powbox-agent:latest "${baked}/${name}" >"$out/${name}"
+            if ! cmp "${src}/${name}" "$out/${name}"; then
+              echo "FAIL: ${baked}/${name} in the lean image differs from ${src}/${name}." >&2
+              exit 1
+            fi
+          done <<<"$want"
+          echo "Lean pass: ${baked} holds exactly ${src}, byte for byte."
 
       # Browser pass. Selecting the set is a gitignored file, so the tree stays
       # clean and the stamped commit does not gain -dirty; the check-ignore

@@ -91,6 +91,7 @@ Parallel, worktree-isolated work uses three baked helpers on `PATH`. Skills and 
 | `/ctx` | Optional context mount root; external folders are mounted under `/ctx/<name>` via `--ctx` or `ctx:` config |
 | `${AGENT_CONFIG_DIR}` | ${AGENT_NAME} config/state (persistent Docker volume) |
 | `/home/node/.config/gh` | GitHub CLI config (persistent Docker volume) |
+| `/usr/local/share/agent-reference` | On-demand reference baked into this image (absent from an image that predates it). Before reporting friction from a run, in a retrospective or a session-learnings report, read its `known-limitations.md`: leave out what it lists, or report only what is new about it |
 | `/workspace/<project-slug>/.worktrees/.pnpm-store` | Per-container pnpm store, dir-mounted JS/powbox gate only (inside the `.worktrees` volume; co-located so worktree installs hardlink) |
 
 Under `--isolated` the `node_modules`, `.worktrees`, `.git/worktrees`, and store/cache paths above (and the worktree roots `wt-bootstrap` checks) are plain subdirectories of the single `agent-ws-*` volume, not separate volumes, and the tmpfs shadows are skipped entirely — running `shadow-refresh.sh` there is a harmless no-op, because the script skips itself under `POWBOX_SELF_HOSTED=1` and exits 0 without mounting.

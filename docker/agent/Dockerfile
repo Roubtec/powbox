@@ -251,6 +251,16 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
     && printf '%s\n' "${POWBOX_COMMIT_CODEX}" > /home/node/.powbox/codex.commit \
     && printf '%s\n' "${AGENT_SKILLS_COMMIT}" > /home/node/.powbox/agent-skills.commit
 
+# --- On-demand agent reference -----------------------------------------------
+# Read straight from the image by both agents, never seeded into a config
+# volume, so it describes the image the session runs in (docs/agent-reference.md).
+# Staged host-side from docker/shared/agent-reference/ plus the selected layer
+# set's agent-reference/ by scripts/stage-agent-reference.{sh,ps1}, which also
+# fixes the modes; no --chown, so the files stay root-owned. It comes after the
+# build-epoch RUN (above it in the stack), so a changed reference file
+# re-renders no instruction file.
+COPY .powbox-staging/agent-reference/ /usr/local/share/agent-reference/
+
 # --- Entrypoint, setup hooks, and worktree helpers ---------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.
 # Each agent's hook is baked here so editing a hook rebuilds only this layer.

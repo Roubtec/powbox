@@ -1417,8 +1417,10 @@ make_build_root() {
 	done
 	cp "$ROOT_DIR/scripts/base-source-files.txt" "$br/scripts/"
 	cp "$ROOT_DIR/scripts/stage-agent-template.sh" "$ROOT_DIR/scripts/stage-agent-template.ps1" "$br/scripts/"
+	cp "$ROOT_DIR/scripts/stage-agent-reference.sh" "$ROOT_DIR/scripts/stage-agent-reference.ps1" "$br/scripts/"
 	mkdir -p "$br/docker/shared"
 	cp "$ROOT_DIR/docker/shared/container-agent.md.tmpl" "$br/docker/shared/"
+	cp -r "$ROOT_DIR/docker/shared/agent-reference" "$br/docker/shared/"
 	cp "$ROOT_DIR/docker/base/Dockerfile" "$br/docker/base/"
 	cp -r "$ROOT_DIR/docker/layers/full" "$br/docker/layers/"
 	: >"$br/docker/layers/custom/.gitkeep"
@@ -1495,12 +1497,16 @@ run_sequence() {
 	assert_eq "[$lang] lean all: no layer-set label on the agent" "$(label "$st" "$AGENT" powbox.layers.set)" ""
 	assert_eq "[$lang] lean all: staged instructions are the core template" \
 		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
+	assert_eq "[$lang] lean all: staged reference is the core known-limitations document" \
+		"$(cmp -s "$br/.powbox-staging/agent-reference/known-limitations.md" "$br/docker/shared/agent-reference/known-limitations.md" && echo same)" same
 
 	printf 'full\n' >"$br/.powbox-layers"
 	fixed_git -C "$br" commit -q --allow-empty -m c1
 	c1="$(git -C "$br" rev-parse --short HEAD)"
 	build "$lang" "$st" all "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] set all: three images" "$(bakes "$st")" "base,layers,agent"
+	assert_eq "[$lang] set all: the set's known limitations are staged under their heading" \
+		"$(grep -cxF -- '## Contributed by the `full` layer set' "$br/.powbox-staging/agent-reference/known-limitations.md")" 1
 	assert_contains "[$lang] set all: agent on the layer-set image" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-layers:latest"
 	assert_eq "[$lang] set all: agent carries the set" "$(label "$st" "$AGENT" powbox.layers.set)" "full"
 	assert_eq "[$lang] set all: agent carries the set's digest" "$(label "$st" "$AGENT" powbox.layers.digest)" "$(bash "$DIG_SH" "$br/docker/layers/full")"
@@ -1631,6 +1637,8 @@ run_sequence() {
 	assert_contains "[$lang] back to lean: agent on the base" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-base:latest"
 	assert_eq "[$lang] back to lean: staged instructions are the core template again" \
 		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
+	assert_eq "[$lang] back to lean: staged reference is the core document again" \
+		"$(cmp -s "$br/.powbox-staging/agent-reference/known-limitations.md" "$br/docker/shared/agent-reference/known-limitations.md" && echo same)" same
 	assert_eq "[$lang] back to lean: no layer-set label" "$(label "$st" "$AGENT" powbox.layers.set)" ""
 }
 

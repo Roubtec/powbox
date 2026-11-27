@@ -501,7 +501,7 @@ powbox_clear_stale_podman_runtime() {
 		echo "Warning: could not write $_marker; continuing." >&2
 	fi
 	if [ "$_cleared" = true ]; then
-		echo "Note: cleared the Podman runtime state an earlier container start left behind. Containers that were running then are stopped now; 'podman ps -a' lists them." >&2
+		echo "Note: cleared the Podman runtime state an earlier container start left behind. Containers that were running then are stopped now, except ones started with --rm, which Podman removes; 'podman ps -a' lists the rest." >&2
 	fi
 	return 0
 }

@@ -141,7 +141,8 @@
 # Result contract (schema powbox.peer-review-run/v1): the FINAL line of stdout
 # is a single JSON object:
 #   { schema, provider, outcome, verdict, elapsedSeconds, exitStatus, attempts,
-#     retried, liveProgress, model, effort, artifactDir, reviewFile, reason }
+#     retried, liveProgress, model, effort, artifactDir, reviewFile, proseFile,
+#     reason }
 #   outcome  ∈ passed | issues | unavailable | timeout | forfeited | failed
 #   verdict  ∈ pass | issues | none   (normalized from the peer's final message)
 #   elapsedSeconds  total wall time across ALL attempts — a retried run reports
@@ -178,21 +179,42 @@
 #               <artifactDir> keeps its provider-native artifacts unchanged for
 #               debugging; review.txt is an additional consumption surface, not a
 #               replacement for them.
+#   proseFile   the same <artifactDir>/review.txt, written and verified the same
+#               way, whenever the final attempt exited 0 with a non-empty,
+#               well-formed final message: equal to reviewFile for
+#               `passed`/`issues`, and ALSO set for a `forfeited` review whose
+#               verdict could not be read because it carries no VERDICT line the
+#               helper recognizes (see "Writing the prompt" below). It is null
+#               for every other result, including a `forfeited` one after an
+#               empty or malformed response, so `forfeited` with a proseFile
+#               means "a review was produced but its verdict could not be read"
+#               and `forfeited` without one means "nothing usable was
+#               produced". No verdict is inferred from that
+#               prose: outcome stays `forfeited`, verdict stays `none`, and the
+#               caller weighs the text. The case is a separate additive key, not
+#               a populated reviewFile or a new outcome value, so a caller
+#               written before it existed (branching on outcome, and reading a
+#               non-null reviewFile as a parsed verdict) gets the result it got
+#               before. The one change such a caller can see is the fail-closed
+#               exit below, which now covers this file as well: a verdict-less
+#               review whose review.txt cannot be produced exits 70 where it used
+#               to report `forfeited`.
 # The helper NEVER reports success because an output file is absent or empty.
 # It exits 0 for any produced outcome (the outcome is a non-blocking signal for
-# the caller to weigh) EXCEPT one whose reviewFile could not be created or
-# verified — that exits 70 and emits NO result, discarding an otherwise complete
-# review rather than reporting one whose prose cannot be trusted — and non-zero
-# otherwise ONLY for its own usage/operational errors.
+# the caller to weigh) EXCEPT one whose review.txt (reviewFile or proseFile) could
+# not be created or verified — that exits 70 and emits NO result, discarding an
+# otherwise complete review rather than reporting one whose prose cannot be
+# trusted — and non-zero otherwise ONLY for its own usage/operational errors.
 #
 # Requires: `jq`, and `python3` — which creates, writes, verifies and modes the
-# reviewFile, making the interpreter a HARD precondition: it is preflighted
-# before any provider is launched and its absence exits 70, because discovering
-# it after a completed review would throw away work nobody can get back. Python 3
-# is baked into the agent image this helper ships in, so this is a documented
-# precondition rather than a live degradation path. Its `tomllib` module is
-# OPTIONAL: an interpreter without it (it arrived in 3.11) degrades codex
-# configured-model passthrough with a warning, exactly like an unparseable config.
+# review.txt behind reviewFile and proseFile, making the interpreter a HARD
+# precondition: it is preflighted before any provider is launched and its
+# absence exits 70, because discovering it after a completed review would throw
+# away work nobody can get back. Python 3 is baked into the agent image this
+# helper ships in, so this is a documented precondition rather than a live
+# degradation path. Its `tomllib` module is OPTIONAL: an interpreter without it
+# (it arrived in 3.11) degrades codex configured-model passthrough with a
+# warning, exactly like an unparseable config.
 #
 # Progress: while running, `liveProgress:true` providers (Codex, when the
 # installed CLI supports `--json`) stream normalized progress events to STDERR;
@@ -226,8 +248,10 @@
 # issue cannot be relied on to fetch it. Put whatever the review needs from the
 # network into the prompt file itself. Ask the reviewer to end its answer with a
 # bare `VERDICT: PASS` or `VERDICT: ISSUES` line: the verdict is read only from
-# such a line, never inferred from the prose, so a review without one reports
-# `verdict: none` rather than a pass or issues outcome.
+# a VERDICT line (those two values or a recognized alias such as `APPROVED`),
+# never inferred from the prose, so a review without one reports
+# `verdict: none` and `outcome: forfeited` rather than a pass or issues outcome.
+# Its prose is still kept, in proseFile.
 #
 # This helper SUPPLEMENTS but does not replace a fresh reviewer subagent gate,
 # and no peer outcome is required for publication.
@@ -244,7 +268,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,233p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,257p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -1028,9 +1052,9 @@ done
 # --- validation --------------------------------------------------------------
 command -v jq >/dev/null 2>&1 || die_usage "jq is required but not on PATH"
 # python3 is a HARD precondition, preflighted here rather than discovered later:
-# every `passed`/`issues` result must carry a verified reviewFile, and finding
+# every result with review prose must carry a verified review file, and finding
 # the interpreter missing AFTER a completed review would throw away work nobody
-# can get back — a run that cannot produce a reviewFile should never have paid a
+# can get back — a run that cannot produce a review file should never have paid a
 # provider. It exits 70 (operational), NOT die_usage's 64: the invocation was
 # well-formed, and this path introduces no new exit-64 case.
 command -v python3 >/dev/null 2>&1 || {
@@ -1900,14 +1924,16 @@ detect_verdict() {
 }
 
 # Absolute path of the normalized review file for the CURRENT attempt, or empty
-# when this attempt produced no usable review prose. Reset per attempt so a retry
-# that ends in a non-success outcome can never report the earlier attempt's file.
+# when this attempt produced no usable review prose (PROSE_FILE) or no parsed
+# verdict (REVIEW_FILE). Reset per attempt so a retry that ends in a non-success
+# outcome can never report the earlier attempt's file.
 REVIEW_FILE=""
+PROSE_FILE=""
 
 # write_review_file <attempt_dir> <parsed_final_message> — normalize the peer's
 # already-parsed final message into <dir>/review.txt, the provider-neutral
 # payload the result points at, and prove the bytes landed. FAIL CLOSED: a caller
-# handed `passed` must never be handed a truncated, empty or absent review, so
+# handed review prose must never be handed a truncated, empty or absent review, so
 # any writer failure ends the run at 70 with no result rather than reporting one
 # whose prose cannot be trusted. 70 is the helper's operational status — the
 # invocation was well-formed and the filesystem gave out afterwards — so this
@@ -1930,7 +1956,7 @@ write_review_file() {
 		echo "peer-review-run: the review file '$f' could not be produced (writer exit $rc); discarding an otherwise complete review rather than emitting a result that points at unverified prose" >&2
 		exit 70
 	fi
-	REVIEW_FILE="$f"
+	PROSE_FILE="$f"
 }
 
 # --- a single attempt --------------------------------------------------------
@@ -1952,6 +1978,7 @@ run_attempt() {
 	# has nothing to do with the finished attempt's provider tree.
 	ATT_REAP_CONFIRMED=0
 	REVIEW_FILE=""
+	PROSE_FILE=""
 	# 1 only when this attempt was `unavailable` because the peer BINARY is
 	# missing (a preflight miss), as opposed to an auth/usage failure. The Claude
 	# key-fallback keys off this: a missing binary cannot be fixed by switching
@@ -2255,22 +2282,25 @@ run_attempt() {
 	fi
 
 	ATT_VERDICT="$(detect_verdict "$text")"
-	# The review file is written HERE, where the outcome is set, because `text` is
-	# a `local` of this function and is gone by the time run_attempt returns.
+	# The review file is written HERE, before the verdict decides anything,
+	# because `text` is a `local` of this function and is gone by the time
+	# run_attempt returns. Every non-empty, well-formed message is kept: a review
+	# whose verdict cannot be read is still prose the caller may weigh.
+	write_review_file "$dir" "$text"
 	case "$ATT_VERDICT" in
 	pass)
 		ATT_OUTCOME=passed
 		ATT_REASON="provider exited 0 with an explicit pass verdict"
-		write_review_file "$dir" "$text"
+		REVIEW_FILE="$PROSE_FILE"
 		;;
 	issues)
 		ATT_OUTCOME=issues
 		ATT_REASON="provider exited 0 and reported an issues verdict"
-		write_review_file "$dir" "$text"
+		REVIEW_FILE="$PROSE_FILE"
 		;;
 	none)
 		ATT_OUTCOME=forfeited
-		ATT_REASON="provider exited 0 but emitted no recognizable VERDICT token"
+		ATT_REASON="provider exited 0 but emitted no recognizable VERDICT token; its review prose is kept in proseFile, and no verdict was inferred from it"
 		;;
 	esac
 	write_meta "$dir" "$attempt_no" "$ATT_OUTCOME"
@@ -2560,10 +2590,12 @@ model_json=null
 [ -n "$EFFECTIVE_MODEL" ] && model_json="$(jq -n --arg m "$EFFECTIVE_MODEL" '$m')"
 effort_json=null
 [ -n "$EFFECTIVE_EFFORT" ] && effort_json="$(jq -n --arg e "$EFFECTIVE_EFFORT" '$e')"
-# Same null discipline for the additive review payload: only a `passed`/`issues`
-# attempt that actually produced and verified the file reports a path.
+# Same null discipline for the additive review payload: only an attempt that
+# actually produced and verified the file reports a path.
 review_json=null
 [ -n "$REVIEW_FILE" ] && review_json="$(jq -n --arg r "$REVIEW_FILE" '$r')"
+prose_json=null
+[ -n "$PROSE_FILE" ] && prose_json="$(jq -n --arg r "$PROSE_FILE" '$r')"
 
 # Emitting this single JSON object IS the helper's contract with the caller — if
 # jq cannot produce it, the run has no parseable result, so fail as an OPERATIONAL
@@ -2584,8 +2616,9 @@ if ! jq -nc \
 	--argjson effort "$effort_json" \
 	--arg artifactDir "$ATTEMPT_DIR" \
 	--argjson reviewFile "$review_json" \
+	--argjson proseFile "$prose_json" \
 	--arg reason "$ATT_REASON" \
-	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,model:$model,effort:$effort,artifactDir:$artifactDir,reviewFile:$reviewFile,reason:$reason}'; then
+	'{schema:$schema,provider:$provider,outcome:$outcome,verdict:$verdict,elapsedSeconds:$elapsed,exitStatus:$exitStatus,attempts:$attempts,retried:$retried,liveProgress:$liveProgress,model:$model,effort:$effort,artifactDir:$artifactDir,reviewFile:$reviewFile,proseFile:$proseFile,reason:$reason}'; then
 	echo "peer-review-run: internal error — could not emit the result JSON" >&2
 	exit 70
 fi

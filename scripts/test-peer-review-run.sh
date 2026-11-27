@@ -21,7 +21,9 @@ set -uo pipefail
 #   (5) timeout — deadline enforced, process TREE reaped (grandchild sleeper gone)
 #   (6) malformed/error-envelope response → forfeited (distinct from failed),
 #       NEVER a pass — a pass token in an error/non-result envelope is rejected
-#   (7) forfeited — exit 0 with empty / no-verdict output (never a false pass)
+#   (7) forfeited — exit 0 with empty / no-verdict output (never a false pass);
+#       a complete message without a verdict keeps its prose in proseFile while
+#       reviewFile stays null, and an empty or malformed one keeps none
 #   (8) retry policy is a TRANSIENT ALLOWLIST — a POSITIVELY transient failure
 #       (network/5xx/timeout) is retried ONCE with a NEW attempt dir and recovers;
 #       two transient failures → failed (retry exhausted); a deterministic
@@ -107,7 +109,9 @@ set -uo pipefail
 #       attempt dir) proving that claim is dropped where no obstacle stands;
 #       warn-and-continue for a failed or wrong-applying mode set; a cleared umask
 #       proved by composing the two injections; short write/read syscalls
-#       survived; and a missing python3 caught by the preflight at exit 70
+#       survived; a missing python3 caught by the preflight at exit 70; and
+#       proseFile — equal to reviewFile for a parsed verdict, set alone for a
+#       verdict-less review, null otherwise, and fail-closed the same way (16m)
 #  (17) retry-route supervision — a deadline is TRANSIENT and starts the one
 #       retry in a fresh attempt dir (timeout-then-pass, timeout-then-issues
 #       through the ordinary final-attempt normalization), two deadlines stay
@@ -547,6 +551,7 @@ assert_eq "6: malformed → forfeited (distinct from failed)" "$(jqf "$RUN_RESUL
 assert_not_contains "6: malformed is never a pass" "$(jqf "$RUN_RESULT" .outcome)" passed
 assert_eq "6: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
 assert_eq "6: not retried (deterministic clean exit)" "$(jqf "$RUN_RESULT" .attempts)" 1
+assert_eq "6: a malformed response keeps no prose" "$(jqf "$RUN_RESULT" .proseFile)" null
 
 # 6b: an ERROR envelope (is_error:true) or non-result type that CONTAINS a pass
 # token must NOT become passed — the envelope is honored, so this is forfeited.
@@ -563,6 +568,7 @@ chmod +x "$d/bin/claude"
 run "$d" $(std_args "$d" claude)
 assert_eq "6b: error envelope w/ pass token → forfeited" "$(jqf "$RUN_RESULT" .outcome)" forfeited
 assert_not_contains "6b: error envelope is never a pass" "$(jqf "$RUN_RESULT" .outcome)" passed
+assert_eq "6b: an error envelope keeps no prose" "$(jqf "$RUN_RESULT" .proseFile)" null
 
 # 6c: a non-"result" type envelope carrying a pass token is likewise not a pass.
 d="$(new_case)"
@@ -577,6 +583,7 @@ chmod +x "$d/bin/claude"
 # shellcheck disable=SC2046
 run "$d" $(std_args "$d" claude)
 assert_eq "6c: non-result type w/ pass token → forfeited" "$(jqf "$RUN_RESULT" .outcome)" forfeited
+assert_eq "6c: a non-result envelope keeps no prose" "$(jqf "$RUN_RESULT" .proseFile)" null
 
 # ============================================================================
 # (7) forfeited — exit 0 with empty output, and exit 0 with no VERDICT token
@@ -595,6 +602,8 @@ chmod +x "$d/bin/codex"
 run "$d" $(std_args "$d" codex)
 assert_eq "7a: empty output → forfeited" "$(jqf "$RUN_RESULT" .outcome)" forfeited
 assert_eq "7a: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "7a: an empty message keeps no prose" "$(jqf "$RUN_RESULT" .proseFile)" null
+assert_absent "7a: and writes no review file" "$(jqf "$RUN_RESULT" .artifactDir)/review.txt"
 
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
@@ -608,6 +617,15 @@ chmod +x "$d/bin/claude"
 run "$d" $(std_args "$d" claude)
 assert_eq "7b: no VERDICT token → forfeited (never a false pass)" "$(jqf "$RUN_RESULT" .outcome)" forfeited
 assert_eq "7b: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+# A complete message without a verdict is still a review: its decoded prose is
+# kept in proseFile, while reviewFile stays null so no caller reads it as a
+# parsed verdict.
+assert_eq "7b: reviewFile stays null without a verdict" "$(jqf "$RUN_RESULT" .reviewFile)" null
+assert_eq "7b: proseFile is <artifactDir>/review.txt" "$(jqf "$RUN_RESULT" .proseFile)" "$(jqf "$RUN_RESULT" .artifactDir)/review.txt"
+printf 'I looked at it and it seems okay to me.' >"$d/expected"
+assert_same_bytes "7b: proseFile holds the decoded claude prose" "$d/expected" "$(jqf "$RUN_RESULT" .proseFile)"
+assert_contains "7b: the reason points at the kept prose" "$(jqf "$RUN_RESULT" .reason)" "kept in proseFile"
+assert_eq "7b: not retried" "$(jqf "$RUN_RESULT" .attempts)" 1
 
 # ============================================================================
 # (8) retry — transient failure retried once (new dir); recover; exhaust → failed
@@ -2782,6 +2800,7 @@ assert_file "16a: reviewFile exists when the result is emitted" "$rf"
 assert_eq "16a: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f '%Lp' "$rf")" 600
 printf 'First line of the codex review.\n\nA third line, after a blank one.\nVERDICT: PASS' >"$d/expected"
 assert_same_bytes "16a: reviewFile holds the full codex review prose" "$d/expected" "$rf"
+assert_eq "16a: proseFile equals reviewFile for a parsed verdict" "$(jqf "$RUN_RESULT" .proseFile)" "$rf"
 
 d="$(new_case)"
 cat >"$d/bin/claude" <<'EOF'
@@ -2803,6 +2822,7 @@ assert_eq "16b: reviewFile is 0600" "$(stat -c '%a' "$rf" 2>/dev/null || stat -f
 printf 'First line of the claude review.\n\nA third line, after a blank one.\nVERDICT: ISSUES' >"$d/expected"
 assert_same_bytes "16b: reviewFile holds the decoded claude review prose" "$d/expected" "$rf"
 assert_not_contains "16b: no JSON envelope leaks into the payload" "$(cat "$rf")" '"is_error"'
+assert_eq "16b: proseFile equals reviewFile for an issues verdict" "$(jqf "$RUN_RESULT" .proseFile)" "$rf"
 
 # 16c — a writer invocation that fails OUTRIGHT is fail-closed: exit 70 and NO
 # result, so an empty or absent reviewFile can never ship inside a successful
@@ -3127,6 +3147,7 @@ d="$(new_case)" # empty bin/ → provider not on PATH
 run "$d" $(std_args "$d" codex)
 assert_eq "16l: unavailable is still unavailable" "$(jqf "$RUN_RESULT" .outcome)" unavailable
 assert_eq "16l: unavailable reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+assert_eq "16l: unavailable reports proseFile null" "$(jqf "$RUN_RESULT" .proseFile)" null
 
 d="$(new_case)"
 cat >"$d/bin/codex" <<'EOF'
@@ -3144,6 +3165,40 @@ assert_eq "16l: forfeited reports reviewFile null" "$(jqf "$RUN_RESULT" .reviewF
 assert_eq "16l: schema is unchanged by the additive field" "$(jqf "$RUN_RESULT" .schema)" "powbox.peer-review-run/v1"
 assert_eq "16l: artifactDir is still the final attempt dir" \
 	"$(jqf "$RUN_RESULT" .artifactDir | xargs -I{} sh -c 'test -f {}/meta.json && echo yes')" yes
+pf="$(jqf "$RUN_RESULT" .proseFile)"
+assert_eq "16l: the verdict-less codex prose is kept at <artifactDir>/review.txt" "$pf" "$(jqf "$RUN_RESULT" .artifactDir)/review.txt"
+assert_eq "16l: proseFile is 0600" "$(stat -c '%a' "$pf" 2>/dev/null || stat -f '%Lp' "$pf")" 600
+printf 'I looked but will not commit to a verdict.' >"$d/expected"
+assert_same_bytes "16l: proseFile holds the full codex prose" "$d/expected" "$pf"
+
+# 16m — the fail-closed guarantee covers a verdict-less review too: a writer that
+# fails exits 70 with no result, rather than a `forfeited` result whose
+# proseFile points at prose that was never proven.
+d="$(new_case)"
+cat >"$d/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = exec ] && [ "$2" = --help ]; then echo "options: --json"; exit 0; fi
+last=""; while [ $# -gt 0 ]; do case "$1" in --output-last-message) last="$2"; shift 2;; *) shift;; esac; done
+cat >/dev/null
+printf '1. a.sh:3 - a real finding\nOverall: needs a fix.\n' >"$last"
+EOF
+chmod +x "$d/bin/codex"
+cat >"$d/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+	if [ "$a" = "--prr-write-review" ]; then
+		echo "injected writer failure" >&2
+		exit 9
+	fi
+done
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$d/bin/python3"
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" codex)
+assert_eq "16m: a failed writer on verdict-less prose exits 70" "$RUN_RC" 70
+assert_eq "16m: and emits no result JSON" "$RUN_OUT" ""
+assert_contains "16m: the discarded review is announced" "$RUN_ERR" "could not be produced"
 
 # ============================================================================
 # (17) retry-route supervision — a deadline is transient and retried once, and
@@ -3555,7 +3610,8 @@ assert_not_contains "17k: nothing was suppressed" "$(jqf "$RUN_RESULT" .reason)"
 # flags the adapter gates on.
 #   18a  default model is the preferred one, the review posture flags are all
 #        present, the prompt is read from the attempt's private copy, and plain
-#        stdout becomes reviewFile
+#        stdout becomes reviewFile; without a VERDICT line it becomes proseFile
+#        instead (18a2)
 #   18b  the preferred model refused for this account → ONE fallback attempt on
 #        the floor model, which the result then reports
 #   18c  an explicit --model is never second-guessed: a refusal fails, no retry
@@ -3613,6 +3669,17 @@ assert_not_contains "18a: contributor mode is left to the user's own setting" "$
 assert_eq "18a: the prompt file is the attempt's private copy" "$(grep -A1 -x -- '--prompt-file' "$d/argv.1" | tail -1)" "$(jqf "$RUN_RESULT" .artifactDir)/prompt.txt"
 assert_eq "18a: the literal prompt reached the provider" "$(cat "$d/prompt-seen.1")" "$(cat "$d/prompt.txt")"
 assert_eq "18a: reviewFile carries plain stdout" "$(cat "$(jqf "$RUN_RESULT" .reviewFile)")" "$(printf 'Looks fine.\n\nVERDICT: PASS')"
+
+# 18a2 — a muse review with no VERDICT line forfeits but keeps its stdout prose,
+# through the same proseFile the other two providers use.
+d="$(new_case)"
+make_muse_fake "$d" 'printf "1. a.py:2 - minor - x\nConclusion: fine once fixed.\n"; exit 0'
+# shellcheck disable=SC2046
+run "$d" $(std_args "$d" muse)
+assert_eq "18a2: muse without a verdict forfeits" "$(jqf "$RUN_RESULT" .outcome)" forfeited
+assert_eq "18a2: verdict none" "$(jqf "$RUN_RESULT" .verdict)" none
+assert_eq "18a2: reviewFile null" "$(jqf "$RUN_RESULT" .reviewFile)" null
+assert_eq "18a2: proseFile carries plain stdout" "$(cat "$(jqf "$RUN_RESULT" .proseFile)")" "$(printf '1. a.py:2 - minor - x\nConclusion: fine once fixed.')"
 
 d="$(new_case)"
 make_muse_fake "$d" 'if [ "$model" = muse-wonder-full-1.0 ]; then '"$MUSE_DENY"'; fi; printf "VERDICT: ISSUES\n- a.py:1 - minor - x\n"; exit 0'

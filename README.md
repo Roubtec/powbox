@@ -227,7 +227,7 @@ The rendered instruction file is loaded into every session of both agents, in ev
 
 A pointer names the situation that makes the read worthwhile, not merely the file. It must also read sensibly where the file is missing: the instruction file lives on a config volume that containers built from different images share, and whichever started last rendered it, so a session can read a pointer, or another image's set notes, in a container whose image lacks what they name. The template says so once and sends the agent to `command -v` and `--help`; the reference files are baked, so they always describe the image that holds them.
 
-`scripts/test-agent-instructions.sh` holds the two halves together for the lean image and every committed set: every reference file the staged instruction file names is staged and every staged one is named, no reference file uses a template variable, and each hazard is still in the template or the notes, checked by one distinctive token. Dropping a hazard on purpose means removing its line from that suite, where a reviewer sees it.
+`scripts/test-agent-instructions.sh` holds the two halves together for the lean image and every committed set: every reference file the staged instruction file names is staged and every staged one is named, no reference file uses a template variable, the tool rows state the versions the Dockerfiles pin, and each hazard is still in the template or the notes, checked by one distinctive token. Dropping a hazard on purpose means removing its line from that suite, where a reviewer sees it.
 
 ### Agent Reference Files
 

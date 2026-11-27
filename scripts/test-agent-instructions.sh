@@ -13,7 +13,9 @@
 #   - the hooks' variable list leaves no ${AGENT_...} placeholder in the
 #     rendered instruction file;
 #   - the hazards the instruction file exists to keep in view are still in it,
-#     so a later trim that drops one fails here rather than in a session.
+#     so a later trim that drops one fails here rather than in a session;
+#   - the tool rows that moved to tooling.md still state the versions the
+#     Dockerfiles pin.
 #
 # The staging scripts themselves are covered by test-stage-agent-template.sh
 # and test-stage-agent-reference.sh, PowerShell twins included; this suite
@@ -156,6 +158,24 @@ assert_has "full: docker is a Podman shim" "$FULL_NOTES" 'shim'
 for set_name in full browser; do
 	assert_has "$set_name: Playwright's browsers are not baked" "$ROOT_DIR/docker/layers/$set_name/agent-notes.md" 'browsers are not baked'
 done
+
+echo "Test: the tool rows state the versions the Dockerfiles pin"
+# The rows moved out of the template into tooling.md, and a Dockerfile's bump
+# comment can only ask for them to be kept in step.
+while IFS='|' read -r tool rows dockerfile expr; do
+	[ -n "$tool" ] || continue
+	version="$(sed -n "$expr" "$ROOT_DIR/$dockerfile")"
+	if [ -z "$version" ]; then
+		ko "$tool: no pinned version found in $dockerfile"
+	else
+		assert_has "$tool $version" "$ROOT_DIR/$rows" "\`$tool\` $version "
+	fi
+done <<'EOF'
+shellcheck|docker/shared/agent-reference/tooling.md|docker/agent/Dockerfile|s/^RUN SHELLCHECK_VERSION=\([0-9.]*\).*/\1/p
+actionlint|docker/shared/agent-reference/tooling.md|docker/agent/Dockerfile|s/^RUN ACTIONLINT_VERSION=\([0-9.]*\).*/\1/p
+markdownlint-cli2|docker/shared/agent-reference/tooling.md|docker/agent/Dockerfile|s/.*markdownlint-cli2@\([0-9.]*\).*/\1/p
+gitleaks|docker/layers/full/agent-reference/tooling.md|docker/layers/full/Dockerfile|s/^RUN GITLEAKS_VERSION=\([0-9.]*\).*/\1/p
+EOF
 
 echo
 echo "agent-instructions tests: ${pass} passed, ${fail} failed"

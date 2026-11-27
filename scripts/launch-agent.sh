@@ -1527,8 +1527,9 @@ fi
 # paths below do; its named volumes (config, node_modules, .worktrees, Podman
 # storage, a self-hosted agent-ws-* workspace) are kept, only its writable layer
 # goes. A running one is refused rather than killed, so a live session is never
-# cut off. Every check below that reuses or recreates a container is guarded on
-# a non-volatile launch, and this block leaves none for them anyway.
+# cut off. This is the one place a volatile launch diverges: it leaves no
+# existing container, so the reuse and recreate checks below, which guard only on
+# CONTAINER_EXISTS, all fall through to a fresh create.
 if [ "$VOLATILE" = true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		echo "Container ${CONTAINER_NAME} is running; stop it before --volatile (it replaces the container with a fresh one), or relaunch without --volatile to attach to it." >&2
@@ -1549,7 +1550,7 @@ fi
 # prep/create flow, so --reclone removes the stopped container to force that flow;
 # the prep step then empties the (kept) agent-ws-* volume and the entrypoint clones
 # fresh. The wipe is one-shot — nothing about it is frozen into the container.
-if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$ISOLATED" = true ] && [ "$RECLONE" = true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		echo "Container ${CONTAINER_NAME} is running; stop it before --reclone (it re-clones on recreate)." >&2
 		exit 1
@@ -1582,11 +1583,11 @@ fi
 # Egress exceptions are frozen at creation too. Unlike the ctx check below, this
 # runs on every reuse, so a deleted .powbox-egress cannot leave an exception
 # live. Every later check can only recreate, never bring a container back.
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	powbox_egress_check_existing reuse
 fi
 
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	# Context mounts are frozen at container creation. When this launch has an
 	# explicit desired set (CLI --ctx, ctx: in config, or explicit ctx: []), compare
 	# the canonical mount-set hash label and recreate stopped mismatches. When there
@@ -1643,7 +1644,7 @@ esac
 # Missing label on an existing container predates this flag — treat it as "true" so the old
 # auto-resume default remains in effect for reused containers until the user explicitly opts out,
 # at which point this branch recycles the container to honour the new intent.
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CONTINUE="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.continue"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$EXISTING_CONTINUE" ]; then
 		EXISTING_CONTINUE="true"
@@ -1696,7 +1697,7 @@ fi
 # ($ISOLATED): its node_modules/.worktrees are subdirs INSIDE the one workspace volume,
 # not separate mounts, so there is nothing to compare — and a steady-state non-dev reuse
 # (no mounts present, none expected) compares equal and is correctly left alone.
-if [ "$ISOLATED" != true ] && [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$ISOLATED" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	EXPECTED_NM_MOUNT=""
 	EXPECTED_WT_MOUNT=""
 	if [ "$MOUNT_WORKSPACE_VOLUMES" = true ]; then
@@ -1755,8 +1756,7 @@ fi
 # a running process, and recreate a stopped mismatch so the new environment takes
 # effect. One recreation re-freezes EVERY var, so the first stopped mismatch
 # breaks the loop rather than trying to remove an already-removed container.
-if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } &&
-	[ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if { [ "$ISOLATED" = true ] || [ "$MOUNT_WORKTREES_VOLUME" = true ]; } && [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_CONTAINER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	# var|expected path|human label for the recreate/warn message
 	for _cache_spec in \
@@ -1813,7 +1813,7 @@ fi
 # persist, even after the image is rebuilt. Recreate a stopped container that
 # lacks the mount so the new volume + device attach; warn (don't disrupt) if it
 # is currently running.
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	HAS_PODMAN_MOUNT="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/home/node/.local/share/containers\"}}yes{{end}}{{end}}" "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -z "$HAS_PODMAN_MOUNT" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
@@ -1841,7 +1841,7 @@ fi
 # one. A container with no recorded label predates this check — leave it alone, since
 # we can't know what it was created with and the storage-mount check above already
 # recreates truly pre-Podman containers.
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	EXISTING_PODMAN_DEVICES="$(docker inspect --format '{{with .Config.Labels}}{{with index . "powbox.podman-devices"}}{{.}}{{end}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 	if [ -n "$EXISTING_PODMAN_DEVICES" ] && [ "$EXISTING_PODMAN_DEVICES" != "$PODMAN_DEVICE_MODE" ]; then
 		if [ "$CONTAINER_RUNNING" = true ]; then
@@ -1859,7 +1859,7 @@ if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	fi
 fi
 
-if [ "$VOLATILE" != true ] && [ "$CONTAINER_EXISTS" = true ]; then
+if [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		if [ "$DETACH" = true ]; then
 			echo "Container ${CONTAINER_NAME} is already running."

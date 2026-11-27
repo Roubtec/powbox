@@ -579,7 +579,8 @@ fi
 # bit also refuses the proof rather than be assumed equal. A rebased,
 # squash-merged or force-pushed branch leaves a last commit that no remote ref
 # contains even though equivalent changes landed; that is refused, not reasoned
-# about.
+# about. The comparisons run with core.fsmonitor off, so a misbehaving
+# fsmonitor hook or daemon cannot vouch for a file the proof never read.
 #
 # The last commit is read from the reflog FILE because no git command can name it
 # here: every reflog reader resolves HEAD first, and an unborn HEAD does not
@@ -591,7 +592,7 @@ DELETED_BRANCH_REMOTE=""
 # deleted_branch_diff <diagnosis so far> <commit> <label> [--cached]
 deleted_branch_diff() {
 	local rc=0
-	git --git-dir="$GITDIR" --work-tree="$WT" diff --quiet --no-ext-diff --no-textconv ${4:+"$4"} "$2" -- 2>/dev/null || rc=$?
+	git --git-dir="$GITDIR" --work-tree="$WT" -c core.fsmonitor=false diff --quiet --no-ext-diff --no-textconv ${4:+"$4"} "$2" -- 2>/dev/null || rc=$?
 	case "$rc" in
 	0) ;;
 	1) die "$1, but its $3 differs from that commit, so it holds changes that may exist nowhere else; refusing to remove it (nothing was changed). Compare: 'git -C $(shq "$WT") diff ${4:+$4 }$2'." ;;
@@ -636,7 +637,7 @@ deleted_branch_proof() {
 	deleted_branch_diff "$what" "$c" index --cached
 	deleted_branch_diff "$what" "$c" "working tree"
 	line=""
-	if ! line="$(git --git-dir="$GITDIR" --work-tree="$WT" ls-files --others --exclude-standard 2>/dev/null)"; then
+	if ! line="$(git --git-dir="$GITDIR" --work-tree="$WT" -c core.fsmonitor=false ls-files --others --exclude-standard 2>/dev/null)"; then
 		die "$what, and its untracked files could not be listed; refusing to remove it (nothing was changed)"
 	fi
 	[ -z "$line" ] ||
@@ -650,7 +651,7 @@ deleted_branch_proof() {
 	stage="$(git --git-dir="$GITDIR" --work-tree="$WT" ls-files -v 2>/dev/null)" ||
 		die "$what, and its index could not be listed; refusing to remove it (nothing was changed)"
 	! grep -q '^[a-zS] ' <<<"$stage" ||
-		die "$what, and its index marks files assume-unchanged or skip-worktree, whose contents git does not compare; refusing to remove it (nothing was changed). List them: 'git -C $(shq "$WT") ls-files -v'."
+		die "$what, and its index marks files assume-unchanged or skip-worktree, whose contents git does not compare; refusing to remove it (nothing was changed). List them: 'git -C $(shq "$WT") ls-files -v', where a lowercase tag marks assume-unchanged and 'S' marks skip-worktree."
 	DELETED_BRANCH_COMMIT="$c"
 }
 

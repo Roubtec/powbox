@@ -2674,6 +2674,29 @@ for flag in assume-unchanged skip-worktree; do
 	fi
 done
 
+# --- an fsmonitor hook that never reports a change hides an edit from git diff,
+# so the proof must not consult it -------------------------------------------
+RDB14="$(deleted_branch_repo rdb-fsmonitor pushed)"
+WDB14="$RDB14/.worktrees/$CONTAINER_NAME/db"
+cat >"$WORK_ROOT/fsmonitor-silent.sh" <<'EOF'
+#!/bin/sh
+printf 'tok\0'
+EOF
+chmod +x "$WORK_ROOT/fsmonitor-silent.sh"
+git_quiet -C "$RDB14" config core.fsmonitor "$WORK_ROOT/fsmonitor-silent.sh"
+git_quiet -C "$WDB14" status --porcelain >/dev/null
+echo edited >>"$WDB14/work.txt"
+if git -C "$WDB14" diff --quiet "$(git -C "$RDB14" rev-parse origin/db-b)" --; then
+	miss="$(deleted_branch_must_refuse "$RDB14" "its working tree differs from that commit")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a deleted-branch worktree whose edit a silent fsmonitor hook hides from git diff"
+	else
+		no "wt-remove deleted-branch fsmonitor refusal inadequate:$miss"
+	fi
+else
+	no "precondition: a silent fsmonitor hook should hide the edit from git diff"
+fi
+
 # --- an operation in flight still outranks the deleted branch ----------------
 RDB9="$(deleted_branch_repo rdb-bisect bisect)"
 if deleted_branch_fixture_ok "$RDB9"; then

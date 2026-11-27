@@ -48,11 +48,15 @@ trap cleanup EXIT
 # Split a git URL into URL_SCHEME and URL_HOST (both lowercased) and
 # URL_PATH: scheme://[user@]host[:port]/path, scp-like [user@]host:path (a
 # colon before any slash), or a local path with no host. A remote-helper
-# prefix such as persistent-https:: is dropped first.
+# prefix such as persistent-https:: is dropped first, but only a leading run
+# of scheme characters counts as one, as in git itself: a `::` inside an IPv6
+# host, a password or a path must not cut the URL short.
 split_url() {
 	local url="$1" rest authority head
 	URL_SCHEME="" URL_HOST="" URL_PATH=""
-	case "$url" in *::*) url="${url#*::}" ;; esac
+	if [[ $url =~ ^[A-Za-z][A-Za-z0-9+.-]*:: ]]; then
+		url="${url#*::}"
+	fi
 	case "$url" in
 	*://*)
 		URL_SCHEME="$(printf '%s' "${url%%://*}" | tr '[:upper:]' '[:lower:]')"

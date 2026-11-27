@@ -1,6 +1,6 @@
 # Tooling in this image
 
-What is baked into this image, with the pinned versions and the caveats worth knowing before first use. Read it before concluding that a tool is missing or installing one, and before first using a linter, a document converter, or a tool a layer set adds.
+What is baked into this image, with the pinned versions and the caveats worth knowing before first use. Read it before concluding that a tool is missing or installing one, before first using a linter, a document converter, or a tool a layer set adds, and before debugging a Claude Workflow script or run.
 
 This file is read from the image, so it describes the image you are running in. The instruction file is rendered onto a config volume that containers from other image builds share, so its own tool list can describe another image; this one cannot.
 

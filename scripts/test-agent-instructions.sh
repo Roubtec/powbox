@@ -112,27 +112,28 @@ assert_eq "this suite renders with the hooks' list" "$(hook_vars entrypoint-clau
 echo "Test: the hazards every session must see are in the core template"
 # One distinctive token per hazard, a command or an identifier where there is
 # one, so that rewording a sentence does not fail the check but dropping the
-# hazard does.
+# hazard does. A token found on more than one line would survive the loss of
+# the sentence it stands for, so it must sit on exactly one.
 while IFS='|' read -r what token; do
 	[ -n "$what" ] || continue
-	assert_has "core: $what" "$CORE" "$token"
+	assert_eq "core: $what" "$(grep -cF -- "$token" "$CORE" || true)" 1
 done <<'EOF'
 host visibility is checked before promising a local file|POWBOX_WORKSPACE_HOST_PATH
 a child Claude session keeps its rm prompts|"${DIR:?}"
-a pointer may name a file this image lacks|command -v
+a pointer may name a file this image lacks|can name a file your image does not have
 yq is the jq wrapper|jq syntax
 markdownlint-cli2 passes when it lints nothing|exits zero when its globs match no files
 a pipeline hides a failure before the pipe|set -o pipefail
 an unchecked cd before a state-changing command|unchecked `cd`
 the peer list with its one-shot forms|${AGENT_PEERS}
 a peer keeps its stdin closed|< /dev/null
-reviews go through the helper|peer-review-run
+reviews go through the helper|For a peer review, run `peer-review-run`
 the verdict line a review prompt asks for|VERDICT: PASS
 the scratchpad is shared by subagents|mktemp -d -p <scratchpad>
 the remote is not rewritten|insteadOf
 no raw force push|--force-with-lease
-review threads come from the helper|gh-review-threads
-destructive checks go in a disposable clone|dc-enter
+review threads come from the helper|gh-review-threads <PR#>
+destructive checks go in a disposable clone|DC="$(dc-enter <slug>)"
 a worktree shares .git|update-ref
 dc-remove only works from the worktree that ran dc-enter|`dc-remove` finds a clone only from the worktree that ran `dc-enter`
 wt-remove's refusal is not answered with a forced removal|git worktree remove --force
@@ -154,7 +155,8 @@ assert_has "full: parallel Go test suites exhaust memory" "$FULL_NOTES" 'go test
 assert_has "full: the sign of it never names memory" "$FULL_NOTES" 'never an error that names memory'
 assert_has "full: PSScriptAnalyzer needs -Recurse" "$FULL_NOTES" '-Recurse'
 assert_has "full: parallel worktrees need their own database cluster" "$FULL_NOTES" 'pg-dev-up --worktree'
-assert_has "full: docker is a Podman shim" "$FULL_NOTES" 'shim'
+assert_has "full: docker is a Podman shim" "$FULL_NOTES" 'is a shim for rootless `podman`'
+assert_has "full: the Go memory hazard is baked beside the Go row too" "$ROOT_DIR/docker/layers/full/agent-reference/tooling.md" 'never an error that names memory'
 for set_name in full browser; do
 	assert_has "$set_name: Playwright's browsers are not baked" "$ROOT_DIR/docker/layers/$set_name/agent-notes.md" 'browsers are not baked'
 done

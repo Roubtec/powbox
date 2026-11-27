@@ -54,7 +54,7 @@ A contribution is normalized as agent notes are (a leading UTF-8 BOM dropped, li
 
 | File | What it holds | Read when |
 |------|---------------|-----------|
-| `tooling.md` | The tools baked into the image, with pinned versions and caveats, and how to install more. A set appends its own tool table | before concluding that a tool is missing, and before first using a linter, a document converter or a set's tool |
+| `tooling.md` | The tools baked into the image, with pinned versions and caveats, and how to install more. A set appends its own tool table | before concluding that a tool is missing, before first using a linter, a document converter or a set's tool, and before debugging a Claude Workflow |
 | `git-helpers.md` | GitHub authentication and remotes, `gitcat`, `gh-review-threads`, `dc-enter`/`dc-remove` | before a cross-branch read, fetching review threads, or using a disposable clone |
 | `worktree-helpers.md` | `wt-bootstrap`, `wt-enter` and `wt-remove` in full, the surfaces parallel work shares, and why a worktree's `node_modules` is not scratch | when a helper blocks or refuses, and before cleaning up a worktree any other way |
 | `environment.md` | The filesystem layout (volumes, tmpfs shadows, host mounts, caches) and the egress firewall. A set appends its own paths | when it matters what a path is or what survives container recreation |

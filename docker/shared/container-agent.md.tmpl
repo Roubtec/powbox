@@ -11,7 +11,7 @@ Your identity for this session is in `$CONTAINER_NAME` (also available via the `
 
 Detail that most sessions never need is kept out of this file. It is baked into the image at `/usr/local/share/agent-reference/`, where it describes the image you are running in. Read a file when its situation arises:
 
-- `tooling.md` — before concluding that a tool is missing or installing one, and before first using a linter, a document converter (PDF, Word, slides) or a tool a layer set adds: what is baked, pinned versions, caveats.
+- `tooling.md` — before concluding that a tool is missing or installing one, before first using a linter, a document converter (PDF, Word, slides) or a tool a layer set adds, and before debugging a Claude Workflow script or run (`wf-check`, `wf-status`): what is baked, pinned versions, caveats.
 - `git-helpers.md` — before a cross-branch read, before fetching PR review threads, and before using a disposable clone: `gitcat`, `gh-review-threads` and `dc-enter`/`dc-remove` in full.
 - `worktree-helpers.md` — when `wt-bootstrap` blocks or `wt-enter`/`wt-remove` refuses, and before removing or cleaning up a worktree any other way: what each helper checks and why.
 - `environment.md` — when it matters whether a path is a volume, a tmpfs shadow or a host mount, what survives container recreation or where a cache lives, and before asking for a firewall exception.
@@ -79,7 +79,7 @@ A worktree's `node_modules` is not private scratch either. Installs hardlink fro
 
 ## Workspace storage
 
-- In dir-mounted mode the project's `node_modules` (the root's and each sub-package's) and each .NET project's `bin`/`obj` are container-local shadows over the host bind mount, so container build output stays off the user's disk. They are detected at container start and again before every `pnpm` install. After adding a .NET project mid-session, or before populating a new sub-package's `node_modules` by any means other than `pnpm`, run `shadow-refresh.sh` first, or the output lands on the host.
+- In dir-mounted mode a JS project's `node_modules` (the root's and each sub-package's) and each .NET project's `bin`/`obj` are container-local shadows over the host bind mount, so container build output stays off the user's disk. They are detected at container start and again before every `pnpm` install. After adding a .NET project mid-session, or before populating a new sub-package's `node_modules` by any means other than `pnpm`, run `shadow-refresh.sh` first, or the output lands on the host.
 - When an install reports nothing to do while a package's binaries (`vitest`, `tsc`, `eslint`, …) are missing, run `pnpm-shadow-doctor` (`--fix` repairs it). No flavor of reinstall does.
 
 ## Network

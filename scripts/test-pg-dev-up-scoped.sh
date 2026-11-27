@@ -716,6 +716,7 @@ url_h2="$(pg "$REPO_H" POSTGRES_DB=app_h -- --worktree up 2>/dev/null | tail -1)
 try "up recreated the unstartable non-durable cluster (same URL)" test "$url_h2" = "$url_h"
 try "the recreated cluster serves queries" test "$(psql "$url_h2" -tAc 'select 1' 2>/dev/null || true)" = "1"
 try "the recreated cluster is empty (old table gone)" test "$(psql "$url_h2" -tAc "select count(*) from pg_class where relname = 'leftover_marker'" 2>/dev/null || true)" = "0"
+try "the recreated cluster recorded its credentials afresh (task 089)" grep -qx 'database=app_h' "$data_h/pg-dev-up.cluster"
 pg "$REPO_H" -- --worktree down >/dev/null 2>&1 || true
 
 echo "== task 088: POWBOX_PG_DURABLE=1 keeps full durability, on disk, and is never discarded =="

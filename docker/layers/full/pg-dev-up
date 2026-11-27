@@ -539,11 +539,14 @@ credential_conflict_text() {
 # without (made before the record existed, or by something else) gets none, so
 # the record stays the proof that pg-dev-up created the directory.
 record_credentials() {
-	local text
+	local text had="$REC_HAS_CREDS" was_user="$REC_USER" was_db="$REC_DB"
 	if [ ! -f "$PGDATA/$CLUSTER_RECORD" ]; then
 		log "The cluster at $PGDATA has no pg-dev-up record (it predates one), so its credentials are not remembered: a later 'url' or 'status' uses your environment's POSTGRES_* values."
 		return 0
 	fi
+	# Compare with the record as it is NOW: recovery may have replaced the
+	# cluster resolve_credentials read with a fresh one that records nothing.
+	load_recorded_credentials "$PGDATA"
 	if [ -n "$REC_HAS_CREDS" ] && [ "$REC_USER" = "$POSTGRES_USER" ] &&
 		[ "$REC_PASS" = "$POSTGRES_PASSWORD" ] && [ "$REC_DB" = "$POSTGRES_DB" ]; then
 		return 0
@@ -554,8 +557,8 @@ record_credentials() {
 		log "warning: could not record the credentials in $PGDATA/$CLUSTER_RECORD; a later 'url' or 'status' may describe other ones."
 		return 0
 	fi
-	[ -z "$REC_HAS_CREDS" ] ||
-		log "Recorded new credentials for this cluster: role $POSTGRES_USER, database $POSTGRES_DB (were role $REC_USER, database $REC_DB)."
+	[ -z "$had" ] || { [ "$was_user" = "$POSTGRES_USER" ] && [ "$was_db" = "$POSTGRES_DB" ]; } ||
+		log "Recorded new credentials for this cluster: role $POSTGRES_USER, database $POSTGRES_DB (were role $was_user, database $was_db)."
 }
 
 # Postmaster options. A non-durable cluster skips every flush to stable storage

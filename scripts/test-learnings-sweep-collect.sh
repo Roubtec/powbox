@@ -304,13 +304,37 @@ printf 'report k\n' >"$REL_CHECKOUT/docs/agent-session-learnings-k.md"
 git -C "$REL_CHECKOUT" add docs/agent-session-learnings-k.md
 git -C "$REL_CHECKOUT" commit --quiet -m session-k
 git -C "$REL_CHECKOUT" push --quiet origin learnings/session-k
-out="$(cd "$WORK_ROOT" && "$COLLECT" list "$REL_CHECKOUT/sub" 2>&1 || true)"
-assert_contains "relative origin listed from elsewhere" "$out" "$(printf 'relsample\tlearnings/session-k\treport-only')"
+# rel_listed <checkout> [<env>...]: list run from elsewhere finds session-k.
+rel_listed() {
+	local dir="$1"
+	shift
+	(cd "$WORK_ROOT" && env "$@" "$COLLECT" list "$dir" 2>&1 || true)
+}
+k_row="$(printf 'relsample\tlearnings/session-k\treport-only')"
+assert_contains "relative origin of a work-tree subdirectory" "$(rel_listed "$REL_CHECKOUT/sub")" "$k_row"
+git init --quiet --bare "${WORK_ROOT}/rel/bare.git"
+git -C "${WORK_ROOT}/rel/bare.git" remote add origin ../Relsample.git
+assert_contains "relative origin of a bare repository" "$(rel_listed "${WORK_ROOT}/rel/bare.git")" "$k_row"
+mkdir -p "${WORK_ROOT}/rel/deep"
+git init --quiet --bare "${WORK_ROOT}/rel/deep/bare.git"
+git -C "${WORK_ROOT}/rel/deep/bare.git" remote add origin ../../../Relsample.git
+assert_contains "bare repository resolves from the directory git runs in" "$(rel_listed "${WORK_ROOT}/rel/deep/bare.git/objects")" "$k_row"
+git init --quiet "${WORK_ROOT}/rel/tilde"
+# shellcheck disable=SC2088 # the literal ~ is the point: git expands it
+git -C "${WORK_ROOT}/rel/tilde" remote add origin '~/Relsample.git'
+assert_contains "a leading ~ is left to git" "$(rel_listed "${WORK_ROOT}/rel/tilde" HOME="${WORK_ROOT}/rel")" "$k_row"
+git -C "$REL_CHECKOUT" worktree add --quiet --detach "${WORK_ROOT}/rel/wts/wt" 2>/dev/null
+git -C "$REL_CHECKOUT" remote set-url origin ../../Relsample.git
+assert_contains "linked worktree resolves from its own top" "$(rel_listed "${WORK_ROOT}/rel/wts/wt")" "$k_row"
+git -C "$REL_CHECKOUT" remote set-url origin ../Relsample.git
 SWEEP9="${HOME_REPO}/sweep9"
 (cd "$WORK_ROOT" && "$COLLECT" export --into "$SWEEP9" "$REL_CHECKOUT/sub" >/dev/null 2>&1) || true
-assert_contains "manifest records the absolute origin" "$(cat "$SWEEP9/MANIFEST.tsv" 2>/dev/null)" "$(printf '\t%s/../Relsample.git\t' "$REL_CHECKOUT")"
-git -C "$HOME_REPO" add sweep9
-git -C "$HOME_REPO" commit --quiet -m sweep9
+rel_url="$(awk -F'\t' 'NR == 2 { print $2 }' "$SWEEP9/MANIFEST.tsv" 2>/dev/null || true)"
+case "$rel_url" in
+/*) if [ "$(cd "$rel_url" && pwd -P)" = "$(cd "$REL_ORIGIN" && pwd -P)" ]; then ok "manifest records the origin as an absolute path"; else ko "manifest records the origin as an absolute path ($rel_url)"; fi ;;
+*) ko "manifest records the origin as an absolute path ($rel_url)" ;;
+esac
+{ git -C "$HOME_REPO" add sweep9 2>/dev/null && git -C "$HOME_REPO" commit --quiet -m sweep9; } || true
 (cd "$HOME_REPO" && "$COLLECT" delete --from "$SWEEP9" --yes >/dev/null 2>&1) || true
 if git -C "$REL_ORIGIN" show-ref --verify --quiet refs/heads/learnings/session-k; then
 	ko "delete reaches the relative origin"

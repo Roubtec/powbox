@@ -89,17 +89,18 @@ split_url() {
 # any user part may be a token, and an `@` anywhere is refused because a raw
 # `/` in a password would hide where the user part ends. Elsewhere a user part
 # is a login name (ssh://git@host/…, git@host:…) unless it carries a password.
-# A relative local path is made absolute against the checkout's top, where git
-# itself resolves it, so fetch, the manifest and delete all reach that origin.
+# A relative local path is made absolute where git itself resolves it, so
+# fetch, the manifest and delete all reach that origin: the top of a work
+# tree, and outside one (a bare repository) the directory git ran in. A
+# leading ~ is left to git, which expands it the same from anywhere.
 origin_url() {
 	local dir="$1" url rest top
 	url="$(git -c safe.directory="$dir" -C "$dir" remote get-url origin 2>/dev/null)" ||
 		die "$dir has no origin remote"
 	split_url "$url"
-	if [ -z "$URL_SCHEME" ] && [ "$URL_PATH" = "$url" ] && [[ $url != /* ]]; then
-		top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel 2>/dev/null)" ||
-			top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --absolute-git-dir)" ||
-			die "cannot locate the repository of $dir"
+	if [ -z "$URL_SCHEME" ] && [ "$URL_PATH" = "$url" ] && [[ $url != /* && $url != "~"* ]]; then
+		top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || top=""
+		[ -n "$top" ] || top="$(cd "$dir" && pwd -P)" || die "cannot locate the repository of $dir"
 		url="$top/$url"
 	fi
 	rest="${url#*://}"

@@ -1189,7 +1189,8 @@ workflows keep cost proportional to the change:
   `test-sync-codex-skills.sh`,
   `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
   `test-no-early-exit-pipes.sh` is itself a guard over the others: it fails when
-  a suite pipes into an early-exiting consumer (`grep -q`, `head`, …) under
+  a suite, or a repo-local skill script under `.claude/skills/` that a suite
+  runs, pipes into an early-exiting consumer (`grep -q`, `head`, …) under
   `pipefail`, a check that fails at random when the producer dies of SIGPIPE;
   its header names the in-process replacements and the
   `# early-exit-pipe-ok: <reason>` escape for a deliberate payload.

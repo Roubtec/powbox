@@ -13,13 +13,13 @@ This file is baked into the image from the powbox repository (`docker/shared/age
 ### A background command's completion notice describes the launcher
 
 - **What:** when an agent harness runs a command in the background, its completion notice reports the command that was launched, not the processes that command started. A launcher that forks its real work and returns at once looks finished while the work is still running.
-- **Why accepted:** upstream harness behaviour. Wait on the real work itself (its PID, an output file, a port) rather than on the launcher.
+- **Why accepted:** upstream harness behaviour, observed and carried. Wait on the real work itself (its PID, an output file, a port) rather than on the launcher.
 - **Reopen if:** the harness gains a way to track a launched command's descendants.
 
 ### A long `claude -p` one-shot prints nothing until it ends
 
 - **What:** `claude -p` with its default text output writes the answer only when the run finishes, so a long one-shot shows no progress and there is no heartbeat to wait on.
-- **Why accepted:** upstream CLI behaviour. `--output-format stream-json` (with `--verbose`) streams events as they happen when progress matters; otherwise bound the run with a timeout and wait for it.
+- **Why accepted:** upstream CLI behaviour, observed and carried; `claude --help` confirms that `text` is the default output format and `stream-json` the streaming one. `--output-format stream-json` (with `--verbose`) streams events as they happen when progress matters; otherwise bound the run with a timeout and wait for it.
 - **Reopen if:** a hang is observed that a timeout does not bound, or the default output gains progress.
 
 ### `gh` prints an agent hint on stderr
@@ -83,7 +83,7 @@ This file is baked into the image from the powbox repository (`docker/shared/age
 ### The entrypoint's stderr from a launch is not kept
 
 - **What:** what the container entrypoint writes to stderr at launch goes to the launching terminal, and nothing copies it to a file. Docker's container log keeps it only while the container exists, and a volatile container is removed when it exits.
-- **Why accepted:** not acted on, since the entrypoint reports its failures on the terminal at the time. A persistent container's `docker logs` is the place to look.
+- **Why accepted:** not acted on, since the entrypoint reports its failures on the terminal at the time. A persistent container's `docker logs` is the place to look. The detached plugin bootstrap is the exception: its output is kept in `.powbox-plugin-bootstrap.log` on Claude's config volume (`$CLAUDE_CONFIG_DIR`).
 - **Reopen if:** a launch problem is lost because its output was gone by the time anyone looked.
 
 ### Extensionless helpers are committed without the executable bit

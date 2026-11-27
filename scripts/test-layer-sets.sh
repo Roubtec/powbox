@@ -1505,6 +1505,7 @@ run_sequence() {
 	c1="$(git -C "$br" rev-parse --short HEAD)"
 	build "$lang" "$st" all "${PIN[@]}" >/dev/null
 	assert_eq "[$lang] set all: three images" "$(bakes "$st")" "base,layers,agent"
+	# shellcheck disable=SC2016 # a literal Markdown heading
 	assert_eq "[$lang] set all: the set's known limitations are staged under their heading" \
 		"$(grep -cxF -- '## Contributed by the `full` layer set' "$br/.powbox-staging/agent-reference/known-limitations.md")" 1
 	assert_contains "[$lang] set all: agent on the layer-set image" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-layers:latest"

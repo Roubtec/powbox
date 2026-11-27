@@ -71,7 +71,7 @@
 #
 # Destroying. `destroy` removes only a cluster pg-dev-up created and marked: a
 # data directory holding a PostgreSQL cluster AND its pg-dev-up.cluster record
-# (or an empty one), owned by the caller. Anything else (a directory that is not
+# (or an empty one at a location pg-dev-up itself chose), owned by the caller. Anything else (a directory that is not
 # a cluster, a cluster from before the record existed, an explicit PGDATA naming
 # such a directory) is refused and left untouched. A running cluster is stopped
 # first. A scoped `destroy` also removes the scope's markers; with an explicit
@@ -539,7 +539,7 @@ credential_conflict_text() {
 # without (made before the record existed, or by something else) gets none, so
 # the record stays the proof that pg-dev-up created the directory.
 record_credentials() {
-	local text had="$REC_HAS_CREDS" was_user="$REC_USER" was_db="$REC_DB"
+	local text had="$REC_HAS_CREDS" was_user="$REC_USER" was_pass="$REC_PASS" was_db="$REC_DB" was=""
 	if [ ! -f "$PGDATA/$CLUSTER_RECORD" ]; then
 		log "The cluster at $PGDATA has no pg-dev-up record (it predates one), so its credentials are not remembered: a later 'url' or 'status' uses your environment's POSTGRES_* values."
 		return 0
@@ -557,8 +557,12 @@ record_credentials() {
 		log "warning: could not record the credentials in $PGDATA/$CLUSTER_RECORD; a later 'url' or 'status' may describe other ones."
 		return 0
 	fi
-	[ -z "$had" ] || { [ "$was_user" = "$POSTGRES_USER" ] && [ "$was_db" = "$POSTGRES_DB" ]; } ||
-		log "Recorded new credentials for this cluster: role $POSTGRES_USER, database $POSTGRES_DB (were role $was_user, database $was_db)."
+	[ -n "$had" ] || return 0
+	[ "$was_user" = "$POSTGRES_USER" ] || was+="${was:+, }role $was_user"
+	[ "$was_db" = "$POSTGRES_DB" ] || was+="${was:+, }database $was_db"
+	[ "$was_pass" = "$POSTGRES_PASSWORD" ] || was+="${was:+, }the previous password"
+	[ -z "$was" ] ||
+		log "Recorded new credentials for this cluster: role $POSTGRES_USER, database $POSTGRES_DB (replacing $was)."
 }
 
 # Postmaster options. A non-durable cluster skips every flush to stable storage
@@ -1688,17 +1692,39 @@ cmd_list() {
 }
 
 # If $1 lies inside a scoped instance (its instance dir under the scoped root, or
-# its RAM-backed data), print that instance's key.
+# its RAM-backed data) or is the data directory an instance recorded, print that
+# instance's key. Both the lexical and the symlink-resolved path are compared, so
+# neither `//`, `.` nor a link can disguise a scope's data as unscoped.
 scoped_key_of_datadir() {
-	local rest
-	case "$1/" in
-		"$SCOPED_ROOT"/*/*) rest="${1#"$SCOPED_ROOT"/}" ;;
-		"$PG_RAM_BASE"/*/*) rest="${1#"$PG_RAM_BASE"/}" ;;
-		*) return 1 ;;
-	esac
-	rest="${rest%%/*}"
-	is_scope_key "$rest" || return 1
-	printf '%s\n' "$rest"
+	local p root rest f
+	local -a paths roots
+	paths=("$(realpath -m -s -- "$1")" "$(realpath -m -- "$1")")
+	roots=("$SCOPED_ROOT" "$(realpath -m -- "$SCOPED_ROOT")" "$PG_RAM_BASE" "$(realpath -m -- "$PG_RAM_BASE")")
+	for p in "${paths[@]}"; do
+		for root in "${roots[@]}"; do
+			case "$p/" in
+				"$root"/*/*)
+					rest="${p#"$root"/}"
+					rest="${rest%%/*}"
+					if is_scope_key "$rest"; then
+						printf '%s\n' "$rest"
+						return 0
+					fi
+					;;
+			esac
+		done
+	done
+	for f in "$SCOPED_ROOT"/*/datadir; do
+		[ -s "$f" ] && [ -O "$f" ] || continue
+		rest="${f%/datadir}"
+		rest="${rest##*/}"
+		is_scope_key "$rest" || continue
+		if [ "$(realpath -m -- "$(cat -- "$f" 2>/dev/null)" 2>/dev/null)" = "${paths[1]}" ]; then
+			printf '%s\n' "$rest"
+			return 0
+		fi
+	done
+	return 1
 }
 
 # Judge whether `destroy` may remove the data directory $1. Sets VERDICT to
@@ -1730,7 +1756,7 @@ destroy_verdict() {
 
 cmd_destroy() {
 	local d recorded="" key refused="" i what
-	local -a cands=() found=() verdicts=()
+	local -a cands=() found=() verdicts=() kept=() managed=()
 	require_bindir
 	if [ -n "$SCOPED" ]; then
 		# Hold the scope's `up` lock, so a concurrent same-scope `up` either
@@ -1743,14 +1769,18 @@ cmd_destroy() {
 			fi
 		fi
 		[ ! -s "$DATADIR_FILE" ] || recorded="$(cat -- "$DATADIR_FILE")"
-		if [ -n "$PGDATA_EXPLICIT" ] && [ "$PGDATA" != "$recorded" ]; then
+		if [ -n "$PGDATA_EXPLICIT" ] && { [ -z "$recorded" ] ||
+			[ "$(realpath -m -s -- "$PGDATA")" != "$(realpath -m -s -- "$recorded")" ]; }; then
 			log "a scoped 'destroy' removes the cluster this scope recorded${recorded:+ ($recorded)}; PGDATA=$PGDATA names another directory, so nothing was removed. Drop PGDATA, or run 'destroy' without a scope flag to destroy the cluster at that PGDATA."
 			exit 1
 		fi
 		[ -z "$recorded" ] || cands+=("$recorded")
 		cands+=("$INSTANCE_DIR/pgdata" "$PG_RAM_BASE/$SCOPE_KEY/pgdata")
 	elif [ -n "$PGDATA_EXPLICIT" ]; then
-		case "$PGDATA" in /*) : ;; *) PGDATA="$(realpath -m -- "$PGDATA")" ;; esac
+		# Lexically (`-s` follows no symlink), so a link stays a link for
+		# destroy_verdict to refuse, however it is spelled: relative, or with the
+		# trailing slash tab completion adds (which `[ -L ]` would see through).
+		PGDATA="$(realpath -m -s -- "$PGDATA")"
 		if key="$(scoped_key_of_datadir "$PGDATA")"; then
 			log "$PGDATA belongs to scoped instance $key; destroy it with 'pg-dev-up --instance $key destroy', which removes its markers too. Nothing was removed."
 			exit 1
@@ -1759,13 +1789,25 @@ cmd_destroy() {
 	else
 		cands+=("$(managed_datadir disk)" "$(managed_datadir ram)")
 	fi
+	managed=("$(realpath -m -s -- "$(managed_datadir disk)")" "$(realpath -m -s -- "$(managed_datadir ram)")")
 	# Judge every candidate before touching any, so a refusal removes nothing.
+	# An empty directory is pg-dev-up's only at a location it chose itself; an
+	# explicit one may be any empty directory the caller owns, so it stays.
 	for d in "${cands[@]}"; do
-		for i in "${found[@]}"; do [ "$i" != "$d" ] || continue 2; done
+		d="$(realpath -m -s -- "$d")"
+		for i in "${found[@]}" "${kept[@]}"; do [ "$i" != "$d" ] || continue 2; done
 		destroy_verdict "$d"
 		case "$VERDICT" in
 			absent) ;;
 			refuse) refused+="${refused:+ }$DESTROY_REASON." ;;
+			empty)
+				if [ "$d" = "${managed[0]}" ] || [ "$d" = "${managed[1]}" ]; then
+					found+=("$d")
+					verdicts+=(empty)
+				else
+					kept+=("$d")
+				fi
+				;;
 			*)
 				found+=("$d")
 				verdicts+=("$VERDICT")
@@ -1798,6 +1840,9 @@ cmd_destroy() {
 		fi
 		log "Removed $what at $d."
 	done
+	for d in "${kept[@]}"; do
+		log "Left the empty directory at $d in place: it is not a location pg-dev-up chose, so nothing marks it as one pg-dev-up created."
+	done
 	if [ -n "$SCOPED" ]; then
 		[ ! -d "$PG_RAM_BASE/$SCOPE_KEY" ] || rmdir -- "$PG_RAM_BASE/$SCOPE_KEY" 2>/dev/null || true
 		if [ -d "$INSTANCE_DIR" ]; then
@@ -1813,7 +1858,7 @@ cmd_destroy() {
 			return 0
 		fi
 	fi
-	[ "${#found[@]}" -eq 0 ] || return 0
+	[ "${#found[@]}" -eq 0 ] && [ "${#kept[@]}" -eq 0 ] || return 0
 	if [ -n "$SCOPED" ]; then
 		log "No cluster to destroy: scoped instance $SCOPE_KEY has no markers or data."
 	else

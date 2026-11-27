@@ -871,6 +871,12 @@ url_m2="$(pg "$REPO_M" POSTGRES_DB=app_m2 -- --worktree up 2>/dev/null | tail -1
 try "up with a new database records it" test "$(pg "$REPO_M" -- --worktree url)" = "$url_m2"
 case "$url_m2" in postgresql://appm:s3c%3Ar%2Ft@*/'app_m2?sslmode=disable') ok "the recorded role and password carry over to the new database" ;; *) ko "credentials did not carry over: $url_m2" ;; esac
 try "the new database exists" test "$(psql "$url_m2" -tAc 'select current_database()' 2>/dev/null || true)" = "app_m2"
+up_pw_err="$WORK/up-pw.err"
+pg "$REPO_M" POSTGRES_PASSWORD=n3w-pass -- --worktree up >/dev/null 2>"$up_pw_err" || ko "up with a new password failed"
+if grep -q "Recorded new credentials.*(replacing the previous password)" "$up_pw_err"; then ok "up says it recorded a changed password"; else ko "a changed password was recorded silently: $(cat "$up_pw_err")"; fi
+if grep -q n3w-pass "$up_pw_err"; then ko "the notice prints the password"; else ok "the notice does not print the password"; fi
+try "the record keeps the new password" grep -qx 'password=n3w-pass' "$data_m/pg-dev-up.cluster"
+pg "$REPO_M" POSTGRES_PASSWORD='s3c:r/t' -- --worktree up >/dev/null 2>&1 || ko "restoring the password failed"
 # A cluster recorded before task 089 (format 1, no credentials) remembers none.
 sed -i '/^user=/d; /^password=/d; /^database=/d; s/^format=2$/format=1/' "$data_m/pg-dev-up.cluster"
 try "a record without credentials leaves url to the environment" test "$(pg "$REPO_M" POSTGRES_USER=appm POSTGRES_PASSWORD='s3c:r/t' POSTGRES_DB=app_m2 -- --worktree url)" = "$url_m2"
@@ -925,12 +931,61 @@ STARTED_DATADIRS+=("$data_n")
 try "an up racing repeated lists succeeds" test "$status_n" -eq 0
 try "and serves its database" test "$(psql "$(tail -1 "$WORK/n.out")" -tAc 'select current_database()' 2>/dev/null || true)" = "app_n"
 
+echo "== task 089: an up that waited on a destroy finds the scope gone =="
+# Stand in for a destroy holding the scope's .uplock: once the up blocks on the
+# lock, remove the instance as destroy does, then release it.
+wait_prof="destroyed-while-waiting"
+wait_key="$(printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$wait_prof" | sha256sum | cut -c1-16)"
+wait_inst="$SCOPED_ROOT/$wait_key"
+(umask 077 && mkdir -p "$wait_inst")
+lock_held="$WORK/wait-lock-held"
+lock_release="$WORK/wait-lock-release"
+(
+	exec 9>"$wait_inst/.uplock"
+	flock 9
+	: >"$lock_held"
+	for _ in $(seq 300); do
+		[ ! -e "$lock_release" ] || break
+		sleep 0.1
+	done
+	rm -f "$wait_inst/.uplock"
+	rmdir "$wait_inst"
+) &
+pid_holder=$!
+for _ in $(seq 100); do
+	[ ! -e "$lock_held" ] || break
+	sleep 0.1
+done
+STARTED_DATADIRS+=("$wait_inst/pgdata")
+wait_err="$WORK/wait-up.err"
+pg "$NONGIT" -- --profile "$wait_prof" up >/dev/null 2>"$wait_err" &
+pid_wait_up=$!
+# The up is blocked once a second process holds the lock file open.
+blocked=""
+for _ in $(seq 100); do
+	if [ "$(find /proc/[0-9]*/fd -lname "$wait_inst/.uplock" 2>/dev/null | wc -l)" -ge 2 ]; then
+		blocked=yes
+		break
+	fi
+	sleep 0.1
+done
+try "the up blocked on the scope's lock" test -n "$blocked"
+: >"$lock_release"
+wait "$pid_holder" || true
+status_wait=0
+wait "$pid_wait_up" || status_wait=$?
+try "the up that waited fails" test "$status_wait" -ne 0
+if grep -q "destroyed while this 'up' waited for it" "$wait_err"; then ok "it says the scope was destroyed meanwhile"; else ko "unclear failure: $(cat "$wait_err")"; fi
+try "it did not re-create the instance" test ! -e "$wait_inst"
+
 echo "== task 089: destroy removes only what pg-dev-up created and marked =="
 try_not "destroy refuses a non-empty PGDATA that holds no cluster" pg "$WORK" PGDATA="$user_dir" -- destroy
 try "the user's file survives" test "$(cat "$user_dir/notes.txt")" = "keep me"
 ln -s "$data_n" "$WORK/link-to-cluster"
 try_not "destroy refuses a PGDATA that is a symbolic link" pg "$WORK" PGDATA="$WORK/link-to-cluster" -- destroy
 try_not "an unscoped destroy refuses a scoped instance's data dir" pg "$WORK" PGDATA="$data_n" -- destroy
+case "$data_n" in "$SCOPED_ROOT"/*) ok "the scoped data dir is under the scoped root" ;; *) ko "scoped data dir elsewhere: $data_n" ;; esac
+try_not "it refuses one spelled with // and ." pg "$WORK" PGDATA="$SCOPED_ROOT/.//${data_n#"$SCOPED_ROOT"/}" -- destroy
 try_not "a scoped destroy refuses an explicit PGDATA naming another directory" pg "$REPO_N" PGDATA="$user_dir" -- --worktree destroy
 try "the refused destroys left the cluster running" pg "$REPO_N" -- --worktree status
 destroy_l_err="$WORK/destroy-l.err"
@@ -952,8 +1007,26 @@ try "destroying it again is a no-op success" pg "$WORK" -- --instance "$key_m" d
 try "a worktree's own scoped destroy removes it" pg "$REPO_N" -- --worktree destroy
 try "its data directory is gone too" test ! -e "$data_n"
 try_not "and scoped status no longer finds it" pg "$REPO_N" -- --worktree status
+ln -s "$unscoped_cred_data" "$WORK/link-to-unscoped"
+try_not "destroy refuses a symbolic link spelled with a trailing slash" pg "$WORK" PGDATA="$WORK/link-to-unscoped/" -- destroy
+try_not "destroy refuses a symbolic link given as a relative path" pg "$WORK" PGDATA=link-to-unscoped -- destroy
+try "the linked cluster survives" test -s "$unscoped_cred_data/PG_VERSION"
 try "an unscoped destroy removes the cluster at its explicit PGDATA" pg "$WORK" PGDATA="$unscoped_cred_data" -- destroy
 try "that data directory is gone" test ! -e "$unscoped_cred_data"
+mkdir "$WORK/empty-explicit"
+try "destroy of an empty explicit PGDATA succeeds" pg "$WORK" PGDATA="$WORK/empty-explicit" -- destroy
+try "and leaves that directory in place" test -d "$WORK/empty-explicit"
+# A scope's recorded explicit data dir lies outside the scoped root, but is still
+# the scope's: only its scoped destroy, which removes the markers too, takes it.
+REPO_P="$WORK/wt-p"
+add_worktree "$MAIN_REPO" "$REPO_P" wt-p
+explicit_p="$WORK/explicit-p-pgdata"
+STARTED_DATADIRS+=("$explicit_p")
+pg "$REPO_P" PGDATA="$explicit_p" POSTGRES_DB=app_p -- --worktree up >/dev/null 2>&1 || ko "scoped up with an explicit PGDATA failed"
+try_not "an unscoped destroy refuses the data dir a scope recorded" pg "$WORK" PGDATA="$explicit_p" -- destroy
+try "the scope's cluster survives" test -s "$explicit_p/PG_VERSION"
+try "the scope's own destroy removes it" pg "$REPO_P" -- --worktree destroy
+try "its explicit data dir is gone" test ! -e "$explicit_p"
 # RAM-backed data that no instance under this scoped root records (here: made
 # under another scoped root) is listed and destroyable by its key.
 REPO_O="$WORK/wt-o"

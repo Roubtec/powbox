@@ -1527,9 +1527,9 @@ fi
 # paths below do; its named volumes (config, node_modules, .worktrees, Podman
 # storage, a self-hosted agent-ws-* workspace) are kept, only its writable layer
 # goes. A running one is refused rather than killed, so a live session is never
-# cut off. This is the one place a volatile launch diverges: it leaves no
-# existing container, so the reuse and recreate checks below, which guard only on
-# CONTAINER_EXISTS, all fall through to a fresh create.
+# cut off. This is where a volatile launch's container decision is made: it
+# leaves no existing container, so every reuse and recreate check below falls
+# through to a fresh create.
 if [ "$VOLATILE" = true ] && [ "$CONTAINER_EXISTS" = true ]; then
 	if [ "$CONTAINER_RUNNING" = true ]; then
 		echo "Container ${CONTAINER_NAME} is running; stop it before --volatile (it replaces the container with a fresh one), or relaunch without --volatile to attach to it." >&2

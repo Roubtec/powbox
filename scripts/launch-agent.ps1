@@ -1363,9 +1363,9 @@ if ($Resume) {
 # conflict. Remove a stopped one, as the recreate paths below do; its named volumes
 # (config, node_modules, .worktrees, Podman storage, a self-hosted agent-ws-*
 # workspace) are kept, only its writable layer goes. A running one is refused rather
-# than killed, so a live session is never cut off. This is the one place a volatile
-# launch diverges: it leaves no existing container, so the reuse and recreate checks
-# below, which guard only on $containerExists, all fall through to a fresh create.
+# than killed, so a live session is never cut off. This is where a volatile launch's
+# container decision is made: it leaves no existing container, so every reuse and
+# recreate check below falls through to a fresh create.
 if ($Volatile -and $containerExists) {
   if ($containerRunning) {
     Write-Error "Container $containerName is running; stop it before -Volatile (it replaces the container with a fresh one), or relaunch without -Volatile to attach to it."

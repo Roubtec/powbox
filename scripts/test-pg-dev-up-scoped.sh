@@ -944,12 +944,15 @@ lock_release="$WORK/wait-lock-release"
 	exec 9>"$wait_inst/.uplock"
 	flock 9
 	: >"$lock_held"
-	for _ in $(seq 300); do
+	# No child of the holder may inherit fd 9 (hence the fork-free loop and the
+	# 9>&- on sleep): the blocked check below counts open descriptors on the lock
+	# file, and a second one must be the up's.
+	for ((i = 0; i < 300; i++)); do
 		[ ! -e "$lock_release" ] || break
-		sleep 0.1
+		sleep 0.1 9>&-
 	done
-	rm -f "$wait_inst/.uplock"
-	rmdir "$wait_inst"
+	rm -f "$wait_inst/.uplock" 9>&-
+	rmdir "$wait_inst" 9>&-
 ) &
 pid_holder=$!
 for _ in $(seq 100); do

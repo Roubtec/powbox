@@ -71,9 +71,10 @@
 #
 # Destroying. `destroy` removes only a cluster pg-dev-up created and marked: a
 # data directory holding a PostgreSQL cluster AND its pg-dev-up.cluster record
-# (or an empty one at a location pg-dev-up itself chose), owned by the caller. Anything else (a directory that is not
-# a cluster, a cluster from before the record existed, an explicit PGDATA naming
-# such a directory) is refused and left untouched. A running cluster is stopped
+# (or an empty one at a location pg-dev-up itself chose), owned by the caller.
+# Anything else (a directory that is not a cluster, a cluster from before the
+# record existed, an explicit PGDATA naming such a directory) is refused and
+# left untouched. A running cluster is stopped
 # first. A scoped `destroy` also removes the scope's markers; with an explicit
 # PGDATA it refuses unless that names the scope's own recorded data directory.
 #

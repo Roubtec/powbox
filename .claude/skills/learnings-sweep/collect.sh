@@ -16,11 +16,14 @@
 #         `unrelated` when it shares no history) and is never deleted.
 # export  copies every report byte for byte to <dir>/reports/<repo>/ and writes
 #         <dir>/MANIFEST.tsv, recording the source commit so a deleted branch
-#         can be recreated while the remote still holds the object.
+#         can be recreated while the remote still holds the object. The
+#         manifest appears only once the whole export has succeeded, so an
+#         interrupted export leaves nothing delete would act on.
 # delete  removes the `report-only` branches the manifest lists, each under a
 #         lease on the recorded commit, and only when the repository holding
 #         <dir> has committed every aggregated copy with exactly the recorded
-#         content, and no open pull request uses the branch as its head.
+#         content, and no open pull request uses the branch as its head (in
+#         any repository, so a fork's branch behind a PR upstream is held).
 #         Without --yes it only prints what it would do.
 #
 # `learnings/*` is always collected; --also adds another branch glob (one `*`
@@ -33,7 +36,9 @@ die() {
 	exit 1
 }
 
-REPORT_RE='(^|/)agent-session-learnings-[^/]*\.md$'
+# `[.]` rather than `\.`: awk -v expands backslash escapes, which would turn
+# `\.` into a wildcard and let awk and grep disagree on what a report is.
+REPORT_RE='(^|/)agent-session-learnings-[^/]*[.]md$'
 STORE=""
 cleanup() { [ -z "$STORE" ] || rm -rf "$STORE"; }
 trap cleanup EXIT
@@ -132,18 +137,33 @@ cmd_scan() {
 		esac
 	done
 	[ "${#checkouts[@]}" -gt 0 ] || die "name at least one checkout"
+	# The label namespaces fetched refs, report directories and the deletion
+	# key, so two origins sharing one would mix their branches: refuse that
+	# before anything is fetched or written.
+	local urls=() labels=() i j
+	for i in "${!checkouts[@]}"; do
+		dir="$(cd "${checkouts[$i]}" && pwd)" || die "no such checkout: ${checkouts[$i]}"
+		urls+=("$(origin_url "$dir")")
+		labels+=("$(repo_label "${urls[$i]}")")
+		for ((j = 0; j < i; j++)); do
+			[ "${labels[$j]}" != "${labels[$i]}" ] ||
+				die "${urls[$j]} and ${urls[$i]} share the label ${labels[$i]}; sweep them in separate runs"
+		done
+	done
+	local manifest=""
 	if [ "$mode" = export ]; then
 		[ -n "$into" ] || die "export needs --into <dir>"
-		[ ! -e "$into/MANIFEST.tsv" ] || die "$into already holds a manifest; use a fresh directory per sweep"
+		[ ! -e "$into/MANIFEST.tsv" ] && [ ! -e "$into/MANIFEST.tsv.partial" ] && [ ! -e "$into/reports" ] ||
+			die "$into already holds an export; use a fresh directory per sweep"
 		mkdir -p "$into/reports"
-		printf 'repo\turl\tbranch\tclass\tcommit\tcommit_date\tsource_path\tblob\taggregated_path\n' >"$into/MANIFEST.tsv"
+		manifest="$into/MANIFEST.tsv.partial"
+		printf 'repo\turl\tbranch\tclass\tcommit\tcommit_date\tsource_path\tblob\taggregated_path\n' >"$manifest"
 	fi
 	STORE="$(mktemp -d)"
 	git init --quiet --bare "$STORE"
-	for dir in "${checkouts[@]}"; do
-		dir="$(cd "$dir" && pwd)" || die "no such checkout: $dir"
-		url="$(origin_url "$dir")"
-		label="$(repo_label "$url")"
+	for i in "${!checkouts[@]}"; do
+		url="${urls[$i]}"
+		label="${labels[$i]}"
 		fetch_repo "$label" "$url" ${also[@]+"${also[@]}"}
 		while read -r ref sha; do
 			[ -n "$ref" ] || continue
@@ -165,10 +185,24 @@ cmd_scan() {
 				[ "$(git hash-object --no-filters "$into/$dest")" = "$blob" ] ||
 					die "copy of ${label}:${branch}:${file} does not match its source"
 				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-					"$label" "$url" "$branch" "$class" "$sha" "$date" "$file" "$blob" "$dest" >>"$into/MANIFEST.tsv"
+					"$label" "$url" "$branch" "$class" "$sha" "$date" "$file" "$blob" "$dest" >>"$manifest"
 			done < <(branch_reports "$label" "$ref")
 		done < <(git -C "$STORE" for-each-ref --format='%(refname) %(objectname)' "refs/sweep/${label}/b")
 	done
+	[ -z "$manifest" ] || mv "$manifest" "$into/MANIFEST.tsv"
+}
+
+# Open pull requests whose head is the branch, in any repository: a fork's
+# branch can back a PR into its upstream, which a listing of the fork's own
+# pull requests does not show. Prints a count, or `gone` when the branch no
+# longer exists.
+open_prs_for_head() {
+	local slug="$1" branch="$2"
+	# shellcheck disable=SC2016 # GraphQL variables, not shell expansions
+	gh api graphql \
+		-f query='query($o: String!, $n: String!, $r: String!) { repository(owner: $o, name: $n) { ref(qualifiedName: $r) { associatedPullRequests(states: OPEN) { totalCount } } } }' \
+		-f o="${slug%%/*}" -f n="${slug#*/}" -f r="refs/heads/${branch}" \
+		--jq '.data.repository.ref | if . == null then "gone" else .associatedPullRequests.totalCount end'
 }
 
 # True when the commit at HEAD of the repository holding <dir> carries the
@@ -211,9 +245,16 @@ cmd_delete() {
 		fi
 		slug="$(github_slug "$url")"
 		if [ -z "$reason" ] && [ -n "$slug" ]; then
-			prs="$(gh pr list --repo "$slug" --head "$branch" --state open --json number --jq length 2>/dev/null)" ||
+			prs="$(open_prs_for_head "$slug" "$branch" 2>/dev/null)" ||
 				reason="could not check for open pull requests"
-			[ -n "$reason" ] || [ "$prs" = 0 ] || reason="an open pull request uses it as head"
+			if [ -z "$reason" ]; then
+				case "$prs" in
+				0) ;;
+				gone) reason="the remote branch no longer exists" ;;
+				[1-9]*) reason="an open pull request uses it as head" ;;
+				*) reason="could not check for open pull requests" ;;
+				esac
+			fi
 		fi
 		if [ -n "$reason" ]; then
 			printf 'held\t%s\t%s\t%s\n' "$repo" "$branch" "$reason"

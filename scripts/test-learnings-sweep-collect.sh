@@ -154,6 +154,76 @@ out="$("$COLLECT" delete --from "$SWEEP3" --yes)"
 assert_contains "altered commit holds the branch" "$out" "$(printf 'held\tsample\tlearnings/session-d')"
 if remote_has learnings/session-d; then ok "its branch is still on origin"; else ko "its branch is still on origin"; fi
 
+echo "Test: a non-report file whose name only resembles a report makes the branch mixed"
+# Only an awk that expands escapes in -v (gawk) can misread this; mawk cannot.
+add_branch learnings/session-e docs/agent-session-learnings-e.md docs/agent-session-learnings-cleanup.cmd
+out="$("$COLLECT" list "$CHECKOUT")"
+assert_contains "look-alike file makes the branch mixed" "$out" "$(printf 'sample\tlearnings/session-e\tmixed')"
+
+echo "Test: two origins sharing a label are refused before anything is written"
+FORK_ORIGIN="${WORK_ROOT}/fork/Sample.git"
+FORK_CHECKOUT="${WORK_ROOT}/fork-checkout"
+mkdir -p "${WORK_ROOT}/fork"
+git clone --quiet --bare "$ORIGIN" "$FORK_ORIGIN"
+git init --quiet "$FORK_CHECKOUT"
+git -C "$FORK_CHECKOUT" remote add origin "$FORK_ORIGIN"
+out="$("$COLLECT" export --into "${HOME_REPO}/dup" "$CHECKOUT" "$FORK_CHECKOUT" 2>&1 || true)"
+assert_contains "shared label refused" "$out" "share the label sample"
+if [ -e "${HOME_REPO}/dup" ]; then ko "refused export wrote nothing"; else ok "refused export wrote nothing"; fi
+
+echo "Test: an interrupted export leaves no manifest for delete to act on"
+BROKEN_CHECKOUT="${WORK_ROOT}/broken-checkout"
+git init --quiet "$BROKEN_CHECKOUT"
+git -C "$BROKEN_CHECKOUT" remote add origin "${WORK_ROOT}/missing.git"
+SWEEP5="${HOME_REPO}/sweep5"
+if "$COLLECT" export --into "$SWEEP5" "$CHECKOUT" "$BROKEN_CHECKOUT" >/dev/null 2>&1; then
+	ko "export with an unreachable origin fails"
+else
+	ok "export with an unreachable origin fails"
+fi
+if [ -e "$SWEEP5/reports/sample/agent-session-learnings-b.md" ]; then ok "reports before the failure were copied"; else ko "reports before the failure were copied"; fi
+if [ -e "$SWEEP5/MANIFEST.tsv" ]; then ko "no manifest after the failure"; else ok "no manifest after the failure"; fi
+if "$COLLECT" delete --from "$SWEEP5" --yes >/dev/null 2>&1; then ko "delete refuses the interrupted export"; else ok "delete refuses the interrupted export"; fi
+if "$COLLECT" export --into "$SWEEP5" "$CHECKOUT" >/dev/null 2>&1; then ko "re-export into the interrupted directory refused"; else ok "re-export into the interrupted directory refused"; fi
+
+echo "Test: a GitHub origin's branch is held while any open pull request uses it as head"
+# The manifest is rewritten to a GitHub URL that git maps back to the local
+# origin, and a stub gh answers the open-pull-request query.
+add_branch learnings/session-f docs/agent-session-learnings-f.md
+SWEEP6="${HOME_REPO}/sweep6"
+"$COLLECT" export --into "$SWEEP6" "$CHECKOUT"
+awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "https://github.com/acme/sample.git" } { print }' "$SWEEP6/MANIFEST.tsv" >"$SWEEP6/MANIFEST.tmp"
+mv "$SWEEP6/MANIFEST.tmp" "$SWEEP6/MANIFEST.tsv"
+git -C "$HOME_REPO" add sweep6
+git -C "$HOME_REPO" commit --quiet -m sweep6
+STUB_BIN="${WORK_ROOT}/stub-bin"
+mkdir -p "$STUB_BIN"
+cat >"$STUB_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_LOG"
+[ "$GH_STUB" != fail ] || exit 1
+printf '%s\n' "$GH_STUB"
+STUB
+chmod +x "$STUB_BIN/gh"
+export GH_LOG="${WORK_ROOT}/gh.log"
+gh_delete() {
+	GH_STUB="$1" PATH="${STUB_BIN}:${PATH}" \
+		GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.${ORIGIN}.insteadOf" GIT_CONFIG_VALUE_0="https://github.com/acme/sample.git" \
+		"$COLLECT" delete --from "$SWEEP6" --yes
+}
+out="$(gh_delete 1)"
+assert_contains "open pull request holds the branch" "$out" "$(printf 'held\tsample\tlearnings/session-f\tan open pull request uses it as head')"
+assert_contains "query names the owner" "$(cat "$GH_LOG")" "o=acme"
+assert_contains "query names the branch ref" "$(cat "$GH_LOG")" "r=refs/heads/learnings/session-f"
+out="$(gh_delete fail)"
+assert_contains "failed query holds the branch" "$out" "$(printf 'held\tsample\tlearnings/session-f\tcould not check for open pull requests')"
+out="$(gh_delete gone)"
+assert_contains "vanished branch held" "$out" "$(printf 'held\tsample\tlearnings/session-f\tthe remote branch no longer exists')"
+if remote_has learnings/session-f; then ok "held branch still on origin"; else ko "held branch still on origin"; fi
+out="$(gh_delete 0)"
+assert_contains "no open pull request lets it go" "$out" "$(printf 'deleted\tsample\tlearnings/session-f')"
+if remote_has learnings/session-f; then ko "branch gone from origin"; else ok "branch gone from origin"; fi
+
 echo "Test: an origin URL carrying a credential is refused"
 git -C "$CHECKOUT" remote set-url origin 'https://user:secret@example.invalid/Sample.git'
 out="$("$COLLECT" list "$CHECKOUT" 2>&1 || true)"

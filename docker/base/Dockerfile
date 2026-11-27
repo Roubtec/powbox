@@ -1,6 +1,9 @@
 FROM node:24-trixie-slim
 
-# System dependencies
+# System dependencies. ripgrep is baked although both agent harnesses bring
+# their own `rg`: Claude Code's is a shell function that exists only in the
+# agent's own shell, and Codex's sits on a PATH only its tool calls see, so a
+# script, Makefile or test suite the agent starts needs this /usr/bin/rg.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bc \
     bat \
@@ -33,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     python3 \
     python3-pip \
+    ripgrep \
     rsync \
     shfmt \
     sqlite3 \
@@ -182,8 +186,9 @@ RUN rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
 #
 # Pinned to 0.13.1 on purpose, not the latest: Debian trixie's pandoc
 # (3.1.11.1) writes a default Typst template that Typst 0.14 and 0.15 reject
-# with `error: font fallback list must not be empty`, while 0.13.1 renders it
-# out of the box. Re-test pandoc's PDF output before bumping either tool; the
+# with `error: font fallback list must not be empty` (re-checked with 0.15.1),
+# while 0.13.1 renders it out of the box. Re-test pandoc's PDF output before
+# bumping either tool; the
 # Stage 1 smoke probe builds a PDF through this engine, so a bump that breaks
 # the template fails there. Fetched as the statically linked musl release
 # tarball from GitHub and sha256-pinned per arch, like the OPA binary in the

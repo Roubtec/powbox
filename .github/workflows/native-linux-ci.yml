@@ -242,7 +242,7 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/wf-check" --package-lock=false \
             --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund \
-            acorn@8.15.0 acorn-walk@8.3.4
+            acorn@8.15.0 acorn-walk@8.3.5
           echo "WF_CHECK_ACORN=$RUNNER_TEMP/wf-check/node_modules/acorn" >>"$GITHUB_ENV"
           echo "WF_CHECK_ACORN_WALK=$RUNNER_TEMP/wf-check/node_modules/acorn-walk" >>"$GITHUB_ENV"
 

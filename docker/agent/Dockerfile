@@ -99,9 +99,9 @@ USER node
 # Keep these above Codex so its cache parent remains this image's parent (the
 # base or the layer-set image); the provenance resolver deliberately models that
 # exact parent plus CODEX_VERSION.
-# actionlint is the current stable v1.7.12 release. Fetch its static Linux
-# tarball directly from GitHub and verify the per-architecture SHA256 published
-# in actionlint_1.7.12_checksums.txt before extracting anything onto PATH. Bump
+# actionlint follows upstream releases. Fetch its static Linux tarball directly
+# from GitHub and verify the per-architecture SHA256 published in the release's
+# actionlint_<version>_checksums.txt before extracting anything onto PATH. Bump
 # the version, both checksums, the tooling-table row, and the exact Bash and
 # PowerShell Stage 1 smoke assertions together.
 USER root
@@ -119,9 +119,11 @@ RUN ACTIONLINT_VERSION=1.7.12 \
     && chmod 0755 /usr/local/bin/actionlint \
     && rm /tmp/actionlint.tar.gz
 
-# ShellCheck 0.11.0 matches the version GitHub's ubuntu runners ship, so a clean
-# local pass predicts a clean Tier 0 shellcheck step (Debian trixie's apt package
-# lags at 0.10.0, which misses checks such as SC2329). Fetch the statically
+# ShellCheck is pinned to the version the `ubuntu-latest` runner image ships
+# (Tier 0 uses that image's shellcheck), not to upstream, so a clean local pass
+# predicts a clean Tier 0 shellcheck step; move it when that image moves
+# (actions/runner-images lists it). Debian trixie's apt package lags at 0.10.0,
+# which misses checks such as SC2329. Fetch the statically
 # linked release tarball and verify the per-architecture SHA256 (the digests
 # GitHub lists on the v0.11.0 release assets) before extracting only the binary.
 # Bump the version, both checksums, the tooling-table row, and the exact Bash
@@ -142,16 +144,25 @@ RUN SHELLCHECK_VERSION=0.11.0 \
     && chmod 0755 /usr/local/bin/shellcheck \
     && rm /tmp/shellcheck.tar.xz
 
-# markdownlint-cli2 0.23.2 is the current npm `latest` release. Keep the global
-# default reproducible and omit optional dependencies; repository wrappers and
-# CI pins remain authoritative when they require another version. wf-check uses
-# private Acorn 8.15.0 and acorn-walk 8.3.4 installs: Acorn matches the parser
-# bundled in Claude Code 2.1.221, and the walker reproduces its AST compiler
-# pass. The native Claude executable does not expose its copies to Node. Bump
-# these literal pins, the tooling-table row, and the exact Bash and PowerShell
-# Stage 1 smoke assertions together.
-RUN npm install -g --omit=optional markdownlint-cli2@0.23.2 \
-    && npm install --prefix /usr/local/lib/wf-check --omit=dev --omit=optional --ignore-scripts acorn@8.15.0 acorn-walk@8.3.4
+# markdownlint-cli2 follows upstream releases, pinned so the global default is
+# reproducible; optional dependencies are omitted, and repository wrappers and
+# CI pins remain authoritative when they require another version. Its version
+# is also stated in the tooling-table row of
+# docker/shared/container-agent.md.tmpl, the exact Bash and PowerShell Stage 1
+# smoke assertions (commands/smoke-test.{sh,ps1}) and README "House Lint and
+# Format Configuration"; bump them together.
+#
+# wf-check uses private Acorn and acorn-walk installs that mirror the copies
+# bundled in Claude Code, not upstream: the Workflow loader parses with them,
+# and the native Claude executable does not expose its copies to Node. Checked
+# against Claude Code 2.1.332, whose bundled parser is Acorn 8.15.x (it lacks
+# the messages Acorn 8.16 added) and whose walker carries acorn-walk 8.3.5's
+# missing-walker error. Move them only when a Claude Code release moves its
+# copies. The same literals sit in docker/shared/wf-check (Acorn only), the
+# Bash and PowerShell Stage 1 smoke assertions, the Tier 0 wf-check step in
+# .github/workflows/native-linux-ci.yml, README and docs/architecture.md.
+RUN npm install -g --omit=optional markdownlint-cli2@0.24.2 \
+    && npm install --prefix /usr/local/lib/wf-check --omit=dev --omit=optional --ignore-scripts acorn@8.15.0 acorn-walk@8.3.5
 USER node
 
 # --- Claude (upper layer: updated most often) --------------------------------

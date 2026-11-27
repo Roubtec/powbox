@@ -1128,7 +1128,7 @@ The two checks below differ in reach: Markdown lint is local-only, while `shfmt`
 
 `.markdownlint.jsonc` carries the Markdown rule set — shared in spirit with the other Roubtec projects, with powbox-specific deviations noted inline — and `.markdownlint-cli2.jsonc` carries only the ignore globs for generated, vendored and container-local trees.
 One directory refines the rule set: `docker/layers/.markdownlint.jsonc` extends it and turns off MD041 (first line must be a top-level heading) for the layer sets' `agent-notes.md` fragments, which the build appends under a heading of its own; it sits above the set directories so it never enters a set's build context or digest.
-Run it with `markdownlint-cli2 "**/*.md"`; the agent image bakes `markdownlint-cli2` 0.23.2, and a repository pin or wrapper stays authoritative wherever one exists.
+Run it with `markdownlint-cli2 "**/*.md"`; the agent image bakes `markdownlint-cli2` 0.24.2, and a repository pin or wrapper stays authoritative wherever one exists.
 Markdown lint is **not** a CI gate today: no workflow lints this repo's Markdown, so its findings are advisory until someone adds the step.
 Tier 1's smoke test does invoke `markdownlint-cli2`, but only to probe that the binary is baked at its pinned version — it lints a throwaway file, never the repository.
 The tree is not clean under this config yet (81 findings across 26 files as of this commit), so compare against the base branch rather than expecting a zero exit — the same "not yet normalized" caveat the `shfmt` step carries.
@@ -1189,7 +1189,7 @@ workflows keep cost proportional to the change:
   behavioral capability probe exercises; any implementation that passes that
   probe works, including mikefarah `yq` v4.45.1.
   The source `wf-check` suite needs the helper's exact Acorn 8.15.0 and
-  acorn-walk 8.3.4 pins, so the job installs them without lifecycle scripts in a
+  acorn-walk 8.3.5 pins, so the job installs them without lifecycle scripts in a
   throwaway npm prefix and exposes only those private module paths to the test.
   Four suites are explicitly routed to the smoke test instead: `test-gh-review-threads.sh`
   and `test-dc-helpers.sh` need their separately fetched/baked helpers

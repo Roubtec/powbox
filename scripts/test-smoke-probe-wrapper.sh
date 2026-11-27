@@ -151,14 +151,14 @@ adversarial=(
 	# backticks - the other command-substitution syntax
 	'true && printf "%s" `printf backtick` >/dev/null'
 	# backslashes, including a trailing-escape shape
-	'printf "a\\b\n" | grep -q "a" && printf "%s\n" "back\\slash" >/dev/null'
+	'printf "a\\b\n" | grep -q "a" && printf "%s\n" "back\\slash" >/dev/null' # early-exit-pipe-ok: probe payload under test
 	# pipes and && mixed, plus ${} expansion
-	'v=abc && [ "${v#a}" = bc ] && printf "%s\n" "$v" | grep -q abc'
+	'v=abc && [ "${v#a}" = bc ] && printf "%s\n" "$v" | grep -q abc' # early-exit-pipe-ok: probe payload under test
 	# a quote-closing injection attempt aimed at the diagnostic itself
 	"true # '; echo PWNED_SQ; '"
 	'true # "; echo PWNED_DQ; "'
 	# ${IFS}, glob chars, semicolons inside quotes, redirection text
-	'printf "%s\n" "a;b>c|d&e" | grep -q "a;b>c|d&e"'
+	'printf "%s\n" "a;b>c|d&e" | grep -q "a;b>c|d&e"' # early-exit-pipe-ok: probe payload under test
 	# a probe that is itself already `|| { ...; exit 1; }`-tailed (the .NET
 	# shape) - the outer guard must stay compatible with it
 	'[ 1 = 1 ] && [ 2 = 2 ] || { printf "%s\n" "inner tail" >&2; exit 1; }'
@@ -394,7 +394,7 @@ else
 fi
 
 printf 'F. pipeline-shaped probes stay enforced (and stay producer-agnostic)\n'
-run_driver 1 "$TMP/f1.out" "true" "printf 'x\n' | grep -q nope" "true"
+run_driver 1 "$TMP/f1.out" "true" "printf 'x\n' | grep -q nope" "true" # early-exit-pipe-ok: probe payload under test
 rc=$?
 if [ "$rc" -ne 0 ] && grep -q "SMOKE PROBE 2 FAILED" "$TMP/f1.out"; then
 	ok "a pipeline whose grep fails is reported"
@@ -404,7 +404,7 @@ fi
 # Deliberate non-goal: pipefail is NOT enabled in the runner or in the per-probe
 # shell, so a producer that fails after emitting the expected text still passes.
 # Pinned so enabling pipefail becomes a conscious, test-visible decision.
-run_driver 1 "$TMP/f2.out" "true" "{ printf 'x\n'; false; } | grep -q x" "true"
+run_driver 1 "$TMP/f2.out" "true" "{ printf 'x\n'; false; } | grep -q x" "true" # early-exit-pipe-ok: probe payload under test
 rc=$?
 if [ "$rc" -eq 0 ]; then
 	ok "producer-side masking is unchanged (pipefail deliberately not set)"
@@ -556,7 +556,7 @@ if command -v pwsh >/dev/null 2>&1; then
 		if [ -s "$CAPTURE" ] && cmp -s "$TMP/from-sh" "$CAPTURE"; then
 			ok ".ps1 and .sh drivers pass docker byte-identical argv (runner + probes)"
 		else
-			bad ".ps1 passed different arguments than .sh" "$(diff -u <(tr '\0' '\n' <"$TMP/from-sh") <(tr '\0' '\n' <"$CAPTURE") 2>&1 | head -40)"
+			bad ".ps1 passed different arguments than .sh" "$(diff -u <(tr '\0' '\n' <"$TMP/from-sh") <(tr '\0' '\n' <"$CAPTURE") 2>&1 | sed -n '1,40p')"
 		fi
 	else
 		bad "pwsh driver invocation failed" "$(cat "$TMP/h.out")"
@@ -1496,8 +1496,8 @@ not() { ! "$@"; }
 # precedes the first line holding <second>.
 out_before() {
 	local a b
-	a="$(grep -nF -- "$1" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
-	b="$(grep -nF -- "$2" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	a="$(grep -m1 -nF -- "$1" "$E2E_OUT" | cut -d: -f1)"
+	b="$(grep -m1 -nF -- "$2" "$E2E_OUT" | cut -d: -f1)"
 	[ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
 }
 # in_na_block <entry>: the entry is listed exactly once, inside the
@@ -1506,8 +1506,8 @@ in_na_block() {
 	local entry_line na_line partial_line
 	[ "$(grep -cxF -- "  - $1" "$E2E_OUT")" -eq 1 ] || return 1
 	entry_line="$(grep -nxF -- "  - $1" "$E2E_OUT" | cut -d: -f1)"
-	na_line="$(grep -n "^Not applicable to this image" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
-	partial_line="$(grep -n "SKIPPED OR PARTIAL" "$E2E_OUT" | head -n 1 | cut -d: -f1)"
+	na_line="$(grep -m1 -n "^Not applicable to this image" "$E2E_OUT" | cut -d: -f1)"
+	partial_line="$(grep -m1 -n "SKIPPED OR PARTIAL" "$E2E_OUT" | cut -d: -f1)"
 	[ -n "$na_line" ] && [ "$entry_line" -gt "$na_line" ] || return 1
 	[ -z "$partial_line" ] || [ "$entry_line" -lt "$partial_line" ]
 }
@@ -1669,7 +1669,9 @@ for drv in "${e2e_drivers[@]}"; do
 	fx="$(new_fixture "custom-probes.$drv")"
 	mkdir -p "$fx/docker/layers/custom"
 	cp "$fx/docker/layers/full/Dockerfile" "$fx/docker/layers/custom/"
+	# early-exit-pipe-ok: fixture probe text, not this suite's assertion
 	printf '# custom probes\r\n\r\ncommand -v first >/dev/null\r\n  # indented comment\r\nsecond --version | grep -q "2"\r\n' >"$fx/docker/layers/custom/smoke-probes.txt"
+	# early-exit-pipe-ok: the same probe text, as the driver must read it back
 	nul_list "$E2E/custom-probes.want" "command -v first >/dev/null" 'second --version | grep -q "2"'
 	set_label "$fx" powbox.layers.set custom
 	set_label "$fx" powbox.layers.digest "$(bash "$fx/scripts/layers-digest.sh" "$fx/docker/layers/custom")"

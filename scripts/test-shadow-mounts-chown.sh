@@ -407,6 +407,15 @@ calls() {
 	grep "^$1 " "$LOG" 2>/dev/null || true
 }
 
+# call_matches <tool> <grep args…> — some logged invocation of the tool matches.
+# The log is matched through a here-string, not piped into `grep -q`, which can
+# exit before `calls` finishes writing and so fail the pipeline under pipefail.
+call_matches() {
+	local tool="$1"
+	shift
+	grep -q "$@" <<<"$(calls "$tool")"
+}
+
 # count <tool> — how many times it was invoked.
 count() {
 	calls "$1" | grep -c . || true
@@ -422,7 +431,7 @@ has() {
 # substitution and abort the suite under `set -e` — exactly the state a
 # regression puts us in, so the assertion must be allowed to run and REPORT it.
 line_of() {
-	grep -nxF -- "$1" "$LOG" | head -n1 | cut -d: -f1 || true
+	grep -m1 -nxF -- "$1" "$LOG" | cut -d: -f1 || true
 }
 
 # before <line-a> <line-b> — both are logged, and a comes first.
@@ -475,12 +484,12 @@ if has "stat $ws/proj"; then
 else
 	ko "expected the owner probe to stat <ws>/proj, got: $(calls stat)"
 fi
-if [ "$(count mount)" = "1" ] && calls mount | grep -qF -- "-t tmpfs" && has "at-mount $ws/proj/bin"; then
+if [ "$(count mount)" = "1" ] && call_matches mount -F -- "-t tmpfs" && has "at-mount $ws/proj/bin"; then
 	ok "the target is then tmpfs-mounted, at the target"
 else
 	ko "expected one tmpfs mount at $ws/proj/bin, got: $(calls mount) $(calls at-mount)"
 fi
-if calls mount | grep -qF "uid=$FAKE_NODE_UID,gid=$FAKE_NODE_GID"; then
+if call_matches mount -F "uid=$FAKE_NODE_UID,gid=$FAKE_NODE_GID"; then
 	ok "the tmpfs is mounted with the node uid/gid"
 else
 	ko "tmpfs mount options lost the node uid/gid: $(calls mount)"
@@ -496,7 +505,7 @@ fi
 # kernel would walk again: "." as the target, and util-linux told not to turn
 # it back into an absolute path (its default), or a component swapped after the
 # walk would redirect the mount.
-if calls mount | grep -q -- '--no-canonicalize .* \.$'; then
+if call_matches mount -- '--no-canonicalize .* \.$'; then
 	ok "the tmpfs targets the held directory ('.') with --no-canonicalize"
 else
 	ko "expected 'mount --no-canonicalize … .', got: $(calls mount)"
@@ -545,7 +554,7 @@ if [ "$(calls chown | grep -c '4242:4242')" = "3" ]; then
 else
 	ko "not every level got 4242:4242: $(calls chown)"
 fi
-if ! calls chown | grep -q '7:7'; then
+if ! call_matches chown '7:7'; then
 	ok "no level inherits a shallower ancestor's ownership"
 else
 	ko "a level inherited the wrong ancestor: $(calls chown)"
@@ -583,18 +592,18 @@ if has "at-chown 4242:4242 $ws/.git/worktrees"; then
 else
 	ko "expected 'at-chown 4242:4242 $ws/.git/worktrees', got: $(calls at-chown)"
 fi
-if calls mount | grep -qF -- "--bind" && has "at-bindsrc $ws/.worktrees/.gitworktrees" && has "at-mount $ws/.git/worktrees"; then
+if call_matches mount -F -- "--bind" && has "at-bindsrc $ws/.worktrees/.gitworktrees" && has "at-mount $ws/.git/worktrees"; then
 	ok "the mount is the durable bind from the volume, not a tmpfs"
 else
 	ko "expected a --bind of the volume's .gitworktrees over .git/worktrees, got: $(calls mount) $(calls at-bindsrc) $(calls at-mount)"
 fi
-if ! calls mount | grep -qF -- "-t tmpfs"; then
+if ! call_matches mount -F -- "-t tmpfs"; then
 	ok "the target did not silently fall back to tmpfs"
 else
 	ko "the target fell back to tmpfs: $(calls mount)"
 fi
 # Both ends are held: the source through a descriptor, the target as the cwd.
-if calls mount | grep -q -- '--no-canonicalize --bind /proc/self/fd/[0-9][0-9]* \.$'; then
+if call_matches mount -- '--no-canonicalize --bind /proc/self/fd/[0-9][0-9]* \.$'; then
 	ok "the bind passes the held source as /proc/self/fd/N and the held target as '.', uncanonicalized"
 else
 	ko "expected 'mount --no-canonicalize --bind /proc/self/fd/N .', got: $(calls mount)"
@@ -928,7 +937,7 @@ FAKE_FINDMNT_FSTYPE=ext4
 run_sut wtlink "$ws/.git/worktrees"
 MOUNTPOINTS=""
 FAKE_FINDMNT_FSTYPE=""
-if ! calls mount | grep -qF -- "--bind" && [ "$(count mount)" = "1" ] && has "at-mount $ws/.git/worktrees" && [ ! -e "$ws/realwt/.gitworktrees" ]; then
+if ! call_matches mount -F -- "--bind" && [ "$(count mount)" = "1" ] && has "at-mount $ws/.git/worktrees" && [ ! -e "$ws/realwt/.gitworktrees" ]; then
 	ok "the target falls back to tmpfs and nothing is made behind the symlink"
 else
 	ko "expected one tmpfs mount at $ws/.git/worktrees and no bind; log was: $(cat "$LOG")"

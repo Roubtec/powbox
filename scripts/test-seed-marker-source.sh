@@ -212,7 +212,7 @@ make_skill "$root/dest/alpha" "alpha STALE"
 printf 'epoch=1\ncommit=old\n' >"$root/dest/alpha/.powbox-seeded"
 out="$(run_worker apply false false skill "$root/src" "$root/dest" "$root/meta" \
 	'Roubtec/agent-skills#codex/dev-skills/skills')"
-if printf '%s\n' "$out" | grep -q '^refreshed	testagent	skill	alpha$' &&
+if grep -q '^refreshed	testagent	skill	alpha$' <<<"$out" &&
 	[ "$(cat "$root/dest/alpha/SKILL.md")" = "alpha v2" ] &&
 	has_line "$root/dest/alpha/.powbox-seeded" \
 		'source=Roubtec/agent-skills#codex/dev-skills/skills/alpha' &&
@@ -238,8 +238,8 @@ printf 'epoch=1\ncommit=old\nsource=Roubtec/agent-skills#codex/dev-skills/skills
 make_skill "$root/dest/gamma" "USER FORK gamma"
 out="$(run_worker apply false false skill "$root/src" "$root/dest" "$root/meta" \
 	'Roubtec/agent-skills#codex/dev-skills/skills')"
-if printf '%s\n' "$out" | grep -q '^refreshed	testagent	skill	alpha$' &&
-	printf '%s\n' "$out" | grep -q '^conflict	testagent	skill	gamma$' &&
+if grep -q '^refreshed	testagent	skill	alpha$' <<<"$out" &&
+	grep -q '^conflict	testagent	skill	gamma$' <<<"$out" &&
 	[ "$(cat "$root/dest/alpha/SKILL.md")" = "alpha v3" ] &&
 	[ "$(cat "$root/dest/gamma/SKILL.md")" = "USER FORK gamma" ] &&
 	[ ! -f "$root/dest/gamma/.powbox-seeded" ]; then
@@ -263,9 +263,9 @@ printf 'epoch=1\ncommit=old\nsource=Roubtec/agent-skills#plugins/dev-skills/skil
 make_skill "$root/dest/mine" "user skill"
 out="$(run_worker classify false false skill "$root/src-absent" "$root/dest" "$root/meta" \
 	'Roubtec/agent-skills#plugins/dev-skills/skills')"
-if printf '%s\n' "$out" | grep -q '^orphan	testagent	skill	legacy$' &&
-	printf '%s\n' "$out" | grep -q '^orphan	testagent	skill	modern$' &&
-	! printf '%s\n' "$out" | grep -q 'skill	mine$'; then
+if grep -q '^orphan	testagent	skill	legacy$' <<<"$out" &&
+	grep -q '^orphan	testagent	skill	modern$' <<<"$out" &&
+	! grep -q 'skill	mine$' <<<"$out"; then
 	ok "orphan sweep classifies both marker shapes, ignores unmarked user skills"
 else
 	no "orphan sweep classifies both marker shapes, ignores unmarked user skills"
@@ -338,7 +338,7 @@ if out="$(POWBOX_SEED_SKILLS_LIB="$LEGACY_LIB" \
 		process_items testagent "$1" "$2" "$3" "$4" "$5"
 	' _ skill "$root/src" "$root/dest" "$root/meta" \
 	'Roubtec/agent-skills#codex/dev-skills/skills' 2>&1)" &&
-	printf '%s\n' "$out" | grep -q '^refreshed	testagent	skill	alpha$' &&
+	grep -q '^refreshed	testagent	skill	alpha$' <<<"$out" &&
 	[ "$(cat "$root/dest/alpha/SKILL.md")" = "alpha v9" ] &&
 	! grep -q '^source=' "$root/dest/alpha/.powbox-seeded"; then
 	ok "worker against a pre-source= baked library degrades instead of aborting"

@@ -337,7 +337,7 @@ broken_output="$($HELPER "$BROKEN_DIR")"
 assert_has "truncated snapshot is ignored" "$broken_output" "workflow snapshot is truncated or invalid JSON"
 assert_has "truncated snapshot does not create a final return" "$broken_output" "(not available)"
 
-if "$HELPER" --help | grep -Fq "best-effort summary"; then
+if help_text="$("$HELPER" --help)" && [[ $help_text == *"best-effort summary"* ]]; then
 	ok "help labels derivation as best effort"
 else
 	bad "help labels derivation as best effort"

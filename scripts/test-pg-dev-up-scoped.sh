@@ -247,7 +247,7 @@ url_a2="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree url)"
 try "repeat url matches ($port_a)" test "$url_a2" = "$url_a"
 try "status reports running" pg "$REPO_A" -- --worktree status
 exp_a="$(pg "$REPO_A" POSTGRES_DB=app_a -- --worktree url --export)"
-if printf %s "$exp_a" | grep -qF "export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:${port_a}/app_a"; then
+if [[ $exp_a == *"export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:${port_a}/app_a"* ]]; then
 	ok "url --export emits the scoped DATABASE_URL"
 else
 	ko "url --export wrong: $exp_a"

@@ -54,7 +54,7 @@ chmod +x "$STUB"
 
 WRAPPER="$TMP/apt-get"
 sed "s#^readonly APT_GET=/usr/bin/apt-get\$#readonly APT_GET=$STUB#" "$SRC" >"$WRAPPER"
-if [ "$(grep -c "^readonly APT_GET=$STUB\$" "$WRAPPER")" != 1 ] || grep -v '^[[:space:]]*#' "$WRAPPER" | grep -q /usr/bin/apt-get; then
+if [ "$(grep -c "^readonly APT_GET=$STUB\$" "$WRAPPER")" != 1 ] || [[ $(grep -v '^[[:space:]]*#' "$WRAPPER") == */usr/bin/apt-get* ]]; then
 	echo "FATAL: could not point the wrapper's APT_GET at the stub; refusing to run it." >&2
 	exit 1
 fi

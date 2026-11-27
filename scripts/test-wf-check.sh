@@ -254,7 +254,7 @@ fi
 kill "$writer_pid" 2>/dev/null || true
 wait "$writer_pid" 2>/dev/null || true
 
-if "$HELPER" --help | grep -Fq "Top-level await and return"; then
+if help_text="$("$HELPER" --help)" && [[ $help_text == *"Top-level await and return"* ]]; then
 	ok "help documents async-wrapper semantics"
 else
 	bad "help documents async-wrapper semantics"

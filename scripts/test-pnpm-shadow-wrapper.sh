@@ -106,14 +106,14 @@ wrapper_stderr() {
 
 # assert_warns / assert_no_warn <stderr> <msg>
 assert_warns() {
-	if printf '%s' "$1" | grep -qF "$WARN_NEEDLE"; then
+	if [[ $1 == *"$WARN_NEEDLE"* ]]; then
 		ok "$2"
 	else
 		ko "$2 (expected the regression warning on stderr)"
 	fi
 }
 assert_no_warn() {
-	if printf '%s' "$1" | grep -qF "$WARN_NEEDLE"; then
+	if [[ $1 == *"$WARN_NEEDLE"* ]]; then
 		ko "$2 (did NOT expect the regression warning on stderr)"
 	else
 		ok "$2"

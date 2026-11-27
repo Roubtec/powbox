@@ -45,19 +45,22 @@ STORE=""
 cleanup() { [ -z "$STORE" ] || rm -rf "$STORE"; }
 trap cleanup EXIT
 
-# Split a git URL into URL_SCHEME, URL_HOST (lowercased) and URL_PATH. scheme://[user@]host[:port]/path, scp-like [user@]host:path (a
-# colon before any slash), and anything else is a local path with no host.
+# Split a git URL into URL_SCHEME and URL_HOST (both lowercased) and
+# URL_PATH: scheme://[user@]host[:port]/path, scp-like [user@]host:path (a
+# colon before any slash), or a local path with no host. A remote-helper
+# prefix such as persistent-https:: is dropped first.
 split_url() {
 	local url="$1" rest authority head
 	URL_SCHEME="" URL_HOST="" URL_PATH=""
+	case "$url" in *::*) url="${url#*::}" ;; esac
 	case "$url" in
-	file://*)
-		URL_SCHEME="file"
-		URL_PATH="${url#file://}"
-		;;
 	*://*)
-		URL_SCHEME="${url%%://*}"
+		URL_SCHEME="$(printf '%s' "${url%%://*}" | tr '[:upper:]' '[:lower:]')"
 		rest="${url#*://}"
+		if [ "$URL_SCHEME" = file ]; then
+			URL_PATH="$rest"
+			return 0
+		fi
 		authority="${rest%%/*}"
 		[ "$authority" = "$rest" ] || URL_PATH="/${rest#*/}"
 		authority="${authority##*@}"
@@ -295,10 +298,11 @@ open_prs_for_head() {
 # aggregated copy with exactly the recorded content. The committed blob is what
 # is compared, not the file on disk: a copy that is only staged, or that was
 # altered on its way into the commit, does not make its source safe to delete.
+# `HEAD:./<path>` resolves relative to <dir>, so no path ever passes through
+# git's quoted path output.
 row_is_safe() {
-	local dir="$1" dest="$2" blob="$3" path
-	path="$(git -C "$dir" ls-files --full-name --error-unmatch -- "$dest" 2>/dev/null)" || return 1
-	[ "$(git -C "$dir" rev-parse --quiet --verify "HEAD:${path}" 2>/dev/null)" = "$blob" ]
+	local dir="$1" dest="$2" blob="$3"
+	[ "$(git -C "$dir" rev-parse --quiet --verify "HEAD:./${dest}" 2>/dev/null)" = "$blob" ]
 }
 
 cmd_delete() {

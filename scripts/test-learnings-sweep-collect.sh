@@ -222,6 +222,15 @@ git -C "$CHECKOUT" checkout --quiet main
 out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.ignoreSubmodules GIT_CONFIG_VALUE_0=all "$COLLECT" list "$CHECKOUT")"
 assert_contains "submodule change makes the branch mixed" "$out" "$(printf 'sample\tlearnings/session-i\tmixed')"
 
+echo "Test: a committed report with a non-ASCII name lets its branch go"
+add_branch learnings/session-j "docs/agent-session-learnings-é.md"
+SWEEP8="${HOME_REPO}/sweep8"
+"$COLLECT" export --into "$SWEEP8" "$CHECKOUT"
+git -C "$HOME_REPO" add sweep8
+git -C "$HOME_REPO" commit --quiet -m sweep8
+out="$("$COLLECT" delete --from "$SWEEP8")"
+assert_contains "non-ASCII copy found committed" "$out" "$(printf 'would-delete\tsample\tlearnings/session-j')"
+
 echo "Test: delete checks open pull requests wherever it can, and holds the branch where it cannot"
 # The manifest URL is rewritten to each origin form in turn, git maps it back
 # to the local origin, and a stub gh answers the login and pull-request queries.
@@ -288,6 +297,8 @@ out="$(refused 'https://user:secret@example.invalid/Sample.git')"
 assert_contains "user and password over https refused" "$out" "embeds a credential"
 assert_not_contains "credential not echoed" "$out" "secret"
 assert_contains "token as https user refused" "$(refused 'https://tok3n@example.invalid/Sample.git')" "embeds a credential"
+assert_contains "token under an upper-case scheme refused" "$(refused 'HTTPS://tok3n@example.invalid/Sample.git')" "embeds a credential"
+assert_contains "token behind a remote-helper prefix refused" "$(refused 'persistent-https::https://tok3n@example.invalid/Sample.git')" "embeds a credential"
 assert_contains "password over ssh:// refused" "$(refused 'ssh://git:secret@example.invalid/Sample.git')" "embeds a credential"
 out="$(refused 'ssh://git@example.invalid/Sample.git')"
 assert_not_contains "ssh:// login name accepted" "$out" "embeds a credential"

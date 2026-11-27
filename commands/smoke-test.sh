@@ -426,7 +426,10 @@ elif [ "$db_gate" = skip ]; then
 	skipped+=("Stage 2: pg-dev-up functional (POWBOX_SMOKE_SKIP_DB)")
 else
 	echo "Running pg-dev-up functional test against $IMAGE ..."
+	# The tmpfs stands in for the one compose.shared.yml gives a launched agent, so
+	# the default cluster must land there, non-durable (task 088).
 	docker run --rm \
+		--tmpfs /run/pg-dev-up:size=512m,mode=1777 \
 		-e POSTGRES_USER=t \
 		-e POSTGRES_PASSWORD='p@s/s&w#d' \
 		-e POSTGRES_DB=app \
@@ -435,6 +438,9 @@ set -e
 pg-dev-up up >/dev/null
 url=$(pg-dev-up url)
 echo "DATABASE_URL=$url"
+st=$(pg-dev-up status 2>&1)
+case "$st" in *"non-durable"*"data in RAM"*) : ;; *) echo "FAIL: default cluster is not non-durable in RAM: $st" >&2; exit 1 ;; esac
+[ "$(psql "$url" -tAc "SHOW fsync")" = off ] || { echo "FAIL: default cluster runs with fsync on" >&2; exit 1; }
 printf %s "$url" | grep -qF "p%40s%2Fs%26w%23d" || { echo "FAIL: password not percent-encoded in URL" >&2; exit 1; }
 printf %s "$url" | grep -qF "@127.0.0.1:" || { echo "FAIL: URL host is not 127.0.0.1" >&2; exit 1; }
 # The DSN must state sslmode=disable: the cluster has no SSL and Go lib/pq

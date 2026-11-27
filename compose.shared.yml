@@ -57,6 +57,17 @@ services:
       # Force the classic renderer for one launch with
       # `-e CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, or run `/tui default` in-session.
       CLAUDE_CODE_NO_FLICKER: "1"
+    # RAM-backed storage for pg-dev-up's throwaway test clusters (docker/layers/full/
+    # pg-dev-up): the container's /tmp sits on its disk-backed writable layer and
+    # /dev/shm is only 64 MB. Pages on a tmpfs count against memory only once
+    # written, so an image without pg-dev-up pays nothing for it. The size is the
+    # bound for every cluster in the container together; when it is too small or
+    # full, pg-dev-up puts new clusters on disk. Raise it with POWBOX_PG_RAM_SIZE
+    # (a tmpfs size such as 4g) before the container is created; never 0, which a
+    # tmpfs reads as unlimited. mode=1777 like /tmp: pg-dev-up keeps an owner-only
+    # directory per user inside it.
+    tmpfs:
+      - /run/pg-dev-up:size=${POWBOX_PG_RAM_SIZE:-2g},mode=1777
     volumes:
       - ${WORKSPACE_PATH:-.}:/workspace/${PROJECT_NAME:-.}:rw
       - gh-config:/home/node/.config/gh

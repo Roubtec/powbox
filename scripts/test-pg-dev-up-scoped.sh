@@ -10,6 +10,11 @@
 # instead of guessing, and (task 035) the emitted DATABASE_URL carries
 # `?sslmode=disable` on BOTH the scoped and the default path — including through
 # the `eval "$(pg-dev-up url --export)"` round-trip, where `%q` escapes the `?`.
+# Task 088: clusters are non-durable by default and say so, POWBOX_PG_DURABLE=1
+# keeps full durability, a non-durable leftover that cannot start is recreated
+# (a durable or unrecorded one never is), and a new cluster goes to RAM-backed
+# storage when it is available and roomy enough, else to disk — including after
+# its RAM data vanished under a surviving scoped marker.
 #
 # Runs the real repo copy of pg-dev-up directly against the baked PostgreSQL
 # server binaries — no image build. Everything is confined to a private temp
@@ -48,6 +53,9 @@ fi
 
 WORK="$(mktemp -d)"
 SCOPED_ROOT="$WORK/scoped-root"
+NO_RAM_ROOT="$WORK/no-ram-root"
+RAM_ROOT="$WORK/ram-root"
+mkdir -p "$RAM_ROOT"
 export POWBOX_PG_SCOPED_ROOT="$SCOPED_ROOT"
 export CONTAINER_NAME="pg-scoped-test-$$"
 
@@ -96,7 +104,10 @@ try_not() {
 # We strip any PGDATA/PGPORT/POSTGRES_* the caller's shell might have exported
 # (e.g. from an `eval "$(pg-dev-up url --export)"`) so the test can never touch
 # or stop a caller-configured cluster; each case that needs an override sets it
-# explicitly AFTER the -u strips, and env's later assignment wins.
+# explicitly AFTER the -u strips, and env's later assignment wins. The RAM root
+# defaults to a path that does not exist, so a container that really has the
+# launcher's /run/pg-dev-up tmpfs never receives this suite's clusters; the
+# RAM-backed cases point it at a sandbox directory instead.
 # Usage: pg <cwd> [ENV=VAL ...] -- <pg-dev-up args...>
 pg() {
 	local cwd="$1"
@@ -107,7 +118,8 @@ pg() {
 		shift
 	done
 	shift # drop --
-	(cd "$cwd" && env -u PGDATA -u PGPORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB "${envs[@]}" bash "$PG" "$@")
+	(cd "$cwd" && env -u PGDATA -u PGPORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
+		-u POWBOX_PG_DURABLE -u POWBOX_PG_RAM_MIN_FREE_MB POWBOX_PG_RAM_ROOT="$NO_RAM_ROOT" "${envs[@]}" bash "$PG" "$@")
 }
 
 # Perform the documented `eval "$(pg-dev-up url --export)"` round-trip on an
@@ -122,14 +134,17 @@ eval_export() { env -u DATABASE_URL bash -c 'eval "$1"; printf %s "${DATABASE_UR
 # 5433-6432 window (so an explicit-port case can never collide with an
 # auto-allocated scoped port), probing each candidate so a pre-existing listener
 # on the host does not make the test flaky. Ports handed out this run are tracked
-# so successive calls return distinct values.
-PICKED_PORTS=()
+# in a file, not a shell array, because callers run this in a `$(...)` subshell:
+# an array would forget every pick, and a later case could be handed the port a
+# deliberately busy listener from an earlier case still holds.
+PICKED_PORTS_FILE="$WORK/picked-ports"
 pick_free_port() {
-	local p
+	local p picked=""
+	[ ! -f "$PICKED_PORTS_FILE" ] || picked=" $(tr '\n' ' ' <"$PICKED_PORTS_FILE")"
 	for ((p = 6500; p <= 6999; p++)); do
-		case " ${PICKED_PORTS[*]:-} " in *" $p "*) continue ;; esac
+		case "$picked " in *" $p "*) continue ;; esac
 		(exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null && continue
-		PICKED_PORTS+=("$p")
+		printf '%s\n' "$p" >>"$PICKED_PORTS_FILE"
 		printf '%s\n' "$p"
 		return 0
 	done
@@ -663,6 +678,158 @@ rec_g2="$(pg "$REPO_G" -- --worktree status 2>&1 | sed -n 's/.*PGDATA=\([^)]*\))
 try "restart re-recorded the explicit data dir" test "$rec_g2" = "$resume_data"
 try "restarted instance serves queries" test "$(psql "$url_g3" -tAc 'select 1' 2>/dev/null || true)" = "1"
 pg "$REPO_G" -- --worktree down >/dev/null 2>&1 || true
+
+# Durability settings of the server behind URL $1, as "fsync=..,full_page_writes=..,synchronous_commit=..".
+durability_settings() {
+	psql "$1" -tAc "select string_agg(name || '=' || setting, ',' order by name) from pg_settings where name in ('fsync', 'full_page_writes', 'synchronous_commit')" 2>/dev/null || true
+}
+NONDURABLE_SETTINGS="fsync=off,full_page_writes=off,synchronous_commit=off"
+DURABLE_SETTINGS="fsync=on,full_page_writes=on,synchronous_commit=on"
+status_datadir() { sed -n 's/.*PGDATA=\([^)]*\)).*/\1/p' <<<"$1"; }
+
+echo "== task 088: a new cluster is non-durable by default, and says so =="
+REPO_H="$WORK/wt-h"
+add_worktree "$MAIN_REPO" "$REPO_H" wt-h
+url_h="$(pg "$REPO_H" POSTGRES_DB=app_h -- --worktree up | tail -1)"
+data_h="$(status_datadir "$(pg "$REPO_H" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_h")
+settings_h="$(durability_settings "$url_h")"
+try "default cluster runs without durable writes ($settings_h)" test "$settings_h" = "$NONDURABLE_SETTINGS"
+try "the cluster records itself as non-durable" grep -qx 'durability=nondurable' "$data_h/pg-dev-up.cluster"
+status_h="$(pg "$REPO_H" -- --worktree status 2>&1)"
+if [[ $status_h == *"cluster: non-durable"*"data on disk"* ]]; then ok "status reports a non-durable cluster on disk"; else ko "status does not report the cluster kind: $status_h"; fi
+try_not "an explicit durability request on an existing non-durable cluster is refused" pg "$REPO_H" POWBOX_PG_DURABLE=1 POSTGRES_DB=app_h -- --worktree up
+try "the refused request left the cluster running" pg "$REPO_H" -- --worktree status
+try_not "an invalid POWBOX_PG_DURABLE value is rejected" pg "$WORK" POWBOX_PG_DURABLE=maybe -- url
+
+echo "== task 088: a non-durable leftover that cannot start is recreated, not a confusing failure =="
+psql "$url_h" -qc 'create table leftover_marker (i int)' >/dev/null 2>&1 || true
+# An unclean stop, then damage only a crash could explain: the next start fails.
+"$BINDIR/pg_ctl" -D "$data_h" -m immediate -w stop >/dev/null 2>&1 || true
+rm -f "$data_h/global/pg_control"
+url_h2="$(pg "$REPO_H" POSTGRES_DB=app_h -- --worktree up 2>/dev/null | tail -1)"
+try "up recreated the unstartable non-durable cluster (same URL)" test "$url_h2" = "$url_h"
+try "the recreated cluster serves queries" test "$(psql "$url_h2" -tAc 'select 1' 2>/dev/null || true)" = "1"
+try "the recreated cluster is empty (old table gone)" test "$(psql "$url_h2" -tAc "select count(*) from pg_class where relname = 'leftover_marker'" 2>/dev/null || true)" = "0"
+pg "$REPO_H" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== task 088: POWBOX_PG_DURABLE=1 keeps full durability, on disk, and is never discarded =="
+REPO_I="$WORK/wt-i"
+add_worktree "$MAIN_REPO" "$REPO_I" wt-i
+url_i="$(pg "$REPO_I" POWBOX_PG_DURABLE=1 POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_i -- --worktree up | tail -1)"
+data_i="$(status_datadir "$(pg "$REPO_I" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_i")
+settings_i="$(durability_settings "$url_i")"
+try "durable cluster keeps durable writes ($settings_i)" test "$settings_i" = "$DURABLE_SETTINGS"
+case "$data_i" in "$SCOPED_ROOT"/*) ok "durable cluster lives on disk even with RAM available" ;; *) ko "durable cluster not on disk: $data_i" ;; esac
+status_i="$(pg "$REPO_I" -- --worktree status 2>&1)"
+if [[ $status_i == *"cluster: durable, data on disk"* ]]; then ok "status reports a durable cluster"; else ko "status does not report durability: $status_i"; fi
+pg "$REPO_I" -- --worktree down >/dev/null 2>&1 || true
+# The durability is the cluster's own: a later plain up keeps it.
+url_i2="$(pg "$REPO_I" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_i -- --worktree up | tail -1)"
+try "a plain up keeps the recorded durability" test "$(durability_settings "$url_i2")" = "$DURABLE_SETTINGS"
+"$BINDIR/pg_ctl" -D "$data_i" -m immediate -w stop >/dev/null 2>&1 || true
+rm -f "$data_i/global/pg_control"
+try_not "an unstartable durable cluster fails up" pg "$REPO_I" POSTGRES_DB=app_i -- --worktree up
+try "the unstartable durable cluster's data is left in place" test -s "$data_i/PG_VERSION"
+# A cluster created before the record existed counts as durable: never discarded.
+REPO_L="$WORK/wt-l"
+add_worktree "$MAIN_REPO" "$REPO_L" wt-l
+pg "$REPO_L" POSTGRES_DB=app_l -- --worktree up >/dev/null 2>&1
+data_l="$(status_datadir "$(pg "$REPO_L" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_l")
+pg "$REPO_L" -- --worktree down >/dev/null 2>&1 || true
+rm -f "$data_l/pg-dev-up.cluster"
+url_l="$(pg "$REPO_L" POSTGRES_DB=app_l -- --worktree up | tail -1)"
+try "a cluster without a record starts durable" test "$(durability_settings "$url_l")" = "$DURABLE_SETTINGS"
+"$BINDIR/pg_ctl" -D "$data_l" -m immediate -w stop >/dev/null 2>&1 || true
+rm -f "$data_l/global/pg_control"
+try_not "an unstartable cluster without a record fails up" pg "$REPO_L" POSTGRES_DB=app_l -- --worktree up
+try "the unrecorded cluster's data is left in place" test -s "$data_l/PG_VERSION"
+
+echo "== task 088: RAM-backed storage holds a new cluster when available, else disk =="
+REPO_J="$WORK/wt-j"
+add_worktree "$MAIN_REPO" "$REPO_J" wt-j
+url_j="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_j -- --worktree up | tail -1)"
+data_j="$(status_datadir "$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_j")
+case "$data_j" in "$RAM_ROOT/$(id -u)/"*/pgdata) ok "data dir in the per-user RAM base" ;; *) ko "data dir not in RAM: $data_j" ;; esac
+try "per-user RAM base is owner-only (got $(stat -c '%a' "$RAM_ROOT/$(id -u)"))" test "$(stat -c '%a' "$RAM_ROOT/$(id -u)")" = 700
+try "the RAM cluster runs non-durable" test "$(durability_settings "$url_j")" = "$NONDURABLE_SETTINGS"
+status_j="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)"
+if [[ $status_j == *"non-durable"*"data in RAM"* ]]; then ok "status reports the RAM-backed cluster"; else ko "status does not report RAM storage: $status_j"; fi
+printf '%s\n' "FATAL:  could not write to file \"pg_wal/xlogtemp\": No space left on device" >>"$data_j/server.log"
+status_full="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)"
+# The sandbox RAM root has room, so only the log line speaks: past tense.
+if [[ $status_full == *"THE RAM DISK WAS FULL"* ]]; then ok "status names a past full RAM disk as such"; else ko "status missed the full RAM disk: $status_full"; fi
+pg "$REPO_J" -- --worktree down >/dev/null 2>&1 || true
+# A container restart empties the RAM disk while the scoped marker (on disk)
+# survives: status says so, and up recreates instead of failing.
+rm -rf "${data_j:?}"
+status_gone="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1 || true)"
+if [[ $status_gone == *"data directory is gone"* ]]; then ok "status reports the vanished RAM data"; else ko "status missed the vanished data: $status_gone"; fi
+url_j2="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_j -- --worktree up | tail -1)"
+try "up recreates a cluster whose RAM data vanished (same URL)" test "$url_j2" = "$url_j"
+try "the recreated RAM cluster serves queries" test "$(psql "$url_j2" -tAc 'select 1' 2>/dev/null || true)" = "1"
+pg "$REPO_J" -- --worktree down >/dev/null 2>&1 || true
+# Relaunched without RAM-backed storage at all: the same RAM root no longer
+# exists, so the recorded RAM path cannot be recreated and up falls back to
+# disk, still non-durable.
+rm -rf "${data_j:?}"
+mv "$RAM_ROOT" "$RAM_ROOT.away"
+url_j3="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_j -- --worktree up | tail -1)"
+data_j3="$(status_datadir "$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+mv "$RAM_ROOT.away" "$RAM_ROOT"
+STARTED_DATADIRS+=("$data_j3")
+case "$data_j3" in "$SCOPED_ROOT"/*) ok "without RAM storage the cluster falls back to disk" ;; *) ko "no disk fallback: $data_j3" ;; esac
+try "the disk fallback is still non-durable" test "$(durability_settings "$url_j3")" = "$NONDURABLE_SETTINGS"
+pg "$REPO_J" -- --worktree down >/dev/null 2>&1 || true
+check_small="$(pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POWBOX_PG_RAM_MIN_FREE_MB=999999999 -- check 2>&1 || true)"
+if [[ $check_small == *"not available"*"MB free"* ]]; then ok "a RAM disk with too little room is not used"; else ko "too-small RAM disk not refused: $check_small"; fi
+check_none="$(pg "$WORK" -- check 2>&1 || true)"
+if [[ $check_none == *"not available"*"no RAM-backed storage"* ]]; then ok "missing RAM storage is reported"; else ko "missing RAM storage not reported: $check_none"; fi
+try_not "a non-numeric POWBOX_PG_RAM_MIN_FREE_MB is rejected" pg "$WORK" POWBOX_PG_RAM_MIN_FREE_MB=lots -- url
+
+echo "== task 088: a new cluster whose record cannot be written is recreated, on disk =="
+# A full RAM disk can let initdb succeed and then fail the record write, leaving
+# a cluster that reads as unrecorded (durable). Inject that one failure with an
+# exported printf override that fails the record write once.
+REPO_K="$WORK/wt-k"
+add_worktree "$MAIN_REPO" "$REPO_K" wt-k
+record_flag="$WORK/record-write-failed"
+up_k_err="$WORK/up-k.err"
+url_k="$(pg "$REPO_K" "BASH_FUNC_printf%%=() { if [[ \$1 == format=1* ]] && [ ! -e '$record_flag' ]; then : >'$record_flag'; return 1; fi; builtin printf \"\$@\"; }" \
+	POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_k -- --worktree up 2>"$up_k_err" | tail -1 || true)"
+data_k="$(status_datadir "$(pg "$REPO_K" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_k")
+try "the record write failure was injected" test -e "$record_flag"
+ram_k="$(sed -n "s/.*just created at \(.*\) could not be recorded.*/\1/p" "$up_k_err")"
+case "$ram_k" in "$RAM_ROOT"/*) ok "up recognised the half-made RAM cluster as its own" ;; *) ko "no recovery of the half-made cluster: $(cat "$up_k_err")" ;; esac
+try "the half-made RAM cluster was discarded" test ! -e "${ram_k:-$RAM_ROOT/missing}/PG_VERSION"
+case "$data_k" in "$SCOPED_ROOT"/*) ok "the retry put the cluster on disk" ;; *) ko "retry not on disk: $data_k" ;; esac
+try "the recreated cluster is non-durable" test "$(durability_settings "$url_k")" = "$NONDURABLE_SETTINGS"
+pg "$REPO_K" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== task 088: a non-empty directory that holds no cluster is left alone =="
+user_dir="$WORK/not-a-cluster"
+mkdir -p "$user_dir"
+printf 'keep me\n' >"$user_dir/notes.txt"
+up_nc_err="$WORK/up-nc.err"
+try_not "up refuses a non-empty PGDATA without a cluster" pg "$WORK" PGDATA="$user_dir" -- --profile not-a-cluster up 2>"$up_nc_err"
+if grep -q "not one pg-dev-up created; it was left alone" "$up_nc_err"; then ok "the refusal says the directory is not a pg-dev-up cluster"; else ko "misleading refusal: $(cat "$up_nc_err")"; fi
+try "the user's file is intact" test "$(cat "$user_dir/notes.txt")" = "keep me"
+
+echo "== task 088: the unscoped cluster gets the same non-durable mode =="
+unscoped_data="$WORK/unscoped-pgdata"
+unscoped_port="$(pick_free_port)"
+url_un="$(pg "$WORK" PGDATA="$unscoped_data" PGPORT="$unscoped_port" -- up | tail -1)"
+STARTED_DATADIRS+=("$unscoped_data")
+try "unscoped cluster runs non-durable" test "$(durability_settings "$url_un")" = "$NONDURABLE_SETTINGS"
+status_un="$(pg "$WORK" PGDATA="$unscoped_data" PGPORT="$unscoped_port" -- status 2>&1)"
+if [[ $status_un == *"cluster: non-durable"* ]]; then ok "unscoped status reports the cluster kind"; else ko "unscoped status missing the kind: $status_un"; fi
+pg "$WORK" PGDATA="$unscoped_data" PGPORT="$unscoped_port" -- down >/dev/null 2>&1 || true
+help_text="$(pg "$WORK" -- help)"
+if [[ $help_text == *POWBOX_PG_DURABLE* ]]; then ok "help documents POWBOX_PG_DURABLE"; else ko "help lost the durability section"; fi
 
 echo "== unscoped invocations keep the historical port and credentials =="
 url_plain="$(pg "$WORK" -- url)"

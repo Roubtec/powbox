@@ -45,7 +45,12 @@
 #     established (fail safe again — an empty `git status` stdout is NOT proof of
 #     a clean tree when the command failed)
 #   * uncommitted changes (`git status --porcelain` non-empty) — even with
-#     --force; commit/push or move them aside first, never delete evidence
+#     --force; commit/push or move them aside first, never delete evidence.
+#     One shape is diagnosed instead of being called uncommitted: a worktree whose
+#     branch was deleted. It is removed only when its tree, index and untracked
+#     set are proven identical to the commit it was last on AND a remote-tracking
+#     ref contains that commit; otherwise the refusal names the branch, the
+#     commit, and which half of the proof failed (see deleted_branch_proof)
 # Both the operation state and the status are read through the worktree's OWN
 # git dir, resolved from the repository's registrations — never as `git -C <wt>`,
 # which resolves upward into the enclosing checkout for a worktree that lost its
@@ -552,8 +557,109 @@ PORCELAIN=""
 if ! PORCELAIN="$(git --git-dir="$GITDIR" --work-tree="$WT" status --porcelain 2>/dev/null)"; then
 	die "cannot read the status of the worktree at $(shq "$WT"), so it cannot be shown to be free of uncommitted changes; refusing to remove it (nothing was changed)"
 fi
-[ -z "$PORCELAIN" ] ||
-	die "worktree has uncommitted changes; commit (and push) them, or move them aside, before removing the worktree at $(shq "$WT")"
+
+# deleted_branch_proof <branch ref> — the worktree's HEAD names a branch that no
+# longer exists, typically a merged PR's branch deleted host-side, where this
+# container's worktree registrations are invisible. HEAD is then unborn and every
+# tracked file reads as a staged addition, so the porcelain above is non-empty
+# even when the tree holds nothing new. Either PROVE there is nothing to lose and
+# return, or refuse naming what was found.
+#
+# The proof: the worktree's index, its tracked files and its untracked set are
+# identical to the commit its HEAD reflog last recorded, and a remote-tracking
+# ref contains that commit. Ignored files are not part of it, exactly as they are
+# not part of the clean-tree verdict: `git status --porcelain` omits them, and a
+# plain `git worktree remove` deletes them. Removing then needs git's `--force`,
+# because git's own cleanliness check reads the same all-staged status; the only
+# other check that flag skips is git's refusal to remove initialized submodules,
+# so a worktree whose index holds any gitlink is refused instead. A rebased,
+# squash-merged or force-pushed branch leaves a last commit that no remote ref
+# contains even though equivalent changes landed; that is refused, not reasoned
+# about.
+#
+# The last commit is read from the reflog FILE because no git command can name it
+# here: every reflog reader resolves HEAD first, and an unborn HEAD does not
+# resolve (`git reflog show HEAD` and `HEAD@{0}` both fail, measured with git
+# 2.47). Under the reftable ref backend there is no such file, so that case is
+# refused with the diagnosis only.
+DELETED_BRANCH_COMMIT=""
+DELETED_BRANCH_REMOTE=""
+# deleted_branch_diff <diagnosis so far> <commit> <label> [--cached]
+deleted_branch_diff() {
+	local rc=0
+	git --git-dir="$GITDIR" --work-tree="$WT" diff --quiet --no-ext-diff --no-textconv ${4:+"$4"} "$2" -- 2>/dev/null || rc=$?
+	case "$rc" in
+	0) ;;
+	1) die "$1, but its $3 differs from that commit, so it holds changes that may exist nowhere else; refusing to remove it (nothing was changed). Compare: 'git -C $(shq "$WT") diff ${4:+$4 }$2'." ;;
+	*) die "$1, and its $3 could not be compared with that commit; refusing to remove it (nothing was changed)" ;;
+	esac
+}
+deleted_branch_proof() {
+	local branch="${1#refs/heads/}" what last c="" refs line storage stage
+	what="the worktree at $(shq "$WT") is on branch '$branch', which no longer exists (deleted, typically after its PR merged), so every tracked file reads as a staged addition"
+	storage="$(git --git-dir="$GITDIR" config --get extensions.refStorage 2>/dev/null)" || storage=files
+	if [ "$storage" = files ] && [ -f "$GITDIR/logs/HEAD" ] && [ -r "$GITDIR/logs/HEAD" ]; then
+		last="$(tail -n 1 -- "$GITDIR/logs/HEAD" 2>/dev/null)" || last=""
+		read -r _ c _ <<<"$last" || :
+		if ! [[ $c =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || [[ $c =~ ^0+$ ]]; then c=""; fi
+	fi
+	[ -n "$c" ] ||
+		die "$what; the commit it was last on cannot be read from its HEAD reflog, so there is nothing to compare the tree against; refusing to remove it (nothing was changed)"
+	git --git-dir="$GITDIR" cat-file -e "$c^{commit}" 2>/dev/null ||
+		die "$what; it was last on $c, which is no longer in this repository; refusing to remove it (nothing was changed)"
+	what="$what; it was last on $c"
+
+	refs="$(git --git-dir="$GITDIR" for-each-ref --contains "$c" --format='%(refname:short)' refs/remotes/ 2>/dev/null)" ||
+		die "$what, and whether a remote-tracking ref contains it could not be read; refusing to remove it (nothing was changed)"
+	# Name a branch rather than a remote's HEAD symref when both contain it.
+	while IFS= read -r line; do
+		case "$line" in
+		"") ;;
+		*/HEAD) [ -n "$DELETED_BRANCH_REMOTE" ] || DELETED_BRANCH_REMOTE="$line" ;;
+		*)
+			DELETED_BRANCH_REMOTE="$line"
+			break
+			;;
+		esac
+	done <<<"$refs"
+	[ -n "$DELETED_BRANCH_REMOTE" ] ||
+		die "$what, which no remote-tracking ref contains (never pushed, or rebased, squash-merged or force-pushed before the branch was deleted), so its content cannot be shown to exist anywhere else; refusing to remove it (nothing was changed). Compare it yourself: 'git -C $(shq "$WT") diff --cached $c' and 'git -C $(shq "$WT") status'."
+	what="$what (contained in $DELETED_BRANCH_REMOTE)"
+
+	deleted_branch_diff "$what" "$c" index --cached
+	deleted_branch_diff "$what" "$c" "working tree"
+	line=""
+	if ! line="$(git --git-dir="$GITDIR" --work-tree="$WT" ls-files --others --exclude-standard 2>/dev/null)"; then
+		die "$what, and its untracked files could not be listed; refusing to remove it (nothing was changed)"
+	fi
+	[ -z "$line" ] ||
+		die "$what, but it holds untracked files that may exist nowhere else; refusing to remove it (nothing was changed). Look: 'git -C $(shq "$WT") status'."
+	stage="$(git --git-dir="$GITDIR" --work-tree="$WT" ls-files --stage 2>/dev/null)" ||
+		die "$what, and its index could not be listed; refusing to remove it (nothing was changed)"
+	! grep -q '^160000 ' <<<"$stage" ||
+		die "$what, and it holds submodules, whose own state this check does not inspect; refusing to remove it (nothing was changed)"
+	DELETED_BRANCH_COMMIT="$c"
+}
+
+if [ -n "$PORCELAIN" ]; then
+	_head_ref=""
+	_rc=0
+	_head_ref="$(git --git-dir="$GITDIR" symbolic-ref --quiet HEAD 2>/dev/null)" || _rc=$?
+	if [ "$_rc" -eq 0 ] && [[ $_head_ref == refs/heads/?* ]]; then
+		_rc=0
+		git --git-dir="$GITDIR" show-ref --verify --quiet "$_head_ref" 2>/dev/null || _rc=$?
+		[ "$_rc" -ne 1 ] || deleted_branch_proof "$_head_ref"
+	fi
+	[ -n "$DELETED_BRANCH_COMMIT" ] ||
+		die "worktree has uncommitted changes; commit (and push) them, or move them aside, before removing the worktree at $(shq "$WT")"
+fi
+
+if [ -n "$DELETED_BRANCH_COMMIT" ]; then
+	git -C "$ROOT" worktree remove --force "$WT" >&2
+	remove_lint_cache
+	printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT"); its branch '${_head_ref#refs/heads/}' was already deleted, and its tree matched $DELETED_BRANCH_COMMIT, which $DELETED_BRANCH_REMOTE contains" >&2
+	exit 0
+fi
 
 if [ -n "$FORCE" ]; then
 	git -C "$ROOT" worktree remove --force "$WT" >&2

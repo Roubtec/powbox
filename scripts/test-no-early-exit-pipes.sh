@@ -31,11 +31,11 @@
 # see a consumer's `exit`/`q` on a later line of a multi-line quoted program, and
 # text inside a string can trip it; the escape covers the latter. It also misses
 # a consumer behind a subshell or option-taking wrapper (`( read x )`,
-# `sudo -u u grep -q`), a loop that `break`s out of `while read`, an awk program
-# holding `|` or a grep `-e` pattern holding `|`, `;`, `&` or `)` before its
-# `exit` or `-q`, and a sed program holding `|` or quitting with GNU `Q`. This
-# suite is excluded from its own scan, because its fixtures are exactly the
-# shape.
+# `sudo -u u grep -q`), a loop that `break`s out of `while read`, a sed quitting
+# with GNU `Q`, and a consumer whose arguments hold a lone `|` ahead of the part
+# that quits (an awk `exit`, a sed `q`, a grep `-q`; for grep also `;`, `&` or
+# `)`, in a pattern or any other argument). This suite is excluded from its own
+# scan, because its fixtures are exactly the shape.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -24,6 +24,10 @@
 #         <dir> has committed every aggregated copy with exactly the recorded
 #         content, and no open pull request uses the branch as its head (in
 #         any repository, so a fork's branch behind a PR upstream is held).
+#         That check runs on github.com and on any host gh is logged in to
+#         (GitHub Enterprise); an origin anywhere else, an SSH host alias
+#         included, is held because nothing can rule out an open PR there.
+#         A local path or file:// origin has no pull requests to check.
 #         Without --yes it only prints what it would do.
 #
 # `learnings/*` is always collected; --also adds another branch glob (one `*`
@@ -36,22 +40,59 @@ die() {
 	exit 1
 }
 
-# `[.]` rather than `\.`: awk -v expands backslash escapes, which would turn
-# `\.` into a wildcard and let awk and grep disagree on what a report is.
 REPORT_RE='(^|/)agent-session-learnings-[^/]*[.]md$'
 STORE=""
 cleanup() { [ -z "$STORE" ] || rm -rf "$STORE"; }
 trap cleanup EXIT
 
+# Split a git URL into URL_SCHEME, URL_HOST (lowercased) and URL_PATH. scheme://[user@]host[:port]/path, scp-like [user@]host:path (a
+# colon before any slash), and anything else is a local path with no host.
+split_url() {
+	local url="$1" rest authority head
+	URL_SCHEME="" URL_HOST="" URL_PATH=""
+	case "$url" in
+	file://*)
+		URL_SCHEME="file"
+		URL_PATH="${url#file://}"
+		;;
+	*://*)
+		URL_SCHEME="${url%%://*}"
+		rest="${url#*://}"
+		authority="${rest%%/*}"
+		[ "$authority" = "$rest" ] || URL_PATH="/${rest#*/}"
+		authority="${authority##*@}"
+		URL_HOST="${authority%:*}"
+		;;
+	*)
+		head="${url%%:*}"
+		if [ "$head" != "$url" ] && [[ $head != */* ]]; then
+			URL_SCHEME=scp
+			URL_PATH="${url#*:}"
+			URL_HOST="${head##*@}"
+		else
+			URL_PATH="$url"
+		fi
+		;;
+	esac
+	URL_HOST="$(printf '%s' "$URL_HOST" | tr '[:upper:]' '[:lower:]')"
+}
+
 # Origin URL of a checkout, refused when it embeds a credential: the URL is
-# written to the manifest, and a token must never land there.
+# written to the manifest, and a token must never land there. Over http(s)
+# any user part may be a token, and an `@` anywhere is refused because a raw
+# `/` in a password would hide where the user part ends. Elsewhere a user part
+# is a login name (ssh://git@host/…, git@host:…) unless it carries a password.
 origin_url() {
-	local dir="$1" url
+	local dir="$1" url rest
 	url="$(git -c safe.directory="$dir" -C "$dir" remote get-url origin 2>/dev/null)" ||
 		die "$dir has no origin remote"
-	case "$url" in
-	*://*@*) die "the origin URL of $dir embeds a credential; reset it to a plain URL first" ;;
-	esac
+	split_url "$url"
+	rest="${url#*://}"
+	case "$URL_SCHEME" in
+	http | https | ftp | ftps) [[ $rest != *@* ]] ;;
+	scp | file | "") true ;;
+	*) [[ $rest != *@* ]] || [[ ${rest%%@*} != *:* ]] ;;
+	esac || die "the origin URL of $dir embeds a credential; reset it to a plain URL first"
 	printf '%s\n' "$url"
 }
 
@@ -61,15 +102,27 @@ repo_label() {
 	printf '%s\n' "$name" | tr '[:upper:]' '[:lower:]'
 }
 
-# owner/repo for a GitHub URL, empty for anything else.
-github_slug() {
-	local rest
-	case "$1" in
-	https://github.com/*) rest="${1#https://github.com/}" ;;
-	git@github.com:*) rest="${1#git@github.com:}" ;;
-	*) return 0 ;;
-	esac
-	printf '%s\n' "${rest%.git}"
+# Where delete can ask about a URL's open pull requests: `local` for a path
+# or file:// URL (no pull requests exist), `github <host> <owner/repo>` for
+# github.com or a host gh is logged in to (GitHub Enterprise), and
+# `unknown <host>` for anything else, an SSH host alias included.
+pr_target() {
+	local path
+	split_url "$1"
+	if [ -z "$URL_HOST" ]; then
+		printf 'local\n'
+		return 0
+	fi
+	path="${URL_PATH#/}"
+	path="${path%/}"
+	path="${path%.git}"
+	[ "$URL_HOST" != ssh.github.com ] || URL_HOST=github.com
+	if [[ $path =~ ^[^/]+/[^/]+$ ]] &&
+		{ [ "$URL_HOST" = github.com ] || gh auth status --hostname "$URL_HOST" >/dev/null 2>&1; }; then
+		printf 'github %s %s\n' "$URL_HOST" "$path"
+	else
+		printf 'unknown %s\n' "$URL_HOST"
+	fi
 }
 
 # Fetch one origin's default branch and candidate branches into the store.
@@ -87,19 +140,37 @@ fetch_repo() {
 		die "fetch from $url failed"
 }
 
+# A changed path is a report when it is a regular file named like one. A path
+# holding a tab or a newline never is, so it cannot break the manifest.
+is_report() {
+	local mode="$1" path="$2"
+	case "$mode" in 100644 | 100755) ;; *) return 1 ;; esac
+	case "$path" in *$'\t'* | *$'\n'*) return 1 ;; esac
+	[[ $path =~ $REPORT_RE ]]
+}
+
+# Write what a branch changes over <base> to the file <out>, NUL-separated.
+# -z keeps git from quoting unusual paths, and the explicit flags keep a
+# configured diff.renames or diff.ignoreSubmodules from hiding a change.
+branch_changes() {
+	git -C "$STORE" diff --raw -z --no-renames --ignore-submodules=none "$1" "$2" >"$3" ||
+		die "cannot diff $2 against its default branch"
+}
+
 # Class of a fetched branch: report-only, mixed, or unrelated.
 branch_class() {
-	local label="$1" ref="$2" base changes
+	local label="$1" ref="$2" base meta path mode status any=0 bad=0
 	base="$(git -C "$STORE" merge-base "$ref" "refs/sweep/${label}/default" 2>/dev/null)" || {
 		printf 'unrelated\n'
 		return 0
 	}
-	changes="$(git -C "$STORE" diff --name-status --no-renames "$base" "$ref")"
-	[ -n "$changes" ] || {
-		printf 'mixed\n'
-		return 0
-	}
-	if printf '%s\n' "$changes" | awk -F'\t' -v re="$REPORT_RE" '$1 != "A" || $2 !~ re { bad = 1 } END { exit bad }'; then
+	branch_changes "$base" "$ref" "$STORE/sweep-changes"
+	while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+		any=1
+		read -r _ mode _ _ status <<<"$meta"
+		[ "$status" = A ] && is_report "$mode" "$path" || bad=1
+	done <"$STORE/sweep-changes"
+	if [ "$any" -eq 1 ] && [ "$bad" -eq 0 ]; then
 		printf 'report-only\n'
 	else
 		printf 'mixed\n'
@@ -108,14 +179,18 @@ branch_class() {
 
 # Report files a branch adds or changes over the default branch.
 branch_reports() {
-	local label="$1" ref="$2" base files
+	local label="$1" ref="$2" base meta path mode status
 	base="$(git -C "$STORE" merge-base "$ref" "refs/sweep/${label}/default" 2>/dev/null)" || return 0
-	files="$(git -C "$STORE" diff --name-only --no-renames --diff-filter=AM "$base" "$ref")"
-	printf '%s\n' "$files" | grep -E "$REPORT_RE" || true
+	branch_changes "$base" "$ref" "$STORE/sweep-changes"
+	while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+		read -r _ mode _ _ status <<<"$meta"
+		case "$status" in A | M) is_report "$mode" "$path" && printf '%s\n' "$path" ;; esac
+	done <"$STORE/sweep-changes"
+	return 0
 }
 
 cmd_scan() {
-	local mode="$1" into="" also=() checkouts=() dir url label ref branch class sha date file blob dest
+	local mode="$1" into="" also=() checkouts=() dir url label ref branch class sha date file blob dest stem n
 	shift
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
@@ -175,18 +250,29 @@ cmd_scan() {
 				continue
 			fi
 			date="$(git -C "$STORE" log -1 --format=%cs "$ref")"
-			while read -r file; do
+			branch_reports "$label" "$ref" >"$STORE/sweep-reports"
+			while IFS= read -r file; do
 				[ -n "$file" ] || continue
 				blob="$(git -C "$STORE" rev-parse "${ref}:${file}")"
+				# Same-named reports from other branches or folders get a
+				# suffix; every candidate is checked, so no copy overwrites one.
 				dest="reports/${label}/${file##*/}"
-				[ ! -e "$into/$dest" ] || dest="${dest%.md}.from-$(printf '%s' "$branch" | tr '/' '-').md"
+				if [ -e "$into/$dest" ]; then
+					stem="${dest%.md}.from-$(printf '%s' "$branch" | tr '/' '-')"
+					dest="${stem}.md"
+					n=2
+					while [ -e "$into/$dest" ]; do
+						dest="${stem}-${n}.md"
+						n=$((n + 1))
+					done
+				fi
 				mkdir -p "$into/reports/${label}"
 				git -C "$STORE" cat-file blob "$blob" >"$into/$dest"
 				[ "$(git hash-object --no-filters "$into/$dest")" = "$blob" ] ||
 					die "copy of ${label}:${branch}:${file} does not match its source"
 				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 					"$label" "$url" "$branch" "$class" "$sha" "$date" "$file" "$blob" "$dest" >>"$manifest"
-			done < <(branch_reports "$label" "$ref")
+			done <"$STORE/sweep-reports"
 		done < <(git -C "$STORE" for-each-ref --format='%(refname) %(objectname)' "refs/sweep/${label}/b")
 	done
 	[ -z "$manifest" ] || mv "$manifest" "$into/MANIFEST.tsv"
@@ -197,9 +283,9 @@ cmd_scan() {
 # pull requests does not show. Prints a count, or `gone` when the branch no
 # longer exists.
 open_prs_for_head() {
-	local slug="$1" branch="$2"
+	local host="$1" slug="$2" branch="$3"
 	# shellcheck disable=SC2016 # GraphQL variables, not shell expansions
-	gh api graphql \
+	gh api --hostname "$host" graphql \
 		-f query='query($o: String!, $n: String!, $r: String!) { repository(owner: $o, name: $n) { ref(qualifiedName: $r) { associatedPullRequests(states: OPEN) { totalCount } } } }' \
 		-f o="${slug%%/*}" -f n="${slug#*/}" -f r="refs/heads/${branch}" \
 		--jq '.data.repository.ref | if . == null then "gone" else .associatedPullRequests.totalCount end'
@@ -216,7 +302,7 @@ row_is_safe() {
 }
 
 cmd_delete() {
-	local from="" yes=0 repo url branch class sha dest blob slug prs reason
+	local from="" yes=0 repo url branch class sha dest blob kind host slug prs reason
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 		--from)
@@ -243,9 +329,12 @@ cmd_delete() {
 				row_is_safe "$from" "$dest" "$blob" || reason="aggregated copy $dest is not committed with the recorded content"
 			done < <(awk -F'\t' -v r="$repo" -v b="$branch" 'NR > 1 && $1 == r && $3 == b { print $9 "\t" $8 }' "$from/MANIFEST.tsv")
 		fi
-		slug="$(github_slug "$url")"
-		if [ -z "$reason" ] && [ -n "$slug" ]; then
-			prs="$(open_prs_for_head "$slug" "$branch" 2>/dev/null)" ||
+		kind=local
+		[ -n "$reason" ] || read -r kind host slug <<<"$(pr_target "$url")"
+		if [ "$kind" = unknown ]; then
+			reason="open pull requests cannot be checked on $host (not GitHub, or no gh login for it)"
+		elif [ "$kind" = github ]; then
+			prs="$(open_prs_for_head "$host" "$slug" "$branch" 2>/dev/null)" ||
 				reason="could not check for open pull requests"
 			if [ -z "$reason" ]; then
 				case "$prs" in

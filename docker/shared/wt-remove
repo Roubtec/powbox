@@ -571,8 +571,12 @@ fi
 # not part of the clean-tree verdict: `git status --porcelain` omits them, and a
 # plain `git worktree remove` deletes them. Removing then needs git's `--force`,
 # because git's own cleanliness check reads the same all-staged status; the only
-# other check that flag skips is git's refusal to remove initialized submodules,
-# so a worktree whose index holds any gitlink is refused instead. A rebased,
+# other check that flag skips is git's submodule refusal, which fires on a gitlink
+# in the index OR a `modules/` dir under the worktree's admin dir (where a
+# submodule's own repository, and its unpushed commits, live), so either one is
+# refused here instead. `git diff` trusts the index's assume-unchanged and
+# skip-worktree bits and never reads such a file, so any entry carrying either
+# bit also refuses the proof rather than be assumed equal. A rebased,
 # squash-merged or force-pushed branch leaves a last commit that no remote ref
 # contains even though equivalent changes landed; that is refused, not reasoned
 # about.
@@ -595,12 +599,15 @@ deleted_branch_diff() {
 	esac
 }
 deleted_branch_proof() {
-	local branch="${1#refs/heads/}" what last c="" refs line storage stage
-	what="the worktree at $(shq "$WT") is on branch '$branch', which no longer exists (deleted, typically after its PR merged), so every tracked file reads as a staged addition"
+	local branch="${1#refs/heads/}" what last old="" c="" refs line storage stage
+	what="the worktree at $(shq "$WT") is on branch '$branch', which does not exist (typically deleted after its PR merged), so every tracked file reads as a staged addition"
 	storage="$(git --git-dir="$GITDIR" config --get extensions.refStorage 2>/dev/null)" || storage=files
 	if [ "$storage" = files ] && [ -f "$GITDIR/logs/HEAD" ] && [ -r "$GITDIR/logs/HEAD" ]; then
 		last="$(tail -n 1 -- "$GITDIR/logs/HEAD" 2>/dev/null)" || last=""
-		read -r _ c _ <<<"$last" || :
+		read -r old c _ <<<"$last" || :
+		# A ref deleted through HEAD itself logs an all-zero new value; the commit
+		# it was on is then the old one.
+		[[ ! $c =~ ^0+$ ]] || c="$old"
 		if ! [[ $c =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || [[ $c =~ ^0+$ ]]; then c=""; fi
 	fi
 	[ -n "$c" ] ||
@@ -609,15 +616,15 @@ deleted_branch_proof() {
 		die "$what; it was last on $c, which is no longer in this repository; refusing to remove it (nothing was changed)"
 	what="$what; it was last on $c"
 
-	refs="$(git --git-dir="$GITDIR" for-each-ref --contains "$c" --format='%(refname:short)' refs/remotes/ 2>/dev/null)" ||
+	refs="$(git --git-dir="$GITDIR" for-each-ref --contains "$c" --format='%(refname)' refs/remotes/ 2>/dev/null)" ||
 		die "$what, and whether a remote-tracking ref contains it could not be read; refusing to remove it (nothing was changed)"
 	# Name a branch rather than a remote's HEAD symref when both contain it.
 	while IFS= read -r line; do
 		case "$line" in
 		"") ;;
-		*/HEAD) [ -n "$DELETED_BRANCH_REMOTE" ] || DELETED_BRANCH_REMOTE="$line" ;;
+		refs/remotes/*/HEAD) [ -n "$DELETED_BRANCH_REMOTE" ] || DELETED_BRANCH_REMOTE="${line#refs/remotes/}" ;;
 		*)
-			DELETED_BRANCH_REMOTE="$line"
+			DELETED_BRANCH_REMOTE="${line#refs/remotes/}"
 			break
 			;;
 		esac
@@ -638,6 +645,12 @@ deleted_branch_proof() {
 		die "$what, and its index could not be listed; refusing to remove it (nothing was changed)"
 	! grep -q '^160000 ' <<<"$stage" ||
 		die "$what, and it holds submodules, whose own state this check does not inspect; refusing to remove it (nothing was changed)"
+	[ ! -e "$GITDIR/modules" ] && [ ! -L "$GITDIR/modules" ] ||
+		die "$what, and its admin dir holds a submodule repository ($(shq "$GITDIR/modules")), whose own commits this check does not inspect; refusing to remove it (nothing was changed)"
+	stage="$(git --git-dir="$GITDIR" --work-tree="$WT" ls-files -v 2>/dev/null)" ||
+		die "$what, and its index could not be listed; refusing to remove it (nothing was changed)"
+	! grep -q '^[a-zS] ' <<<"$stage" ||
+		die "$what, and its index marks files assume-unchanged or skip-worktree, whose contents git does not compare; refusing to remove it (nothing was changed). List them: 'git -C $(shq "$WT") ls-files -v'."
 	DELETED_BRANCH_COMMIT="$c"
 }
 
@@ -657,7 +670,7 @@ fi
 if [ -n "$DELETED_BRANCH_COMMIT" ]; then
 	git -C "$ROOT" worktree remove --force "$WT" >&2
 	remove_lint_cache
-	printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT"); its branch '${_head_ref#refs/heads/}' was already deleted, and its tree matched $DELETED_BRANCH_COMMIT, which $DELETED_BRANCH_REMOTE contains" >&2
+	printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT"); its branch '${_head_ref#refs/heads/}' does not exist, and its tree matched $DELETED_BRANCH_COMMIT, which $DELETED_BRANCH_REMOTE contains" >&2
 	exit 0
 fi
 

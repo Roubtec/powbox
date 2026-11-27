@@ -2496,7 +2496,7 @@ deleted_branch_must_refuse() {
 		text="$(cat "$err")"
 		[ "$rc" -ne 0 ] || miss="$miss $mode-REMOVED-ANYWAY"
 		[ -d "$wt" ] || miss="$miss $mode-worktree-gone"
-		[[ $text == *"on branch 'db-b', which no longer exists"* ]] || miss="$miss $mode-branch-not-named"
+		[[ $text == *"on branch 'db-b', which does not exist"* ]] || miss="$miss $mode-branch-not-named"
 		[[ $text != *"uncommitted changes"* ]] || miss="$miss $mode-generic-uncommitted-message"
 		for p in "$@"; do
 			[[ $text == *"$p"* ]] || miss="$miss $mode-missing:[$p]"
@@ -2519,7 +2519,7 @@ if deleted_branch_fixture_ok "$RDB1"; then
 	(cd "$RDB1" && bash "$WT_REMOVE" db 2>"$WORK_ROOT/rdb1.err") || rc=$?
 	text="$(cat "$WORK_ROOT/rdb1.err")"
 	if [ "$rc" -eq 0 ] && [ ! -e "$WDB1" ] && ! worktree_list_has "$RDB1" "worktree $WDB1" &&
-		[[ $text == *"branch 'db-b' was already deleted"* ]] && [[ $text == *"$CDB1"* ]] &&
+		[[ $text == *"branch 'db-b' does not exist"* ]] && [[ $text == *"$CDB1"* ]] &&
 		[[ $text == *"origin/db-b contains"* ]]; then
 		ok "wt-remove removes a deleted-branch worktree, without --force, once its tree matches a commit origin/db-b contains"
 	else
@@ -2543,6 +2543,40 @@ if deleted_branch_fixture_ok "$RDB2" && ! git -C "$RDB2" show-ref --verify --qui
 	fi
 else
 	no "precondition: the merged deleted-branch fixture should have no origin/db-b"
+fi
+
+# --- origin/HEAD present (the usual clone): a branch is named, not the symref --
+RDB12="$(deleted_branch_repo rdb-headref merged)"
+git_quiet -C "$RDB12" remote set-head origin main
+if deleted_branch_fixture_ok "$RDB12" && git -C "$RDB12" show-ref --verify --quiet refs/remotes/origin/HEAD; then
+	rc=0
+	(cd "$RDB12" && bash "$WT_REMOVE" db 2>"$WORK_ROOT/rdb12.err") || rc=$?
+	text="$(cat "$WORK_ROOT/rdb12.err")"
+	if [ "$rc" -eq 0 ] && [[ $text == *"which origin/main contains"* ]]; then
+		ok "wt-remove names origin/main, not the origin/HEAD symref, as the ref containing a deleted branch's commit"
+	else
+		no "wt-remove did not name origin/main with origin/HEAD present (rc=$rc): $text"
+	fi
+else
+	no "precondition: the origin/HEAD deleted-branch fixture should have refs/remotes/origin/HEAD"
+fi
+
+# --- branch deleted through HEAD: the last reflog line's new value is all zeros,
+# and the commit is in its old field --------------------------------------------
+RDB13="$(deleted_branch_repo rdb-zeroref pushed)"
+CDB13="$(git -C "$RDB13" rev-parse origin/db-b)"
+printf '%s %s %s\n' "$CDB13" 0000000000000000000000000000000000000000 $'x <x@x> 0 +0000\tupdate-ref: deleted' >>"$RDB13/.git/worktrees/db/logs/HEAD"
+if deleted_branch_fixture_ok "$RDB13"; then
+	rc=0
+	(cd "$RDB13" && bash "$WT_REMOVE" db 2>"$WORK_ROOT/rdb13.err") || rc=$?
+	text="$(cat "$WORK_ROOT/rdb13.err")"
+	if [ "$rc" -eq 0 ] && [[ $text == *"$CDB13"* ]]; then
+		ok "wt-remove reads the commit from the old field of an all-zero last reflog entry"
+	else
+		no "wt-remove did not fall back to the old field of an all-zero reflog entry (rc=$rc): $text"
+	fi
+else
+	no "precondition: the all-zero-reflog deleted-branch fixture is not in the deleted-branch state"
 fi
 
 # --- the landmine: rebased before deletion, so NO remote ref contains it ------
@@ -2608,6 +2642,37 @@ if [ -z "$miss" ]; then
 else
 	no "wt-remove deleted-branch submodule refusal inadequate:$miss"
 fi
+
+# --- a submodule REPOSITORY under the admin dir: git's own clean removal refuses
+# it, and the --force the proof path needs would delete it with the admin dir --
+RDB11="$(deleted_branch_repo rdb-modules pushed)"
+mkdir -p "$RDB11/.git/worktrees/db/modules/subm"
+echo unpushed >"$RDB11/.git/worktrees/db/modules/subm/x"
+miss="$(deleted_branch_must_refuse "$RDB11" "its admin dir holds a submodule repository")"
+[ -e "$RDB11/.git/worktrees/db/modules/subm/x" ] || miss="$miss modules-dir-gone"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree whose admin dir holds a submodule repository (modules/)"
+else
+	no "wt-remove deleted-branch modules/ refusal inadequate:$miss"
+fi
+
+# --- assume-unchanged / skip-worktree: git diff never reads such a file, so an
+# edit behind either bit would pass both comparisons -------------------------
+for flag in assume-unchanged skip-worktree; do
+	rdb="$(deleted_branch_repo "rdb-$flag" pushed)"
+	echo edited >>"$rdb/.worktrees/$CONTAINER_NAME/db/work.txt"
+	git_quiet -C "$rdb/.worktrees/$CONTAINER_NAME/db" update-index "--$flag" work.txt
+	if git -C "$rdb/.worktrees/$CONTAINER_NAME/db" diff --quiet "$(git -C "$rdb" rev-parse origin/db-b)" --; then
+		miss="$(deleted_branch_must_refuse "$rdb" "marks files assume-unchanged or skip-worktree")"
+		if [ -z "$miss" ]; then
+			ok "wt-remove refuses a deleted-branch worktree whose edited file is flagged $flag"
+		else
+			no "wt-remove deleted-branch $flag refusal inadequate:$miss"
+		fi
+	else
+		no "precondition: git diff should hide an edit behind --$flag"
+	fi
+done
 
 # --- an operation in flight still outranks the deleted branch ----------------
 RDB9="$(deleted_branch_repo rdb-bisect bisect)"

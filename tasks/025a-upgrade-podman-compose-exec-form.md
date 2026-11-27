@@ -3,7 +3,7 @@
 ## Why this task exists
 
 Task 025's smoke proved that the bundled `podman-compose` 1.3 always rewrites an exec-form health check `test: ["CMD", "/bin/true"]` into a shell-wrapped `["CMD-SHELL", "/bin/sh -c /bin/true"]`.
-On images that ship a shell (e.g. alpine) the wrapped command still runs, so the defect is invisible; on distroless / shell-less images (no `/bin/sh`) the health check can never execute and the service stays at `starting` forever — the exact Kalm2 SPIRE-overlay symptom that motivated task 025.
+On images that ship a shell (e.g. alpine) the wrapped command still runs, so the defect is invisible; on distroless / shell-less images (no `/bin/sh`) the health check can never execute and the service stays at `starting` forever — the exact downstream SPIRE-overlay symptom that motivated task 025.
 
 This is a quirk of the current `podman-compose` version, not something Powbox's architecture introduces.
 Task 025 therefore shipped an honest, deliberately GREEN `KNOWN-XFAIL`: its distroless reproduction (section 4c of `scripts/smoke-test-podman.sh`) demonstrates the break exists today and emits a loud self-clearing NOTE if the wrap ever disappears, but it does not fail CI over an upstream limitation.

@@ -15,7 +15,7 @@
 #
 #   1. The embedded Compose fixture is well-formed YAML whose health check is an
 #      EXEC-form CMD array (test[0] == "CMD"), NOT a CMD-SHELL string — the exec
-#      form is the entire point (the Kalm2 distroless case), and a stray rewrite to
+#      form is the entire point (the distroless case), and a stray rewrite to
 #      CMD-SHELL would stop testing it while still looking green. It also carries a
 #      never-succeeding /bin/false negative-control service and a shell-less
 #      "distroless" service (its own heredoc) that actively reproduces the break.

@@ -43,7 +43,7 @@ in `container-agent.md.tmpl` and a README pointer for discoverability.
   against `cli/cli` (worthwhile, but independent — a possible follow-up task).
 - The reply/resolve/comment recipes (they stay as-is; they are single-object REST/GraphQL
   calls with no pagination hazard).
-- Base-image changes; anything Go/kalm2-specific.
+- Base-image changes; anything Go- or downstream-project-specific.
 
 ## Helper contract (design sketch — refine details, keep the guarantees)
 

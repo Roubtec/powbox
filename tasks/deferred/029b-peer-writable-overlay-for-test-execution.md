@@ -3,7 +3,7 @@
 ## Why this task exists (and why it is deferred)
 
 Read-only peer reviews systematically cannot **execute** tests: build tooling must write caches inside the tree (Vite/SvelteKit's `node_modules/.vite` and `.svelte-kit`, `tsc --incremental` metadata, Go's per-tree artifacts), and the provider's read-only sandbox rejects those writes.
-Every Scribz peer review hit this and said so; the consequence is that every peer claim of the form "this test would fail without the fix" is a static judgement — a systematic weakening of the second opinion on exactly the claim that decides whether a fix is genuinely covered, across every repo we run daily.
+Every peer review in one downstream project hit this and said so; the consequence is that every peer claim of the form "this test would fail without the fix" is a static judgement — a systematic weakening of the second opinion on exactly the claim that decides whether a fix is genuinely covered, across every repo we run daily.
 
 The peer needs "cannot modify the branch", which is not the same as "cannot write anywhere".
 An overlay gives both: the provider sees a **writable view** of the worktree while every write lands in a throwaway upper layer outside it — the real tree is untouched by construction, stronger than the current permission-based read-only promise.
@@ -33,7 +33,7 @@ The spike's acceptance question: inside the overlay, does `pnpm vitest run` (a S
 - Document generically (README/architecture): this is useful to anyone running untrusted-ish reviewers or parallel agents over worktrees, not just our peer loop — writes land in a discardable upper layer, the tree is untouched by construction.
 - Hermetic tests in `scripts/test-peer-review-run.sh` style (fake provider writes into the tree; assert the real tree is untouched and the write landed in the upper layer), plus a smoke case on a rebuilt image.
 
-Out of scope: network policy changes, provider CLI changes, per-repo cache relocation (that cheaper repo-side alternative is already in the Scribz handoff and remains valid independently).
+Out of scope: network policy changes, provider CLI changes, per-repo cache relocation (that cheaper repo-side alternative is already in that downstream project's handoff and remains valid independently).
 
 ## Context and references
 

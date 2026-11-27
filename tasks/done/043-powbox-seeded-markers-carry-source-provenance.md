@@ -6,7 +6,7 @@
 
 Seeded skills and workflows carry a `.powbox-seeded` marker with `epoch=` and `commit=` lines (`docker/shared/seed-skills.sh`, `seed_marker_content`).
 That answers "which image build put this here" but not "where does the canonical source live" — and the second question is the one an agent hits when it finds a defect in a baked artifact mid-run.
-In a scribz session, an agent that found a real capability gap in `wf-address-tasks.js` spent several exploratory commands across four plugin-cache copies before concluding (from the marker's `commit=`) that the file was image-managed, and still could not tell that the fix belonged in `Roubtec/powbox` at `docker/claude/agent-container/workflows/wf-address-tasks.js` — the session patch died with the session, and the report had to describe the upstream location by inference.
+In a downstream-project session, an agent that found a real capability gap in `wf-address-tasks.js` spent several exploratory commands across four plugin-cache copies before concluding (from the marker's `commit=`) that the file was image-managed, and still could not tell that the fix belonged in `Roubtec/powbox` at `docker/claude/agent-container/workflows/wf-address-tasks.js` — the session patch died with the session, and the report had to describe the upstream location by inference.
 
 One extra marker line turns that multi-command hunt into one `cat`.
 

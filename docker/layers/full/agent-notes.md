@@ -37,7 +37,7 @@ The emitted URL ends in `?sslmode=disable` — the cluster has no SSL and Go's `
 The cluster runs as the unprivileged `node` user with trust auth on a loopback socket (the container is the security boundary), so no `sudo -u postgres` dance is needed. Defaults are `postgres`/`postgres`/`postgres` on port `5432`; override per project to match its `.env` before the first call:
 
 ```bash
-POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
+POSTGRES_USER=myapp POSTGRES_PASSWORD=myapp POSTGRES_DB=myapp pg-dev-up
 ```
 
 Other subcommands: `pg-dev-up status`, `pg-dev-up down` (stop but keep data), `pg-dev-up help`.

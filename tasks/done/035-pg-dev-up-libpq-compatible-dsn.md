@@ -4,7 +4,7 @@
 
 `pg-dev-up` builds its DATABASE_URL as `postgresql://user:pass@host:port/db` with no query parameters (`docker/shared/pg-dev-up:602`).
 Go's `lib/pq` defaults to `sslmode=require` when the DSN does not specify one, so any Go integration suite pointed at a `pg-dev-up` cluster fails with `SSL is not enabled on the server` until someone appends `?sslmode=disable`.
-This bit repeatedly in kalm2 (`-tags integration` suites are the main consumer of `pg-dev-up` there): a subagent rediscovered the workaround independently and had to flag it forward to every later runner — roughly one wasted debugging cycle per agent that touched a live database.
+This bit repeatedly in a downstream Go project (`-tags integration` suites are the main consumer of `pg-dev-up` there): a subagent rediscovered the workaround independently and had to flag it forward to every later runner — roughly one wasted debugging cycle per agent that touched a live database.
 
 The cluster is loopback-only with trust auth and the container is the security boundary, so `sslmode=disable` is the honest description of the connection, not a weakening.
 

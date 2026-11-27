@@ -4,7 +4,7 @@
 
 ## Why this task exists
 
-Iterating on Workflow scripts inside a container is currently hand-rolled in two places, both observed costing multiple turns in a scribz `wf-address-tasks` run:
+Iterating on Workflow scripts inside a container is currently hand-rolled in two places, both observed costing multiple turns in a downstream project's `wf-address-tasks` run:
 
 1. **No syntax check.** Workflow scripts are plain JS whose body the runtime wraps in an async function, so a top-level `return` is legal — but `node --check` rejects it with `SyntaxError: Illegal return statement`, a misleading error. Validating an edit required a throwaway python script to strip the `meta` export and re-wrap the body before `node --check` would accept it. Without a checker, a typo surfaces only after stopping a live run — which kills in-flight subagents and forces a resume cycle.
 2. **No run introspection.** Answering "how far along is this run?" took a `jq` pass over the session's `journal.jsonl` plus parsing a stringified wave plan out of a result blob; the per-agent `*.meta.json` files carry only `{"agentType","spawnDepth"}` — no label, phase, or status — so agent transcripts correlate only by opaque ID.

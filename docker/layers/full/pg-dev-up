@@ -52,7 +52,7 @@
 # so it must contain only the characters A-Za-z0-9._/- (no spaces/metacharacters).
 #
 # To match a project's expected credentials, set the env vars before calling,
-# e.g.  POSTGRES_USER=telemed POSTGRES_PASSWORD=telemed POSTGRES_DB=telemed pg-dev-up
+# e.g.  POSTGRES_USER=myapp POSTGRES_PASSWORD=myapp POSTGRES_DB=myapp pg-dev-up
 #
 # The emitted DATABASE_URL always ends in `?sslmode=disable`:
 #   postgresql://<user>:<pass>@127.0.0.1:<port>/<db>?sslmode=disable

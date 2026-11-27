@@ -2,14 +2,14 @@
 
 Follow-up to PR #75 (bake Go toolchain + golangci-lint into the base image). Originally parked in `tasks/deferred/`; promoted to `tasks/` 2026-07-02 — implemented on a branch stacked on `go-toolchain-base` (PR #75, still open) because it edits the docs sections that PR added.
 
-Source: agent session learnings 2026-07-02 ("Agent Session Learnings - 2026-07-02 00:21 UTC", a Claude retrospective from a long-running kalm2 session in a powbox container). The relevant findings are restated in full below so this task stands alone.
+Source: agent session learnings 2026-07-02 ("Agent Session Learnings - 2026-07-02 00:21 UTC", a Claude retrospective from a long-running downstream-project session in a powbox container). The relevant findings are restated in full below so this task stands alone.
 
 ## Background — what PR #75 ships and what it doesn't
 
 PR #75 bakes `go` 1.26.4 (sha256-pinned, `/usr/local/go`) and `golangci-lint` v2.12.2 (sha256-pinned tarball, `/usr/local/bin`) into the base image, with `GOTOOLCHAIN=auto` and `~/go/bin` on `PATH`. That covers the toolchain itself. It deliberately does **not** touch cache handling, which the session learnings flag as the remaining ergonomics/correctness gap for real Go work:
 
 1. **Go caches are container-ephemeral.** `GOMODCACHE` (default `~/go/pkg/mod`) and `GOCACHE` (default `~/.cache/go-build`) live in the container filesystem — no volume covers `/home/node/go` or `/home/node/.cache` (see `compose.shared.yml` volumes and the per-agent `agent-nm-*`/`agent-wt-*` volumes in `scripts/launch-agent.sh`). Every container recreation (image update, relaunch) cold-downloads all modules and rebuilds everything. The learnings doc: "Persist/pre-warm `GOMODCACHE` (`~/go/pkg/mod`) + `GOCACHE` (`~/.cache/go-build`) as a volume (as `node_modules` already is) so `go build`/`go test ./...` don't cold-download each session."
-2. **golangci-lint's analysis cache bleeds across parallel worktrees.** Its cache (default `~/.cache/golangci-lint`) is shared per-home, and parallel `address-tasks`/`address-reviews` runs in sibling worktrees can surface phantom findings from a sibling's tree state (a standing observation from kalm2 sessions; CI avoids it by keying the cache on `go.sum` + `.golangci.yml`). The learnings doc: "Scope the golangci-lint + go-build caches per worktree (or ship a wrapper) so parallel Go runs don't show phantom sibling findings."
+2. **golangci-lint's analysis cache bleeds across parallel worktrees.** Its cache (default `~/.cache/golangci-lint`) is shared per-home, and parallel `address-tasks`/`address-reviews` runs in sibling worktrees can surface phantom findings from a sibling's tree state (a standing observation from downstream Go project sessions; CI avoids it by keying the cache on `go.sum` + `.golangci.yml`). The learnings doc: "Scope the golangci-lint + go-build caches per worktree (or ship a wrapper) so parallel Go runs don't show phantom sibling findings."
 
 ## The nuance — share the safe caches, isolate the unsafe one
 

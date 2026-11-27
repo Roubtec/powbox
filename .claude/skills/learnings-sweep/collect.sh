@@ -90,18 +90,30 @@ split_url() {
 # `/` in a password would hide where the user part ends. Elsewhere a user part
 # is a login name (ssh://git@host/…, git@host:…) unless it carries a password.
 # A relative local path is made absolute where git itself resolves it, so
-# fetch, the manifest and delete all reach that origin: the top of a work
-# tree, and outside one (a bare repository) the directory git ran in. A
-# leading ~ is left to git, which expands it the same from anywhere.
+# fetch, the manifest and delete all reach that origin: the top of the work
+# tree when git runs inside one, and otherwise (a bare repository, a git dir)
+# the directory git ran in. Its parent is resolved physically where it
+# exists, so the manifest outlives the checkout. A leading ~ is left to git, which expands it
+# the same from anywhere.
 origin_url() {
-	local dir="$1" url rest top
+	local dir="$1" url rest top abs
 	url="$(git -c safe.directory="$dir" -C "$dir" remote get-url origin 2>/dev/null)" ||
 		die "$dir has no origin remote"
 	split_url "$url"
 	if [ -z "$URL_SCHEME" ] && [ "$URL_PATH" = "$url" ] && [[ $url != /* && $url != "~"* ]]; then
-		top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || top=""
-		[ -n "$top" ] || top="$(cd "$dir" && pwd -P)" || die "cannot locate the repository of $dir"
-		url="$top/$url"
+		if [ "$(git -c safe.directory="$dir" -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
+			top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel)"
+		else
+			top="$(CDPATH='' cd -- "$dir" && pwd -P)"
+		fi
+		[ -n "$top" ] || die "cannot locate the repository of $dir"
+		# Only the parent is resolved: git tries <name>.git before <name>, so
+		# the name itself must reach it as written.
+		if abs="$(CDPATH='' cd -- "$top" && CDPATH='' cd -- "$(dirname -- "$url")" 2>/dev/null && pwd -P)"; then
+			url="${abs%/}/$(basename -- "$url")"
+		else
+			url="$top/$url"
+		fi
 	fi
 	rest="${url#*://}"
 	case "$URL_SCHEME" in
@@ -233,7 +245,7 @@ cmd_scan() {
 	# before anything is fetched or written.
 	local urls=() labels=() i j
 	for i in "${!checkouts[@]}"; do
-		dir="$(cd "${checkouts[$i]}" && pwd)" || die "no such checkout: ${checkouts[$i]}"
+		dir="$(CDPATH='' cd -- "${checkouts[$i]}" && pwd)" || die "no such checkout: ${checkouts[$i]}"
 		urls+=("$(origin_url "$dir")")
 		labels+=("$(repo_label "${urls[$i]}")")
 		for ((j = 0; j < i; j++)); do

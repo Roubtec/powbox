@@ -326,6 +326,25 @@ git init --quiet --bare "${WORK_ROOT}/rel/sym/Relsample.git"
 git init --quiet "${WORK_ROOT}/rel/sym/co"
 git -C "${WORK_ROOT}/rel/sym/co" remote add origin ../link/../Relsample.git
 rel_case "symlink before .." "${WORK_ROOT}/rel/sym/co"
+mkdir -p "${WORK_ROOT}/rel/l/d"
+ln -s ../../checkout "${WORK_ROOT}/rel/l/d/colink"
+rel_case "symlinked checkout" "${WORK_ROOT}/rel/l/d/colink/sub"
+git -C "$REL_CHECKOUT" remote set-url origin ../Relsample
+rel_case "name without .git" "$REL_CHECKOUT"
+git -C "$REL_CHECKOUT" remote set-url origin ../Relsample.git
+mkdir -p "${WORK_ROOT}/rel/n"
+git clone --quiet --bare "$REL_ORIGIN" "${WORK_ROOT}/rel/n/Relsample.git"
+git init --quiet "${WORK_ROOT}/rel/n/Relsample.git/inner"
+git -C "${WORK_ROOT}/rel/n/Relsample.git/inner" remote add origin ..
+rel_case "origin of .." "${WORK_ROOT}/rel/n/Relsample.git/inner"
+# git blocks a relative path starting with -, so collect.sh must not reach it.
+mkdir -p "${WORK_ROOT}/rel/dash/co/-"
+git init --quiet "${WORK_ROOT}/rel/dash/co"
+git clone --quiet --bare "$REL_ORIGIN" "${WORK_ROOT}/rel/dash/co/-/Relsample.git"
+git -C "${WORK_ROOT}/rel/dash/co" config remote.origin.url -/Relsample.git
+out="$(cd "$WORK_ROOT" && "$COLLECT" list "${WORK_ROOT}/rel/dash/co" 2>&1 || true)"
+assert_contains "origin starting with - refused, as git refuses it" "$out" "git refuses the origin -/Relsample.git"
+assert_not_contains "and not reached" "$out" "$k_row"
 git init --quiet --bare "${WORK_ROOT}/rel/bare.git"
 git -C "${WORK_ROOT}/rel/bare.git" remote add origin ../Relsample.git
 rel_case "bare repository" "${WORK_ROOT}/rel/bare.git"

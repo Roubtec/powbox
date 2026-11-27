@@ -94,14 +94,18 @@ split_url() {
 # tree when git runs inside one, and otherwise (a bare repository, a git dir)
 # the directory git ran in. Like git, it is walked physically (a symlink
 # before `..` is followed, not collapsed), and where its parent exists the
-# result names no part of the checkout, so the manifest outlives it. A
-# leading ~ is left to git, which expands it the same from anywhere.
+# result names no part of the checkout unless the origin lies inside it, so
+# the manifest outlives the checkout. A leading ~ is left to git, which
+# expands it the same from anywhere.
 origin_url() {
 	local dir="$1" url rest top abs parent name
 	url="$(git -c safe.directory="$dir" -C "$dir" remote get-url origin 2>/dev/null)" ||
 		die "$dir has no origin remote"
 	split_url "$url"
 	if [ -z "$URL_SCHEME" ] && [ "$URL_PATH" = "$url" ] && [[ $url != /* && $url != "~"* ]]; then
+		# git blocks a path that could read as an option; made absolute it
+		# would pass, so refuse it here as git does (and keep cd off `-`).
+		[[ $url != -* ]] || die "git refuses the origin $url of $dir"
 		if [ "$(git -c safe.directory="$dir" -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
 			top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel)"
 		else

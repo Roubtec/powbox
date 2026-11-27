@@ -140,9 +140,9 @@ ENV PATH="/opt/mssql-tools18/bin:${PATH}"
 # without the linter, and the pinned digests make the bits immutable where a
 # tag fetch is not. The binary is extracted OFF PATH to /usr/local/libexec:
 # the PATH name /usr/local/bin/golangci-lint is a symlink to the
-# cache-scoping wrapper (golangci-lint-wrapper.sh — the pnpm-wrapper
-# precedent; see the wrapper COPY below), which derives
-# a per-worktree GOLANGCI_LINT_CACHE and then execs this real binary. gopls
+# cache- and lock-scoping wrapper (golangci-lint-wrapper.sh — the pnpm-wrapper
+# precedent; see the wrapper COPY below), which derives a per-worktree
+# GOLANGCI_LINT_CACHE and run-lock TMPDIR, then execs this real binary. gopls
 # and dlv are deliberately NOT baked: the agent harnesses speak no LSP and
 # debug via tests/prints, and either is one `go install` away (~/go/bin is on
 # PATH below).

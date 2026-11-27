@@ -185,11 +185,11 @@
 #               `passed`/`issues`, and ALSO set for a `forfeited` review whose
 #               verdict could not be read because it carries no VERDICT line the
 #               helper recognizes (see "Writing the prompt" below). It is null
-#               for every other result,
-#               including a `forfeited` one after an empty or malformed response,
-#               so `forfeited` with a proseFile means "a review was produced but
-#               its verdict could not be read" and `forfeited` without one means
-#               "nothing usable was produced". No verdict is inferred from that
+#               for every other result, including a `forfeited` one after an
+#               empty or malformed response, so `forfeited` with a proseFile
+#               means "a review was produced but its verdict could not be read"
+#               and `forfeited` without one means "nothing usable was
+#               produced". No verdict is inferred from that
 #               prose: outcome stays `forfeited`, verdict stays `none`, and the
 #               caller weighs the text. The case is a separate additive key, not
 #               a populated reviewFile or a new outcome value, so a caller
@@ -248,7 +248,8 @@
 # issue cannot be relied on to fetch it. Put whatever the review needs from the
 # network into the prompt file itself. Ask the reviewer to end its answer with a
 # bare `VERDICT: PASS` or `VERDICT: ISSUES` line: the verdict is read only from
-# such a line, never inferred from the prose, so a review without one reports
+# a VERDICT line (those two values or a recognized alias such as `APPROVED`),
+# never inferred from the prose, so a review without one reports
 # `verdict: none` and `outcome: forfeited` rather than a pass or issues outcome.
 # Its prose is still kept, in proseFile.
 #
@@ -267,7 +268,7 @@ usage() {
 	# Range end tracks the LAST line of the header comment block (the line above
 	# `set -uo pipefail`); extend it whenever that block grows, or --help starts
 	# truncating mid-sentence.
-	sed -n '2,256p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,257p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die_usage() {
@@ -1053,7 +1054,7 @@ command -v jq >/dev/null 2>&1 || die_usage "jq is required but not on PATH"
 # python3 is a HARD precondition, preflighted here rather than discovered later:
 # every result with review prose must carry a verified review file, and finding
 # the interpreter missing AFTER a completed review would throw away work nobody
-# can get back — a run that cannot produce a reviewFile should never have paid a
+# can get back — a run that cannot produce a review file should never have paid a
 # provider. It exits 70 (operational), NOT die_usage's 64: the invocation was
 # well-formed, and this path introduces no new exit-64 case.
 command -v python3 >/dev/null 2>&1 || {

@@ -15,6 +15,11 @@
 # (a durable or unrecorded one never is), and a new cluster goes to RAM-backed
 # storage when it is available and roomy enough, else to disk — including after
 # its RAM data vanished under a surviving scoped marker.
+# Task 089: `up` records its credentials so a later `url`/`status` from a fresh
+# shell describes the cluster (and a disagreeing environment is reported, not
+# silently used), `list` shows every cluster read-only with its owner, and
+# `destroy` removes a cluster completely but only one pg-dev-up created and
+# marked — never an arbitrary directory an explicit PGDATA names.
 #
 # Runs the real repo copy of pg-dev-up directly against the baked PostgreSQL
 # server binaries — no image build. Everything is confined to a private temp
@@ -798,7 +803,7 @@ REPO_K="$WORK/wt-k"
 add_worktree "$MAIN_REPO" "$REPO_K" wt-k
 record_flag="$WORK/record-write-failed"
 up_k_err="$WORK/up-k.err"
-url_k="$(pg "$REPO_K" "BASH_FUNC_printf%%=() { if [[ \$1 == format=1* ]] && [ ! -e '$record_flag' ]; then : >'$record_flag'; return 1; fi; builtin printf \"\$@\"; }" \
+url_k="$(pg "$REPO_K" "BASH_FUNC_printf%%=() { if [[ \$1 == format=* ]] && [ ! -e '$record_flag' ]; then : >'$record_flag'; return 1; fi; builtin printf \"\$@\"; }" \
 	POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_k -- --worktree up 2>"$up_k_err" | tail -1 || true)"
 data_k="$(status_datadir "$(pg "$REPO_K" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
 STARTED_DATADIRS+=("$data_k")
@@ -831,13 +836,144 @@ pg "$WORK" PGDATA="$unscoped_data" PGPORT="$unscoped_port" -- down >/dev/null 2>
 help_text="$(pg "$WORK" -- help)"
 if [[ $help_text == *POWBOX_PG_DURABLE* ]]; then ok "help documents POWBOX_PG_DURABLE"; else ko "help lost the durability section"; fi
 
+# The `list --porcelain` row (tab-separated) of the cluster whose field $1 is $2.
+list_row() {
+	pg "$WORK" -- list --porcelain 2>/dev/null | awk -F '\t' -v f="$1" -v want="$2" '$f == want { print; exit }'
+}
+# Field $2 of porcelain row $1.
+row_field() { awk -F '\t' -v f="$2" '{ print $f }' <<<"$1"; }
+
+echo "== task 089: url and status describe the credentials up recorded =="
+REPO_M="$WORK/wt-m"
+add_worktree "$MAIN_REPO" "$REPO_M" wt-m
+top_m="$(git -C "$REPO_M" rev-parse --show-toplevel)"
+url_m="$(pg "$REPO_M" POSTGRES_USER=appm POSTGRES_PASSWORD='s3c:r/t' POSTGRES_DB=app_m -- --worktree up | tail -1)"
+data_m="$(status_datadir "$(pg "$REPO_M" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_m")
+try "a fresh shell's url prints the credentials up was given" test "$(pg "$REPO_M" -- --worktree url)" = "$url_m"
+try "the remembered URL connects as the recorded role" test "$(psql "$(pg "$REPO_M" -- --worktree url)" -tAc 'select current_user || current_database()' 2>/dev/null || true)" = "appmapp_m"
+try "the record moved to format 2" grep -qx 'format=2' "$data_m/pg-dev-up.cluster"
+try "the record keeps the role and database" grep -qx 'user=appm' "$data_m/pg-dev-up.cluster"
+try "the record keeps the password, percent-encoded" grep -qx 'password=s3c%3Ar%2Ft' "$data_m/pg-dev-up.cluster"
+try "the record kept its durability through the rewrite" grep -qx 'durability=nondurable' "$data_m/pg-dev-up.cluster"
+try "the data directory holding the password is owner-only" test "$(stat -c '%a' "$data_m")" = 700
+url_conflict_err="$WORK/url-conflict.err"
+try_not "url refuses when POSTGRES_DB disagrees with the record" pg "$REPO_M" POSTGRES_DB=other -- --worktree url 2>"$url_conflict_err"
+if grep -q "POSTGRES_DB=other, but the cluster's database is app_m" "$url_conflict_err"; then ok "the refusal names both databases"; else ko "unclear refusal: $(cat "$url_conflict_err")"; fi
+try "url with agreeing values still prints the URL" test "$(pg "$REPO_M" POSTGRES_USER=appm POSTGRES_DB=app_m -- --worktree url)" = "$url_m"
+status_m="$(pg "$REPO_M" POSTGRES_PASSWORD=wrong -- --worktree status 2>&1)" || ko "status of the running cluster failed"
+if [[ $status_m == *"credentials: role appm, database app_m"*"POSTGRES_PASSWORD differs"* ]]; then ok "status reports the recorded credentials and the disagreement"; else ko "status missed the credentials or the disagreement: $status_m"; fi
+try "a plain up in a fresh shell keeps the recorded credentials" test "$(pg "$REPO_M" -- --worktree up 2>/dev/null | tail -1)" = "$url_m"
+url_m2="$(pg "$REPO_M" POSTGRES_DB=app_m2 -- --worktree up 2>/dev/null | tail -1)"
+try "up with a new database records it" test "$(pg "$REPO_M" -- --worktree url)" = "$url_m2"
+case "$url_m2" in postgresql://appm:s3c%3Ar%2Ft@*/'app_m2?sslmode=disable') ok "the recorded role and password carry over to the new database" ;; *) ko "credentials did not carry over: $url_m2" ;; esac
+try "the new database exists" test "$(psql "$url_m2" -tAc 'select current_database()' 2>/dev/null || true)" = "app_m2"
+# A cluster recorded before task 089 (format 1, no credentials) remembers none.
+sed -i '/^user=/d; /^password=/d; /^database=/d; s/^format=2$/format=1/' "$data_m/pg-dev-up.cluster"
+try "a record without credentials leaves url to the environment" test "$(pg "$REPO_M" POSTGRES_USER=appm POSTGRES_PASSWORD='s3c:r/t' POSTGRES_DB=app_m2 -- --worktree url)" = "$url_m2"
+if [[ "$(pg "$REPO_M" -- --worktree status 2>&1)" == *"credentials: not recorded"* ]]; then ok "status says the credentials are not recorded"; else ko "status claims recorded credentials"; fi
+pg "$REPO_M" POSTGRES_USER=appm POSTGRES_PASSWORD='s3c:r/t' POSTGRES_DB=app_m2 -- --worktree up >/dev/null 2>&1
+try "the next up records them into the old record" grep -qx 'user=appm' "$data_m/pg-dev-up.cluster"
+# The unscoped cluster has the same memory: it keeps the record in its data dir.
+unscoped_cred_data="$WORK/unscoped-cred-pgdata"
+unscoped_cred_port="$(pick_free_port)"
+url_uc="$(pg "$WORK" PGDATA="$unscoped_cred_data" PGPORT="$unscoped_cred_port" POSTGRES_USER=unu POSTGRES_DB=und -- up | tail -1)"
+STARTED_DATADIRS+=("$unscoped_cred_data")
+try "an unscoped url from a fresh shell prints the recorded credentials" test "$(pg "$WORK" PGDATA="$unscoped_cred_data" PGPORT="$unscoped_cred_port" -- url)" = "$url_uc"
+pg "$WORK" PGDATA="$unscoped_cred_data" -- down >/dev/null 2>&1 || true
+
+echo "== task 089: list shows every cluster, whose it is and whether it runs =="
+row_m="$(list_row 11 "$data_m")"
+try "list shows the worktree-scoped cluster" test -n "$row_m"
+try "its kind is worktree" test "$(row_field "$row_m" 1)" = worktree
+try "it is running" test "$(row_field "$row_m" 3)" = running
+try "its owner is the worktree's toplevel" test "$(row_field "$row_m" 8)" = "$top_m"
+try "its owner is present" test "$(row_field "$row_m" 7)" = present
+try "it shows the recorded role and database" test "$(row_field "$row_m" 9)/$(row_field "$row_m" 10)" = "appm/app_m2"
+key_m="$(row_field "$row_m" 2)"
+try "it names the instance by its 16-hex key" test "${#key_m}" = 16
+row_prof="$(list_row 8 ci-lane-1)"
+try "a stopped profile instance is listed as such" test "$(row_field "$row_prof" 1)/$(row_field "$row_prof" 3)" = "profile/stopped"
+row_l="$(list_row 11 "$data_l")"
+try "a cluster without a pg-dev-up record is listed as unrecorded" test "$(row_field "$row_l" 5)" = unrecorded
+human_list="$(pg "$WORK" -- list 2>/dev/null)"
+if [[ $human_list == *"scoped instance $key_m, worktree $top_m"*"running on 127.0.0.1:"*"remove: pg-dev-up --instance $key_m destroy"* ]]; then ok "the human list names the owner, the state and the removal command"; else ko "human list unclear: $human_list"; fi
+git -C "$MAIN_REPO" worktree remove --force "$REPO_M"
+try "once the worktree is gone, list says so" test "$(row_field "$(list_row 11 "$data_m")" 7)" = gone
+if [[ "$(pg "$WORK" -- list 2>/dev/null)" == *"worktree $top_m (which no longer exists)"* ]]; then ok "the human list flags the gone worktree"; else ko "gone worktree not flagged"; fi
+# Read-only: list neither creates its roots nor touches existing markers.
+pg "$WORK" POWBOX_PG_SCOPED_ROOT="$WORK/never-root" POWBOX_PG_RAM_ROOT="$WORK/never-ram" -- list >/dev/null 2>&1
+try "list creates no scoped root" test ! -e "$WORK/never-root"
+try "list creates no RAM base" test ! -e "$WORK/never-ram"
+markers_state() { find "$SCOPED_ROOT" -maxdepth 2 -not -name pgdata -printf '%P %s %T@ %m\n' | sort; }
+before_list="$(markers_state)"
+pg "$WORK" -- list >/dev/null 2>&1
+try "list leaves every marker as it was" test "$(markers_state)" = "$before_list"
+# A concurrent up is not disturbed by repeated listing.
+REPO_N="$WORK/wt-n"
+add_worktree "$MAIN_REPO" "$REPO_N" wt-n
+pg "$REPO_N" POSTGRES_DB=app_n -- --worktree up >"$WORK/n.out" 2>/dev/null &
+pid_n=$!
+for _ in 1 2 3 4 5 6; do pg "$WORK" -- list --porcelain >/dev/null 2>&1 || true; done
+status_n=0
+wait "$pid_n" || status_n=$?
+data_n="$(status_datadir "$(pg "$REPO_N" -- --worktree status 2>&1 || true)")"
+STARTED_DATADIRS+=("$data_n")
+try "an up racing repeated lists succeeds" test "$status_n" -eq 0
+try "and serves its database" test "$(psql "$(tail -1 "$WORK/n.out")" -tAc 'select current_database()' 2>/dev/null || true)" = "app_n"
+
+echo "== task 089: destroy removes only what pg-dev-up created and marked =="
+try_not "destroy refuses a non-empty PGDATA that holds no cluster" pg "$WORK" PGDATA="$user_dir" -- destroy
+try "the user's file survives" test "$(cat "$user_dir/notes.txt")" = "keep me"
+ln -s "$data_n" "$WORK/link-to-cluster"
+try_not "destroy refuses a PGDATA that is a symbolic link" pg "$WORK" PGDATA="$WORK/link-to-cluster" -- destroy
+try_not "an unscoped destroy refuses a scoped instance's data dir" pg "$WORK" PGDATA="$data_n" -- destroy
+try_not "a scoped destroy refuses an explicit PGDATA naming another directory" pg "$REPO_N" PGDATA="$user_dir" -- --worktree destroy
+try "the refused destroys left the cluster running" pg "$REPO_N" -- --worktree status
+destroy_l_err="$WORK/destroy-l.err"
+try_not "destroy refuses a cluster without pg-dev-up's record" pg "$REPO_L" -- --worktree destroy 2>"$destroy_l_err"
+if grep -q "nothing proves pg-dev-up created it" "$destroy_l_err"; then ok "the refusal says why"; else ko "unclear refusal: $(cat "$destroy_l_err")"; fi
+try "the unrecorded cluster's data is untouched" test -s "$data_l/PG_VERSION"
+try "its scope's markers are untouched" test -s "$(dirname "$data_l")/datadir"
+try_not "--instance cannot create a cluster" pg "$WORK" -- --instance "$key_m" up
+try_not "--instance rejects a malformed key" pg "$WORK" -- --instance not-a-key destroy
+port_m="$(row_field "$row_m" 4)"
+pid_m="$(sed -n 1p "$data_m/postmaster.pid")"
+try "a running cluster whose worktree is gone is destroyed by its key" pg "$WORK" -- --instance "$key_m" destroy
+try_not "its postmaster was stopped" kill -0 "$pid_m"
+try_not "its port no longer answers" bash -c "exec 3<>/dev/tcp/127.0.0.1/$port_m" 2>/dev/null
+try "its data directory is gone" test ! -e "$data_m"
+try "its instance markers are gone" test ! -e "$SCOPED_ROOT/$key_m"
+try "list no longer shows it" test -z "$(list_row 2 "$key_m")"
+try "destroying it again is a no-op success" pg "$WORK" -- --instance "$key_m" destroy
+try "a worktree's own scoped destroy removes it" pg "$REPO_N" -- --worktree destroy
+try "its data directory is gone too" test ! -e "$data_n"
+try_not "and scoped status no longer finds it" pg "$REPO_N" -- --worktree status
+try "an unscoped destroy removes the cluster at its explicit PGDATA" pg "$WORK" PGDATA="$unscoped_cred_data" -- destroy
+try "that data directory is gone" test ! -e "$unscoped_cred_data"
+# RAM-backed data that no instance under this scoped root records (here: made
+# under another scoped root) is listed and destroyable by its key.
+REPO_O="$WORK/wt-o"
+add_worktree "$MAIN_REPO" "$REPO_O" wt-o
+pg "$REPO_O" POWBOX_PG_SCOPED_ROOT="$WORK/other-root" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_o -- --worktree up >/dev/null 2>&1
+data_o="$(status_datadir "$(pg "$REPO_O" POWBOX_PG_SCOPED_ROOT="$WORK/other-root" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_o")
+row_o="$(pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- list --porcelain 2>/dev/null | awk -F '\t' -v d="$data_o" '$11 == d')"
+try "RAM data without an instance here is listed with an unknown owner" test "$(row_field "$row_o" 1)/$(row_field "$row_o" 7)" = "scoped/unknown"
+try "it is destroyable by its key" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --instance "$(row_field "$row_o" 2)" destroy
+try "its RAM data is gone" test ! -e "$data_o"
+help_089="$(pg "$WORK" -- help)"
+if [[ $help_089 == *"pg-dev-up destroy"*"pg-dev-up list"* ]]; then ok "help documents destroy and list"; else ko "help lacks destroy/list"; fi
+
 echo "== unscoped invocations keep the historical port and credentials =="
-url_plain="$(pg "$WORK" -- url)"
+# PGDATA names an empty spot, so a real unscoped cluster in this container (and
+# the credentials it recorded) can never leak into the expected default URL.
+url_plain="$(pg "$WORK" PGDATA="$WORK/no-cluster-here" -- url)"
 try "unscoped URL keeps port 5432 and the default credentials, and adds sslmode=disable" test "$url_plain" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
 # Task 035, DEFAULT (unscoped) path: the same single construction site feeds
 # `up`, `url`, and `url --export`, so the parameter and its eval round-trip must
 # hold here too — `url` alone is hermetic (it touches no cluster).
-exp_plain="$(pg "$WORK" -- url --export)"
+exp_plain="$(pg "$WORK" PGDATA="$WORK/no-cluster-here" -- url --export)"
 rt_plain="$(eval_export "$exp_plain")"
 try "unscoped url --export round-trips through eval" test "$rt_plain" = "$url_plain"
 

@@ -157,8 +157,11 @@ RUN SHELLCHECK_VERSION=0.11.0 \
 # and the native Claude executable does not expose its copies to Node. Checked
 # against Claude Code 2.1.332, whose bundled parser is Acorn 8.15.x (it lacks
 # the messages Acorn 8.16 added) and whose walker carries acorn-walk 8.3.5's
-# missing-walker error. Move them only when a Claude Code release moves its
-# copies. The same literals sit in docker/shared/wf-check (Acorn only), the
+# missing-walker error. Check Claude Code's own copies by their behaviour, not
+# by grepping version strings: the binary also embeds Bun's internal REPL
+# copies (Acorn 8.16.0, acorn-walk 8.3.5 under internal/repl/), which a
+# version grep finds first. Move them only when a Claude Code release moves
+# its copies. The same literals sit in docker/shared/wf-check (Acorn only), the
 # Bash and PowerShell Stage 1 smoke assertions, the Tier 0 wf-check step in
 # .github/workflows/native-linux-ci.yml, README and docs/architecture.md.
 RUN npm install -g --omit=optional markdownlint-cli2@0.24.2 \

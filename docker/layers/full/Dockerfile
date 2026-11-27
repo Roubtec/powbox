@@ -216,7 +216,7 @@ ENV PATH="/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # (https://github.com/open-policy-agent/opa/releases). The default
 # opa_linux_<arch> asset is itself statically linked, a single self-contained
 # binary dropped straight onto PATH (no tarball to unpack); the `_static`
-# assets are byte-identical duplicates that upstream deprecated in 1.22.
+# assets are equivalent static builds that upstream deprecated in 1.22.
 #
 # Version note: this is ONE baked release. `opa test` on a policy suite is
 # version-tolerant in practice (validated against a 1.4.x-pinned project's

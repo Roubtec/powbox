@@ -1,6 +1,6 @@
 # 091a — Move the bundled PostgreSQL to a current major
 
-**Relates to:** 091 (the pin refresh this was split from, because it grows beyond a version bump), 088 and 089 (they change `pg-dev-up` too). Touches the PostgreSQL block of `docker/layers/full/Dockerfile`, `docker/layers/full/pg-dev-up`, the PostgreSQL image the shared Podman store pre-caches (`docker/layers/full/seed-image-store.sh`), `docker/layers/full/agent-notes.md`, `docker/layers/full/smoke-probes.txt`, `scripts/test-pg-dev-up-scoped.sh`, `docs/architecture.md` "Bundled PostgreSQL", and the README and Podman docs that name the major.
+**Relates to:** 091 (the pin refresh this was split from, because it grows beyond a version bump), 088 and 089 (they change `pg-dev-up` too). Touches the PostgreSQL block of `docker/layers/full/Dockerfile`, `docker/layers/full/pg-dev-up`, the PostgreSQL image the shared Podman store pre-caches (`docker/layers/full/seed-image-store.sh`), `docker/layers/full/agent-notes.md`, `docker/layers/full/smoke-probes.txt`, `scripts/test-pg-dev-up-scoped.sh`, `docs/architecture.md` "Bundled PostgreSQL", the `full` set's description in `.powbox-layers.example`, and the README and Podman docs that name the major.
 
 ## Why this task exists
 

@@ -1,6 +1,6 @@
 # 091b — Move the base image to the current Node.js LTS
 
-**Relates to:** 091 (the pin refresh this was split from, because it changes the runtime of every image and every project). Touches the `FROM` line and `BASE_SOURCE_IMAGE` of `docker/base/Dockerfile`, the `BASE_SOURCE_IMAGE` default in `docker-bake.hcl`, the fallback helper image in `commands/reset-claude-history.{sh,ps1}`, the comments in `commands/check-updates.{sh,ps1}` and `scripts/build-image.{sh,ps1}` that name the base, and README.
+**Relates to:** 091 (the pin refresh this was split from, because it changes the runtime of every image and every project). Touches the `FROM` line and `BASE_SOURCE_IMAGE` of `docker/base/Dockerfile`, the `BASE_SOURCE_IMAGE` default in `docker-bake.hcl`, the fallback helper image in `commands/reset-claude-history.{sh,ps1}`, the literal fallback and comments in `scripts/build-image.{sh,ps1}`, the comments in `commands/check-updates.{sh,ps1}`, `scripts/base-source-digest.sh` and `.github/workflows/native-linux-build.yml` that name the base, the `powbox.base.source` fixture in `scripts/test-layer-sets.sh`, and README.
 
 ## Why this task exists
 

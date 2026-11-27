@@ -310,15 +310,22 @@ k_row="$(printf 'relsample\tlearnings/session-k\treport-only')"
 rel_case() {
 	local name="$1" dir="$2" out
 	shift 2
-	if (cd "$WORK_ROOT" && env "$@" git -C "$dir" ls-remote origin HEAD >/dev/null 2>&1); then
-		ok "$name: git reaches the origin"
-	else
-		ko "$name: git reaches the origin"
-	fi
+	out="$(cd "$WORK_ROOT" && env "$@" git -C "$dir" ls-remote origin refs/heads/learnings/session-k 2>&1 || true)"
+	assert_contains "$name: git reaches the origin" "$out" "refs/heads/learnings/session-k"
 	out="$(cd "$WORK_ROOT" && env "$@" "$COLLECT" list "$dir" 2>&1 || true)"
 	assert_contains "$name: collect.sh reaches it too" "$out" "$k_row"
 }
+rel_case "checkout root" "$REL_CHECKOUT"
 rel_case "work-tree subdirectory" "$REL_CHECKOUT/sub"
+# A symlink before `..` is followed, as the kernel does for git, not
+# collapsed as text: the textual reading lands on a decoy without session-k.
+mkdir -p "${WORK_ROOT}/rel/real/inner" "${WORK_ROOT}/rel/sym"
+ln -s ../real/inner "${WORK_ROOT}/rel/sym/link"
+git clone --quiet --bare "$REL_ORIGIN" "${WORK_ROOT}/rel/real/Relsample.git"
+git init --quiet --bare "${WORK_ROOT}/rel/sym/Relsample.git"
+git init --quiet "${WORK_ROOT}/rel/sym/co"
+git -C "${WORK_ROOT}/rel/sym/co" remote add origin ../link/../Relsample.git
+rel_case "symlink before .." "${WORK_ROOT}/rel/sym/co"
 git init --quiet --bare "${WORK_ROOT}/rel/bare.git"
 git -C "${WORK_ROOT}/rel/bare.git" remote add origin ../Relsample.git
 rel_case "bare repository" "${WORK_ROOT}/rel/bare.git"

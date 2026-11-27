@@ -92,11 +92,12 @@ split_url() {
 # A relative local path is made absolute where git itself resolves it, so
 # fetch, the manifest and delete all reach that origin: the top of the work
 # tree when git runs inside one, and otherwise (a bare repository, a git dir)
-# the directory git ran in. Its parent is resolved physically where it
-# exists, so the manifest outlives the checkout. A leading ~ is left to git, which expands it
-# the same from anywhere.
+# the directory git ran in. Like git, it is walked physically (a symlink
+# before `..` is followed, not collapsed), and where its parent exists the
+# result names no part of the checkout, so the manifest outlives it. A
+# leading ~ is left to git, which expands it the same from anywhere.
 origin_url() {
-	local dir="$1" url rest top abs
+	local dir="$1" url rest top abs parent name
 	url="$(git -c safe.directory="$dir" -C "$dir" remote get-url origin 2>/dev/null)" ||
 		die "$dir has no origin remote"
 	split_url "$url"
@@ -104,13 +105,15 @@ origin_url() {
 		if [ "$(git -c safe.directory="$dir" -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
 			top="$(git -c safe.directory="$dir" -C "$dir" rev-parse --show-toplevel)"
 		else
-			top="$(CDPATH='' cd -- "$dir" && pwd -P)"
+			top="$(CDPATH='' cd -P -- "$dir" && pwd -P)"
 		fi
 		[ -n "$top" ] || die "cannot locate the repository of $dir"
-		# Only the parent is resolved: git tries <name>.git before <name>, so
-		# the name itself must reach it as written.
-		if abs="$(CDPATH='' cd -- "$top" && CDPATH='' cd -- "$(dirname -- "$url")" 2>/dev/null && pwd -P)"; then
-			url="${abs%/}/$(basename -- "$url")"
+		# The last name stays as written: git tries suffixes on it (/.git,
+		# .git), so resolving it here could pick another candidate.
+		parent="$(dirname -- "$url")" name="$(basename -- "$url")"
+		case "$name" in . | ..) parent="$url" name="" ;; esac
+		if abs="$(CDPATH='' cd -P -- "$top" && CDPATH='' cd -P -- "$parent" 2>/dev/null && pwd -P)"; then
+			if [ -n "$name" ]; then url="${abs%/}/$name"; else url="$abs"; fi
 		else
 			url="$top/$url"
 		fi
@@ -245,7 +248,7 @@ cmd_scan() {
 	# before anything is fetched or written.
 	local urls=() labels=() i j
 	for i in "${!checkouts[@]}"; do
-		dir="$(CDPATH='' cd -- "${checkouts[$i]}" && pwd)" || die "no such checkout: ${checkouts[$i]}"
+		dir="$(CDPATH='' cd -P -- "${checkouts[$i]}" && pwd -P)" || die "no such checkout: ${checkouts[$i]}"
 		urls+=("$(origin_url "$dir")")
 		labels+=("$(repo_label "${urls[$i]}")")
 		for ((j = 0; j < i; j++)); do

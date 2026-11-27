@@ -1497,8 +1497,8 @@ run_sequence() {
 	assert_eq "[$lang] lean all: no layer-set label on the agent" "$(label "$st" "$AGENT" powbox.layers.set)" ""
 	assert_eq "[$lang] lean all: staged instructions are the core template" \
 		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
-	assert_eq "[$lang] lean all: staged reference is the core known-limitations document" \
-		"$(cmp -s "$br/.powbox-staging/agent-reference/known-limitations.md" "$br/docker/shared/agent-reference/known-limitations.md" && echo same)" same
+	assert_eq "[$lang] lean all: staged reference is the core files" \
+		"$(diff -r "$br/.powbox-staging/agent-reference" "$br/docker/shared/agent-reference" >/dev/null && echo same)" same
 
 	printf 'full\n' >"$br/.powbox-layers"
 	fixed_git -C "$br" commit -q --allow-empty -m c1
@@ -1508,6 +1508,11 @@ run_sequence() {
 	# shellcheck disable=SC2016 # a literal Markdown heading
 	assert_eq "[$lang] set all: the set's known limitations are staged under their heading" \
 		"$(grep -cxF -- '## Contributed by the `full` layer set' "$br/.powbox-staging/agent-reference/known-limitations.md")" 1
+	# shellcheck disable=SC2016 # literal Markdown headings
+	assert_eq "[$lang] set all: the set's tool list and its always-loaded notes are staged under their headings" \
+		"$(grep -cxF -- '## Contributed by the `full` layer set' "$br/.powbox-staging/agent-reference/tooling.md"),$(grep -cxF -- '## Additional tooling from the `full` layer set' "$br/.powbox-staging/agent.md.tmpl")" 1,1
+	assert_eq "[$lang] set all: a reference file only the set has is staged beside the core files" \
+		"$(cmp -s "$br/docker/layers/full/agent-reference/local-postgresql.md" "$br/.powbox-staging/agent-reference/local-postgresql.md" && echo same)" same
 	assert_contains "[$lang] set all: agent on the layer-set image" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-layers:latest"
 	assert_eq "[$lang] set all: agent carries the set" "$(label "$st" "$AGENT" powbox.layers.set)" "full"
 	assert_eq "[$lang] set all: agent carries the set's digest" "$(label "$st" "$AGENT" powbox.layers.digest)" "$(bash "$DIG_SH" "$br/docker/layers/full")"
@@ -1638,8 +1643,8 @@ run_sequence() {
 	assert_contains "[$lang] back to lean: agent on the base" "$(tail -1 "$st/bake.log")" "BASE_IMAGE=powbox-agent-base:latest"
 	assert_eq "[$lang] back to lean: staged instructions are the core template again" \
 		"$(cmp -s "$br/.powbox-staging/agent.md.tmpl" "$br/docker/shared/container-agent.md.tmpl" && echo same)" same
-	assert_eq "[$lang] back to lean: staged reference is the core document again" \
-		"$(cmp -s "$br/.powbox-staging/agent-reference/known-limitations.md" "$br/docker/shared/agent-reference/known-limitations.md" && echo same)" same
+	assert_eq "[$lang] back to lean: staged reference is the core files again" \
+		"$(diff -r "$br/.powbox-staging/agent-reference" "$br/docker/shared/agent-reference" >/dev/null && echo same)" same
 	assert_eq "[$lang] back to lean: no layer-set label" "$(label "$st" "$AGENT" powbox.layers.set)" ""
 }
 
@@ -1680,8 +1685,8 @@ fi
 echo "Test: the browser and full sets install, document and probe the same browser stack"
 
 # A build selects one set, so the two sets each carry their own copy of the
-# browser stack's Dockerfile blocks, agent notes and probes; these checks keep
-# the copies from drifting apart.
+# browser stack's Dockerfile blocks, agent notes, reference rows and probes;
+# these checks keep the copies from drifting apart.
 BROWSER_DIR="$ROOT_DIR/docker/layers/browser"
 FULL_DIR="$ROOT_DIR/docker/layers/full"
 stack_of() { sed -n '/^# >>> browser stack/,/^# <<< browser stack$/p' "$1"; }
@@ -1697,12 +1702,24 @@ else
 		"$(diff <(printf '%s\n' "$browser_stack") <(printf '%s\n' "$full_stack") | sed -n '1,20p')"
 fi
 
+# The notes open with a sentence naming the set and its tools, which differs
+# by design; the hazards below it are list items and must not.
 missing=""
 while IFS= read -r line; do
-	[ -n "$line" ] || continue
+	case "$line" in "- "*) ;; *) continue ;; esac
 	grep -qxF -- "$line" "$FULL_DIR/agent-notes.md" || missing="${missing}${line:0:80}... "
 done <"$BROWSER_DIR/agent-notes.md"
-assert_eq "browser stack: every line of browser's agent notes is in full's" "$missing" ""
+assert_eq "browser stack: every hazard in browser's agent notes is in full's" "$missing" ""
+
+missing=""
+for ref in "$BROWSER_DIR"/agent-reference/*.md; do
+	[ -e "$ref" ] || continue
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		grep -qxF -- "$line" "$FULL_DIR/agent-reference/${ref##*/}" 2>/dev/null || missing="${missing}${ref##*/}: ${line:0:80}... "
+	done <"$ref"
+done
+assert_eq "browser stack: every line of browser's reference files is in full's file of that name" "$missing" ""
 
 # probe_lines <file>: the probe lines, as smoke_read_probe_file reads them.
 probe_lines() { grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$1" || true; }

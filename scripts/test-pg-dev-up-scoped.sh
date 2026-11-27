@@ -838,7 +838,9 @@ if [[ $help_text == *POWBOX_PG_DURABLE* ]]; then ok "help documents POWBOX_PG_DU
 
 # The `list --porcelain` row (tab-separated) of the cluster whose field $1 is $2.
 list_row() {
-	pg "$WORK" -- list --porcelain 2>/dev/null | awk -F '\t' -v f="$1" -v want="$2" '$f == want { print; exit }'
+	local rows
+	rows="$(pg "$WORK" -- list --porcelain 2>/dev/null || true)"
+	awk -F '\t' -v f="$1" -v want="$2" '$f == want && !done { print; done = 1 }' <<<"$rows"
 }
 # Field $2 of porcelain row $1.
 row_field() { awk -F '\t' -v f="$2" '{ print $f }' <<<"$1"; }

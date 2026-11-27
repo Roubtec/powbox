@@ -137,6 +137,30 @@ remove_lint_cache() {
 		printf '%s\n' "wt-remove: warning: could not remove lint cache at $(shq "$cache")" >&2
 }
 
+# Report, never remove, a pg-dev-up cluster this worktree's `--worktree` scope
+# left behind: it lives outside the worktree, may hold durable data, and
+# pg-dev-up exists only in the `full` layer set (see wt_pg_clusters). Removing
+# one automatically would break this script's promise never to destroy work.
+report_pg_clusters() {
+	local row state storage
+	local -a f
+	while IFS= read -r row; do
+		IFS=$'\t' read -r -a f <<<"$row"
+		case "${f[2]}" in
+		running) state="running" ;;
+		stopped) state="stopped" ;;
+		*) state="its data already gone" ;;
+		esac
+		case "${f[5]}" in
+		ram) storage=", data in RAM" ;;
+		disk) storage=", data on disk" ;;
+		*) storage="" ;;
+		esac
+		printf '%s\n' "wt-remove: note: pg-dev-up cluster ${f[1]} (${state}${storage}) that served the worktree at $(shq "$WT") is still there; 'pg-dev-up list' shows it and how to remove it" >&2
+	done < <(wt_pg_clusters_for "$WT")
+	return 0
+}
+
 # EVERY dynamic path this script prints — the ordinary success and orphan-reap
 # lines here just as much as the refusals further down — is rendered with `shq`
 # and placed in an `at <path>` position, for two reasons. `shq` is the same
@@ -152,6 +176,7 @@ remove_lint_cache() {
 if [ ! -d "$WT" ]; then
 	remove_lint_cache
 	printf '%s\n' "wt-remove: already absent at $(shq "$WT"); nothing to do" >&2
+	report_pg_clusters
 	exit 0
 fi
 
@@ -187,6 +212,7 @@ if ! git -C "$WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 		printf '%s\n' "wt-remove: cleared an empty orphaned worktree dir at $(shq "$WT") (branch kept)" >&2
 		;;
 	esac
+	report_pg_clusters
 	exit 0
 fi
 
@@ -672,6 +698,7 @@ if [ -n "$DELETED_BRANCH_COMMIT" ]; then
 	git -C "$ROOT" worktree remove --force "$WT" >&2
 	remove_lint_cache
 	printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT"); its branch '${_head_ref#refs/heads/}' does not exist, and its tree matched $DELETED_BRANCH_COMMIT, which $DELETED_BRANCH_REMOTE contains" >&2
+	report_pg_clusters
 	exit 0
 fi
 
@@ -682,3 +709,4 @@ else
 fi
 remove_lint_cache
 printf '%s\n' "wt-remove: removed the worktree at $(shq "$WT") (branch kept)" >&2
+report_pg_clusters

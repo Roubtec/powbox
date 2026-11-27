@@ -402,3 +402,54 @@ wt_worktree_locked() {
 	done < <(git -C "$root" worktree list --porcelain -z 2>/dev/null)
 	return 1
 }
+
+# --- pg-dev-up clusters ------------------------------------------------------
+# `pg-dev-up --worktree` keeps a worktree's PostgreSQL cluster OUTSIDE the
+# worktree (markers under its scoped root, data there or in RAM), so removing
+# the worktree leaves the cluster behind. These helpers only REPORT such
+# clusters, never remove one: its data may be durable, and destroying it is the
+# owner's call (`pg-dev-up ... destroy`). pg-dev-up ships only in the `full`
+# layer set while the wt-* helpers are baked into every image, so all of this is
+# best-effort: an absent helper, one too old to know `list`, or one that fails
+# yields no rows and never an error.
+
+# wt_pg_clusters — print `pg-dev-up list --porcelain`: one tab-separated row per
+# cluster (kind key state port durability storage owner-state owner user
+# database datadir, `-` for an empty field). Always returns 0.
+wt_pg_clusters() {
+	command -v pg-dev-up >/dev/null 2>&1 || return 0
+	timeout 30 pg-dev-up list --porcelain </dev/null 2>/dev/null || true
+}
+
+# wt_pg_clusters_for <worktree path> — the rows of the worktree-scoped clusters
+# whose recorded owner is that worktree (compared as given and canonicalized,
+# since pg-dev-up records `git rev-parse --show-toplevel`). Always returns 0.
+wt_pg_clusters_for() {
+	local want="$1" canon row
+	local -a f
+	canon="$(realpath -m -- "$want" 2>/dev/null)" || canon="$want"
+	while IFS= read -r row; do
+		IFS=$'\t' read -r -a f <<<"$row"
+		[ "${#f[@]}" -eq 11 ] && [ "${f[0]}" = worktree ] || continue
+		[ "${f[7]}" = "$want" ] || [ "${f[7]}" = "$canon" ] || continue
+		printf '%s\n' "$row"
+	done < <(wt_pg_clusters)
+	return 0
+}
+
+# wt_pg_leftovers_json — a JSON array of the clusters whose owner cannot be shown
+# to exist any more: a worktree that is gone, or an instance with no owner
+# record. `-` fields become null. Prints `[]` when there are none, or when
+# pg-dev-up or jq cannot answer.
+wt_pg_leftovers_json() {
+	local json
+	json="$(wt_pg_clusters | jq -Rsc '
+		def v: if . == "-" then null else . end;
+		[split("\n")[] | select(length > 0) | split("\t")
+		 | select(length == 11 and (.[6] == "gone" or .[6] == "unknown"))
+		 | {kind: .[0], key: .[1], state: .[2], port: (.[3] | v), durability: (.[4] | v),
+		    storage: (.[5] | v), ownerState: .[6], owner: (.[7] | v), dataDir: (.[10] | v)}]' 2>/dev/null)" ||
+		json=""
+	[ -n "$json" ] || json='[]'
+	printf '%s\n' "$json"
+}

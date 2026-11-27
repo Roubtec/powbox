@@ -185,9 +185,15 @@ function Split-Powbox-YamlKeyValue ([string]$Line) {
   return $null
 }
 
+# Config files are read whole with ReadAllLines, never streamed with ReadLines.
+# ReadLines keeps the file open until its enumerator is disposed, and a foreach
+# left early (the return below) does not dispose it: the handle then lives until
+# the garbage collector finalizes it. cc/cx run this script inside the user's
+# interactive session, so on Windows that open reader blocked saving the file
+# until the terminal was closed.
 function Test-Powbox-TopSection ([string]$File, [string]$Section) {
   if (-not (Test-Path $File -PathType Leaf)) { return $false }
-  foreach ($line in [System.IO.File]::ReadLines($File)) {
+  foreach ($line in [System.IO.File]::ReadAllLines($File)) {
     $stripped = (ConvertFrom-Powbox-YamlCommentedLine $line).Trim(" ", "`t", "`r")
     if ($stripped -eq "") { continue }
     if ($line[0] -eq ' ' -or $line[0] -eq "`t") { continue }
@@ -267,7 +273,7 @@ function Read-Powbox-CtxFile ([string]$File) {
   $inCtx = $false
   $current = $null
   $lineNo = 0
-  foreach ($lineRaw in [System.IO.File]::ReadLines($File)) {
+  foreach ($lineRaw in [System.IO.File]::ReadAllLines($File)) {
     $lineNo++
     $line = $lineRaw.TrimEnd("`r")
     $stripped = (ConvertFrom-Powbox-YamlCommentedLine $line).Trim(" ", "`t", "`r")

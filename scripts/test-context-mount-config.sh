@@ -610,6 +610,42 @@ out_ps="$(run_ps "$ws")"
 assert_not_contains "ignored local config quiet in bash" "$out_sh" ".powbox.local.yml exists but is not ignored"
 assert_not_contains "ignored local config quiet in PowerShell" "$out_ps" ".powbox.local.yml exists but is not ignored"
 
+# cc/cx run the launcher inside the user's interactive PowerShell session, so a
+# config file the launcher leaves open stays open for as long as that terminal
+# lives. On Windows an open reader blocks every writer, and the user can no
+# longer save .powbox.local.yml. Both files carry the section the launcher
+# looks for, ahead of further content, so a reader that stops at the first
+# match is the case under test.
+echo "Test: PowerShell launcher leaves no config file open in the calling session"
+ws="$(new_ws ps-config-handles)"
+mkdir -p "$ws/refs"
+cat >"$ws/.powbox.yml" <<'YAML'
+ctx:
+  - path: ./refs
+shadow:
+  - dist
+YAML
+cat >"$ws/.powbox.local.yml" <<'YAML'
+shadow:
+  - build
+ctx:
+  - path: ./refs
+trailing: value
+YAML
+if [ -d /proc/self/fd ]; then
+	# shellcheck disable=SC2016 # Literal PowerShell command; variables expand in pwsh.
+	out_ps="$(
+		POWBOX_PRINT_CTX=1 \
+			POWBOX_CD_AFTER_LAUNCH=0 \
+			POWBOX_TEST_POWBOX_PS="$POWBOX_PS" \
+			POWBOX_TEST_WS="$ws" \
+			pwsh -NoProfile -Command '. "$env:POWBOX_TEST_POWBOX_PS"; $null = cc "$env:POWBOX_TEST_WS"; $open = @(Get-ChildItem -LiteralPath "/proc/$PID/fd" -ErrorAction SilentlyContinue | Where-Object { $_.LinkTarget -like "$env:POWBOX_TEST_WS/.powbox*" }); "OPEN_CONFIG_HANDLES=$($open.Count)"' 2>&1
+	)"
+	assert_eq "no config file left open after cc" "$(value_of "$out_ps" OPEN_CONFIG_HANDLES)" "0"
+else
+	printf '  skip no /proc fd table to inspect on this platform\n'
+fi
+
 echo ""
 echo "Results: $pass passed, $fail failed."
 if [ "$fail" -gt 0 ]; then

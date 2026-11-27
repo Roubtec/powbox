@@ -292,6 +292,32 @@ out="$(gh_delete https://github.com/acme/sample.git 0)"
 assert_contains "no open pull request lets it go" "$out" "$(printf 'deleted\tsample\tlearnings/session-f')"
 if remote_has learnings/session-f; then ko "branch gone from origin"; else ok "branch gone from origin"; fi
 
+echo "Test: a relative origin path is resolved against its checkout, not the caller"
+REL_ORIGIN="${WORK_ROOT}/rel/Relsample.git"
+REL_CHECKOUT="${WORK_ROOT}/rel/checkout"
+git clone --quiet --bare "$ORIGIN" "$REL_ORIGIN"
+git clone --quiet "$REL_ORIGIN" "$REL_CHECKOUT" 2>/dev/null
+git -C "$REL_CHECKOUT" remote set-url origin ../Relsample.git
+mkdir -p "$REL_CHECKOUT/sub" "$REL_CHECKOUT/docs"
+git -C "$REL_CHECKOUT" checkout --quiet -b learnings/session-k origin/main
+printf 'report k\n' >"$REL_CHECKOUT/docs/agent-session-learnings-k.md"
+git -C "$REL_CHECKOUT" add docs/agent-session-learnings-k.md
+git -C "$REL_CHECKOUT" commit --quiet -m session-k
+git -C "$REL_CHECKOUT" push --quiet origin learnings/session-k
+out="$(cd "$WORK_ROOT" && "$COLLECT" list "$REL_CHECKOUT/sub" 2>&1 || true)"
+assert_contains "relative origin listed from elsewhere" "$out" "$(printf 'relsample\tlearnings/session-k\treport-only')"
+SWEEP9="${HOME_REPO}/sweep9"
+(cd "$WORK_ROOT" && "$COLLECT" export --into "$SWEEP9" "$REL_CHECKOUT/sub" >/dev/null 2>&1) || true
+assert_contains "manifest records the absolute origin" "$(cat "$SWEEP9/MANIFEST.tsv" 2>/dev/null)" "$(printf '\t%s/../Relsample.git\t' "$REL_CHECKOUT")"
+git -C "$HOME_REPO" add sweep9
+git -C "$HOME_REPO" commit --quiet -m sweep9
+(cd "$HOME_REPO" && "$COLLECT" delete --from "$SWEEP9" --yes >/dev/null 2>&1) || true
+if git -C "$REL_ORIGIN" show-ref --verify --quiet refs/heads/learnings/session-k; then
+	ko "delete reaches the relative origin"
+else
+	ok "delete reaches the relative origin"
+fi
+
 echo "Test: an origin URL carrying a credential is refused, a login name is not"
 refused() {
 	git -C "$CHECKOUT" remote set-url origin "$1"

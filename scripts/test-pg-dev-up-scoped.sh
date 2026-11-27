@@ -799,7 +799,7 @@ add_worktree "$MAIN_REPO" "$REPO_K" wt-k
 record_flag="$WORK/record-write-failed"
 up_k_err="$WORK/up-k.err"
 url_k="$(pg "$REPO_K" "BASH_FUNC_printf%%=() { if [[ \$1 == format=1* ]] && [ ! -e '$record_flag' ]; then : >'$record_flag'; return 1; fi; builtin printf \"\$@\"; }" \
-	POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_k -- --worktree up 2>"$up_k_err" | tail -1)"
+	POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_k -- --worktree up 2>"$up_k_err" | tail -1 || true)"
 data_k="$(status_datadir "$(pg "$REPO_K" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
 STARTED_DATADIRS+=("$data_k")
 try "the record write failure was injected" test -e "$record_flag"

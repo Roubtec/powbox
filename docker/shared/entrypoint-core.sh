@@ -452,6 +452,60 @@ for _cache_var in GOMODCACHE GOCACHE CCACHE_DIR NUGET_PACKAGES PLAYWRIGHT_BROWSE
 done
 unset _cache_var _cache_dir
 
+# Prints an id unique to this container start: the kernel boot id plus PID 1's
+# start time (field 22 of /proc/1/stat). A restart gives PID 1 a new start time
+# and a host reboot a new boot id, while both stay fixed for as long as this
+# start's processes live. The fields are counted after the last ')' because the
+# command name before it may hold spaces or parentheses. Prints nothing when
+# either value cannot be read. $1 replaces /proc.
+powbox_container_start_id() {
+	local _proc="${1:-/proc}" _boot _stat _fields
+	_boot="$(cat "$_proc/sys/kernel/random/boot_id" 2>/dev/null)" || return 0
+	_stat="$(cat "$_proc/1/stat" 2>/dev/null)" || return 0
+	read -r -a _fields <<<"${_stat##*) }"
+	[ -n "$_boot" ] || return 0
+	case "${_fields[19]:-}" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	printf '%s:%s\n' "$_boot" "${_fields[19]}"
+}
+
+# Clears the Podman runtime state an earlier container start left in $1, once
+# per start: $2 is this start's id, recorded in a marker, so a second run within
+# the same start (when a Podman of this start may be live) clears nothing. An
+# empty $2 clears nothing either, because whose state it is cannot be told.
+# Only the subdirectories rootless Podman and its runtime keep here are removed:
+# other tools put sockets and locks in XDG_RUNTIME_DIR too, and the detached
+# plugin bootstrap may already be using them.
+powbox_clear_stale_podman_runtime() {
+	local _dir="$1" _start="$2" _marker _recorded="" _sub _cleared=false
+	_marker="$_dir/.powbox-podman-start"
+	if [ -z "$_start" ]; then
+		echo "Warning: cannot identify this container start, so Podman runtime state in $_dir is left as it is; if podman reports \"invalid internal status\", remove $_dir/libpod and $_dir/containers." >&2
+		return 0
+	fi
+	if [ -f "$_marker" ]; then
+		_recorded="$(cat "$_marker" 2>/dev/null || true)"
+	fi
+	[ "$_recorded" != "$_start" ] || return 0
+	for _sub in containers crun libpod netns podman; do
+		if [ -e "$_dir/$_sub" ] || [ -L "$_dir/$_sub" ]; then
+			if rm -rf -- "${_dir:?}/$_sub"; then
+				_cleared=true
+			else
+				echo "Warning: could not remove stale Podman runtime state $_dir/$_sub; podman may fail with \"invalid internal status\" until it is gone." >&2
+			fi
+		fi
+	done
+	if ! printf '%s\n' "$_start" 2>/dev/null >"$_marker"; then
+		echo "Warning: could not write $_marker; continuing." >&2
+	fi
+	if [ "$_cleared" = true ]; then
+		echo "Note: cleared the Podman runtime state an earlier container start left behind. Containers that were running then are stopped now; 'podman ps -a' lists them." >&2
+	fi
+	return 0
+}
+
 # Prepare rootless Podman (present only in an image whose layer set installs it,
 # such as full; the lean base has none, so this whole block is skipped there).
 # XDG_RUNTIME_DIR must exist, be private, and be exported so Podman
@@ -462,8 +516,10 @@ unset _cache_var _cache_dir
 # restarts while Claude and Codex keep separate, non-clobbering stores.
 if command -v podman >/dev/null 2>&1; then
 	_xdg="${XDG_RUNTIME_DIR:-/home/node/.local/run}"
+	_xdg_ready=false
 	if mkdir -p "$_xdg" && chmod 700 "$_xdg"; then
 		export XDG_RUNTIME_DIR="$_xdg"
+		_xdg_ready=true
 	else
 		echo "Warning: could not prepare XDG_RUNTIME_DIR ($_xdg) for Podman; continuing." >&2
 	fi
@@ -481,6 +537,19 @@ if command -v podman >/dev/null 2>&1; then
 			exec zsh
 		fi
 		exec "$@"
+	fi
+
+	# XDG_RUNTIME_DIR is on the container's writable layer, not the tmpfs Podman
+	# expects it to be, so it outlives a restart or a host crash. Podman would then
+	# trust a pause.pid and container states describing processes that are gone,
+	# and every podman, docker or compose command would fail with "invalid internal
+	# status" until the state was cleared by hand. Clearing it makes Podman see a
+	# fresh boot: it marks the old containers stopped and starts a new pause
+	# process. Only the graphroot is persistent, and it is not under this directory.
+	# This runs after the writer branch, though the writer is safe either way: it
+	# is a --rm container with its own writable layer, never restarted.
+	if [ "$_xdg_ready" = true ]; then
+		powbox_clear_stale_podman_runtime "$_xdg" "$(powbox_container_start_id)"
 	fi
 
 	# Storage driver: fuse-overlayfs needs /dev/fuse; without it Podman uses the
@@ -557,7 +626,7 @@ if command -v podman >/dev/null 2>&1; then
 		fi
 		printf '[storage]\ndriver = "vfs"\n' >"$HOME/.config/containers/storage.conf"
 	fi
-	unset _xdg _containers_root _driver_marker _desired_driver _chosen_driver _imgstore
+	unset _xdg _xdg_ready _containers_root _driver_marker _desired_driver _chosen_driver _imgstore
 fi
 
 # Bounded best-effort wait for the detached plugin bootstrap (primary Claude only —

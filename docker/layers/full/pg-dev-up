@@ -173,6 +173,10 @@ UNSCOPED_DISK_PGDATA="/tmp/pgdata"
 # server ignores unknown files there). Its presence also marks the directory as
 # one pg-dev-up created, which is what lets `up` discard a non-durable leftover.
 CLUSTER_RECORD="pg-dev-up.cluster"
+# The data directory THIS invocation's initdb just created. Writing the record
+# can still fail after initdb (a full RAM disk), leaving a cluster that reads as
+# unrecorded, i.e. durable; this lets recovery discard it as the throwaway it is.
+CREATED_DATADIR=""
 
 # Snapshot of the scoped port/datadir markers as they were BEFORE this `up` began
 # to touch them (captured by snapshot_scoped_markers, under the per-scope
@@ -441,6 +445,7 @@ init_and_start() {
 		fi
 		mkdir -p "$PGDATA" || return 1
 		"$BINDIR/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8 >/dev/null || return 1
+		CREATED_DATADIR="$PGDATA"
 		write_cluster_record "$PGDATA" || return 1
 	fi
 	# Validate the effective port immediately before it is interpolated into the
@@ -470,21 +475,24 @@ ram_full_hint() {
 	[ -d "$PG_RAM_ROOT" ] || return 0
 	free="$(fs_free_mb "$PG_RAM_ROOT" || printf '0')"
 	[ ! -f "$1/server.log" ] || tail_text="$(tail -n 50 "$1/server.log" 2>/dev/null || true)"
-	if [ "$free" -lt 16 ] || [[ $tail_text == *"No space left on device"* ]]; then
-		log "THE RAM DISK IS FULL: $PG_RAM_ROOT ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown')). Database writes fail with 'No space left on device' — that is storage, not a test failure. Free room by stopping and deleting clusters you no longer need under $PG_RAM_BASE, relaunch the container with a larger POWBOX_PG_RAM_SIZE, or create the cluster on disk (an explicit PGDATA on disk, or POWBOX_PG_DURABLE=1)."
+	local remedy="Free room by stopping and deleting clusters you no longer need under $PG_RAM_BASE, relaunch the container with a larger POWBOX_PG_RAM_SIZE, or create the cluster on disk (an explicit PGDATA on disk, or POWBOX_PG_DURABLE=1)."
+	if [ "$free" -lt 16 ]; then
+		log "THE RAM DISK IS FULL: $PG_RAM_ROOT ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown')). Database writes fail with 'No space left on device' — that is storage, not a test failure. $remedy"
+	elif [[ $tail_text == *"No space left on device"* ]]; then
+		# The log keeps the line after room is freed, so this is past tense.
+		log "THE RAM DISK WAS FULL: $1/server.log shows a write that failed with 'No space left on device' — that is storage, not a test failure. $PG_RAM_ROOT now has $free MB free ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown')). If it fills again: $remedy"
 	fi
 }
 
-# Remove the data directory of a cluster that could not be started, but only
-# one pg-dev-up created as non-durable (its record says so), or one a failed
-# initdb left empty. Anything else is refused, so this can never delete a
-# durable cluster or a directory pg-dev-up did not make.
+# Remove the data directory of a stopped cluster that could not be started, but
+# only one pg-dev-up created as non-durable (its record says so) or that this
+# invocation's initdb just created, or one a failed initdb left empty. Anything
+# else is refused, so this can never delete a durable cluster or a directory
+# pg-dev-up did not make.
 discard_cluster_dir() {
 	local d="${1:?}"
-	if cluster_running_at "$d"; then
-		"$BINDIR/pg_ctl" -D "$d" -m immediate -w stop >/dev/null 2>&1 || return 1
-	fi
-	if [ -s "$d/PG_VERSION" ] && [ "$(cluster_durability "$d")" = nondurable ] && [ -O "$d" ]; then
+	if [ -O "$d" ] && { [ "$d" = "$CREATED_DATADIR" ] ||
+		{ [ -s "$d/PG_VERSION" ] && [ "$(cluster_durability "$d")" = nondurable ]; }; }; then
 		rm -rf -- "$d"
 	elif [ -d "$d" ]; then
 		rmdir -- "$d" 2>/dev/null
@@ -508,12 +516,17 @@ recover_unstartable_cluster() {
 		log "port $PGPORT is already in use by another process; the cluster at $failed was left as it is (free the port or set a different PGPORT)."
 		exit 1
 	fi
-	if [ -s "$failed/PG_VERSION" ] && [ "$(cluster_durability "$failed")" != nondurable ]; then
+	if [ "$failed" = "$CREATED_DATADIR" ]; then
+		log "The cluster this 'up' just created at $failed could not be recorded or started (see above); recreating it."
+	elif [ -s "$failed/PG_VERSION" ] && [ "$(cluster_durability "$failed")" != nondurable ]; then
 		log "could not start the durable cluster at $failed; see $failed/server.log. pg-dev-up never discards a durable cluster."
 		exit 1
-	fi
-	[ ! -s "$failed/PG_VERSION" ] ||
+	elif [ -s "$failed/PG_VERSION" ]; then
 		log "Could not start the non-durable cluster at $failed (see its server.log); its data was throwaway, so recreating it empty."
+	elif [ -n "$(ls -A -- "$failed" 2>/dev/null)" ]; then
+		log "$failed is not empty and holds no PostgreSQL cluster, so it is not one pg-dev-up created; it was left alone. Point PGDATA at an empty or new directory."
+		exit 1
+	fi
 	if ! discard_cluster_dir "$failed"; then
 		log "could not clear $failed to recreate the cluster; remove it and run 'up' again."
 		exit 1
@@ -528,7 +541,11 @@ recover_unstartable_cluster() {
 	fi
 	if ! init_and_start; then
 		ram_full_hint "$PGDATA"
-		log "could not start a fresh cluster at $PGDATA either; see $PGDATA/server.log."
+		if [ -f "$PGDATA/server.log" ]; then
+			log "could not start a fresh cluster at $PGDATA either; see $PGDATA/server.log."
+		else
+			log "could not create a fresh cluster at $PGDATA either; see the error above."
+		fi
 		exit 1
 	fi
 }

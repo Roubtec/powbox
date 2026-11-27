@@ -760,7 +760,8 @@ status_j="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&
 if [[ $status_j == *"non-durable"*"data in RAM"* ]]; then ok "status reports the RAM-backed cluster"; else ko "status does not report RAM storage: $status_j"; fi
 printf '%s\n' "FATAL:  could not write to file \"pg_wal/xlogtemp\": No space left on device" >>"$data_j/server.log"
 status_full="$(pg "$REPO_J" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)"
-if [[ $status_full == *"THE RAM DISK IS FULL"* ]]; then ok "status names a full RAM disk as such"; else ko "status missed the full RAM disk: $status_full"; fi
+# The sandbox RAM root has room, so only the log line speaks: past tense.
+if [[ $status_full == *"THE RAM DISK WAS FULL"* ]]; then ok "status names a past full RAM disk as such"; else ko "status missed the full RAM disk: $status_full"; fi
 pg "$REPO_J" -- --worktree down >/dev/null 2>&1 || true
 # A container restart empties the RAM disk while the scoped marker (on disk)
 # survives: status says so, and up recreates instead of failing.
@@ -788,6 +789,35 @@ if [[ $check_small == *"not available"*"MB free"* ]]; then ok "a RAM disk with t
 check_none="$(pg "$WORK" -- check 2>&1 || true)"
 if [[ $check_none == *"not available"*"no RAM-backed storage"* ]]; then ok "missing RAM storage is reported"; else ko "missing RAM storage not reported: $check_none"; fi
 try_not "a non-numeric POWBOX_PG_RAM_MIN_FREE_MB is rejected" pg "$WORK" POWBOX_PG_RAM_MIN_FREE_MB=lots -- url
+
+echo "== task 088: a new cluster whose record cannot be written is recreated, on disk =="
+# A full RAM disk can let initdb succeed and then fail the record write, leaving
+# a cluster that reads as unrecorded (durable). Inject that one failure with an
+# exported printf override that fails the record write once.
+REPO_K="$WORK/wt-k"
+add_worktree "$MAIN_REPO" "$REPO_K" wt-k
+record_flag="$WORK/record-write-failed"
+up_k_err="$WORK/up-k.err"
+url_k="$(pg "$REPO_K" "BASH_FUNC_printf%%=() { if [[ \$1 == format=1* ]] && [ ! -e '$record_flag' ]; then : >'$record_flag'; return 1; fi; builtin printf \"\$@\"; }" \
+	POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_k -- --worktree up 2>"$up_k_err" | tail -1)"
+data_k="$(status_datadir "$(pg "$REPO_K" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$data_k")
+try "the record write failure was injected" test -e "$record_flag"
+ram_k="$(sed -n "s/.*just created at \(.*\) could not be recorded.*/\1/p" "$up_k_err")"
+case "$ram_k" in "$RAM_ROOT"/*) ok "up recognised the half-made RAM cluster as its own" ;; *) ko "no recovery of the half-made cluster: $(cat "$up_k_err")" ;; esac
+try "the half-made RAM cluster was discarded" test ! -e "${ram_k:-$RAM_ROOT/missing}/PG_VERSION"
+case "$data_k" in "$SCOPED_ROOT"/*) ok "the retry put the cluster on disk" ;; *) ko "retry not on disk: $data_k" ;; esac
+try "the recreated cluster is non-durable" test "$(durability_settings "$url_k")" = "$NONDURABLE_SETTINGS"
+pg "$REPO_K" -- --worktree down >/dev/null 2>&1 || true
+
+echo "== task 088: a non-empty directory that holds no cluster is left alone =="
+user_dir="$WORK/not-a-cluster"
+mkdir -p "$user_dir"
+printf 'keep me\n' >"$user_dir/notes.txt"
+up_nc_err="$WORK/up-nc.err"
+try_not "up refuses a non-empty PGDATA without a cluster" pg "$WORK" PGDATA="$user_dir" -- --profile not-a-cluster up 2>"$up_nc_err"
+if grep -q "not one pg-dev-up created; it was left alone" "$up_nc_err"; then ok "the refusal says the directory is not a pg-dev-up cluster"; else ko "misleading refusal: $(cat "$up_nc_err")"; fi
+try "the user's file is intact" test "$(cat "$user_dir/notes.txt")" = "keep me"
 
 echo "== task 088: the unscoped cluster gets the same non-durable mode =="
 unscoped_data="$WORK/unscoped-pgdata"

@@ -105,7 +105,7 @@ emulators, or a non-headless browser. Track that separately.
 | `compose.netdev.yml` | Optional overlay carrying `/dev/net/tun` for nested-container networking (slirp4netns/pasta; without it every default `podman run` fails). Same `POWBOX_PODMAN` gate as `compose.fuse.yml`, but a separate file so the two devices attach independently under `auto`. |
 | `docker/shared/entrypoint-core.sh` | At startup (guarded by `command -v podman`): create `XDG_RUNTIME_DIR` mode 700; pick storage driver — keep the image default (overlay + fuse-overlayfs) when `/dev/fuse` is present, else write a user `storage.conf` selecting the slower `vfs` driver. |
 | `scripts/launch-agent.sh` | New per-container volume `agent-podman-<agent>-<project>` mounted at `/home/node/.local/share/containers` (images + named volumes persist across restarts), created+chowned in the existing root pre-run. Adds `compose.fuse.yml` + `compose.netdev.yml` to the `-f` chain to attach `/dev/fuse` + `/dev/net/tun` per the `POWBOX_PODMAN` gate (`on` forces both, `auto` detects each, `off` neither; `POWBOX_FUSE` is the deprecated alias). |
-| `docker/shared/container-agent.md.tmpl` | Documents the capability for the in-container agent (tooling row, filesystem row, network note). |
+| `docker/layers/full/agent-notes.md`, `docker/layers/full/agent-reference/` | Document the capability for the in-container agent: the always-loaded Containers note, and on demand the Containers row in `tooling.md` and the filesystem row and network note in `environment.md`. |
 
 ### Design decisions / rationale
 

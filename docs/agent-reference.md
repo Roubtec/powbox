@@ -46,9 +46,22 @@ The image sets no `AGENT_KNOWN_LIMITATIONS`, since the document sits at the conv
 
 A contribution is normalized as agent notes are (a leading UTF-8 BOM dropped, line endings made LF, leading blank lines and trailing whitespace dropped, one final newline), so a fragment opens with its own entries' headings, never with a top-level one. Core files are staged byte for byte. Both source directories may hold only regular files named like `name.md`; the staging refuses a subdirectory, a symlink or any other name, so the bake never depends on what the checkout carries beyond file content. Staging is a pure function of those inputs, every file mode 0644 and the directory 0755, because BuildKit keys the `COPY` on content and mode and the Bash and PowerShell drivers must hit the same cache; `scripts/test-stage-agent-reference.sh` holds both twins to that. A contribution lives in the set directory, so `scripts/layers-digest.{sh,ps1}` hash it like any other file there and editing it makes the update check report the set stale.
 
-**What is not seeded.** Unlike the instruction template, nothing here is copied to a config volume or rendered at container start, so no variable is substituted into these files. The `COPY` comes after the `build-epoch` `RUN` in `docker/agent/Dockerfile` (above it in the stack), so changing a reference file does not re-render the instruction files.
+**What is not seeded.** Unlike the instruction template, nothing here is copied to a config volume or rendered at container start, so no variable is substituted into these files: a file that would need `${AGENT_CONFIG_DIR}` or the like names both agents' values instead. The `COPY` comes after the `build-epoch` `RUN` in `docker/agent/Dockerfile` (above it in the stack), so changing a reference file does not re-render the instruction files.
 
-**Pointing at it.** The always-loaded instruction file is the wrong place for this material, and mentions the directory once, in its filesystem table. A pointer to a reference file should name the situation that makes reading it worthwhile, and must still read sensibly in a container whose image predates the file, since the rendered instruction file lives on a volume that containers built from different images share.
+**Pointing at it.** The always-loaded instruction file is the wrong place for this material. Its "Reference files" section lists each core file once with the situation that makes reading it worthwhile, and a set's notes do the same for a file only that set contributes. A pointer that only says a file exists does not get followed. A pointer must also read sensibly in a container whose image lacks the file, because it predates it or was built without the set that contributes it: the rendered instruction file lives on a volume that containers built from different images share. The instruction file says so once, and sends the agent to the tool's `--help` and to `command -v`.
+
+## The files
+
+| File | What it holds | Read when |
+|------|---------------|-----------|
+| `tooling.md` | The tools baked into the image, with pinned versions and caveats, and how to install more. A set appends its own tool table | before concluding that a tool is missing, and before first using a linter, a document converter or a set's tool |
+| `git-helpers.md` | GitHub authentication and remotes, `gitcat`, `gh-review-threads`, `dc-enter`/`dc-remove` | before a cross-branch read, fetching review threads, or using a disposable clone |
+| `worktree-helpers.md` | `wt-bootstrap`, `wt-enter` and `wt-remove` in full, the surfaces parallel work shares, and why a worktree's `node_modules` is not scratch | when a helper blocks or refuses, and before cleaning up a worktree any other way |
+| `environment.md` | The filesystem layout (volumes, tmpfs shadows, host mounts, caches) and the egress firewall. A set appends its own paths | when it matters what a path is or what survives container recreation |
+| `known-limitations.md` | Limitations accepted on purpose, under the convention above. A set appends its own entries | before reporting friction from a run |
+| `local-postgresql.md` (`full` only) | `pg-dev-up`: starting a throwaway cluster, credentials, worktree-scoped clusters | when a suite needs a live database |
+
+What stays out of these files is the hazards: anything an agent would get wrong with no signal that would send it looking belongs in the instruction template or the set's notes, at about a sentence each. README "What Belongs in the Instruction File" has the test, and `scripts/test-agent-instructions.sh` checks that every file here is pointed at, that every pointer resolves for the lean image and each committed set, and that no file uses a template variable.
 
 ## Changing the known-limitations document
 

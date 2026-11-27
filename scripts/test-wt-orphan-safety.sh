@@ -2406,6 +2406,236 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Integration: a worktree whose BRANCH WAS DELETED (task 082) — a merged PR's
+# branch removed host-side, where this container's worktree registrations are
+# invisible, while the task worktree is still registered here. HEAD is unborn and
+# every tracked file reads as a staged addition. wt-remove must name the branch
+# and the commit it was last on, and may remove the worktree only when the tree,
+# index and untracked set match that commit AND a remote-tracking ref contains
+# it; everything weaker is a refusal that says which half failed.
+# ---------------------------------------------------------------------------
+
+# deleted_branch_repo <name> <shape> [<git init flag>...] -> echoes ROOT, holding
+# worktree `db` on branch `db-b` with one commit (`work.txt`, plus a .gitignore
+# for `build/`) beyond main, and a bare `origin`. <shape>:
+#   pushed       db-b pushed, so origin/db-b contains the commit
+#   merged       main fast-forwarded to it and pushed, origin/db-b deleted
+#   rebased      only a patch-equivalent cherry-pick of it reaches origin/main
+#   submodule    as `pushed`, with a gitlink committed beside work.txt
+#   bisect       as `pushed`, with a bisect started on the branch before deletion
+# The deletion is done the way the host does it: with this worktree's admin dir
+# out of git's sight, so `git branch -D` does not refuse a checked-out branch.
+deleted_branch_repo() {
+	local name="$1" shape="$2" root bare wt
+	shift 2
+	root="$(make_repo "$name" "$@")"
+	bare="$WORK_ROOT/$name-origin.git"
+	wt="$root/.worktrees/$CONTAINER_NAME/db"
+	git_quiet init -q --bare "$bare"
+	git_quiet -C "$root" remote add origin "$bare"
+	git_quiet -C "$root" worktree add -q "$wt" -b db-b >/dev/null 2>&1
+	echo work >"$wt/work.txt"
+	printf 'build/\n' >"$wt/.gitignore"
+	git_quiet -C "$wt" add -A
+	if [ "$shape" = submodule ]; then
+		# The empty directory an uninitialized submodule leaves checked out.
+		mkdir "$wt/sub"
+		git_quiet -C "$wt" update-index --add --cacheinfo "160000,$(git -C "$root" rev-parse main),sub"
+	fi
+	git_quiet -C "$wt" commit -qm work
+	case "$shape" in
+	merged)
+		git_quiet -C "$root" merge -q --ff-only db-b
+		git_quiet -C "$root" push -q origin main >/dev/null 2>&1
+		;;
+	rebased)
+		git_quiet -C "$root" cherry-pick db-b >/dev/null 2>&1
+		git_quiet -C "$root" commit -q --amend -m "work, rebased" >/dev/null 2>&1
+		git_quiet -C "$root" push -q origin main >/dev/null 2>&1
+		;;
+	*) git_quiet -C "$root" push -q origin main db-b >/dev/null 2>&1 ;;
+	esac
+	[ "$shape" != bisect ] || git_quiet -C "$wt" bisect start >/dev/null 2>&1 || true
+	mv "$root/.git/worktrees/db" "$root/.git/db-aside"
+	git_quiet -C "$root" branch -q -D db-b
+	mv "$root/.git/db-aside" "$root/.git/worktrees/db"
+	echo "$root"
+}
+
+# deleted_branch_fixture_ok <root> — the fixture really is in the deleted-branch
+# state: HEAD names refs/heads/db-b, which does not exist, and the porcelain is
+# the all-staged-additions shape that used to read as "uncommitted changes".
+deleted_branch_fixture_ok() {
+	local wt="$1/.worktrees/$CONTAINER_NAME/db" st
+	[ -d "$wt" ] &&
+		[ "$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null)" = refs/heads/db-b ] &&
+		! git -C "$1" show-ref --verify --quiet refs/heads/db-b &&
+		st="$(git -C "$wt" status --porcelain)" &&
+		[[ $st == *"A"?" work.txt"* ]]
+}
+
+# deleted_branch_must_refuse <root> <phrase>... — echo `miss` fragments unless
+# wt-remove refuses the `db` worktree WITH and WITHOUT --force, leaves it in
+# place, names the deleted branch and every <phrase>, does not fall back to the
+# misleading "uncommitted changes", and advises nothing destructive.
+deleted_branch_must_refuse() {
+	local root="$1" wt="$1/.worktrees/$CONTAINER_NAME/db" err mode rc miss="" p text
+	err="$WORK_ROOT/db-${root##*/}.err"
+	shift
+	deleted_branch_fixture_ok "$root" || {
+		printf '%s' " fixture-not-in-deleted-branch-state"
+		return 0
+	}
+	for mode in plain force; do
+		rc=0
+		if [ "$mode" = plain ]; then
+			(cd "$root" && bash "$WT_REMOVE" db 2>"$err") || rc=$?
+		else
+			(cd "$root" && bash "$WT_REMOVE" db --force 2>"$err") || rc=$?
+		fi
+		text="$(cat "$err")"
+		[ "$rc" -ne 0 ] || miss="$miss $mode-REMOVED-ANYWAY"
+		[ -d "$wt" ] || miss="$miss $mode-worktree-gone"
+		[[ $text == *"on branch 'db-b', which no longer exists"* ]] || miss="$miss $mode-branch-not-named"
+		[[ $text != *"uncommitted changes"* ]] || miss="$miss $mode-generic-uncommitted-message"
+		for p in "$@"; do
+			[[ $text == *"$p"* ]] || miss="$miss $mode-missing:[$p]"
+		done
+		miss="$miss$(destructive_advice "$err" "$wt" "$root" db db-b)"
+	done
+	printf '%s' "$miss"
+}
+
+# --- proven: the tree matches a commit origin/db-b contains -> removed --------
+RDB1="$(deleted_branch_repo rdb-pushed pushed)"
+WDB1="$RDB1/.worktrees/$CONTAINER_NAME/db"
+CDB1="$(git -C "$RDB1" rev-parse origin/db-b)"
+# An IGNORED file is not part of the proof, exactly as a plain removal of a clean
+# worktree deletes one (git's status omits ignored files).
+mkdir -p "$WDB1/build"
+echo artifact >"$WDB1/build/out"
+if deleted_branch_fixture_ok "$RDB1"; then
+	rc=0
+	(cd "$RDB1" && bash "$WT_REMOVE" db 2>"$WORK_ROOT/rdb1.err") || rc=$?
+	text="$(cat "$WORK_ROOT/rdb1.err")"
+	if [ "$rc" -eq 0 ] && [ ! -e "$WDB1" ] && ! worktree_list_has "$RDB1" "worktree $WDB1" &&
+		[[ $text == *"branch 'db-b' was already deleted"* ]] && [[ $text == *"$CDB1"* ]] &&
+		[[ $text == *"origin/db-b contains"* ]]; then
+		ok "wt-remove removes a deleted-branch worktree, without --force, once its tree matches a commit origin/db-b contains"
+	else
+		no "wt-remove did not remove a deleted-branch worktree proven identical to a pushed commit (rc=$rc): $text"
+	fi
+else
+	no "precondition: the pushed deleted-branch fixture is not in the deleted-branch state"
+fi
+
+# --- proven through ANCESTRY: merged into origin/main, origin/db-b gone --------
+RDB2="$(deleted_branch_repo rdb-merged merged)"
+WDB2="$RDB2/.worktrees/$CONTAINER_NAME/db"
+if deleted_branch_fixture_ok "$RDB2" && ! git -C "$RDB2" show-ref --verify --quiet refs/remotes/origin/db-b; then
+	rc=0
+	(cd "$RDB2" && bash "$WT_REMOVE" db 2>"$WORK_ROOT/rdb2.err") || rc=$?
+	text="$(cat "$WORK_ROOT/rdb2.err")"
+	if [ "$rc" -eq 0 ] && [ ! -e "$WDB2" ] && [[ $text == *"origin/main contains"* ]]; then
+		ok "wt-remove accepts a deleted-branch worktree whose last commit is merely reachable from origin/main"
+	else
+		no "wt-remove did not accept a last commit reachable from origin/main (rc=$rc): $text"
+	fi
+else
+	no "precondition: the merged deleted-branch fixture should have no origin/db-b"
+fi
+
+# --- the landmine: rebased before deletion, so NO remote ref contains it ------
+# origin/main carries an equivalent commit with the very same tree; that is not
+# proof, and the refusal must say why.
+RDB3="$(deleted_branch_repo rdb-rebased rebased)"
+CDB3="$(tail -n 1 "$RDB3/.git/worktrees/db/logs/HEAD" | cut -d' ' -f2)"
+if [ "$(git -C "$RDB3" rev-parse "origin/main^{tree}")" = "$(git -C "$RDB3" rev-parse "$CDB3^{tree}")" ]; then
+	miss="$(deleted_branch_must_refuse "$RDB3" "last on $CDB3" "which no remote-tracking ref contains")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a deleted-branch worktree whose commit was rebased away, naming the commit no remote ref contains"
+	else
+		no "wt-remove rebased deleted-branch refusal inadequate:$miss"
+	fi
+else
+	no "precondition: the rebased fixture's origin/main should carry the same tree as the unreachable commit"
+fi
+
+# --- pushed, but the tree is NOT the commit: each half of the proof ----------
+RDB4="$(deleted_branch_repo rdb-wt pushed)"
+echo edited >>"$RDB4/.worktrees/$CONTAINER_NAME/db/work.txt"
+miss="$(deleted_branch_must_refuse "$RDB4" "its working tree differs from that commit" "contained in origin/db-b")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree with an unstaged edit, naming the working-tree difference"
+else
+	no "wt-remove deleted-branch working-tree refusal inadequate:$miss"
+fi
+
+RDB5="$(deleted_branch_repo rdb-index pushed)"
+echo staged >>"$RDB5/.worktrees/$CONTAINER_NAME/db/work.txt"
+git_quiet -C "$RDB5/.worktrees/$CONTAINER_NAME/db" add work.txt
+miss="$(deleted_branch_must_refuse "$RDB5" "its index differs from that commit")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree with a staged edit, naming the index difference"
+else
+	no "wt-remove deleted-branch index refusal inadequate:$miss"
+fi
+
+RDB6="$(deleted_branch_repo rdb-untracked pushed)"
+echo new >"$RDB6/.worktrees/$CONTAINER_NAME/db/new.txt"
+miss="$(deleted_branch_must_refuse "$RDB6" "it holds untracked files")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree holding an untracked file"
+else
+	no "wt-remove deleted-branch untracked refusal inadequate:$miss"
+fi
+
+# --- no reflog to name the commit by: diagnosis only ---------------------------
+RDB7="$(deleted_branch_repo rdb-noreflog pushed)"
+rm -f "$RDB7/.git/worktrees/db/logs/HEAD"
+miss="$(deleted_branch_must_refuse "$RDB7" "cannot be read from its HEAD reflog")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree whose HEAD reflog is gone, saying so"
+else
+	no "wt-remove deleted-branch no-reflog refusal inadequate:$miss"
+fi
+
+# --- a gitlink: the --force the removal needs would skip git's submodule check
+RDB8="$(deleted_branch_repo rdb-submodule submodule)"
+miss="$(deleted_branch_must_refuse "$RDB8" "it holds submodules")"
+if [ -z "$miss" ]; then
+	ok "wt-remove refuses a deleted-branch worktree whose index holds a submodule"
+else
+	no "wt-remove deleted-branch submodule refusal inadequate:$miss"
+fi
+
+# --- an operation in flight still outranks the deleted branch ----------------
+RDB9="$(deleted_branch_repo rdb-bisect bisect)"
+if deleted_branch_fixture_ok "$RDB9"; then
+	miss="$(wt_remove_must_refuse "a bisect (BISECT_LOG)" "$RDB9" db "$RDB9/.git/worktrees/db/BISECT_LOG" dirty)"
+	if [ -z "$miss" ]; then
+		ok "a bisect left in a deleted-branch worktree is still what wt-remove names"
+	else
+		no "a deleted branch masked the in-progress bisect:$miss"
+	fi
+else
+	no "precondition: the bisect deleted-branch fixture is not in the deleted-branch state"
+fi
+
+# --- reftable keeps the reflog where nothing can read it for an unborn HEAD --
+if [ -n "$REFTABLE_OK" ]; then
+	RDB10="$(deleted_branch_repo rdb-reftable pushed --ref-format=reftable)"
+	miss="$(deleted_branch_must_refuse "$RDB10" "cannot be read from its HEAD reflog")"
+	if [ -z "$miss" ]; then
+		ok "wt-remove refuses a deleted-branch worktree under reftable with the diagnosis, since its reflog cannot be read"
+	else
+		no "wt-remove reftable deleted-branch refusal inadequate:$miss"
+	fi
+else
+	skip "deleted-branch worktree under reftable (this git cannot create a reftable repo)"
+fi
+
+# ---------------------------------------------------------------------------
 # Integration: wt-enter names the PRIMARY checkout when it is what blocks the
 # branch (a human or peer agent switched the shared main working tree onto it).
 # The error must identify the main checkout, flag that it is shared, and point

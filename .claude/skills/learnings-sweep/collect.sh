@@ -131,11 +131,9 @@ origin_url() {
 	printf '%s\n' "$url"
 }
 
-# Label of an origin: the last name of its path (scp-like host: and trailing
-# slashes dropped, as git accepts `sample.git/`), less a .git suffix and
-# lowercased; for a work tree's own `.git` directory, the name of the work
-# tree. The label is a ref component and a directory name, so anything that
-# cannot be one is refused rather than fetched into a broken refspec.
+# The label is a ref component and a directory name, so a name that cannot be
+# one is refused before anything is fetched or written. An origin naming a
+# work tree's own `.git` directory is labelled after the work tree.
 repo_label() {
 	local path name
 	split_url "$1"

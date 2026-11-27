@@ -1148,12 +1148,13 @@ workflows keep cost proportional to the change:
   is the only CI check on `full`, the set Tier 1 never builds —
   plus `scripts/run-pure-shell-tests.sh`, which discovers and runs in parallel
   every native-Linux-hermetic `scripts/test-*.sh` source suite not explicitly
-  routed to the smoke test. The current 23-suite set is `test-apt-get-wrapper.sh`,
+  routed to the smoke test. The current 25-suite set is `test-apt-get-wrapper.sh`,
   `test-claude-hook-skew.sh`,
   `test-context-mount-config.sh`, `test-detect-shadows.sh`,
   `test-egress-allow-list.sh`,
   `test-image-store-writer-gate.sh`, `test-launcher-tail-reread.sh`,
-  `test-layer-sets.sh`, `test-ownership-negative-control.sh`,
+  `test-launcher-volatile.sh`, `test-layer-sets.sh`,
+  `test-no-early-exit-pipes.sh`, `test-ownership-negative-control.sh`,
   `test-peer-review-run.sh`,
   `test-podman-compose-healthcheck.sh`, `test-ps-docker-format.sh`,
   `test-rm-prompt-bypass.sh`, `test-seed-marker-source.sh`,
@@ -1161,6 +1162,11 @@ workflows keep cost proportional to the change:
   `test-shadow-refresh-guard.sh`, `test-smoke-probe-wrapper.sh`,
   `test-stage-agent-template.sh`, `test-sync-codex-skills.sh`,
   `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
+  `test-no-early-exit-pipes.sh` is itself a guard over the others: it fails when
+  a suite pipes into an early-exiting consumer (`grep -q`, `head`, …) under
+  `pipefail`, a check that fails at random when the producer dies of SIGPIPE;
+  its header names the in-process replacements and the
+  `# early-exit-pipe-ok: <reason>` escape for a deliberate payload.
   A new suite is selected automatically; a
   suite-named log heading makes any non-zero exit obvious. The detect-shadows
   suite needs the jq-compatible filters provided by **jq-backed python-yq**, so

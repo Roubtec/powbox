@@ -2656,7 +2656,7 @@ make_capped_config() { # <file> <total-bytes> <model>
 	if [ "$pad" -ge 2 ]; then
 		{
 			printf '#'
-			tr '\0' 'x' </dev/zero 2>/dev/null | head -c "$((pad - 2))"
+			head -c "$((pad - 2))" /dev/zero | tr '\0' 'x'
 			printf '\n'
 		} >>"$f"
 	fi

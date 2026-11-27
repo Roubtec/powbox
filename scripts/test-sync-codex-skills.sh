@@ -48,7 +48,7 @@ no() {
 marker_sha() {
 	local m="$1/.powbox-seeded"
 	[ -f "$m" ] || return 0
-	grep -a '^agent_skills_commit=' "$m" 2>/dev/null | head -n1 | cut -d= -f2
+	grep -a -m1 '^agent_skills_commit=' "$m" 2>/dev/null | cut -d= -f2
 }
 
 # make_skill <dir> <body> — create a minimal skill folder with a SKILL.md.

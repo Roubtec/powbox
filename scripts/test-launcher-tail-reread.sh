@@ -62,7 +62,7 @@ if [ ! -s "$BLOCK" ]; then
 fi
 ok "the final compose run sits in a top-level { ... } group"
 
-if [ "$(tail -n 1 "$BLOCK")" = "}" ] && [ "$(tail -n 2 "$BLOCK" | head -n 1)" = $'\texit' ]; then
+if [ "$(tail -n 1 "$BLOCK")" = "}" ] && [ "$(tail -n 2 "$BLOCK" | sed -n 1p)" = $'\texit' ]; then
 	ok "the group ends the file with exit then }"
 else
 	ko "the group ends the file with exit then }" "last lines: $(tail -n 2 "$BLOCK" | tr '\n' '|')"

@@ -1685,7 +1685,7 @@ elif [ "$browser_stack" = "$full_stack" ]; then
 	ok "browser stack: the Dockerfile blocks are identical in both sets, comments included"
 else
 	ko "browser stack: the Dockerfile blocks differ between the sets" \
-		"$(diff <(printf '%s\n' "$browser_stack") <(printf '%s\n' "$full_stack") | head -n 20)"
+		"$(diff <(printf '%s\n' "$browser_stack") <(printf '%s\n' "$full_stack") | sed -n '1,20p')"
 fi
 
 missing=""

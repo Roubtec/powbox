@@ -315,7 +315,7 @@ PS
 	$saw_any || ko "the Legacy-passing harness reported nothing" "$out"
 	# The parser walk must keep finding the raw-string templates the regex guard
 	# protects, so it cannot go blind without failing.
-	if printf '%s' "$out" | grep -q '^SKIP'; then
+	if grep -q '^SKIP' <<<"$out"; then
 		:
 	else
 		for want in commands/check-updates.ps1 scripts/build-image-lib.ps1 scripts/launch-agent.ps1 scripts/smoke-test-lib.ps1 shell/powbox.ps1; do

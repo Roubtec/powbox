@@ -272,10 +272,10 @@ destructive_advice() {
 			;;
 		esac
 	done
-	printf '%s\n' "$text" |
+	text="$(printf '%s\n' "$text" |
 		LC_ALL=C sed -E 's/^(wt-enter|wt-remove|wt-bootstrap): //' |
-		LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g' |
-		grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-zA-Z]*[rRfF]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-zA-Z]*[fF]|checkout[[:space:]]+--[[:space:]]|switch[[:space:]]+-[a-zA-Z]*[fF]|--discard-changes\b|\brestore\b|clean[[:space:]]+-[a-zA-Z]*[fFdDxX]|branch[[:space:]]+-[dD]\b|bisect[[:space:]]+reset\b|--skip\b|--quit\b|--delete\b|--force\b' &&
+		LC_ALL=C sed 's/worktree[[:space:]][[:space:]]*prune//g')"
+	grep -qiE 'wt-remove|worktree[[:space:]]+remove|\brm[[:space:]]+-[a-zA-Z]*[rRfF]|\babort\b|reset[[:space:]]+--hard|checkout[[:space:]]+-[a-zA-Z]*[fF]|checkout[[:space:]]+--[[:space:]]|switch[[:space:]]+-[a-zA-Z]*[fF]|--discard-changes\b|\brestore\b|clean[[:space:]]+-[a-zA-Z]*[fFdDxX]|branch[[:space:]]+-[dD]\b|bisect[[:space:]]+reset\b|--skip\b|--quit\b|--delete\b|--force\b' <<<"$text" &&
 		echo " destructive-advice"
 	return 0
 }
@@ -469,6 +469,23 @@ esac
 # Integration helpers
 # ---------------------------------------------------------------------------
 git_quiet() { git -c init.defaultBranch=main -c user.email=t@t -c user.name=t "$@"; }
+
+# Checks here capture output before matching it rather than piping it into
+# `grep -q`/`head`: under pipefail the producer can die of SIGPIPE and fail a
+# check whose line was there. scripts/test-no-early-exit-pipes.sh enforces it.
+
+# worktree_list_has <repo> <line> — `git worktree list --porcelain` succeeds and
+# holds this exact line.
+worktree_list_has() {
+	local list
+	list="$(git -C "$1" worktree list --porcelain)" && grep -qxF -- "$2" <<<"$list"
+}
+
+# wt_enter_line_has <errfile> <text> — the text appears on a line wt-enter
+# printed itself, not only in a git message it relayed.
+wt_enter_line_has() {
+	grep -q '^wt-enter:' <<<"$(grep -F -- "$2" "$1")"
+}
 
 # make_repo <name> [<git init flag>...] -> echoes ROOT of a fresh repo with one
 # commit. The extra flags exist for `--ref-format=reftable`, which is what makes
@@ -725,7 +742,7 @@ git_quiet -C "$RG" worktree add -q --detach "$RG/det" >/dev/null 2>&1
 mkdir -p "$RG/.git/worktrees/det/rebase-merge"
 printf 'refs/heads/det-b\n' >"$RG/.git/worktrees/det/rebase-merge/head-name"
 out="$UNSET_MARK"
-if git -C "$RG" worktree list --porcelain | grep -qx detached &&
+if worktree_list_has "$RG" detached &&
 	wt_read_path out wt_worktree_for_branch "$RG" det-b && [ "$out" = "$RG/det" ]; then
 	ok "wt_worktree_for_branch names a DETACHED worktree that holds the branch through a rebase"
 else
@@ -992,7 +1009,7 @@ else
 		git -C "$WB2/task-b" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 		# The recreated worktree is fresh (no UNSAVED.txt), and the dirty work was
 		# preserved under the quarantine dir rather than deleted.
-		q="$(find "$R2/.worktrees/.orphaned/$CONTAINER_NAME" -name UNSAVED.txt -type f 2>/dev/null | head -1)"
+		q="$(find "$R2/.worktrees/.orphaned/$CONTAINER_NAME" -name UNSAVED.txt -type f -print -quit 2>/dev/null)"
 		if [ -n "$q" ] && [ "$(cat "$q")" = "dirty work" ] && [ ! -f "$WB2/task-b/UNSAVED.txt" ]; then
 			ok "wt-enter quarantines dead-metadata dirty orphan and recreates fresh"
 		else
@@ -1012,7 +1029,7 @@ git_quiet -C "$R3" worktree add -q "$WB3/task-c" -b task-c >/dev/null 2>&1
 echo "dirty work c" >"$WB3/task-c/UNSAVED.txt"
 break_metadata "$R3" task-c
 if (cd "$R3" && bash "$WT_REMOVE" task-c >/dev/null 2>&1); then
-	q="$(find "$R3/.worktrees/.orphaned/$CONTAINER_NAME" -name UNSAVED.txt -type f 2>/dev/null | head -1)"
+	q="$(find "$R3/.worktrees/.orphaned/$CONTAINER_NAME" -name UNSAVED.txt -type f -print -quit 2>/dev/null)"
 	if [ ! -e "$WB3/task-c" ] && [ -n "$q" ] && [ "$(cat "$q")" = "dirty work c" ]; then
 		ok "wt-remove quarantines a dead-metadata dirty orphan instead of deleting it"
 	else
@@ -1178,7 +1195,7 @@ RB2="$(make_repo rb-onbranch)"
 git_quiet -C "$RB2" branch bis-b
 git_quiet -C "$RB2" worktree add -q "$RB2/.worktrees/$CONTAINER_NAME/bis-b" bis-b >/dev/null 2>&1
 git_quiet -C "$RB2/.worktrees/$CONTAINER_NAME/bis-b" bisect start >/dev/null 2>&1 || true
-if git -C "$RB2" worktree list --porcelain | grep -qx "branch refs/heads/bis-b"; then
+if worktree_list_has "$RB2" "branch refs/heads/bis-b"; then
 	miss="$(wt_remove_must_refuse "a bisect (BISECT_LOG)" "$RB2" bis-b "$RB2/.git/worktrees/bis-b/BISECT_START")"
 	if [ -z "$miss" ]; then
 		ok "wt-remove refuses a worktree bisecting ON its branch (clean status, nothing else to see)"
@@ -2002,8 +2019,10 @@ else
 	grep -qF "$want_bisect" "$EQ" || miss="$miss no-quoted-bisect-hint"
 	! grep -qF "git -C $WBQ/task-q status" "$EQ" || miss="$miss unquoted-path"
 	# End-to-end, per command: lift it from between its delimiters and run it.
-	q_status="$(LC_ALL=C sed -n "s/^wt-remove: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$EQ" | head -1)"
-	q_bisect="$(LC_ALL=C sed -n "s/.*(and '\(git -C .* bisect log\)').*/\1/p" "$EQ" | head -1)"
+	q_status="$(LC_ALL=C sed -n "s/^wt-remove: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$EQ")"
+	q_status="${q_status%%$'\n'*}"
+	q_bisect="$(LC_ALL=C sed -n "s/.*(and '\(git -C .* bisect log\)').*/\1/p" "$EQ")"
+	q_bisect="${q_bisect%%$'\n'*}"
 	for hint in "$q_status" "$q_bisect"; do
 		if [ -z "$hint" ]; then
 			miss="$miss no-inspection-command"
@@ -2409,7 +2428,7 @@ else
 	[ "$rc5" -eq 128 ] || miss="$miss exit-status-$rc5"
 	grep -qiF "primary" "$E5" || miss="$miss no-primary-wording"
 	# The path must appear on wt-enter's OWN line, not only in git's fatal.
-	grep -F "$R5" "$E5" | grep -q '^wt-enter:' || miss="$miss no-primary-path"
+	wt_enter_line_has "$E5" "$R5" || miss="$miss no-primary-path"
 	grep -qiF "shared" "$E5" || miss="$miss no-shared-warning"
 	grep -qiF "coordinate" "$E5" || miss="$miss no-coordination-hint"
 	# The shared main checkout is the worst thing to be told to discard, so the
@@ -2441,14 +2460,14 @@ for i in 1 2 3; do
 	git_quiet -C "$RY" commit -qam "c$i"
 done
 git_quiet -C "$RY" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
-if git -C "$RY" worktree list --porcelain | grep -qx detached; then
+if worktree_list_has "$RY" detached; then
 	if out="$(cd "$RY" && bash "$WT_ENTER" task-y main 2>"$EY")"; then
 		no "wt-enter must fail when a bisecting primary checkout holds the branch (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
 		grep -qiF "primary" "$EY" || miss="$miss no-primary-wording"
-		grep -F "$RY" "$EY" | grep -q '^wt-enter:' || miss="$miss no-primary-path"
+		wt_enter_line_has "$EY" "$RY" || miss="$miss no-primary-path"
 		grep -qiF "coordinate" "$EY" || miss="$miss no-coordination-hint"
 		miss="$miss$(destructive_advice "$EY" "$RY/.worktrees/$CONTAINER_NAME/task-y" "$RY" task-y main)"
 		[ ! -e "$RY/.worktrees/$CONTAINER_NAME/task-y" ] || miss="$miss worktree-created"
@@ -2483,7 +2502,7 @@ else
 	# git's fatal status (128) is propagated rather than flattened to 1.
 	[ "$rc6" -eq 128 ] || miss="$miss exit-status-$rc6"
 	# Surfaced by wt-enter itself, not merely left inside git's fatal text.
-	grep -F "$WB6/task-f" "$E6" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	wt_enter_line_has "$E6" "$WB6/task-f" || miss="$miss no-blocking-path"
 	! grep -qiF "primary" "$E6" || miss="$miss claims-primary"
 	# The caller is told how to look at the blocker, not how to delete it.
 	grep -qF "git -C $WB6/task-f status" "$E6" || miss="$miss no-inspection-hint"
@@ -2513,7 +2532,7 @@ if out="$(cd "$RN" && bash "$WT_ENTER" task-x "$NOISY_BRANCH" 2>"$EN")"; then
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
-	grep -F "$WBN/task-w" "$EN" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	wt_enter_line_has "$EN" "$WBN/task-w" || miss="$miss no-blocking-path"
 	# Precondition: the noisy word really is in the output (else this proves nothing).
 	grep -qF "$NOISY_BRANCH" "$EN" || miss="$miss branch-name-not-echoed"
 	miss="$miss$(destructive_advice "$EN" "$WBN/task-w" "$WBN/task-x" "$RN" "$NOISY_BRANCH" task-x)"
@@ -2549,7 +2568,8 @@ else
 	# End-to-end: take the command wt-enter actually printed and RUN it (as
 	# `rev-parse` rather than `status`, so the answer is comparable). Pasting it
 	# must reach the blocking worktree and nothing else.
-	hint_cmd="$(LC_ALL=C sed -n "s/^wt-enter: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$ES" | head -1)"
+	hint_cmd="$(LC_ALL=C sed -n "s/^wt-enter: look at it yourself: '\(git -C .* status\)'.*/\1/p" "$ES")"
+	hint_cmd="${hint_cmd%%$'\n'*}"
 	if [ -n "$hint_cmd" ]; then
 		got="$(eval "${hint_cmd% status} rev-parse --show-toplevel" 2>/dev/null || true)"
 		[ "$got" = "$WBS/task-y" ] || miss="$miss inspection-command-not-pasteable"
@@ -2674,13 +2694,13 @@ git_quiet -C "$R7" commit -qam "main edit"
 git_quiet -C "$R7" worktree add -q "$WB7/task-h" task-h >/dev/null 2>&1
 # Conflicting rebase: it stops mid-flight and leaves the worktree detached.
 git_quiet -C "$WB7/task-h" rebase main >/dev/null 2>&1 || true
-if git -C "$R7" worktree list --porcelain | grep -qx detached; then
+if worktree_list_has "$R7" detached; then
 	if out="$(cd "$R7" && bash "$WT_ENTER" task-i task-h 2>"$E7")"; then
 		no "wt-enter must fail when the branch is held by an interrupted rebase (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
-		grep -F "$WB7/task-h" "$E7" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		wt_enter_line_has "$E7" "$WB7/task-h" || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E7" || miss="$miss claims-primary"
 		miss="$miss$(destructive_advice "$E7" "$WB7/task-h" "$WB7/task-i" "$R7" task-h task-i)"
 		[ ! -e "$WB7/task-i" ] || miss="$miss worktree-created"
@@ -2707,13 +2727,13 @@ done
 git_quiet -C "$R8" branch task-j
 git_quiet -C "$R8" worktree add -q "$WB8/task-j" task-j >/dev/null 2>&1
 git_quiet -C "$WB8/task-j" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
-if git -C "$R8" worktree list --porcelain | grep -qx detached; then
+if worktree_list_has "$R8" detached; then
 	if out="$(cd "$R8" && bash "$WT_ENTER" task-k task-j 2>"$E8")"; then
 		no "wt-enter must fail when the branch is held by a bisect (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
-		grep -F "$WB8/task-j" "$E8" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		wt_enter_line_has "$E8" "$WB8/task-j" || miss="$miss no-blocking-path"
 		! grep -qiF "primary" "$E8" || miss="$miss claims-primary"
 		miss="$miss$(destructive_advice "$E8" "$WB8/task-j" "$WB8/task-k" "$R8" task-j task-k)"
 		[ ! -e "$WB8/task-k" ] || miss="$miss worktree-created"
@@ -2740,14 +2760,14 @@ EA="$WORK_ROOT/ra.err"
 git_quiet -C "$RA" branch task-m
 git_quiet -C "$RA" worktree add -q "$WBA/task-m" task-m >/dev/null 2>&1
 git_quiet -C "$WBA/task-m" bisect start >/dev/null 2>&1 || true
-if git -C "$RA" worktree list --porcelain | grep -qx "branch refs/heads/task-m" &&
+if worktree_list_has "$RA" "branch refs/heads/task-m" &&
 	[ -z "$(git -C "$WBA/task-m" status --porcelain)" ]; then
 	if out="$(cd "$RA" && bash "$WT_ENTER" task-n task-m 2>"$EA")"; then
 		no "wt-enter must fail when the branch is held by an on-branch bisect (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
-		grep -F "$WBA/task-m" "$EA" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		wt_enter_line_has "$EA" "$WBA/task-m" || miss="$miss no-blocking-path"
 		miss="$miss$(destructive_advice "$EA" "$WBA/task-m" "$WBA/task-n" "$RA" task-m task-n)"
 		[ ! -e "$WBA/task-n" ] || miss="$miss worktree-created"
 		if [ -z "$miss" ]; then
@@ -2788,13 +2808,13 @@ git_quiet -C "$WBR/task-u" revert --no-edit \
 	"$(git -C "$RR" rev-parse task-u~1)" "$(git -C "$RR" rev-parse task-u~2)" >/dev/null 2>&1 || true
 if [ -e "$RR/.git/worktrees/task-u/sequencer" ] &&
 	[ -z "$(git -C "$WBR/task-u" status --porcelain)" ] &&
-	git -C "$RR" worktree list --porcelain | grep -qx "branch refs/heads/task-u"; then
+	worktree_list_has "$RR" "branch refs/heads/task-u"; then
 	if out="$(cd "$RR" && bash "$WT_ENTER" task-v task-u 2>"$ER")"; then
 		no "wt-enter must fail when the branch is held by an interrupted revert (got '$out')"
 	else
 		miss=""
 		[ -z "$out" ] || miss="$miss stdout-not-empty"
-		grep -F "$WBR/task-u" "$ER" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+		wt_enter_line_has "$ER" "$WBR/task-u" || miss="$miss no-blocking-path"
 		miss="$miss$(destructive_advice "$ER" "$WBR/task-u" "$WBR/task-v" "$RR" task-u task-v)"
 		# The revert sequence is still there afterwards.
 		[ -e "$RR/.git/worktrees/task-u/sequencer" ] || miss="$miss revert-state-lost"
@@ -2825,7 +2845,7 @@ if out="$(cd "$RP" && bash "$WT_ENTER" task-r task-q 2>"$EP")"; then
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
-	grep -F "$WBP/task-q" "$EP" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	wt_enter_line_has "$EP" "$WBP/task-q" || miss="$miss no-blocking-path"
 	grep -qF "worktree prune" "$EP" || miss="$miss no-prune-remedy"
 	miss="$miss$(destructive_advice "$EP" "$WBP/task-q" "$WBP/task-r" "$RP" task-q task-r)"
 	if [ -z "$miss" ]; then
@@ -2854,15 +2874,15 @@ done
 git_quiet -C "$RM" branch task-w
 git_quiet -C "$RM" worktree add -q "$WBM/task-w" task-w >/dev/null 2>&1
 git_quiet -C "$WBM/task-w" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
-if git -C "$RM" worktree list --porcelain | grep -qx detached; then
+if worktree_list_has "$RM" detached; then
 	rm -rf "$WBM/task-w" # detached by the bisect, now gone from disk
-	if git -C "$RM" worktree prune -n -v 2>&1 | grep -qF "worktrees/task-w"; then
+	if pruned="$(git -C "$RM" worktree prune -n -v 2>&1)" && [[ $pruned == *"worktrees/task-w"* ]]; then
 		if out="$(cd "$RM" && bash "$WT_ENTER" task-x task-w 2>"$EM")"; then
 			no "wt-enter must fail when a deleted mid-bisect worktree holds the branch (got '$out')"
 		else
 			miss=""
 			[ -z "$out" ] || miss="$miss stdout-not-empty"
-			grep -F "$WBM/task-w" "$EM" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+			wt_enter_line_has "$EM" "$WBM/task-w" || miss="$miss no-blocking-path"
 			grep -qF "worktree prune" "$EM" || miss="$miss no-prune-remedy"
 			! grep -qiF "primary" "$EM" || miss="$miss claims-primary"
 			miss="$miss$(destructive_advice "$EM" "$WBM/task-w" "$WBM/task-x" "$RM" task-w task-x)"
@@ -2905,14 +2925,14 @@ elif out="$(cd "$RL" && bash "$WT_ENTER" task-lm task-lk 2>"$EL")"; then
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
-	grep -F "$WBL/task-lk" "$EL" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	wt_enter_line_has "$EL" "$WBL/task-lk" || miss="$miss no-blocking-path"
 	grep -qiF "locked" "$EL" || miss="$miss no-lock-wording"
 	# The stale-record remedy must not be offered for a record git will not touch.
 	! grep -qF "worktree prune" "$EL" || miss="$miss prune-advised-for-locked-blocker"
 	miss="$miss$(destructive_advice "$EL" "$WBL/task-lk" "$WBL/task-lm" "$RL" task-lk task-lm)"
 	[ ! -e "$WBL/task-lm" ] || miss="$miss worktree-created"
 	# Nothing was remediated: the locked record is still registered, still holding.
-	git -C "$RL" worktree list --porcelain | grep -qx "branch refs/heads/task-lk" ||
+	worktree_list_has "$RL" "branch refs/heads/task-lk" ||
 		miss="$miss lock-record-gone"
 	if [ -z "$miss" ]; then
 		ok "wt-enter withholds the 'worktree prune' remedy for a LOCKED registered-but-missing blocker"
@@ -2937,7 +2957,7 @@ if out="$(cd "$RV" && bash "$WT_ENTER" task-t task-s 2>"$EV")"; then
 else
 	miss=""
 	[ -z "$out" ] || miss="$miss stdout-not-empty"
-	grep -F "$WBV/task-s" "$EV" | grep -q '^wt-enter:' || miss="$miss no-blocking-path"
+	wt_enter_line_has "$EV" "$WBV/task-s" || miss="$miss no-blocking-path"
 	miss="$miss$(destructive_advice "$EV" "$WBV/task-s" "$WBV/task-t" "$RV" task-s task-t)"
 	if [ -z "$miss" ]; then
 		ok "wt-enter names a blocker whose own git dir cannot be read, and still advises nothing destructive"
@@ -3035,7 +3055,7 @@ done
 git_quiet -C "$NLD_ROOT" branch nld-b
 git_quiet -C "$NLD_ROOT" worktree add -q "$NLD_WT" nld-b >/dev/null 2>&1
 git_quiet -C "$NLD_WT" bisect start HEAD HEAD~2 >/dev/null 2>&1 || true
-if git -C "$NLD_ROOT" worktree list --porcelain | grep -qx detached; then
+if worktree_list_has "$NLD_ROOT" detached; then
 	if out="$(cd "$NLD_ROOT" && bash "$WT_ENTER" task-nld nld-b 2>"$END")"; then
 		no "wt-enter must fail when a detached blocker under a trailing-newline path holds the branch (got '$out')"
 	else

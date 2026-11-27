@@ -320,7 +320,7 @@ sl_rc() {
 # (`X="$(sl_key …)"`). Without it, a missing or unreadable marker takes the whole
 # suite down mid-run — no summary line, no idea which cases never ran.
 sl_key() {
-	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1 || true
+	grep -m1 "^$2=" "$1" 2>/dev/null | sed "s/^$2=//" || true
 }
 
 sl_sha() {
@@ -906,7 +906,7 @@ else
 	chmod 644 "$DST"
 	if [ "$RC" = 0 ] && [ "$RC2" = 0 ] &&
 		[ "$(cat "$DST" 2>/dev/null)" = "v1" ] &&
-		printf '%s' "$SL_NOTE_FIRST" | grep -q 'could not write' &&
+		[[ $SL_NOTE_FIRST == *'could not write'* ]] &&
 		[ -z "$SL_NOTE_SECOND" ] &&
 		[ "$(sl_key "$MK" notified_epoch)" = "200" ] &&
 		[ "$(sl_key "$MK" epoch)" = "100" ] &&

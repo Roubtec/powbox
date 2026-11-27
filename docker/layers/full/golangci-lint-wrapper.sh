@@ -45,16 +45,33 @@
 # container, so parallel worktrees failed each other's lint. The wrapper
 # re-roots TMPDIR at a per-toplevel subdir of the same temp root:
 #       ${TMPDIR:-/tmp}/golangci-lint-<euid><toplevel>
-# so runs in one worktree still exclude each other (the guard is right there:
-# they share the analysis cache) while siblings never meet. It applies to
-# every git toplevel, main checkout included, since nothing lands on the host
-# mount. The guard is kept rather than passing --allow-parallel-runners, which
-# would disable it within a worktree too. TMPDIR is the lock's only knob, so
-# the exported value also reaches the linter's children (go list's go-build
-# work dirs); those are ephemeral and stay on the caller's temp filesystem.
-# The guard's own settings (--allow-parallel-runners/--allow-serial-runners,
-# run.allow-*-runners in the project config) are untouched: the wrapper never
-# adds flags. A caller's TMPDIR still picks the temp root.
+# so runs on one tree still exclude each other, as the linter intends, while
+# different toplevels never meet. It applies to every git toplevel, main
+# checkout included, since nothing lands on the host mount. The guard is kept
+# rather than passing --allow-parallel-runners, which would drop it on one
+# tree too. TMPDIR is the lock's only knob, so the exported value also reaches
+# the linter's children (go list's go-build work dirs); those are ephemeral
+# and stay on the caller's temp filesystem.
+#
+# The lock is keyed by toplevel, independently of the cache scoping above, so
+# toplevels that share a cache run concurrently against it: worktrees outside
+# .worktrees/<container>/<slug> (e.g. .claude/worktrees/<name>, or
+# `git worktree add ../x`), main checkouts without a .worktrees mount (all of
+# these share the default cache), and runs that export one GOLANGCI_LINT_CACHE.
+# That is safe: the cache is a copy of cmd/go's (internal/go/cache), whose
+# Open documents that processes on one machine "will coordinate using
+# operating system file locks and may duplicate effort but will not corrupt
+# the cache". Keying the lock on the cache instead would bring the collision
+# back for exactly those harness-native worktrees.
+#
+# A caller's TMPDIR is deliberately NOT passed through verbatim: the scope dir
+# is nested inside it. TMPDIR is a general temp-root variable that shells and
+# harnesses export for reasons unrelated to lint, so passing it through would
+# silently restore the shared lock for every such shell. The caller's value
+# still picks the temp root, and the guard's own settings
+# (--allow-parallel-runners/--allow-serial-runners, run.allow-*-runners in the
+# project config) win untouched: the wrapper never adds flags. To run with
+# TMPDIR exactly as given, invoke the real binary at $GOLANGCI_REAL.
 #
 # An explicit GOLANGCI_LINT_CACHE in the environment always wins — the wrapper
 # only fills the gap. And it ALWAYS execs the real binary: no derivation or

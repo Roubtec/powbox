@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# golangci-lint wrapper — scope the analysis cache per worktree *before* the
-# real linter can read a sibling's stale results.
+# golangci-lint wrapper — scope the analysis cache and the run lock per
+# worktree *before* the real linter can read a sibling's stale results or
+# collide with a sibling's run.
 #
 # Why this exists
 # ---------------
@@ -37,10 +38,28 @@
 #   * anything else (no .worktrees mount, not a git repo, derivation failure)
 #       -> untouched default (~/.cache/golangci-lint)
 #
+# Run lock: `golangci-lint run` refuses to start while another run holds an
+# exclusive flock on golangci-lint.lock in os.TempDir() — $TMPDIR, else /tmp —
+# giving up after 5s with exit 3 "parallel golangci-lint is running" (observed
+# on v2.12.2 with strace). With TMPDIR unset that is ONE lock for the whole
+# container, so parallel worktrees failed each other's lint. The wrapper
+# re-roots TMPDIR at a per-toplevel subdir of the same temp root:
+#       ${TMPDIR:-/tmp}/golangci-lint-<euid><toplevel>
+# so runs in one worktree still exclude each other (the guard is right there:
+# they share the analysis cache) while siblings never meet. It applies to
+# every git toplevel, main checkout included, since nothing lands on the host
+# mount. The guard is kept rather than passing --allow-parallel-runners, which
+# would disable it within a worktree too. TMPDIR is the lock's only knob, so
+# the exported value also reaches the linter's children (go list's go-build
+# work dirs); those are ephemeral and stay on the caller's temp filesystem.
+# The guard's own settings (--allow-parallel-runners/--allow-serial-runners,
+# run.allow-*-runners in the project config) are untouched: the wrapper never
+# adds flags. A caller's TMPDIR still picks the temp root.
+#
 # An explicit GOLANGCI_LINT_CACHE in the environment always wins — the wrapper
 # only fills the gap. And it ALWAYS execs the real binary: no derivation or
 # mkdir failure may ever block the actual lint command (the pnpm-wrapper
-# principle) — on failure it just warns and runs with the default cache.
+# principle) — on failure it just warns and runs with the default.
 set -uo pipefail
 
 # The real binary, extracted off PATH by docker/layers/full/Dockerfile (the
@@ -57,15 +76,27 @@ run_real() {
 	exit 127
 }
 
-# Respect an explicit caller choice.
-if [ -n "${GOLANGCI_LINT_CACHE:-}" ]; then
+# Derive the checkout this invocation lints. Outside a git repo (or with git
+# itself missing/broken) there is nothing to scope — run with the defaults.
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || TOP=""
+if [ -z "$TOP" ]; then
 	run_real "$@"
 fi
 
-# Derive the checkout this invocation lints. Outside a git repo (or with git
-# itself missing/broken) there is nothing to scope — run with the default.
-TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || TOP=""
-if [ -z "$TOP" ]; then
+# Run lock (see the header). The 0700 per-euid base keeps another user's
+# pre-created dir in a shared /tmp from being trusted.
+LOCKBASE="${TMPDIR:-/tmp}"
+LOCKBASE="${LOCKBASE%/}/golangci-lint-$EUID"
+LOCKDIR="$LOCKBASE$TOP"
+mkdir -m 700 "$LOCKBASE" 2>/dev/null
+if [ -O "$LOCKBASE" ] && mkdir -p "$LOCKDIR" 2>/dev/null && [ -w "$LOCKDIR" ]; then
+	export TMPDIR="$LOCKDIR"
+else
+	echo "golangci-lint-wrapper: warning: cannot create lock dir $LOCKDIR; running with the shared run lock." >&2
+fi
+
+# Respect an explicit caller cache choice.
+if [ -n "${GOLANGCI_LINT_CACHE:-}" ]; then
 	run_real "$@"
 fi
 

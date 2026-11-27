@@ -17,13 +17,13 @@ Everything below is on `PATH` and ready to use — no installation needed.
 | Build | `make`, `patch`, `gcc`, `g++` |
 | Shell linting | `shellcheck` 0.11.0 is the baked default, the same release GitHub's ubuntu runners ship, so a clean local pass predicts a clean CI pass; a repository's pinned version or wrapper stays authoritative when present. |
 | GitHub Actions linting | `actionlint` 1.7.12 is the baked default; invoke it as `actionlint`, but use a repository's pinned version or wrapper when present. |
-| Markdown linting | `markdownlint-cli2` 0.23.2 is the baked default; invoke it as `markdownlint-cli2`, but repository CI pins and wrappers remain authoritative, so use the wrapper or `npx --yes markdownlint-cli2@<pin>` when another version is required. |
+| Markdown linting | `markdownlint-cli2` 0.24.2 is the baked default; invoke it as `markdownlint-cli2`, but repository CI pins and wrappers remain authoritative, so use the wrapper or `npx --yes markdownlint-cli2@<pin>` when another version is required. |
 | Workflow debugging | `wf-check <script.js>` validates Claude Workflow metadata and async-body syntax without running it; `wf-status <runId-or-transcript-dir>` summarizes a run best-effort from its snapshot, journal, and agent transcripts. |
 | Archives/transfer | `wget`, `curl`, `zip`, `unzip`, `rsync`, `bzip2`, `xz`, `zstd` |
 | Data | `envsubst`, `bc`, `xxd` |
 | Databases | `sqlite3` |
 | Network | `ping`, `nc` |
-| File search | `fd`, `bat` |
+| File search | `rg`, `fd`, `bat`. `rg` is a real binary at `/usr/bin/rg`, so scripts, Makefiles and test suites you run can call it too, not only your own shell. |
 | Document processing | `pdftotext`, `pdftoppm`, `pdfinfo`, `pandoc`, `typst`. `pandoc` converts Markdown to Word, PowerPoint, HTML and EPUB, and to PDF through the baked Typst engine: `pandoc in.md -o out.pdf --pdf-engine=typst` (US Letter by default; add `-V papersize=a4` for A4, and `--extract-media=<dir>` when the input is a `.docx` that contains images, or Typst cannot find them). No headless browser and no LaTeX are part of this base image, so turning HTML or a slide deck into PDF needs a browser: use one the layer-set section at the end of this file documents when it is there, and otherwise install what you need for the session. |
 | Editors | `nano`, `vim` |
 | Sandbox | `bubblewrap` (`bwrap`) |

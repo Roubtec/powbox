@@ -45,6 +45,8 @@ USER root
 # ---------------------------------------------------------------------------
 # PHP 8.4 and composer
 # ---------------------------------------------------------------------------
+# 8.4 is the PHP Debian trixie packages, not a chosen pin: a newer minor would
+# need a third-party repo (sury), so it moves with the base distribution.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     php8.4-cli \
     php8.4-xml \
@@ -162,14 +164,14 @@ ENV PATH="/opt/mssql-tools18/bin:${PATH}"
 # --retry-all-errors additionally rides out transient CDN 5xx/timeouts. Safe here
 # because both artifacts are sha256-pinned below, so a retried/partial download can
 # never smuggle in different bits.
-RUN GO_VERSION=1.26.4 \
-    && GOLANGCI_LINT_VERSION=2.12.2 \
+RUN GO_VERSION=1.27.4 \
+    && GOLANGCI_LINT_VERSION=2.15.0 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
-        amd64) go_sha256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f \
-               golangci_sha256=8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553 ;; \
-        arm64) go_sha256=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768 \
-               golangci_sha256=44cd40a8c76c86755375adfeea52cfd3533cb43d7bd647771e0ae065e166df3a ;; \
+        amd64) go_sha256=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 \
+               golangci_sha256=9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea ;; \
+        arm64) go_sha256=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 \
+               golangci_sha256=b4d8f17068b35ee6060cc2f69a16fb48740d706fbba81661c318649c114a6998 ;; \
         *) echo "no pinned Go/golangci-lint checksums for architecture: $arch" >&2; exit 1 ;; \
     esac \
     && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
@@ -208,12 +210,13 @@ ENV PATH="/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # unit-test authorization policy (`opa test policy/…`). Baked so a session
 # touching Rego can run the same policy tests its CI does locally instead of
 # leaning on the GitHub workflow that installs OPA — general-purpose tooling on
-# the same footing as the Go/golangci binaries above. Fetched as the pinned,
-# statically linked release binary from GitHub and sha256-pinned per arch
-# (checksums from the release's opa_linux_<arch>_static.sha256); bump the
-# version and both sums together (https://github.com/open-policy-agent/opa/releases).
-# The `_static` build is used deliberately — a single self-contained binary with
-# no glibc coupling, dropped straight onto PATH (no tarball to unpack).
+# the same footing as the Go/golangci binaries above. Fetched as the pinned
+# release binary from GitHub and sha256-pinned per arch (checksums from the
+# release's opa_linux_<arch>.sha256); bump the version and both sums together
+# (https://github.com/open-policy-agent/opa/releases). The default
+# opa_linux_<arch> asset is itself statically linked, a single self-contained
+# binary dropped straight onto PATH (no tarball to unpack); the `_static`
+# assets are equivalent static builds that upstream deprecated in 1.22.
 #
 # Version note: this is ONE baked release. `opa test` on a policy suite is
 # version-tolerant in practice (validated against a 1.4.x-pinned project's
@@ -223,15 +226,15 @@ ENV PATH="/usr/local/go/bin:/home/node/go/bin:${PATH}"
 # loads byte-for-byte in a particular deployed engine version.
 #
 # Placed low so an OPA bump never busts the expensive apt/mssql/pwsh/Go layers.
-RUN OPA_VERSION=1.18.2 \
+RUN OPA_VERSION=1.23.0 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
-        amd64) opa_sha256=9903e5125ac281104f2c4b7371d10cc3b74a98933743fcbfc174f9bf0ab20de8 ;; \
-        arm64) opa_sha256=9cad2e67d375aded483823349173fe100d9701d37635908edadeb0298603c58c ;; \
+        amd64) opa_sha256=e017efe78c61f66c2a242b8493ddad9a94dd704d839cb806a857d7cdfed41ee5 ;; \
+        arm64) opa_sha256=ece9528770475698999b38b8372182e5d93e8d64b718a3e95afb87fc81ecd8a6 ;; \
         *) echo "no pinned OPA checksum for architecture: $arch" >&2; exit 1 ;; \
     esac \
     && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --http1.1 -o /usr/local/bin/opa \
-        "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_${arch}_static" \
+        "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_${arch}" \
     && echo "${opa_sha256}  /usr/local/bin/opa" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/opa
 
@@ -247,9 +250,10 @@ RUN OPA_VERSION=1.18.2 \
 # and both sums together (https://github.com/gitleaks/gitleaks/releases).
 # Only the binary is extracted from the tarball (LICENSE/README stay out).
 #
-# Version note: 8.30.1 is the newest release and the one projects' CI pins
-# today. Upstream declared gitleaks feature complete in 2026 (security patches
-# only; its author moved to Betterleaks), so this pin should rarely move. Like
+# Version note: this pin follows upstream releases. Upstream declared gitleaks
+# feature complete in 2026 (security patches only; its author moved to
+# Betterleaks), so it should rarely move; bump it together with the version
+# probe in smoke-probes.txt and the agent-notes.md row. Like
 # OPA, this is ONE baked release: a project pinning a different version in CI
 # should verify against its own pin, and if a project moves its lane to
 # Betterleaks, swap the baked tool rather than baking both.
@@ -473,8 +477,11 @@ ENV CHROME_NO_SANDBOX=true
 # Version choice: the 10.0 LTS band (supported to 2028-11-14; 8.0's support
 # ends 2026-11-10), pinned only to major.minor (the postgresql-16 /
 # mssql-tools18 precedent, NOT the sha256-pinned tarball treatment Go and OPA
-# need — this is a signed distro repo). It is the major projects currently pin
-# in CI (`actions/setup-dotnet` with `10.0.1xx`). The apt candidate tracks the
+# need — this is a signed distro repo). It stays on the LTS band rather than
+# the newer STS one (11.0): projects pin the LTS major in CI
+# (`actions/setup-dotnet` with `10.0.1xx`), and an SDK bundles only its own
+# runtime, so an 11.0-only image could build a net10.0 project but not run its
+# tests without DOTNET_ROLL_FORWARD. The apt candidate tracks the
 # NEWEST 10.0 feature band (10.0.4xx at the time of writing), so a local run
 # and a CI run agree on the runtime and language major but not necessarily on
 # the SDK feature band. `dotnet-sdk-10.0` pulls its own runtime, the ASP.NET

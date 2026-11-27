@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-A kalm2 implementation session (task 107, OPC-UA adapter with a pinned open62541/OpenSSL CGO build) verified that GCC, Make, CGO, the ASan/UBSan runtimes, and the OpenSSL 3.5 *runtime* are already baked, but every native/CMake/TLS build still has to `sudo apt-get update && apt-get install` the same small set of build-orchestration packages first: `cmake`, `pkg-config`, `libssl-dev`, `ninja-build`.
+A downstream project's implementation session (an OPC-UA adapter with a pinned open62541/OpenSSL CGO build) verified that GCC, Make, CGO, the ASan/UBSan runtimes, and the OpenSSL 3.5 *runtime* are already baked, but every native/CMake/TLS build still has to `sudo apt-get update && apt-get install` the same small set of build-orchestration packages first: `cmake`, `pkg-config`, `libssl-dev`, `ninja-build`.
 
 These four (plus `zlib1g-dev`, the other near-universal C dev header) are general-purpose across projects — any CGo module wrapping a C library, any CMake-based vendored dependency, any TLS-linking native build — require no privileged runtime setup, and are cheap in image size. Baking them removes a repeated multi-minute apt round-trip (and its network dependency) from every native-build session, on the same footing as the existing `build-essential` layer.
 
@@ -30,7 +30,7 @@ Update the container docs and smoke coverage to match (see Target files).
 
 ## Context and references
 
-- Source assessment: kalm2 task `107-adapter-wave-b-modbus-opcua.md` ("Container-image recommendations" from the implementing session). Verified against the current image: `cmake`, `pkg-config`, `ninja`, `libssl-dev`, and `zlib1g-dev` are all absent; `build-essential`, `libasan8`/`libubsan1`, and `libssl3t64` (runtime) are present.
+- Source assessment: the downstream project's task file for that adapter ("Container-image recommendations" from the implementing session). Verified against the current image: `cmake`, `pkg-config`, `ninja`, `libssl-dev`, and `zlib1g-dev` are all absent; `build-essential`, `libasan8`/`libubsan1`, and `libssl3t64` (runtime) are present.
 - `docker/base/Dockerfile` — note the layer-ordering convention stated repeatedly in its comments: new installs go **low in the file** so they never bust the expensive gh/mssql/pwsh/npm layers above (the Podman, Go, and OPA layers are the precedent).
 - `scripts/base-source-files.txt` — the base recipe digest hashes `docker/base/Dockerfile` itself, so a pure apt-line change is picked up automatically; the manifest only needs editing when base `COPY`s change (they don't here).
 - `AGENTS.md` "Validating Changes" — image builds and smoke runs cannot happen in-container; only static lint runs here.

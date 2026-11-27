@@ -204,12 +204,12 @@ case "$conmon_cwd" in
 *) fail "conmon runs in [$conmon_cwd], want the container persist directory (conmon wrapper not applied?)" ;;
 esac
 
-# 4. Compose exec-form health check. Motivating regression (Kalm2 SPIRE overlay):
+# 4. Compose exec-form health check. Motivating regression (a downstream SPIRE overlay):
 # podman-compose left a distroless exec-form health check stuck at "starting". The
 # fixture has up to THREE services so the check has real teeth: "hc" (test /bin/true)
 # MUST reach healthy, a negative-control "bad" (test /bin/false) MUST be driven to
 # unhealthy — see 4b — and a shell-less "distroless" service (see 4c) actively
-# reproduces the Kalm2 break (detected by the translated form + failure reason, not a
+# reproduces that break (detected by the translated form + failure reason, not a
 # never-healthy outcome).
 # Exercised through "docker compose" (the shim spelling agents use); it routes to
 # "podman compose" -> the podman-compose provider, so both spellings share one path.
@@ -286,7 +286,7 @@ bad_cid=$(podman ps -aq --filter "label=com.docker.compose.project=$compose_proj
 # shell-wrapped one. On this sandbox podman-compose 1.3 ALWAYS rewrites the exec form
 # ["CMD","/bin/true"] -> ["CMD-SHELL","/bin/sh -c /bin/true"], so we surface that as a
 # loud KNOWN-XFAIL (a detected+reported condition, not a silent pass hidden in prose):
-# a distroless image with no /bin/sh WOULD be stuck at starting — the reported Kalm2
+# a distroless image with no /bin/sh WOULD be stuck at starting — the reported downstream
 # symptom. We only FAIL if the check was dropped or mangled BEYOND that known wrap
 # (the intended binary did not survive), and NOTE it if a future provider stops
 # wrapping (the docs workaround could then be revisited).
@@ -295,7 +295,7 @@ hc_test=$(podman inspect --format "{{if .Config.Healthcheck}}{{json .Config.Heal
 case "$hc_kind" in
 CMD-SHELL)
 	case "$hc_test" in
-	*/bin/true*) echo "KNOWN-XFAIL: podman-compose 1.3 rewrote the exec-form health check [CMD /bin/true] to ${hc_test} — a distroless image with no /bin/sh WOULD be stuck at starting (the Kalm2 SPIRE symptom); alpine has a shell so it still reaches healthy. See docs/rootless-podman.md Compose health-check behavior." ;;
+	*/bin/true*) echo "KNOWN-XFAIL: podman-compose 1.3 rewrote the exec-form health check [CMD /bin/true] to ${hc_test} — a distroless image with no /bin/sh WOULD be stuck at starting (the reported SPIRE symptom); alpine has a shell so it still reaches healthy. See docs/rootless-podman.md Compose health-check behavior." ;;
 	*) fail "compose mistranslated the exec-form health check beyond the known CMD-SHELL wrap: ${hc_test} (the intended /bin/true did not survive the conversion)" ;;
 	esac
 	;;
@@ -345,7 +345,7 @@ echo "Negative control OK: the never-succeeding /bin/false service was driven to
 
 # 4c. Distroless (shell-less) XFAIL reproduction. The alpine "hc" service reaches
 # healthy DESPITE the CMD->CMD-SHELL rewrite precisely because alpine HAS /bin/sh, so
-# 4a/4b never exercise the path that actually broke the Kalm2 distroless SPIRE check.
+# 4a/4b never exercise the path that actually broke the downstream distroless SPIRE check.
 # This third service uses a genuinely shell-less image (registry.k8s.io/pause, no
 # /bin/sh) with the SAME exec-form check shape.
 #
@@ -408,7 +408,7 @@ if [ "$distroless_ok" = true ]; then
 	if [ "$dl_preserved" = true ]; then
 		echo "NOTE (distroless XFAIL now obsolete): podman-compose PRESERVED the shell-less service exec-form check as the exact ${dl_test} (unwrapped CMD exec form) — the CMD->CMD-SHELL rewrite that broke distroless health checks is GONE and the provider now honors the exec form. This is the true provider-fixed signal (independent of whether /pause ever exits). Task 025a can raise this XFAIL to a HARD FAIL keyed on the preserved CMD exec form; revisit accepted limitation #2 in docs/rootless-podman.md. (Driven health state: ${dl_health}.)"
 	elif [ "$dl_wrapped" = true ] && [ "$dl_shellmissing" = true ]; then
-		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into the exact ${dl_test}, reintroducing /bin/sh — which is ABSENT from this image (proven: podman exec /bin/sh -> ${dl_shellerr}). The /pause binary IS present (it is the image entrypoint), so the shell wrap — not an absent check binary and not a never-exiting one — is why the check fails (driven state: ${dl_health}). This actively reproduces the Kalm2 distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
+		echo "KNOWN-XFAIL (distroless): podman-compose 1.3 wrapped the shell-less service exec-form check into the exact ${dl_test}, reintroducing /bin/sh — which is ABSENT from this image (proven: podman exec /bin/sh -> ${dl_shellerr}). The /pause binary IS present (it is the image entrypoint), so the shell wrap — not an absent check binary and not a never-exiting one — is why the check fails (driven state: ${dl_health}). This actively reproduces the reported distroless SPIRE break and is the EXPECTED green state on this provider. See docs/rootless-podman.md Compose health-check behavior."
 	elif [ "$dl_wrapped" = true ]; then
 		fail "distroless XFAIL reproduction is inconclusive: the exec-form check was shell-wrapped to the expected ${dl_test}, but reproducing the wrap with podman exec /bin/sh did NOT fail for a shell-not-found reason (${dl_shellerr}) — cannot confirm the absent shell is the cause"
 	else

@@ -3,7 +3,7 @@
 ## Why this task exists
 
 The remaining steps are decisions and validations only Ruben (or a colleague)
-can perform — they gate publishing the skills and switching jabko (and future
+can perform — they gate publishing the skills and switching a downstream project (and future
 shared repos) onto the plugin. Kept as a checklist so nothing lands out of
 order.
 
@@ -31,8 +31,8 @@ from their own `.claude/settings.json`, not through the powbox entrypoint.
    reintroduce the auth-ordering problem 015g removed. Treat the public flip as
    permanent (per 015g's stated assumption); if the repo ever must go private
    again, the credential-helper wait has to come back first.
-3. **Colleague onboarding validation (one colleague, on jabko branch
-   `add-dev-skill-support`):**
+3. **Colleague onboarding validation (one colleague, on the downstream
+   project's plugin-support branch):**
    - Open the repo in Claude Code, trust it → expect a prompt to install the
      `roubtec` marketplace + `dev-skills` plugin (driven by the
      `.claude/settings.json` already on that branch).
@@ -44,7 +44,7 @@ from their own `.claude/settings.json`, not through the powbox entrypoint.
      colleagues based on this observation.
    - Enable marketplace auto-update: `/plugin` → Marketplaces → `roubtec`
      → Enable auto-update.
-4. **Merge the jabko branch** `add-dev-skill-support` — **only after** step 3
+4. **Merge the downstream project's plugin-support branch** — **only after** step 3
    passes (the plugin-populated precondition — task 015a merged — is already
    satisfied as of this run); before that, the settings would prompt collaborators
    to install an empty/broken plugin.

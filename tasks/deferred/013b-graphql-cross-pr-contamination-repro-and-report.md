@@ -2,7 +2,7 @@
 
 ## Why this task exists (and why it is deferred)
 
-Concurrent `gh api graphql` calls against the same repository have repeatedly returned **another PR's** review threads: observed live in kalm2 (a PR #142 query returning PR #143's comments; earlier, #10/#11 queries surfacing #9's threads) and documented in `gh-review-threads`' header as the reason that helper exists.
+Concurrent `gh api graphql` calls against the same repository have repeatedly returned **another PR's** review threads: observed live in a downstream repository (one PR's query returning a sibling PR's comments; earlier, two PRs' queries surfacing a third PR's threads) and documented in `gh-review-threads`' header as the reason that helper exists.
 The defect is server-side (GitHub) and can only be detected locally — which the helper now does fail-closed (after the agent-skills scope-check fix, task 013 there).
 An upstream report is goodwill toward the real fix, and a repro harness makes the maintainers' lives easy enough that the report might actually go somewhere.
 
@@ -17,14 +17,14 @@ The next observed contamination (a `gh-review-threads` exit-3 with offender URLs
 
 - `scripts/repro-gh-graphql-cross-pr.sh` (or a small Go/node script if cleaner): given a repo and ≥2 PR numbers that have review threads, fan out R rounds × N concurrent GraphQL `reviewThreads` queries (the same query shape `gh-review-threads` sends, one PR per call), and for every response assert the echoed identity (`repository.nameWithOwner`, `pullRequest.number`) and every comment URL belong to the requested PR.
 - On mismatch: capture the full request/response pair (sanitized — strip tokens; the repo used should be one whose thread contents are shareable, or bodies redacted), the timestamps, concurrency level, and `gh`/API version headers, into an evidence directory.
-- Run it against an **existing** repo with suitable PRs (kalm2 already qualifies; any repo with ≥2 open-or-closed PRs carrying review threads works). Creating a dedicated repo with synthetic PRs/comments is explicitly out of scope — if the bug won't reproduce against existing repos within a bounded run (say, a few hundred rounds), record the negative result and stop; the historical evidence still stands.
+- Run it against an **existing** repo with suitable PRs (the downstream repository where it was observed already qualifies; any repo with ≥2 open-or-closed PRs carrying review threads works). Creating a dedicated repo with synthetic PRs/comments is explicitly out of scope — if the bug won't reproduce against existing repos within a bounded run (say, a few hundred rounds), record the negative result and stop; the historical evidence still stands.
 - Draft the upstream report (GitHub Support ticket and/or `cli/cli` discussion — the crossing has been observed via `gh api graphql`, so ruling `gh`'s HTTP/2 connection reuse in or out is part of what the harness should vary: `--paginate` vs single-shot, HTTP/1.1 via `GIT_CURL_VERBOSE`-style forcing if feasible): symptom, query shape, concurrency conditions, observed pairs with timestamps, harness link/attachment.
 
 ## Context and references
 
 - `Roubtec/agent-skills:plugins/dev-skills/bin/gh-review-threads` — the query shape, the manual-paging rationale (`--paginate` under concurrency was the original suspect), and the documented prior occurrences.
 - `scripts/test-gh-review-threads.sh` — the local (fake-`gh`) suite; the harness is its live-API sibling, and belongs beside it.
-- Historical observed pairs to cite: kalm2 #142←#143 (2026-07-29 session), kalm2 #9→#10/#11 (earlier, per helper header).
+- Historical observed pairs to cite, both from a downstream repository: one PR's query returning its sibling's threads (2026-07-29 session), and one PR's threads surfacing in two other PRs' queries (earlier, per helper header).
 
 ## Implementation notes
 

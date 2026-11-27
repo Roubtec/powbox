@@ -4,7 +4,7 @@
 
 Powbox promises that the rootless `podman compose` command and the Docker-compatible `docker compose` shim are usable from an agent container.
 
-A Kalm2 SPIRE-overlay session reported that Podman Compose 1.3 left a distroless exec-form health check permanently at `starting`, despite the service running.
+A downstream project's SPIRE-overlay session reported that Podman Compose 1.3 left a distroless exec-form health check permanently at `starting`, despite the service running.
 
 The current Podman smoke verifies the command exists but does not create a Compose service with an exec-form health check, so this compatibility gap can regress unnoticed.
 
@@ -14,13 +14,13 @@ The current Podman smoke verifies the command exists but does not create a Compo
 - Verify the service becomes `healthy` within a bounded interval through the supported Compose command path, and clean up all fixture resources even on failure.
 - Record the precise supported behavior and any deliberately accepted limitation in the rootless-Podman documentation.
 
-Out of scope: changing Kalm2's SPIRE Compose files, adding a general Compose conformance suite, or treating an absent `/dev/net/tun` as a product failure.
+Out of scope: changing the downstream project's SPIRE Compose files, adding a general Compose conformance suite, or treating an absent `/dev/net/tun` as a product failure.
 
 ## Context and references
 
 - `scripts/smoke-test-podman.sh` currently verifies Podman, nested runs, bridge networking, and only the presence of the Compose subcommand.
 - Powbox currently installs Podman 5.x with `podman-compose` 1.3; the task must test the actual provider selected by `podman compose`/the Docker shim, not assume Docker Compose v2 semantics.
-- Kalm2's `deploy/local/docker-compose.spire.yml` is the motivating real-world shape: distroless images need `CMD` exec-form checks rather than `CMD-SHELL`.
+- The downstream project's SPIRE Compose file is the motivating real-world shape: distroless images need `CMD` exec-form checks rather than `CMD-SHELL`.
 - The outer smoke command must keep its existing capability/device gating, so this new check belongs with the already-gated nested-run portion.
 
 ## Target files or areas

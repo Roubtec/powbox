@@ -17,7 +17,7 @@ channels, and document the new custody split.
 
 **Out of scope:**
 - The human follow-through steps (repo visibility flip, colleague onboarding,
-  jabko branch merge) — see task 015e.
+  downstream branch merge) — see task 015e.
 
 ## Context and references
 

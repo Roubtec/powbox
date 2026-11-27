@@ -2,7 +2,7 @@
 
 ## Why this task exists
 
-The kalm2 task-107 assessment that motivated task `019` flagged `ccache` as "add only if the image also configures a persistent cache directory; otherwise the benefit across sessions is limited". Powbox is exactly the environment that can satisfy that condition: the per-project `.worktrees` volume already hosts the persistent Go caches (`GOMODCACHE`/`GOCACHE` — see `docs/architecture.md` "Volumes and Stores" and task `tasks/done/011-go-cache-persistence-and-worktree-scoping.md`), and a compiler cache is the same shape of asset — content-addressed, lock-safe under concurrency, and deliberately **shared across a project's worktrees** so every worktree benefits from warm objects.
+The downstream-project assessment that motivated task `019` flagged `ccache` as "add only if the image also configures a persistent cache directory; otherwise the benefit across sessions is limited". Powbox is exactly the environment that can satisfy that condition: the per-project `.worktrees` volume already hosts the persistent Go caches (`GOMODCACHE`/`GOCACHE` — see `docs/architecture.md` "Volumes and Stores" and task `tasks/done/011-go-cache-persistence-and-worktree-scoping.md`), and a compiler cache is the same shape of asset — content-addressed, lock-safe under concurrency, and deliberately **shared across a project's worktrees** so every worktree benefits from warm objects.
 
 Repeated large native builds (the open62541/OpenSSL class of vendored C dependency, rebuilt per worktree and per container recreation) are where this pays off; without the persistent dir, ccache's default `~/.cache/ccache` dies with the container.
 

@@ -4,8 +4,8 @@
 
 Two linters that the review/task skills lean on are not on `PATH`, so subagents re-install them per worktree, per session:
 
-- `actionlint`: any task touching `.github/workflows/*.yml` triggers a fresh `go install github.com/rhysd/actionlint/cmd/actionlint@latest` (observed repeatedly in kalm2, a CI-heavy repo where workflow files are routine review targets).
-- `markdownlint-cli2`: repos that lint `tasks/*.md` fall back to `npx --yes markdownlint-cli2`, paying npx resolution and a network dependency on every lint. Worse, bare `npx` pulls the latest version, which can disagree with a repo's CI pin (kalm2 pins 0.18.1 in CI; newer versions raise MD060 false alarms on pre-existing files), so every subagent has to be told the pin or produce false failures.
+- `actionlint`: any task touching `.github/workflows/*.yml` triggers a fresh `go install github.com/rhysd/actionlint/cmd/actionlint@latest` (observed repeatedly in a downstream project, a CI-heavy repo where workflow files are routine review targets).
+- `markdownlint-cli2`: repos that lint `tasks/*.md` fall back to `npx --yes markdownlint-cli2`, paying npx resolution and a network dependency on every lint. Worse, bare `npx` pulls the latest version, which can disagree with a repo's CI pin (one downstream project pins 0.18.1 in CI; newer versions raise MD060 false alarms on pre-existing files), so every subagent has to be told the pin or produce false failures.
 
 Baking both removes a recurring per-session cost across all consumer repos.
 
@@ -20,7 +20,7 @@ Included:
 
 Out of scope:
 
-- Per-repo lint configuration or pins (each consumer repo owns its own; kalm2's 0.18.1 pin stays a kalm2 concern).
+- Per-repo lint configuration or pins (each consumer repo owns its own; a downstream project's 0.18.1 pin stays that project's concern).
 - Adding lint invocations to powbox CI.
 
 ## Context and references

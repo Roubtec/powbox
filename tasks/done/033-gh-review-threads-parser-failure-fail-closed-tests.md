@@ -5,7 +5,7 @@
 `gh-review-threads` exists to detect cross-PR contamination in concurrent GraphQL responses and fail closed (exit 3, nothing on stdout).
 Its scope check has a shape blind spot: `scope_offenders()` extracts comment URLs via a process substitution (`done < <(jq -r '.[].comments.nodes[].url' <<<"$combined")`), and a `jq` failure inside a process substitution is not caught by `set -euo pipefail`.
 With a thread whose `comments` is `null`, `{}`, or absent, `jq` errors, prints nothing, the offender list comes back empty, and the helper emits its payload with exit 0 — the guard fails **open** on exactly the malformed shapes a crossed or truncated response can produce.
-This was reproduced deterministically during a kalm2 review batch, in the same session where a live `gh-review-threads 142` call returned PR #143's comments at exit 0.
+This was reproduced deterministically during a downstream project's review batch, in the same session where a live `gh-review-threads` call returned another PR's comments at exit 0.
 
 When this task was written, the hermetic suite `scripts/test-gh-review-threads.sh` (then 396 lines, cases (a)–(g)) tested contamination only with **well-formed** JSON carrying wrong URLs — the one contamination shape the guard survived.
 It never fed the shape that fails open, so powbox Stage 0b validated the blind spot into the image.

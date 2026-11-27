@@ -1,5 +1,5 @@
 // House Markdown rules, shared in spirit with the other Roubtec projects
-// (jabko / kalm2 / scribz carry the same rule set). Deviations from those are
+// (they all carry the same rule set). Deviations from those are
 // noted inline; everything else is deliberately identical so the rules do not
 // have to be re-inferred per repo.
 {

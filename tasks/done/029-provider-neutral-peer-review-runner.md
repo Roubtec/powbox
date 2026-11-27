@@ -19,7 +19,7 @@ Out of scope: changing Claude or Codex themselves, requiring either peer opinion
 
 ## Context and references
 
-- The previous Jabko review loop manually created a prompt/artifact directory, launched `claude -p` under `setsid`, verified PID handoff, polled output, parsed JSON, and performed scoped cleanup for every round.
+- A previous downstream-project review loop manually created a prompt/artifact directory, launched `claude -p` under `setsid`, verified PID handoff, polled output, parsed JSON, and performed scoped cleanup for every round.
 - The shared `agent-skills` copies of review skills currently contain provider-specific launch guidance. This helper's stable invocation/result contract is the downstream adoption boundary; do not make that adoption depend on a temporary report.
 - `docs/architecture.md` states that helpers consumed by agent-layer skills/workflows belong in `docker/shared/` and are baked by `docker/agent/Dockerfile`.
 - Existing safe building blocks include `gh-review-threads`; do not duplicate it or couple this helper to GitHub review-thread fetching.

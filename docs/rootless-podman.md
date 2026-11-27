@@ -456,7 +456,7 @@ than advertising two that could diverge. The smoke does five things that each
 (`.Config.Healthcheck.Test[0]`); it drives the check and asserts the alpine service
 reaches **`healthy`**; it runs a never-succeeding **negative-control** service that
 must be **driven to `unhealthy`**; and it stands up a third, genuinely **shell-less
-(distroless)** service that actively reproduces the Kalm2 break as a documented
+(distroless)** service that actively reproduces the reported break as a documented
 **XFAIL** (see limitation #2). So it fails if Compose drops the check, mangles the
 exec array beyond the known wrap, or leaves the alpine/negative-control services in
 the wrong health state.
@@ -492,7 +492,7 @@ one *worse* than described fails the smoke.
    `["CMD", "/bin/true"]` is translated to `["CMD-SHELL", "/bin/sh -c /bin/true"]`,
    i.e. it is run through `/bin/sh`. A shell-bearing image (Alpine, Debian) runs it
    fine; a **distroless** image with no `/bin/sh` cannot, so the wrapped command
-   fails and the service never goes `healthy` — exactly the Kalm2 SPIRE-overlay
+   fails and the service never goes `healthy` — exactly the downstream SPIRE-overlay
    symptom that motivated this check. The smoke does not paper over this: it inspects
    the wired check and, when it finds the rewrite, emits a loud **`KNOWN-XFAIL`**
    diagnostic naming the exact translated array (so the regression is visible in the

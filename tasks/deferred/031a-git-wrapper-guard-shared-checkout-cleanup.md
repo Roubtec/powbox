@@ -4,7 +4,7 @@
 
 Task 031 documented the shared-vs-isolated surfaces boundary: the main checkout and the `.worktrees` volume are shared by every process in a container (including a peer harness), `.worktrees` is protected only by `.gitignore` + tmpfs shadows, and one repo-root `git clean -fdx` or `git reset --hard` by any co-tenant can silently destroy another agent's uncommitted work.
 That protection is convention-only.
-During a July 2026 kalm2 parallel batch the failure was real: an implementer's worktree was reset/hard-cleaned mid-task several times by an unattributed co-tenant process, discarding uncommitted work (committed work always survived).
+During a July 2026 parallel batch in a downstream project the failure was real: an implementer's worktree was reset/hard-cleaned mid-task several times by an unattributed co-tenant process, discarding uncommitted work (committed work always survived).
 
 **Deferred because:** the documentation shipped (task 031, the template's "Shared vs. isolated surfaces" section) and no recurrence has been observed since; a git shim is invasive (surprising `git` behavior is its own footgun) and should be built from a fresh incident's specifics, not speculatively.
 This spec exists as inspiration for the day it bites again.

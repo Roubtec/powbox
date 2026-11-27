@@ -3,7 +3,7 @@
 ## Why this task exists
 
 When `wt-enter <slug> <branch>` fails because the branch is checked out elsewhere, git's underlying error reads `fatal: '<branch>' is already used by worktree at '/workspace/<slug>'`.
-When that path is the **primary checkout** (a human or peer switched the main working tree onto the branch mid-session), the message is accurate but routinely misread as a stale-worktree problem: an agent in a long scribz session burned a diagnostic detour confirming via `git reflog` that nothing had been lost, before realizing the main checkout itself was sitting on the branch.
+When that path is the **primary checkout** (a human or peer switched the main working tree onto the branch mid-session), the message is accurate but routinely misread as a stale-worktree problem: an agent in a long downstream-project session burned a diagnostic detour confirming via `git reflog` that nothing had been lost, before realizing the main checkout itself was sitting on the branch.
 
 The failure needs to name the situation: "the branch you want is checked out in the **main working tree**, which is shared with humans and peer agents — do not detach it blindly."
 

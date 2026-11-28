@@ -1051,7 +1051,24 @@ else
 	try_not "a plain destroy refuses a scope's cluster at an unscoped default" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- destroy 2>"$destroy_q_err"
 	if grep -q -- "--instance $(row_field "$rows_q" 2) destroy" "$destroy_q_err"; then ok "the refusal names the scoped destroy"; else ko "unclear refusal: $(cat "$destroy_q_err")"; fi
 	try "the scope's cluster survives" test -s "$default_ram/PG_VERSION"
+	# The non-destroying unscoped verbs leave a scope's cluster alone too: `down`
+	# would stop it, `status`/`url` would describe it on 5432, and `up` would
+	# take it over there. Each refuses and names how to reach it instead.
+	key_q="$(row_field "$rows_q" 2)"
+	verb_q_err="$WORK/verb-q.err"
+	try_not "a plain down refuses a scope's cluster at an unscoped default" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- down 2>"$verb_q_err"
+	if grep -q -- "--instance $key_q down" "$verb_q_err"; then ok "the refusal names the scoped command"; else ko "unclear refusal: $(cat "$verb_q_err")"; fi
+	try "the scope's cluster still runs" pg "$REPO_Q" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status
+	try_not "a plain status refuses it" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- status
+	try_not "a plain url refuses it" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- url
+	try_not "a plain up refuses to take it over" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- up
+	try "--instance status still reaches it" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --instance "$key_q" status
 fi
+# An explicit unscoped PGDATA naming a scope's data dir is refused the same way.
+try_not "an unscoped status refuses an explicit PGDATA naming a scope's data" pg "$WORK" PGDATA="$default_ram" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- status
+try_not "an unscoped down refuses it" pg "$WORK" PGDATA="$default_ram" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- down
+try_not "an unscoped up refuses it" pg "$WORK" PGDATA="$default_ram" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- up
+try "the scope's cluster survives them" pg "$REPO_Q" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status
 try "the scope's own destroy removes it" pg "$REPO_Q" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree destroy
 try "the unscoped RAM default is gone" test ! -e "$default_ram"
 # A scope whose RAM cluster was stopped and which then came up on an explicit

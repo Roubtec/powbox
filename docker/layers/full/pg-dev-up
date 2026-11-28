@@ -417,21 +417,30 @@ choose_fresh_datadir() {
 # Resolve the data directory when no PGDATA was given and no scoped record
 # applies: a running managed cluster first, then an existing one (disk first, so
 # a durable cluster is always found again), else where a new one would go.
+# Unscoped, a default location a scope recorded as its explicit PGDATA is that
+# scope's, so it is passed over here (configure_paths refuses it if the fresh
+# choice lands there).
 resolve_managed_datadir() {
 	local d
 	for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
-		if cluster_running_at "$d"; then
+		if cluster_running_at "$d" && ! foreign_scope_datadir "$d"; then
 			PGDATA="$d"
 			return 0
 		fi
 	done
 	for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
-		if [ -s "$d/PG_VERSION" ]; then
+		if [ -s "$d/PG_VERSION" ] && ! foreign_scope_datadir "$d"; then
 			PGDATA="$d"
 			return 0
 		fi
 	done
 	choose_fresh_datadir "${1:-}"
+}
+
+# 0 if this is an unscoped run and $1 is a scoped instance's data directory.
+# A scoped run's own managed locations are its own, never foreign.
+foreign_scope_datadir() {
+	[ -z "$SCOPED" ] && scoped_key_of_datadir "$1" >/dev/null
 }
 
 # Create the owner-only parents of a managed RAM data directory. The root is a
@@ -1109,6 +1118,24 @@ configure_paths() {
 			resolve_managed_datadir quiet
 		fi
 	fi
+	# A scope may record an unscoped default location as its explicit PGDATA, and
+	# an explicit PGDATA may point into a scope. Either way the cluster is the
+	# scope's: unscoped, `down` would stop it, `status`/`url` would report it on
+	# 5432 rather than the scope's port, and `up` would take it over on 5432.
+	# `destroy` judges its own candidates (cmd_destroy); check/help touch none.
+	case "$portmode" in
+		up | stop | read)
+			local key
+			if key="$(scoped_key_of_datadir "$PGDATA")"; then
+				if [ "$portmode" = up ]; then
+					log "$PGDATA belongs to scoped instance $key, so an unscoped 'up' will not start it on port $PGPORT. Bring it up through its own scope ('pg-dev-up list' shows its worktree or profile), or give another PGDATA. Nothing was changed."
+				else
+					log "$PGDATA belongs to scoped instance $key; address it with 'pg-dev-up --instance $key down|status|url'. Nothing was changed."
+				fi
+				exit 1
+			fi
+			;;
+	esac
 }
 
 pg_running() {

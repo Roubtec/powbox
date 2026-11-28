@@ -276,6 +276,12 @@ RUN date +%s%N | tee /home/node/.agent-container/claude/build-epoch /home/node/.
 # build-epoch RUN (above it in the stack), so a changed reference file
 # re-renders no instruction file.
 COPY .powbox-staging/agent-reference/ /usr/local/share/agent-reference/
+# The known-limitations convention (docs/agent-reference.md) has a reader find
+# the document through this variable, so the image names its own here. An
+# image ENV reaches the entrypoint, the agent it execs (Claude or Codex), the
+# peer either starts and every shell under them. Pinned by a Stage 1 smoke
+# probe and by scripts/test-agent-instructions.sh.
+ENV AGENT_KNOWN_LIMITATIONS=/usr/local/share/agent-reference/known-limitations.md
 
 # --- Entrypoint, setup hooks, and worktree helpers ---------------------------
 # The unified entrypoint seeds every agent at startup, then execs the primary.

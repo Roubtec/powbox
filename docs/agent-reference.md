@@ -8,12 +8,9 @@ This section is written so that any environment can satisfy it and any report-wr
 
 **Purpose.** A known-limitations document lists the limitations of an environment that have been verified and accepted on purpose: upstream behaviour the environment cannot change, deliberate design choices, and reports that were never reproduced. It exists so that someone writing a retrospective or a friction report does not rediscover, re-verify and re-report what has already been decided.
 
-**Location.** A reader looks in exactly one place:
+**Location.** A reader finds the document through the environment variable `AGENT_KNOWN_LIMITATIONS`, which names one file or several, separated the way `PATH` is on the platform. An environment that has a document sets the variable for every session that might write a report. Where the file sits is the environment's own business: a reader knows no path, only the variable.
 
-1. the file the environment variable `AGENT_KNOWN_LIMITATIONS` names, when that variable is set and not empty;
-2. otherwise, `/usr/local/share/agent-reference/known-limitations.md`.
-
-When there is no readable file at that place, the environment has no such document, and the reader behaves exactly as it would without the convention. A set variable is authoritative: a reader does not fall back to the fixed path when the named file is missing.
+When the variable is unset or empty, the environment has no such document, and the reader behaves exactly as it would without the convention. A named file that cannot be read counts as absent. A tool may also read documents a project provides; that is the tool's own rule and no part of this convention.
 
 **Format.** Plain Markdown, UTF-8. Each entry is a heading followed by its text, and states three things:
 
@@ -36,7 +33,7 @@ powbox ships one home for on-demand agent reference material, the known-limitati
 | Staged for the build | the gitignored `.powbox-staging/agent-reference/`, written by `scripts/stage-agent-reference.{sh,ps1}` before every `agent` or `all` build |
 | Baked | `/usr/local/share/agent-reference/` in the agent image, the same path for Claude and Codex, owned by root and read-only to the agents |
 
-The image sets no `AGENT_KNOWN_LIMITATIONS`, since the document sits at the convention's fixed path.
+The image sets `AGENT_KNOWN_LIMITATIONS` to `/usr/local/share/agent-reference/known-limitations.md`, with an `ENV` in `docker/agent/Dockerfile`, so a session of either agent, a peer it starts and every shell under them inherit it. That is how a tool following the convention finds the document; the baked path is where powbox keeps it, and nothing outside the image needs to know it. A Stage 1 smoke probe checks that the variable is set in the built image and names a readable file, and `scripts/test-agent-instructions.sh` checks that it names a file the build stages.
 
 **How a set contributes.** A set puts files in its own `agent-reference/` directory, as it puts `agent-notes.md` beside its Dockerfile. When the set is selected, the staging script combines them with the core files:
 

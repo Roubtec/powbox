@@ -441,7 +441,11 @@ prepare_datadir_parent() {
 		"$PG_RAM_BASE"/*)
 			(umask 077 && mkdir -p "$(dirname "$PGDATA")") || return 1
 			enforce_owner_only "$PG_RAM_BASE"
-			[ -z "$SCOPED" ] || enforce_owner_only "$PG_RAM_BASE/$SCOPE_KEY"
+			# Only when the data lies there: a scope's explicit PGDATA elsewhere
+			# under the base (such as the unscoped default) makes no scope dir.
+			case "$PGDATA/" in
+				"$PG_RAM_BASE/$SCOPE_KEY"/*) [ -z "$SCOPED" ] || enforce_owner_only "$PG_RAM_BASE/$SCOPE_KEY" ;;
+			esac
 			;;
 	esac
 }
@@ -1619,7 +1623,9 @@ render_cluster() {
 # another user are skipped, as every scoped command refuses them.
 cmd_list() {
 	local fmt="$1" inst key d c mport row
-	local -A seen_dirs=() seen_keys=()
+	# Keyed by resolved path, so one data directory is listed once however its
+	# record spells it.
+	local -A seen_dirs=()
 	local -a f
 	case "$fmt" in
 		'' | --porcelain) : ;;
@@ -1631,8 +1637,11 @@ cmd_list() {
 	require_bindir
 	for d in "$PG_RAM_BASE/pgdata" "$UNSCOPED_DISK_PGDATA"; do
 		[ -s "$d/PG_VERSION" ] || continue
+		# A scope may record an unscoped default location as its explicit
+		# PGDATA; its own row below lists it, with the removal that works.
+		! scoped_key_of_datadir "$d" >/dev/null || continue
 		list_cluster unscoped "" "$d" "" "" ""
-		seen_dirs["$d"]=1
+		seen_dirs["$(realpath -m -- "$d")"]=1
 	done
 	for inst in "$SCOPED_ROOT"/*/; do
 		[ -d "$inst" ] || continue
@@ -1653,24 +1662,24 @@ cmd_list() {
 		[ ! -s "$inst/port" ] || mport="$(cat -- "$inst/port" 2>/dev/null || true)"
 		owner_info "$inst"
 		list_cluster "$O_KIND" "$key" "$d" "$mport" "$O_STATE" "$O_OWNER"
-		seen_keys["$key"]=1
-		[ -z "$d" ] || seen_dirs["$d"]=1
+		[ -z "$d" ] || seen_dirs["$(realpath -m -- "$d")"]=1
 	done
-	# RAM data no instance under this scoped root records: an instance made under
-	# another POWBOX_PG_SCOPED_ROOT, or one whose markers were removed. It still
-	# holds memory, so it is listed, with an unknown owner.
+	# RAM data no listed instance records: an instance made under another
+	# POWBOX_PG_SCOPED_ROOT, one whose markers were removed, or one whose scope
+	# has since recorded another data directory. It still holds memory, so it is
+	# listed, with an unknown owner; `--instance <key> destroy` removes it.
 	for d in "$PG_RAM_BASE"/*/pgdata; do
 		[ -e "$d" ] || continue
 		key="${d%/pgdata}"
 		key="${key##*/}"
-		is_scope_key "$key" && [ -z "${seen_keys["$key"]:-}" ] || continue
+		is_scope_key "$key" && [ -z "${seen_dirs["$(realpath -m -- "$d")"]:-}" ] || continue
 		list_cluster scoped "$key" "$d" "" unknown ""
-		seen_dirs["$d"]=1
+		seen_dirs["$(realpath -m -- "$d")"]=1
 	done
 	if [ -n "$PGDATA_EXPLICIT" ]; then
 		d="$PGDATA"
 		case "$d" in /*) : ;; *) d="$(realpath -m -- "$d")" ;; esac
-		if [ -s "$d/PG_VERSION" ] && [ -z "${seen_dirs["$d"]:-}" ]; then
+		if [ -s "$d/PG_VERSION" ] && [ -z "${seen_dirs["$(realpath -m -- "$d")"]:-}" ]; then
 			list_cluster explicit "" "$d" "" "" ""
 		fi
 	fi
@@ -1788,7 +1797,15 @@ cmd_destroy() {
 		fi
 		cands+=("$PGDATA")
 	else
-		cands+=("$(managed_datadir disk)" "$(managed_datadir ram)")
+		# A scope may record either default location as its explicit PGDATA,
+		# and then the cluster there is that scope's, exactly as above.
+		for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
+			if { [ -e "$d" ] || [ -L "$d" ]; } && key="$(scoped_key_of_datadir "$d")"; then
+				log "$d belongs to scoped instance $key; destroy it with 'pg-dev-up --instance $key destroy', which removes its markers too. Nothing was removed."
+				exit 1
+			fi
+			cands+=("$d")
+		done
 	fi
 	managed=("$(realpath -m -s -- "$(managed_datadir disk)")" "$(realpath -m -s -- "$(managed_datadir ram)")")
 	# Judge every candidate before touching any, so a refusal removes nothing.

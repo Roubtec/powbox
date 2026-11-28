@@ -1030,6 +1030,49 @@ try_not "an unscoped destroy refuses the data dir a scope recorded" pg "$WORK" P
 try "the scope's cluster survives" test -s "$explicit_p/PG_VERSION"
 try "the scope's own destroy removes it" pg "$REPO_P" -- --worktree destroy
 try "its explicit data dir is gone" test ! -e "$explicit_p"
+# A scope can record an unscoped DEFAULT location as its explicit PGDATA (here
+# the sandboxed RAM default; the disk default is the real /tmp/pgdata, which
+# this suite never touches). A plain destroy must refuse it rather than take the
+# scope's cluster and strand its markers, and list must show it once, as the
+# scope's. Skipped while a real /tmp/pgdata exists, since a plain destroy also
+# judges that location.
+REPO_Q="$WORK/wt-q"
+add_worktree "$MAIN_REPO" "$REPO_Q" wt-q
+default_ram="$RAM_ROOT/$(id -u)/pgdata"
+STARTED_DATADIRS+=("$default_ram")
+pg "$REPO_Q" PGDATA="$default_ram" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_q -- --worktree up >/dev/null 2>&1 || ko "scoped up at the unscoped RAM default failed"
+rows_q="$(pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- list --porcelain 2>/dev/null | awk -F '\t' -v d="$default_ram" '$11 == d')"
+try "list shows a scope's cluster at an unscoped default once" test "$(grep -c . <<<"$rows_q")" -eq 1
+try "and as the scope's, not unscoped" test "$(row_field "$rows_q" 1)" = worktree
+if [ -e /tmp/pgdata ] || [ -L /tmp/pgdata ]; then
+	echo "  skip: a plain destroy is not exercised while /tmp/pgdata exists"
+else
+	destroy_q_err="$WORK/destroy-q.err"
+	try_not "a plain destroy refuses a scope's cluster at an unscoped default" pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- destroy 2>"$destroy_q_err"
+	if grep -q -- "--instance $(row_field "$rows_q" 2) destroy" "$destroy_q_err"; then ok "the refusal names the scoped destroy"; else ko "unclear refusal: $(cat "$destroy_q_err")"; fi
+	try "the scope's cluster survives" test -s "$default_ram/PG_VERSION"
+fi
+try "the scope's own destroy removes it" pg "$REPO_Q" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree destroy
+try "the unscoped RAM default is gone" test ! -e "$default_ram"
+# A scope whose RAM cluster was stopped and which then came up on an explicit
+# disk PGDATA still leaves that RAM data behind, holding memory: list shows it
+# beside the scope's recorded cluster, and the scoped destroy removes both.
+REPO_R="$WORK/wt-r"
+add_worktree "$MAIN_REPO" "$REPO_R" wt-r
+pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_r -- --worktree up >/dev/null 2>&1 || ko "RAM-backed scoped up failed"
+ram_r="$(status_datadir "$(pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree status 2>&1)")"
+STARTED_DATADIRS+=("$ram_r")
+pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree down >/dev/null 2>&1 || true
+explicit_r="$WORK/explicit-r-pgdata"
+STARTED_DATADIRS+=("$explicit_r")
+pg "$REPO_R" PGDATA="$explicit_r" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_r -- --worktree up >/dev/null 2>&1 || ko "scoped up on an explicit disk PGDATA failed"
+rows_r="$(pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- list --porcelain 2>/dev/null)"
+try "the RAM cluster is under the scoped RAM base" test "${ram_r#"$RAM_ROOT"/}" != "$ram_r"
+try "list shows the scope's recorded disk cluster" test -n "$(awk -F '\t' -v d="$explicit_r" '$11 == d' <<<"$rows_r")"
+try "and the RAM data it left behind" test "$(awk -F '\t' -v d="$ram_r" '$11 == d { print $6 }' <<<"$rows_r")" = ram
+try "the scoped destroy removes both" pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree destroy
+try "the explicit disk cluster is gone" test ! -e "$explicit_r"
+try "the RAM leftover is gone" test ! -e "$ram_r"
 # RAM-backed data that no instance under this scoped root records (here: made
 # under another scoped root) is listed and destroyable by its key.
 REPO_O="$WORK/wt-o"

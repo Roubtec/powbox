@@ -107,14 +107,10 @@ done
 
 echo "Test: the image names its known-limitations document in AGENT_KNOWN_LIMITATIONS"
 # A report-writing tool finds the document through the variable alone
-# (docs/agent-reference.md), so the ENV must name a file the build bakes. The
-# loop above leaves the last set's staging in place; the core file is staged
-# for every set.
+# (docs/agent-reference.md), so the ENV must name a file the build bakes.
 assert_eq "docker/agent/Dockerfile sets the variable once, to the baked document" \
 	"$(grep -E '^ENV AGENT_KNOWN_LIMITATIONS=' "$ROOT_DIR/docker/agent/Dockerfile" || true)" \
 	"ENV AGENT_KNOWN_LIMITATIONS=${REFERENCE_DIR}/known-limitations.md"
-assert_eq "the file it names is staged for the bake" \
-	"$([ -f "$root/.powbox-staging/agent-reference/known-limitations.md" ] && echo staged)" staged
 
 echo "Test: both hooks render the instruction file with the same variable list"
 hook_vars() { grep -oE "envsubst '[^']*'" "$ROOT_DIR/docker/shared/$1"; }

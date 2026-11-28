@@ -33,7 +33,7 @@ powbox ships one home for on-demand agent reference material, the known-limitati
 | Staged for the build | the gitignored `.powbox-staging/agent-reference/`, written by `scripts/stage-agent-reference.{sh,ps1}` before every `agent` or `all` build |
 | Baked | `/usr/local/share/agent-reference/` in the agent image, the same path for Claude and Codex, owned by root and read-only to the agents |
 
-The image sets `AGENT_KNOWN_LIMITATIONS` to `/usr/local/share/agent-reference/known-limitations.md`, with an `ENV` in `docker/agent/Dockerfile`, so a session of either agent, a peer it starts and every shell under them inherit it. That is how a tool following the convention finds the document; the baked path is where powbox keeps it, and nothing outside the image needs to know it. A Stage 1 smoke probe checks that the variable is set in the built image and names a readable file, and `scripts/test-agent-instructions.sh` checks that it names a file the build stages.
+The image sets `AGENT_KNOWN_LIMITATIONS` to `/usr/local/share/agent-reference/known-limitations.md`, with an `ENV` in `docker/agent/Dockerfile`, so a session of either agent, a peer it starts and every shell under them inherit it. That is how a tool following the convention finds the document; the baked path is where powbox keeps it, and nothing outside the image needs to know it. A Stage 1 smoke probe checks that the variable is set in the built image and names a readable file, and `scripts/test-agent-instructions.sh` checks that the Dockerfile sets it exactly once, to that path.
 
 **How a set contributes.** A set puts files in its own `agent-reference/` directory, as it puts `agent-notes.md` beside its Dockerfile. When the set is selected, the staging script combines them with the core files:
 

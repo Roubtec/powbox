@@ -7,8 +7,9 @@
 # pg-dev-up, rootless Podman, and the headless browser stack (Chromium, Marp
 # CLI, Mermaid CLI, Playwright CLI) that the `browser` set installs too. Each
 # sits in its own delimited block below, so a copy can be trimmed by deleting a
-# block together with that tool's probes in smoke-probes.txt and its notes in
-# agent-notes.md (and, for Podman or PostgreSQL, the files the block copies).
+# block together with that tool's probes in smoke-probes.txt, its mentions in
+# agent-notes.md and its rows in agent-reference/ (and, for Podman or
+# PostgreSQL, the files the block copies).
 # CI never builds it: Tier 1 exercises the layer-set chain through the smaller
 # `browser` set, Tier 0 only checks this directory against the contract below,
 # and the maintainer builds this set by hand and fixes it when an install
@@ -253,7 +254,7 @@ RUN OPA_VERSION=1.23.0 \
 # Version note: this pin follows upstream releases. Upstream declared gitleaks
 # feature complete in 2026 (security patches only; its author moved to
 # Betterleaks), so it should rarely move; bump it together with the version
-# probe in smoke-probes.txt and the agent-notes.md row. Like
+# probe in smoke-probes.txt and the agent-reference/tooling.md row. Like
 # OPA, this is ONE baked release: a project pinning a different version in CI
 # should verify against its own pin, and if a project moves its lane to
 # Betterleaks, swap the baked tool rather than baking both.

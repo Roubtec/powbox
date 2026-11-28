@@ -459,6 +459,47 @@ jobs:
           done
           echo "Browser pass: both agents' seeded templates equal ${expected}; the notes heading is ${want}, as expected."
 
+      # The same check as the lean pass, against the directory build.sh staged
+      # for this set: the core files plus the set's contributions. The set
+      # documents its tools in agent-reference/tooling.md, which the staging
+      # appends to the core file under a heading of its own, and the set's
+      # always-loaded notes point there, so the heading must have reached the
+      # image exactly when the set has that file.
+      - name: Baked agent reference - browser image
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=.powbox-staging/agent-reference
+          baked=/usr/local/share/agent-reference
+          # shellcheck disable=SC2016 # the backticks are part of the heading
+          heading='## Contributed by the `browser` layer set'
+          out="${RUNNER_TEMP}/agent-reference-browser"
+          mkdir -p "$out"
+          want="$(cd "$src" && LC_ALL=C ls -A)"
+          have="$(docker run --rm --entrypoint ls powbox-agent:latest -A "$baked" | LC_ALL=C sort)"
+          if [ "$have" != "$want" ]; then
+            echo "FAIL: ${baked} in the browser image lists [${have}], but ${src} holds [${want}]." >&2
+            exit 1
+          fi
+          while IFS= read -r name; do
+            docker run --rm --entrypoint cat powbox-agent:latest "${baked}/${name}" >"$out/${name}"
+            if ! cmp "${src}/${name}" "$out/${name}"; then
+              echo "FAIL: ${baked}/${name} in the browser image differs from ${src}/${name}." >&2
+              exit 1
+            fi
+          done <<<"$want"
+          if [ -f docker/layers/browser/agent-reference/tooling.md ]; then
+            want_heading=1
+          else
+            want_heading=0
+          fi
+          have_heading="$(grep -cxF -- "$heading" "$out/tooling.md" || true)"
+          if [ "$have_heading" != "$want_heading" ]; then
+            echo "FAIL: ${baked}/tooling.md in the browser image has the set's heading ${have_heading} time(s), expected ${want_heading}." >&2
+            exit 1
+          fi
+          echo "Browser pass: ${baked} holds exactly ${src}, byte for byte; the set's tool heading appears ${have_heading} time(s), as expected."
+
       # Stage 1b against the built image with a probe file whose second probe
       # fails, read from the file the image's `browser` label selects: it shows
       # that Stage 1b runs the set's probes (probe 1 passes first) and that a

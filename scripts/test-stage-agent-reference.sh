@@ -235,11 +235,15 @@ stage_both "real sources, lean" "$root" ""
 assert_same_file "real sources, lean: the core known-limitations document" \
 	"$(out_dir "$root")/known-limitations.md" "$ROOT_DIR/docker/shared/agent-reference/known-limitations.md"
 stage_both "real sources, browser" "$root" browser
-assert_same_file "real sources, browser: contributes nothing" \
+assert_same_file "real sources, browser: no known limitations of its own" \
 	"$(out_dir "$root")/known-limitations.md" "$ROOT_DIR/docker/shared/agent-reference/known-limitations.md"
+assert_eq "real sources, browser: its tools follow the heading once" \
+	"$(grep -cxF -- '## Contributed by the `browser` layer set' "$(out_dir "$root")/tooling.md")" 1
 stage_both "real sources, full" "$root" full
 assert_eq "real sources, full: its entries follow the heading once" \
 	"$(grep -cxF -- '## Contributed by the `full` layer set' "$(out_dir "$root")/known-limitations.md")" 1
+assert_eq "real sources, full: its tools follow the heading once" \
+	"$(grep -cxF -- '## Contributed by the `full` layer set' "$(out_dir "$root")/tooling.md")" 1
 
 echo
 echo "stage-agent-reference tests: ${pass} passed, ${fail} failed, ${skip} skipped"

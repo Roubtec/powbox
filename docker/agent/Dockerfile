@@ -102,8 +102,9 @@ USER node
 # actionlint follows upstream releases. Fetch its static Linux tarball directly
 # from GitHub and verify the per-architecture SHA256 published in the release's
 # actionlint_<version>_checksums.txt before extracting anything onto PATH. Bump
-# the version, both checksums, the tooling-table row, and the exact Bash and
-# PowerShell Stage 1 smoke assertions together.
+# the version, both checksums, the tooling-table row
+# (docker/shared/agent-reference/tooling.md), and the exact Bash and PowerShell
+# Stage 1 smoke assertions together.
 USER root
 RUN ACTIONLINT_VERSION=1.7.12 \
     && arch="$(dpkg --print-architecture)" \
@@ -126,8 +127,9 @@ RUN ACTIONLINT_VERSION=1.7.12 \
 # which misses checks such as SC2329. Fetch the statically
 # linked release tarball and verify the per-architecture SHA256 (the digests
 # GitHub lists on the v0.11.0 release assets) before extracting only the binary.
-# Bump the version, both checksums, the tooling-table row, and the exact Bash
-# and PowerShell Stage 1 smoke assertions together.
+# Bump the version, both checksums, the tooling-table row
+# (docker/shared/agent-reference/tooling.md), and the exact Bash and PowerShell
+# Stage 1 smoke assertions together.
 RUN SHELLCHECK_VERSION=0.11.0 \
     && case "$(dpkg --print-architecture)" in \
         amd64) shellcheck_arch=x86_64 \
@@ -148,7 +150,7 @@ RUN SHELLCHECK_VERSION=0.11.0 \
 # reproducible; optional dependencies are omitted, and repository wrappers and
 # CI pins remain authoritative when they require another version. Its version
 # is also stated in the tooling-table row of
-# docker/shared/container-agent.md.tmpl, the exact Bash and PowerShell Stage 1
+# docker/shared/agent-reference/tooling.md, the exact Bash and PowerShell Stage 1
 # smoke assertions (commands/smoke-test.{sh,ps1}) and README "House Lint and
 # Format Configuration"; bump them together.
 #

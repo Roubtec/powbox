@@ -19,7 +19,15 @@
 #     "remote": true|false,    // push/PR available; false is a fallback, NOT a blocker
 #     "availBytes": N,         // free bytes on the .worktrees mount
 #     "prunedOrphans": ["<slug>", ...],       // EMPTY orphan dirs removed
-#     "quarantinedOrphans": ["<slug>", ...]   // NON-EMPTY orphans preserved (moved aside)
+#     "quarantinedOrphans": ["<slug>", ...],  // NON-EMPTY orphans preserved (moved aside)
+#     "pgLeftovers": [{"key": "<16 hex>", "kind": "worktree|scoped", "state":
+#                      "running|stopped|nodata", "port", "durability", "storage",
+#                      "ownerState": "gone|unknown", "owner", "dataDir"}, ...]
+#                              // pg-dev-up clusters whose worktree no longer exists
+#                              // (or whose owner was never recorded); reported only,
+#                              // never removed — `pg-dev-up list` shows how. Always
+#                              // [] where pg-dev-up is absent (it ships only in the
+#                              // `full` layer set).
 #   }
 #
 # Exit 0 when ok (even with remote=false); exit 1 on a blocker.
@@ -175,6 +183,12 @@ fi
 
 AVAIL="$(findmnt -nbo AVAIL -T "$ROOT/.worktrees" 2>/dev/null || echo 0)"
 
+# --- pg-dev-up clusters that outlived their worktree (report only) -------------
+PG_LEFTOVERS="$(wt_pg_leftovers_json)"
+jq -e 'type == "array"' >/dev/null 2>&1 <<<"$PG_LEFTOVERS" || PG_LEFTOVERS='[]'
+jq -r '.[] | "pg-dev-up cluster \(.key) (\(.state)) outlived its owner \(.owner // "(not recorded)"); see `pg-dev-up list`"' \
+	<<<"$PG_LEFTOVERS" >&2 || true
+
 if [ ${#QUARANTINED[@]} -gt 0 ]; then
 	QUAR_JSON="$(printf '%s\n' "${QUARANTINED[@]}" | jq -R . | jq -s .)"
 else
@@ -186,5 +200,6 @@ jq -n \
 	--argjson remote "$REMOTE" \
 	--argjson avail "${AVAIL:-0}" \
 	--argjson quarantined "$QUAR_JSON" \
-	--args '{ok: true, wtBase: $wtBase, remote: $remote, availBytes: $avail, prunedOrphans: $ARGS.positional, quarantinedOrphans: $quarantined}' \
+	--argjson pgLeftovers "$PG_LEFTOVERS" \
+	--args '{ok: true, wtBase: $wtBase, remote: $remote, availBytes: $avail, prunedOrphans: $ARGS.positional, quarantinedOrphans: $quarantined, pgLeftovers: $pgLeftovers}' \
 	-- ${PRUNED[@]+"${PRUNED[@]}"}

@@ -285,6 +285,24 @@ trap 'rm -rf "$WORK_ROOT"' EXIT
 
 export CONTAINER_NAME="testcont"
 
+# wt-remove and wt-bootstrap ask `pg-dev-up list --porcelain` for clusters a
+# worktree left behind (task 089). A stub shadows any real pg-dev-up for the
+# whole suite, so no case here reads this container's clusters: it prints the
+# rows in $PG_STUB_ROWS, fails while $PG_STUB_ROWS.fail exists, refuses any
+# other command, and logs every invocation to $PG_STUB_ROWS.calls.
+PG_STUB_BIN="$WORK_ROOT/pg-stub-bin"
+PG_STUB_ROWS="$WORK_ROOT/pg-stub-rows"
+mkdir -p "$PG_STUB_BIN"
+cat >"$PG_STUB_BIN/pg-dev-up" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$PG_STUB_ROWS.calls"
+[ "\$*" = "list --porcelain" ] || exit 2
+[ ! -e "$PG_STUB_ROWS.fail" ] || exit 1
+[ ! -f "$PG_STUB_ROWS" ] || cat "$PG_STUB_ROWS"
+STUB
+chmod +x "$PG_STUB_BIN/pg-dev-up"
+export PATH="$PG_STUB_BIN:$PATH"
+
 # ---------------------------------------------------------------------------
 # Unit: destructive_advice ITSELF. Every branch-conflict case below leans on it,
 # so a blind spot in the detector silently disarms all of them — and the defect
@@ -3431,6 +3449,85 @@ else
 		no "wt-enter self-blocker message inadequate:$miss"
 	fi
 fi
+
+# ---------------------------------------------------------------------------
+# pg-dev-up clusters (task 089). A `pg-dev-up --worktree` cluster lives outside
+# the worktree, so removing the worktree leaves it behind. wt-remove REPORTS one
+# that served the removed worktree, and never removes it (its data may be
+# durable; destroying it is the owner's call); wt-bootstrap's JSON lists those
+# whose worktree is gone. pg-dev-up ships only in the `full` layer set, so both
+# must shrug off its absence or failure.
+# ---------------------------------------------------------------------------
+RPG="$(make_repo rpg)"
+WBPG="$RPG/.worktrees/$CONTAINER_NAME"
+git_quiet -C "$RPG" worktree add -q "$WBPG/task-pg" -b task-pg >/dev/null 2>&1
+git_quiet -C "$RPG" worktree add -q "$WBPG/task-pg2" -b task-pg2 >/dev/null 2>&1
+TOP_PG="$(git -C "$WBPG/task-pg" rev-parse --show-toplevel)"
+{
+	printf 'worktree\t0123456789abcdef\trunning\t5433\tnondurable\tram\tpresent\t%s\tpostgres\tapp\t/run/pg-dev-up/1000/0123456789abcdef/pgdata\n' "$TOP_PG"
+	printf 'worktree\tfedcba9876543210\tstopped\t5434\tdurable\tdisk\tgone\t/elsewhere/wt\tpostgres\tapp\t/tmp/pg-dev-up-scoped/fedcba9876543210/pgdata\n'
+	printf 'scoped\t00000000000000aa\tstopped\t-\tnondurable\tram\tunknown\t-\t-\t-\t/run/pg-dev-up/1000/00000000000000aa/pgdata\n'
+	printf 'profile\t1111111111111111\tstopped\t5435\tnondurable\tdisk\t-\tci-lane\tpostgres\tapp\t/tmp/pg-dev-up-scoped/1111111111111111/pgdata\n'
+	printf 'unscoped\t-\trunning\t5432\tnondurable\tdisk\t-\t-\tpostgres\tpostgres\t/tmp/pgdata\n'
+} >"$PG_STUB_ROWS"
+
+out="$(wt_pg_clusters_for "$TOP_PG")"
+if [ "$(printf '%s\n' "$out" | cut -f2)" = 0123456789abcdef ]; then
+	ok "wt_pg_clusters_for picks exactly the cluster whose owner is that worktree"
+else
+	no "wt_pg_clusters_for answered: $out"
+fi
+out="$(wt_pg_leftovers_json)"
+if [ "$(jq -c '[.[].key]' <<<"$out" 2>/dev/null)" = '["fedcba9876543210","00000000000000aa"]' ] &&
+	[ "$(jq -c '.[1].owner' <<<"$out" 2>/dev/null)" = null ]; then
+	ok "wt_pg_leftovers_json lists the clusters whose owner is gone or unrecorded, '-' as null"
+else
+	no "wt_pg_leftovers_json answered: $out"
+fi
+: >"$PG_STUB_ROWS.fail"
+if [ -z "$(wt_pg_clusters_for "$TOP_PG")" ] && [ "$(wt_pg_leftovers_json)" = '[]' ]; then
+	ok "a failing pg-dev-up yields no clusters, not an error"
+else
+	no "a failing pg-dev-up leaked into the answers"
+fi
+rm -f "$PG_STUB_ROWS.fail"
+mkdir -p "$WORK_ROOT/no-pg-bin"
+if (PATH="$WORK_ROOT/no-pg-bin:/usr/bin:/bin" && ! command -v pg-dev-up >/dev/null 2>&1); then
+	if (PATH="$WORK_ROOT/no-pg-bin:/usr/bin:/bin" &&
+		[ -z "$(wt_pg_clusters_for "$TOP_PG")" ] && [ "$(wt_pg_leftovers_json)" = '[]' ]); then
+		ok "an absent pg-dev-up yields no clusters, not an error"
+	else
+		no "an absent pg-dev-up was not tolerated"
+	fi
+else
+	skip "absent pg-dev-up: one is on /usr/bin or /bin here"
+fi
+
+EPG="$WORK_ROOT/rpg.err"
+: >"$PG_STUB_ROWS.calls"
+rc=0
+(cd "$RPG" && bash "$WT_REMOVE" task-pg 2>"$EPG") || rc=$?
+miss=""
+[ "$rc" -eq 0 ] || miss="$miss exit-$rc"
+[ ! -e "$WBPG/task-pg" ] || miss="$miss worktree-kept"
+grep -qF "pg-dev-up cluster 0123456789abcdef (running, data in RAM) that served the worktree at $(printf '%q' "$WBPG/task-pg") is still there; 'pg-dev-up list' shows it" "$EPG" || miss="$miss no-note"
+! grep -qE 'fedcba9876543210|00000000000000aa|1111111111111111' "$EPG" || miss="$miss foreign-cluster-reported"
+[ "$(sort -u "$PG_STUB_ROWS.calls")" = "list --porcelain" ] || miss="$miss pg-dev-up-called-with:$(tr '\n' ' ' <"$PG_STUB_ROWS.calls")"
+miss="$miss$(destructive_advice "$EPG" "$WBPG/task-pg" "$RPG")"
+if [ -z "$miss" ]; then
+	ok "wt-remove reports the worktree's pg-dev-up cluster, only lists, and removes nothing else"
+else
+	no "wt-remove pg-dev-up report wrong:$miss ($(cat "$EPG"))"
+fi
+: >"$PG_STUB_ROWS.fail"
+rc=0
+(cd "$RPG" && bash "$WT_REMOVE" task-pg2 2>"$EPG") || rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$WBPG/task-pg2" ] && ! grep -q 'pg-dev-up' "$EPG"; then
+	ok "wt-remove still removes the worktree when pg-dev-up fails, and says nothing about clusters"
+else
+	no "a failing pg-dev-up broke wt-remove (rc=$rc): $(cat "$EPG")"
+fi
+rm -f "$PG_STUB_ROWS.fail" "$PG_STUB_ROWS"
 
 echo
 if [ "$skipped" -gt 0 ]; then

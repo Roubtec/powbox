@@ -13,17 +13,25 @@
 #   pg-dev-up [up]      init (first run) + start, ensure role/db, print DATABASE_URL
 #   pg-dev-up status    report whether the dev cluster is running (exit 1 if not),
 #                       and whether it is durable and where its data lives
-#   pg-dev-up url       print the DATABASE_URL for the configured role/db
+#   pg-dev-up url       print the DATABASE_URL of the role/db `up` set the cluster up with
 #   pg-dev-up down      stop the dev cluster ($PGDATA is kept for a later restart)
+#   pg-dev-up destroy   stop the cluster if it runs and delete it with its data, for
+#                       good (only a cluster pg-dev-up created; see "Destroying")
+#   pg-dev-up list      list every cluster this helper knows about, whose it is,
+#                       whether it runs, and the command that removes it
+#                       (`list --porcelain`: one tab-separated line per cluster)
 #   pg-dev-up check     verify the server binaries are present (no daemon needed)
 #   pg-dev-up help
 #
 # Scoped mode (opt-in) — isolate the cluster per Git worktree so parallel
 # worktrees can run database tests concurrently without sharing one cluster,
 # data directory, or port. The flag goes BEFORE the command and applies to
-# up / status / url / down:
-#   pg-dev-up --worktree [up|status|url|down]   scope to the current Git worktree
-#   pg-dev-up --profile <id> [up|status|...]    scope to an explicit identifier
+# up / status / url / down / destroy:
+#   pg-dev-up --worktree [up|status|url|down|destroy]  scope to the current Git worktree
+#   pg-dev-up --profile <id> [up|status|...]           scope to an explicit identifier
+#   pg-dev-up --instance <key> [status|url|down|destroy]
+#                       an existing scoped cluster by the key `list` shows, e.g.
+#                       one whose worktree no longer exists (not for `up`)
 # e.g.
 #   pg-dev-up --worktree up
 #   eval "$(pg-dev-up --worktree url --export)"
@@ -50,6 +58,32 @@
 # choice is recorded in the data directory (pg-dev-up.cluster) and kept for the
 # cluster's life, so later commands need not repeat it; a cluster created before
 # that record existed counts as durable. `status` reports which kind it is.
+#
+# Credentials. `up` records the role, password and database it set the cluster
+# up with in that same record, so a later `url` or `status` describes the
+# cluster whatever the calling shell holds; `up` without POSTGRES_* reuses the
+# recorded values. The password is stored in plain text (percent-encoded, not
+# encrypted): the cluster uses trust auth on loopback inside the container, and
+# the data directory is owner-only. A POSTGRES_* value that disagrees with the
+# record makes `url` refuse and `status` say so; `up` with the new value creates
+# that role/database and records it. A cluster without a record (made before
+# pg-dev-up kept one) remembers nothing, and `url` uses the environment.
+#
+# Destroying. `destroy` removes only a cluster pg-dev-up created and marked: a
+# data directory holding a PostgreSQL cluster AND its pg-dev-up.cluster record
+# (or an empty one at a location pg-dev-up itself chose), owned by the caller.
+# Anything else (a directory that is not a cluster, a cluster from before the
+# record existed, an explicit PGDATA naming such a directory) is refused and
+# left untouched. A running cluster is stopped
+# first. A scoped `destroy` also removes the scope's markers; with an explicit
+# PGDATA it refuses unless that names the scope's own recorded data directory.
+#
+# Listing. `list` reads markers and records only: it takes no lock and creates
+# nothing, so it never disturbs a concurrent `up`. It finds the unscoped cluster
+# in its two default places, every scoped instance under the scoped root, and
+# RAM-backed data no scoped instance records. An unscoped cluster made with an
+# explicit PGDATA leaves no marker anywhere else, so `list` shows it only when
+# PGDATA names it.
 #
 # Environment overrides (defaults in parentheses):
 #   PGDATA            cluster data directory  (RAM: /run/pg-dev-up/<uid>/pgdata, else /tmp/pgdata;
@@ -105,14 +139,29 @@ PGPORT_EXPLICIT=""
 [ -n "${PGPORT:-}" ] && PGPORT_EXPLICIT="yes"
 
 PG_HOST="127.0.0.1"
+# Which credentials the caller gave (non-empty, as for PGDATA/PGPORT): only those
+# can disagree with, or replace, the ones a cluster recorded.
+POSTGRES_USER_EXPLICIT=""
+[ -z "${POSTGRES_USER:-}" ] || POSTGRES_USER_EXPLICIT=yes
+POSTGRES_PASSWORD_EXPLICIT=""
+[ -z "${POSTGRES_PASSWORD:-}" ] || POSTGRES_PASSWORD_EXPLICIT=yes
+POSTGRES_DB_EXPLICIT=""
+[ -z "${POSTGRES_DB:-}" ] || POSTGRES_DB_EXPLICIT=yes
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-postgres}"
+# The credentials the cluster's record holds (set by resolve_credentials).
+REC_HAS_CREDS=""
+REC_USER=""
+REC_PASS=""
+REC_DB=""
+CRED_CONFLICT=""
 
 # Scoped-mode state (populated by the flag parse + resolve_scope below).
 SCOPED=""
-SCOPE_MODE=""       # worktree | profile
-SCOPE_PROFILE_ID="" # for --profile <id>
+SCOPE_MODE=""         # worktree | profile | instance
+SCOPE_PROFILE_ID=""   # for --profile <id>
+SCOPE_INSTANCE_KEY="" # for --instance <key>
 # Canonicalize the scoped root to an ABSOLUTE path ONCE, up front. A relative
 # POWBOX_PG_SCOPED_ROOT or TMPDIR would otherwise re-resolve against whatever the
 # current directory happens to be, so two invocations (or a `cd` mid-run) could
@@ -128,6 +177,7 @@ esac
 INSTANCE_DIR=""
 PORT_FILE=""
 DATADIR_FILE=""
+OWNER_FILE=""
 SCOPE_KEY=""
 
 # Durability: requested only when a cluster is CREATED; an existing cluster keeps
@@ -391,17 +441,34 @@ prepare_datadir_parent() {
 		"$PG_RAM_BASE"/*)
 			(umask 077 && mkdir -p "$(dirname "$PGDATA")") || return 1
 			enforce_owner_only "$PG_RAM_BASE"
-			[ -z "$SCOPED" ] || enforce_owner_only "$PG_RAM_BASE/$SCOPE_KEY"
+			# Only when the data lies there: a scope's explicit PGDATA elsewhere
+			# under the base (such as the unscoped default) makes no scope dir.
+			case "$PGDATA/" in
+				"$PG_RAM_BASE/$SCOPE_KEY"/*) [ -z "$SCOPED" ] || enforce_owner_only "$PG_RAM_BASE/$SCOPE_KEY" ;;
+			esac
 			;;
 	esac
 }
 
-cluster_record_value() {
-	local out
-	[ -f "$1/$CLUSTER_RECORD" ] || return 1
-	out="$(sed -n "s/^$2=//p" "$1/$CLUSTER_RECORD" 2>/dev/null || true)"
-	printf '%s\n' "${out%%$'\n'*}"
+# kv_get <file> <key>: the value of the first `<key>=` line, or status 1 when the
+# file or the key is missing. Records and markers are `key=value` lines.
+kv_get() {
+	local line
+	[ -f "$1" ] || return 1
+	line="$(grep -m 1 -e "^$2=" -- "$1" 2>/dev/null)" || return 1
+	printf '%s\n' "${line#*=}"
 }
+
+# kv_get_decoded <var> <file> <key>: kv_get, percent-decoded into <var>.
+# Free-form values (credentials, paths) are stored percent-encoded so that one
+# value is always one line.
+kv_get_decoded() {
+	local raw
+	raw="$(kv_get "$2" "$3")" || return 1
+	printf -v "$1" '%b' "${raw//%/\\x}"
+}
+
+cluster_record_value() { kv_get "$1/$CLUSTER_RECORD" "$2"; }
 
 # durable | nondurable. A cluster without a record predates it and ran with
 # full durability, so it stays durable.
@@ -413,10 +480,94 @@ cluster_durability() {
 	fi
 }
 
+# The record's text: <durability> <created> [<user> <password> <database>].
+# Format 2 added the credentials; a format-1 record (task 088) has none.
+cluster_record_text() {
+	printf 'format=2\ndurability=%s\ncreated=%s\n' "$1" "$2" || return 1
+	[ $# -ge 5 ] || return 0
+	printf 'user=%s\npassword=%s\ndatabase=%s\n' "$(urlencode "$3")" "$(urlencode "$4")" "$(urlencode "$5")"
+}
+
 write_cluster_record() {
 	local durability=nondurable
 	[ -z "$DURABLE_REQUESTED" ] || durability=durable
-	printf 'format=1\ndurability=%s\ncreated=%s\n' "$durability" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$1/$CLUSTER_RECORD"
+	cluster_record_text "$durability" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$1/$CLUSTER_RECORD"
+}
+
+# Load the credentials $1's record holds into REC_*; REC_HAS_CREDS says whether
+# it holds any (a format-1 record, or none at all, does not).
+load_recorded_credentials() {
+	REC_HAS_CREDS=""
+	REC_USER=""
+	REC_PASS=""
+	REC_DB=""
+	kv_get_decoded REC_USER "$1/$CLUSTER_RECORD" user || return 0
+	kv_get_decoded REC_PASS "$1/$CLUSTER_RECORD" password || return 0
+	kv_get_decoded REC_DB "$1/$CLUSTER_RECORD" database || return 0
+	[ -n "$REC_USER" ] && [ -n "$REC_DB" ] || return 0
+	REC_HAS_CREDS=yes
+}
+
+# Settle POSTGRES_USER/PASSWORD/DB for $PGDATA. Where the cluster recorded
+# credentials, a value the caller did not give comes from the record. On `up` a
+# given value replaces the recorded one (cmd_up records the new set); on a read
+# command the record wins and CRED_CONFLICT lists every given value that
+# disagrees, for `url` to refuse on and `status` to report.
+resolve_credentials() {
+	local mode="$1"
+	CRED_CONFLICT=""
+	load_recorded_credentials "$PGDATA"
+	[ -n "$REC_HAS_CREDS" ] || return 0
+	if [ -z "$POSTGRES_USER_EXPLICIT" ] || [ "$mode" != up ]; then
+		[ -z "$POSTGRES_USER_EXPLICIT" ] || [ "$POSTGRES_USER" = "$REC_USER" ] ||
+			CRED_CONFLICT+="${CRED_CONFLICT:+; }POSTGRES_USER=$POSTGRES_USER, but the cluster's role is $REC_USER"
+		POSTGRES_USER="$REC_USER"
+	fi
+	if [ -z "$POSTGRES_PASSWORD_EXPLICIT" ] || [ "$mode" != up ]; then
+		[ -z "$POSTGRES_PASSWORD_EXPLICIT" ] || [ "$POSTGRES_PASSWORD" = "$REC_PASS" ] ||
+			CRED_CONFLICT+="${CRED_CONFLICT:+; }POSTGRES_PASSWORD differs from the recorded password"
+		POSTGRES_PASSWORD="$REC_PASS"
+	fi
+	if [ -z "$POSTGRES_DB_EXPLICIT" ] || [ "$mode" != up ]; then
+		[ -z "$POSTGRES_DB_EXPLICIT" ] || [ "$POSTGRES_DB" = "$REC_DB" ] ||
+			CRED_CONFLICT+="${CRED_CONFLICT:+; }POSTGRES_DB=$POSTGRES_DB, but the cluster's database is $REC_DB"
+		POSTGRES_DB="$REC_DB"
+	fi
+}
+
+credential_conflict_text() {
+	printf '%s\n' "your environment disagrees with the credentials 'up' recorded for the cluster at $PGDATA ($CRED_CONFLICT). Unset those POSTGRES_* variables to use the recorded ones, or run 'up' with them to add that role/database to the cluster and record it."
+}
+
+# After `up` ensured the role and database: record them in the cluster's record,
+# rewritten atomically. Only a cluster pg-dev-up created has a record; one
+# without (made before the record existed, or by something else) gets none, so
+# the record stays the proof that pg-dev-up created the directory.
+record_credentials() {
+	local text had="$REC_HAS_CREDS" was_user="$REC_USER" was_pass="$REC_PASS" was_db="$REC_DB" was=""
+	if [ ! -f "$PGDATA/$CLUSTER_RECORD" ]; then
+		log "The cluster at $PGDATA has no pg-dev-up record (it predates one), so its credentials are not remembered: a later 'url' or 'status' uses your environment's POSTGRES_* values."
+		return 0
+	fi
+	# Compare with the record as it is NOW: recovery may have replaced the
+	# cluster resolve_credentials read with a fresh one that records nothing.
+	load_recorded_credentials "$PGDATA"
+	if [ -n "$REC_HAS_CREDS" ] && [ "$REC_USER" = "$POSTGRES_USER" ] &&
+		[ "$REC_PASS" = "$POSTGRES_PASSWORD" ] && [ "$REC_DB" = "$POSTGRES_DB" ]; then
+		return 0
+	fi
+	if ! text="$(cluster_record_text "$(cluster_durability "$PGDATA")" "$(cluster_record_value "$PGDATA" created || true)" \
+		"$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB")" ||
+		! atomic_write "$PGDATA/$CLUSTER_RECORD" "$text"; then
+		log "warning: could not record the credentials in $PGDATA/$CLUSTER_RECORD; a later 'url' or 'status' may describe other ones."
+		return 0
+	fi
+	[ -n "$had" ] || return 0
+	[ "$was_user" = "$POSTGRES_USER" ] || was+="${was:+, }role $was_user"
+	[ "$was_db" = "$POSTGRES_DB" ] || was+="${was:+, }database $was_db"
+	[ "$was_pass" = "$POSTGRES_PASSWORD" ] || was+="${was:+, }the previous password"
+	[ -z "$was" ] ||
+		log "Recorded new credentials for this cluster: role $POSTGRES_USER, database $POSTGRES_DB (replacing $was)."
 }
 
 # Postmaster options. A non-durable cluster skips every flush to stable storage
@@ -605,7 +756,9 @@ scope_key() {
 	# same. NUL can appear in neither a filesystem path nor an env value, so it is
 	# an unambiguous frame. Pipe straight into sha256sum — never store NULs in a
 	# shell variable (bash command substitution would strip them).
-	if [ "$SCOPE_MODE" = profile ]; then
+	if [ "$SCOPE_MODE" = instance ]; then
+		printf '%s\n' "$SCOPE_INSTANCE_KEY"
+	elif [ "$SCOPE_MODE" = profile ]; then
 		printf 'profile\0%s\0%s\0' "${CONTAINER_NAME:-}" "$SCOPE_PROFILE_ID" |
 			sha256sum | cut -c1-16
 	else
@@ -710,10 +863,12 @@ snapshot_scoped_markers() {
 # Populate INSTANCE_DIR / PORT_FILE / DATADIR_FILE / PGDATA / PG_SOCKDIR for
 # scoped mode. An explicit PGDATA still wins; the socket dir is always scoped so
 # two clusters never share a /tmp socket file (clients connect over TCP anyway).
-# `portmode` is up|read|stop|none: on a read command (down/status/url — `stop`
-# is `read` minus the port requirement) we resolve the data dir `up` recorded,
-# so a `down` finds the SAME cluster `up` started even if that `up` used an
-# explicit PGDATA that this call did not repeat.
+# `portmode` is up|read|stop|destroy|none: on a read command (down/status/url —
+# `stop` is `read` minus the port requirement) we resolve the data dir `up`
+# recorded, so a `down` finds the SAME cluster `up` started even if that `up`
+# used an explicit PGDATA that this call did not repeat. `destroy` is `stop`
+# that also tolerates a missing data dir marker (cmd_destroy looks for the data
+# itself, and a scope with nothing left is nothing to destroy).
 resolve_scope() {
 	local portmode="$1" key
 	# The scoped root becomes the socket dir interpolated (unquoted) into the pg_ctl
@@ -729,6 +884,7 @@ resolve_scope() {
 	INSTANCE_DIR="$SCOPED_ROOT/$key"
 	PORT_FILE="$INSTANCE_DIR/port"
 	DATADIR_FILE="$INSTANCE_DIR/datadir"
+	OWNER_FILE="$INSTANCE_DIR/owner"
 	# Only `up` may CREATE the instance dir; a read command (down/status/url)
 	# must not materialize an empty instance for a scope that was never `up`ed
 	# (it would leave a stray dir behind and mask "no instance yet" errors).
@@ -764,6 +920,8 @@ resolve_scope() {
 			PGDATA="$INSTANCE_DIR/pgdata"
 		elif [ -s "$DATADIR_FILE" ]; then
 			PGDATA="$(cat "$DATADIR_FILE")"
+		elif [ "$portmode" = destroy ]; then
+			PGDATA=""
 		else
 			log "no scoped instance for this worktree/profile yet (run 'pg-dev-up ... up' first)."
 			exit 1
@@ -928,7 +1086,7 @@ configure_paths() {
 		# port marker: they report the connection endpoint, which without the
 		# recorded port is unknowable.
 		case "$portmode" in
-			up | stop) : ;;
+			up | stop | destroy) : ;;
 			*) scoped_port_for_read ;;
 		esac
 		# resolve_scope (+ scoped_port_for_read on a read command) set PGDATA and
@@ -1123,6 +1281,13 @@ cmd_up() {
 			log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
 			exit 1
 		fi
+		# A `destroy` that held the lock first has removed the instance dir, and
+		# with it the file this lock is on; carrying on would re-create the dir
+		# outside the owner-only checks in resolve_scope.
+		if [ ! -d "$INSTANCE_DIR" ]; then
+			log "this scope's cluster was destroyed while this 'up' waited for it; run 'up' again."
+			exit 1
+		fi
 		# Now that we hold the per-scope lock, snapshot the markers and allocate the
 		# port — BOTH under the lock. Snapshotting here (not earlier, unlocked) means a
 		# concurrent same-scope `up` that lost the lock captures the WINNER's markers
@@ -1179,6 +1344,7 @@ cmd_up() {
 		trap 'rollback_scoped_markers' EXIT
 	fi
 	[ -n "$SCOPED" ] || refuse_durability_mismatch
+	resolve_credentials up
 	if pg_running; then
 		# In SCOPED mode only, talk to the port the cluster ACTUALLY listens on (not
 		# a possibly-mismatched requested $PGPORT), so we never create roles/db on an
@@ -1223,8 +1389,10 @@ cmd_up() {
 		atomic_write "$DATADIR_FILE" "$PGDATA"
 		atomic_write "$PORT_FILE" "$PGPORT"
 		trap - EXIT
+		write_owner_record
 	fi
 	ensure_role_db
+	record_credentials
 	# Recommend the SCOPE-CORRECT export recipe: an unscoped `url --export` would
 	# export the /tmp:5432 cluster's URL, not this scoped instance's.
 	local export_cmd="pg-dev-up url --export"
@@ -1246,36 +1414,58 @@ cmd_down() {
 		"$BINDIR/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null
 		# Show the SCOPE-CORRECT restart recipe: for a scoped instance a plain
 		# `pg-dev-up` would start the UNSCOPED /tmp:5432 cluster, not this one.
-		local restart="pg-dev-up"
+		local restart="run 'pg-dev-up' to restart"
 		if [ -n "$SCOPED" ]; then
-			if [ "$SCOPE_MODE" = profile ]; then
-				restart="pg-dev-up --profile $SCOPE_PROFILE_ID up"
-			else
-				restart="pg-dev-up --worktree up"
-			fi
+			case "$SCOPE_MODE" in
+				profile) restart="run 'pg-dev-up --profile $SCOPE_PROFILE_ID up' to restart" ;;
+				instance) restart="restart it with 'up' from its worktree or profile; 'pg-dev-up --instance $SCOPE_KEY destroy' removes it" ;;
+				*) restart="run 'pg-dev-up --worktree up' to restart" ;;
+			esac
 		fi
 		if [ "$(storage_of "$PGDATA")" = ram ]; then
-			log "Stopped. Data kept in RAM at $PGDATA until the container stops (run '$restart' to restart)."
+			log "Stopped. Data kept in RAM at $PGDATA until the container stops ($restart)."
 		else
-			log "Stopped. Data kept at $PGDATA (run '$restart' to restart)."
+			log "Stopped. Data kept at $PGDATA ($restart)."
 		fi
 	else
 		log "Not running."
 	fi
 }
 
+# One line on the credentials `url` prints for $PGDATA, and any disagreement.
+describe_credentials() {
+	if [ -n "$REC_HAS_CREDS" ]; then
+		log "credentials: role $POSTGRES_USER, database $POSTGRES_DB (as 'up' recorded them)"
+	elif [ -s "$PGDATA/PG_VERSION" ]; then
+		log "credentials: not recorded for this cluster; 'url' uses your environment (role $POSTGRES_USER, database $POSTGRES_DB)"
+	fi
+	[ -z "$CRED_CONFLICT" ] || log "WARNING: $(credential_conflict_text) Until then 'url' refuses."
+}
+
 cmd_status() {
 	require_bindir
+	resolve_credentials read
 	if pg_running; then
 		log "running on $PG_HOST:$PGPORT (PGDATA=$PGDATA)"
 		describe_cluster
+		describe_credentials
 		ram_full_hint "$PGDATA"
 	else
 		log "not running (PGDATA=$PGDATA)"
 		describe_cluster
+		describe_credentials
 		ram_full_hint "$PGDATA"
 		return 1
 	fi
+}
+
+cmd_url() {
+	resolve_credentials read
+	if [ -n "$CRED_CONFLICT" ]; then
+		log "refusing to print a URL: $(credential_conflict_text)"
+		exit 1
+	fi
+	print_url "${1:-}"
 }
 
 cmd_check() {
@@ -1286,6 +1476,411 @@ cmd_check() {
 		log "RAM-backed storage: available at $PG_RAM_ROOT ($(fs_usage_text "$PG_RAM_ROOT" || printf 'usage unknown'))."
 	else
 		log "RAM-backed storage: not available ($RAM_UNAVAILABLE_REASON); new clusters go on disk."
+	fi
+}
+
+# --- owner record, list, destroy --------------------------------------------
+
+is_scope_key() { [[ $1 =~ ^[0-9a-f]{16}$ ]]; }
+
+# Record whose scoped instance this is, so `list` can tell after the instance's
+# name (a hash) no longer does: the worktree's toplevel and common Git dir, or
+# the profile id. Rewritten by every scoped `up`; a marker like the others, so
+# losing it costs only the owner `list` shows.
+write_owner_record() {
+	local text common top
+	text="format=1"
+	if [ "$SCOPE_MODE" = profile ]; then
+		text+=$'\nmode=profile\nprofile='"$(urlencode "$SCOPE_PROFILE_ID")"
+	else
+		common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+		top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+		text+=$'\nmode=worktree\ntoplevel='"$(urlencode "$top")"$'\ngitdir='"$(urlencode "$common")"
+	fi
+	text+=$'\ncontainer='"$(urlencode "${CONTAINER_NAME:-}")"
+	atomic_write "$OWNER_FILE" "$text" ||
+		log "warning: could not record this scope's owner in $OWNER_FILE; 'list' will show it as unknown."
+}
+
+# 0 if $1 is still the toplevel of a Git worktree. A directory that lost its
+# `.git` resolves upward to an enclosing repository and so does not count.
+worktree_present() {
+	[ -d "$1" ] && [ "$(git -C "$1" rev-parse --show-toplevel 2>/dev/null || true)" = "$1" ]
+}
+
+# Set O_KIND (worktree | profile | scoped), O_STATE (present | gone | unknown
+# | -) and O_OWNER for the scoped instance dir $1, from its owner record.
+owner_info() {
+	local mode=""
+	O_KIND=scoped
+	O_STATE=unknown
+	O_OWNER=""
+	mode="$(kv_get "$1/owner" mode || true)"
+	case "$mode" in
+		worktree)
+			kv_get_decoded O_OWNER "$1/owner" toplevel || O_OWNER=""
+			[ -n "$O_OWNER" ] || return 0
+			O_KIND=worktree
+			if worktree_present "$O_OWNER"; then O_STATE=present; else O_STATE=gone; fi
+			;;
+		profile)
+			kv_get_decoded O_OWNER "$1/owner" profile || O_OWNER=""
+			[ -n "$O_OWNER" ] || return 0
+			O_KIND=profile
+			O_STATE=-
+			;;
+	esac
+}
+
+# One tab-separated line; an empty field becomes `-`, and a tab or newline in a
+# value becomes `?`, so every line has the same eleven fields.
+tsv_row() {
+	local f out="" first=yes
+	for f in "$@"; do
+		f="${f:--}"
+		f="${f//$'\t'/?}"
+		f="${f//$'\n'/?}"
+		if [ -n "$first" ]; then out="$f"; else out+=$'\t'"$f"; fi
+		first=""
+	done
+	printf '%s\n' "$out"
+}
+
+# Add a `list --porcelain` row: kind key state port durability storage
+# owner-state owner user database datadir. <datadir> may be empty (unknown).
+LIST_ROWS=()
+list_cluster() {
+	local kind="$1" key="$2" d="$3" port="" mport="$4" ostate="$5" owner="$6"
+	local state=nodata dur="" storage="" user="" db="" u="" b=""
+	if [ -n "$d" ]; then
+		if cluster_running_at "$d"; then
+			state=running
+			port="$(sed -n '4p' "$d/postmaster.pid" 2>/dev/null | tr -cd '0-9' || true)"
+		elif [ -s "$d/PG_VERSION" ]; then
+			state=stopped
+		fi
+	fi
+	if [ "$state" != nodata ]; then
+		if [ -f "$d/$CLUSTER_RECORD" ]; then dur="$(cluster_durability "$d")"; else dur=unrecorded; fi
+		storage="$(storage_of "$d")"
+		if kv_get_decoded u "$d/$CLUSTER_RECORD" user && kv_get_decoded b "$d/$CLUSTER_RECORD" database; then
+			user="$u"
+			db="$b"
+		fi
+	fi
+	[ -n "$port" ] || port="$mport"
+	LIST_ROWS+=("$(tsv_row "$kind" "$key" "$state" "$port" "$dur" "$storage" "$ostate" "$owner" "$user" "$db" "$d")")
+}
+
+# The human form of one porcelain row ($1..$11 as in list_cluster).
+render_cluster() {
+	local kind="$1" key="$2" state="$3" port="$4" dur="$5" storage="$6" ostate="$7" owner="$8" user="$9" db="${10}" d="${11}"
+	local title what remove="pg-dev-up --instance $key destroy"
+	case "$kind" in
+		unscoped)
+			title="unscoped cluster"
+			remove="pg-dev-up destroy"
+			;;
+		explicit)
+			title="cluster at the PGDATA you gave"
+			remove="PGDATA=$(printf '%q' "$d") pg-dev-up destroy"
+			;;
+		worktree)
+			title="scoped instance $key, worktree $owner"
+			[ "$ostate" != gone ] || title+=" (which no longer exists)"
+			;;
+		profile) title="scoped instance $key, profile $owner" ;;
+		*) title="scoped instance $key, owner not recorded" ;;
+	esac
+	case "$state" in
+		running) what="running on $PG_HOST:$port" ;;
+		stopped)
+			what="stopped"
+			[ "$port" = - ] || what+=" (port $port reserved)"
+			;;
+		*) what="no data (its data directory is gone; only markers remain)" ;;
+	esac
+	if [ "$state" != nodata ]; then
+		case "$dur" in
+			nondurable) what+=", non-durable" ;;
+			durable) what+=", durable" ;;
+			*) what+=", durable, without a pg-dev-up record" ;;
+		esac
+		if [ "$storage" = ram ]; then what+=", data in RAM"; else what+=", data on disk"; fi
+	fi
+	printf '%s\n  %s\n' "$title" "$what"
+	[ "$d" = - ] || printf '  data: %s\n' "$d"
+	[ "$user" = - ] || printf '  role %s, database %s\n' "$user" "$db"
+	if [ "$dur" = unrecorded ]; then
+		printf '  remove: %s refuses it, as nothing proves pg-dev-up created it\n' "$remove"
+	else
+		printf '  remove: %s\n' "$remove"
+	fi
+}
+
+# Read-only by design: no lock, no mkdir, no write, so a concurrent `up` (whose
+# port reservation the .portlock guards) is never disturbed. Instances owned by
+# another user are skipped, as every scoped command refuses them.
+cmd_list() {
+	local fmt="$1" inst key d c mport row
+	# Keyed by resolved path, so one data directory is listed once however its
+	# record spells it.
+	local -A seen_dirs=()
+	local -a f
+	case "$fmt" in
+		'' | --porcelain) : ;;
+		*)
+			log "unknown 'list' option '$fmt' (try: --porcelain)"
+			exit 2
+			;;
+	esac
+	require_bindir
+	for d in "$PG_RAM_BASE/pgdata" "$UNSCOPED_DISK_PGDATA"; do
+		[ -s "$d/PG_VERSION" ] || continue
+		# A scope may record an unscoped default location as its explicit
+		# PGDATA; its own row below lists it, with the removal that works.
+		! scoped_key_of_datadir "$d" >/dev/null || continue
+		list_cluster unscoped "" "$d" "" "" ""
+		seen_dirs["$(realpath -m -- "$d")"]=1
+	done
+	for inst in "$SCOPED_ROOT"/*/; do
+		[ -d "$inst" ] || continue
+		inst="${inst%/}"
+		key="${inst##*/}"
+		is_scope_key "$key" && [ -O "$inst" ] || continue
+		d=""
+		[ ! -s "$inst/datadir" ] || d="$(cat -- "$inst/datadir" 2>/dev/null || true)"
+		if [ -z "$d" ]; then
+			for c in "$inst/pgdata" "$PG_RAM_BASE/$key/pgdata"; do
+				if [ -e "$c" ]; then
+					d="$c"
+					break
+				fi
+			done
+		fi
+		mport=""
+		[ ! -s "$inst/port" ] || mport="$(cat -- "$inst/port" 2>/dev/null || true)"
+		owner_info "$inst"
+		list_cluster "$O_KIND" "$key" "$d" "$mport" "$O_STATE" "$O_OWNER"
+		[ -z "$d" ] || seen_dirs["$(realpath -m -- "$d")"]=1
+	done
+	# RAM data no listed instance records: an instance made under another
+	# POWBOX_PG_SCOPED_ROOT, one whose markers were removed, or one whose scope
+	# has since recorded another data directory. It still holds memory, so it is
+	# listed, with an unknown owner; `--instance <key> destroy` removes it.
+	for d in "$PG_RAM_BASE"/*/pgdata; do
+		[ -e "$d" ] || continue
+		key="${d%/pgdata}"
+		key="${key##*/}"
+		is_scope_key "$key" && [ -z "${seen_dirs["$(realpath -m -- "$d")"]:-}" ] || continue
+		list_cluster scoped "$key" "$d" "" unknown ""
+		seen_dirs["$(realpath -m -- "$d")"]=1
+	done
+	if [ -n "$PGDATA_EXPLICIT" ]; then
+		d="$PGDATA"
+		case "$d" in /*) : ;; *) d="$(realpath -m -- "$d")" ;; esac
+		if [ -s "$d/PG_VERSION" ] && [ -z "${seen_dirs["$(realpath -m -- "$d")"]:-}" ]; then
+			list_cluster explicit "" "$d" "" "" ""
+		fi
+	fi
+	if [ "$fmt" = --porcelain ]; then
+		[ "${#LIST_ROWS[@]}" -eq 0 ] || printf '%s\n' "${LIST_ROWS[@]}"
+		return 0
+	fi
+	if [ "${#LIST_ROWS[@]}" -eq 0 ]; then
+		printf 'No pg-dev-up clusters found.\n'
+	else
+		c=""
+		for row in "${LIST_ROWS[@]}"; do
+			IFS=$'\t' read -r -a f <<<"$row"
+			[ -z "$c" ] || printf '\n'
+			render_cluster "${f[@]}"
+			c=yes
+		done
+	fi
+	log "An unscoped cluster made with an explicit PGDATA is listed only while PGDATA names it."
+}
+
+# If $1 lies inside a scoped instance (its instance dir under the scoped root, or
+# its RAM-backed data) or is the data directory an instance recorded, print that
+# instance's key. Both the lexical and the symlink-resolved path are compared, so
+# neither `//`, `.` nor a link can disguise a scope's data as unscoped.
+scoped_key_of_datadir() {
+	local p root rest f
+	local -a paths roots
+	paths=("$(realpath -m -s -- "$1")" "$(realpath -m -- "$1")")
+	roots=("$SCOPED_ROOT" "$(realpath -m -- "$SCOPED_ROOT")" "$PG_RAM_BASE" "$(realpath -m -- "$PG_RAM_BASE")")
+	for p in "${paths[@]}"; do
+		for root in "${roots[@]}"; do
+			case "$p/" in
+				"$root"/*/*)
+					rest="${p#"$root"/}"
+					rest="${rest%%/*}"
+					if is_scope_key "$rest"; then
+						printf '%s\n' "$rest"
+						return 0
+					fi
+					;;
+			esac
+		done
+	done
+	for f in "$SCOPED_ROOT"/*/datadir; do
+		[ -s "$f" ] && [ -O "$f" ] || continue
+		rest="${f%/datadir}"
+		rest="${rest##*/}"
+		is_scope_key "$rest" || continue
+		if [ "$(realpath -m -- "$(cat -- "$f" 2>/dev/null)" 2>/dev/null)" = "${paths[1]}" ]; then
+			printf '%s\n' "$rest"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Judge whether `destroy` may remove the data directory $1. Sets VERDICT to
+# absent | empty | ours | refuse, and DESTROY_REASON for a refusal. `ours`
+# needs both a cluster and the record only pg-dev-up writes, in a directory the
+# caller owns, so an explicit PGDATA can never point destroy at anything else.
+destroy_verdict() {
+	local d="$1"
+	VERDICT=refuse
+	DESTROY_REASON=""
+	if [ -L "$d" ]; then
+		DESTROY_REASON="$d is a symbolic link, not a data directory pg-dev-up made"
+	elif [ ! -e "$d" ]; then
+		VERDICT=absent
+	elif [ ! -d "$d" ]; then
+		DESTROY_REASON="$d is not a directory"
+	elif [ ! -O "$d" ]; then
+		DESTROY_REASON="$d is owned by another user"
+	elif [ -z "$(ls -A -- "$d" 2>/dev/null)" ]; then
+		VERDICT=empty
+	elif [ -s "$d/PG_VERSION" ] && [ -f "$d/$CLUSTER_RECORD" ]; then
+		VERDICT=ours
+	elif [ -s "$d/PG_VERSION" ]; then
+		DESTROY_REASON="$d holds a PostgreSQL cluster without pg-dev-up's $CLUSTER_RECORD record (made before pg-dev-up kept one, or not by pg-dev-up), so nothing proves pg-dev-up created it"
+	else
+		DESTROY_REASON="$d is not empty and holds no PostgreSQL cluster, so pg-dev-up did not create it"
+	fi
+}
+
+cmd_destroy() {
+	local d recorded="" key refused="" i what
+	local -a cands=() found=() verdicts=() kept=() managed=()
+	require_bindir
+	if [ -n "$SCOPED" ]; then
+		# Hold the scope's `up` lock, so a concurrent same-scope `up` either
+		# finishes first (and is destroyed) or finds the scope gone.
+		if [ -d "$INSTANCE_DIR" ]; then
+			exec 8>"$INSTANCE_DIR/.uplock"
+			if ! flock -w 60 8; then
+				log "timed out waiting for the scoped instance lock ($INSTANCE_DIR/.uplock)."
+				exit 1
+			fi
+		fi
+		[ ! -s "$DATADIR_FILE" ] || recorded="$(cat -- "$DATADIR_FILE")"
+		if [ -n "$PGDATA_EXPLICIT" ] && { [ -z "$recorded" ] ||
+			[ "$(realpath -m -s -- "$PGDATA")" != "$(realpath -m -s -- "$recorded")" ]; }; then
+			log "a scoped 'destroy' removes the cluster this scope recorded${recorded:+ ($recorded)}; PGDATA=$PGDATA names another directory, so nothing was removed. Drop PGDATA, or run 'destroy' without a scope flag to destroy the cluster at that PGDATA."
+			exit 1
+		fi
+		[ -z "$recorded" ] || cands+=("$recorded")
+		cands+=("$INSTANCE_DIR/pgdata" "$PG_RAM_BASE/$SCOPE_KEY/pgdata")
+	elif [ -n "$PGDATA_EXPLICIT" ]; then
+		# Lexically (`-s` follows no symlink), so a link stays a link for
+		# destroy_verdict to refuse, however it is spelled: relative, or with the
+		# trailing slash tab completion adds (which `[ -L ]` would see through).
+		PGDATA="$(realpath -m -s -- "$PGDATA")"
+		if key="$(scoped_key_of_datadir "$PGDATA")"; then
+			log "$PGDATA belongs to scoped instance $key; destroy it with 'pg-dev-up --instance $key destroy', which removes its markers too. Nothing was removed."
+			exit 1
+		fi
+		cands+=("$PGDATA")
+	else
+		# A scope may record either default location as its explicit PGDATA,
+		# and then the cluster there is that scope's, exactly as above.
+		for d in "$(managed_datadir disk)" "$(managed_datadir ram)"; do
+			if { [ -e "$d" ] || [ -L "$d" ]; } && key="$(scoped_key_of_datadir "$d")"; then
+				log "$d belongs to scoped instance $key; destroy it with 'pg-dev-up --instance $key destroy', which removes its markers too. Nothing was removed."
+				exit 1
+			fi
+			cands+=("$d")
+		done
+	fi
+	managed=("$(realpath -m -s -- "$(managed_datadir disk)")" "$(realpath -m -s -- "$(managed_datadir ram)")")
+	# Judge every candidate before touching any, so a refusal removes nothing.
+	# An empty directory is pg-dev-up's only at a location it chose itself; an
+	# explicit one may be any empty directory the caller owns, so it stays.
+	for d in "${cands[@]}"; do
+		d="$(realpath -m -s -- "$d")"
+		for i in "${found[@]}" "${kept[@]}"; do [ "$i" != "$d" ] || continue 2; done
+		destroy_verdict "$d"
+		case "$VERDICT" in
+			absent) ;;
+			refuse) refused+="${refused:+ }$DESTROY_REASON." ;;
+			empty)
+				if [ "$d" = "${managed[0]}" ] || [ "$d" = "${managed[1]}" ]; then
+					found+=("$d")
+					verdicts+=(empty)
+				else
+					kept+=("$d")
+				fi
+				;;
+			*)
+				found+=("$d")
+				verdicts+=("$VERDICT")
+				;;
+		esac
+	done
+	if [ -n "$refused" ]; then
+		log "refusing to destroy: $refused Nothing was removed; if it is yours, delete it yourself, then run 'destroy' again."
+		exit 1
+	fi
+	for d in "${found[@]}"; do
+		cluster_running_at "$d" || continue
+		log "Stopping the cluster at $d…"
+		if ! "$BINDIR/pg_ctl" -D "$d" -m fast -w stop >/dev/null; then
+			log "could not stop the cluster at $d (see $d/server.log); it was not removed."
+			exit 1
+		fi
+	done
+	for i in "${!found[@]}"; do
+		d="${found[$i]}"
+		if [ "${verdicts[$i]}" = ours ]; then
+			what="the cluster"
+			rm -rf -- "$d" || {
+				log "could not remove all of $d."
+				exit 1
+			}
+		else
+			what="the empty data directory"
+			rmdir -- "$d" || exit 1
+		fi
+		log "Removed $what at $d."
+	done
+	for d in "${kept[@]}"; do
+		log "Left the empty directory at $d in place: it is not a location pg-dev-up chose, so nothing marks it as one pg-dev-up created."
+	done
+	if [ -n "$SCOPED" ]; then
+		[ ! -d "$PG_RAM_BASE/$SCOPE_KEY" ] || rmdir -- "$PG_RAM_BASE/$SCOPE_KEY" 2>/dev/null || true
+		if [ -d "$INSTANCE_DIR" ]; then
+			# Only the files pg-dev-up keeps there: the markers (and a temp file an
+			# interrupted atomic_write left), the lock, and the server's socket.
+			rm -f -- "$PORT_FILE" "$DATADIR_FILE" "$OWNER_FILE" "$PORT_FILE".?????? "$DATADIR_FILE".?????? \
+				"$OWNER_FILE".?????? "$INSTANCE_DIR"/.s.PGSQL.* "$INSTANCE_DIR/.uplock"
+			if ! rmdir -- "$INSTANCE_DIR" 2>/dev/null; then
+				log "$INSTANCE_DIR holds files pg-dev-up did not put there, so it was left in place: $(find "$INSTANCE_DIR" -mindepth 1 -maxdepth 1 -printf '%f ')"
+				exit 1
+			fi
+			log "Removed scoped instance $SCOPE_KEY."
+			return 0
+		fi
+	fi
+	[ "${#found[@]}" -eq 0 ] && [ "${#kept[@]}" -eq 0 ] || return 0
+	if [ -n "$SCOPED" ]; then
+		log "No cluster to destroy: scoped instance $SCOPE_KEY has no markers or data."
+	else
+		log "No cluster to destroy (nothing at ${cands[*]})."
 	fi
 }
 
@@ -1326,6 +1921,23 @@ while [ $# -gt 0 ]; do
 			SCOPE_PROFILE_ID="${1#--profile=}"
 			shift
 			;;
+		--instance)
+			SCOPED=1
+			SCOPE_MODE=instance
+			shift
+			[ $# -gt 0 ] || {
+				log "--instance requires the key 'pg-dev-up list' shows"
+				exit 2
+			}
+			SCOPE_INSTANCE_KEY="$1"
+			shift
+			;;
+		--instance=*)
+			SCOPED=1
+			SCOPE_MODE=instance
+			SCOPE_INSTANCE_KEY="${1#--instance=}"
+			shift
+			;;
 		--)
 			shift
 			break
@@ -1340,9 +1952,17 @@ if [ "$SCOPE_MODE" = profile ]; then
 		*[!A-Za-z0-9._-]*) log "invalid --profile id (allowed: A-Za-z0-9._-)"; exit 2 ;;
 	esac
 fi
+if [ "$SCOPE_MODE" = instance ] && ! is_scope_key "$SCOPE_INSTANCE_KEY"; then
+	log "invalid --instance key '$SCOPE_INSTANCE_KEY': it is the 16-hex-digit key 'pg-dev-up list' shows."
+	exit 2
+fi
 
 case "${1:-up}" in
 	up | "")
+		if [ "$SCOPE_MODE" = instance ]; then
+			log "--instance selects an existing cluster for status, url, down or destroy; 'up' needs --worktree or --profile."
+			exit 2
+		fi
 		configure_paths up
 		cmd_up
 		;;
@@ -1357,7 +1977,19 @@ case "${1:-up}" in
 	url)
 		configure_paths read
 		shift
-		print_url "${1:-}"
+		cmd_url "${1:-}"
+		;;
+	destroy)
+		configure_paths destroy
+		cmd_destroy
+		;;
+	list)
+		if [ -n "$SCOPED" ]; then
+			log "'list' shows every cluster; it takes no --worktree, --profile or --instance."
+			exit 2
+		fi
+		shift
+		cmd_list "${1:-}"
 		;;
 	check)
 		configure_paths none
@@ -1367,7 +1999,7 @@ case "${1:-up}" in
 		usage
 		;;
 	*)
-		log "unknown command '$1' (try: up, down, status, url, check, help)"
+		log "unknown command '$1' (try: up, down, destroy, status, url, list, check, help)"
 		exit 2
 		;;
 esac

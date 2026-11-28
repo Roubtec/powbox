@@ -241,6 +241,8 @@ One of them is the [known-limitations document](docker/shared/agent-reference/kn
 
 Every skill both agents use lives in the [`Roubtec/agent-skills`](https://github.com/Roubtec/agent-skills) repo — the single source of truth. That includes `enable-worktrees` and `session-learnings`, which used to live in this repo as powbox-specific skills and were forfeited to agent-skills along with the `wf-*` Claude dynamic workflows. Skills still reach the agents through **two delivery channels**, split by runtime rather than by source ownership.
 
+One skill is deliberately not part of that palette: [`.claude/skills/learnings-sweep/`](.claude/skills/learnings-sweep/SKILL.md) is a maintainer skill for this repository itself, loaded by Claude Code as a project skill when a session runs in the powbox checkout and shipped in no image. It harvests the reports `session-learnings` leaves on throwaway branches across the repositories that use powbox: its `collect.sh` gathers them into a local-only branch and deletes the source branches under a lease, and the skill then walks the triage into tasks for whichever repository each finding belongs to. `scripts/test-learnings-sweep-collect.sh` pins the collection and deletion guards.
+
 | Channel | Delivers | Source of truth | How it updates |
 |---|---|---|---|
 | **Plugin** | the full shared skill palette (and the `wf-*` dynamic workflows) to Claude as the `dev-skills@roubtec` plugin, and — synced from the same marketplace clone — Codex's copies of the skills | `Roubtec/agent-skills` | `dev-skills@roubtec` marketplace plugin — installed/refreshed by a detached post-firewall bootstrap at every agent-container start (only the short-lived image-store writer skips it); on primary-Claude launches a short bounded wait before the agent launches means a warm refresh usually applies **this** session (a Codex prompt never uses the plugin, so it does not wait — the refresh lands next session; cold volume: first session needs `/reload-plugins` or a restart). The same detached bootstrap **also syncs the Codex copies** of the skills from the plugin's freshly-refreshed marketplace clone into the codex-config volume (a local, no-network sync ordered after the clone refresh; SHA-gated to a byte-for-byte no-op when unchanged), so Codex converges on the same `agent-skills` commit at the same container-recycle cadence instead of the image-bake cadence |
@@ -1187,7 +1189,8 @@ workflows keep cost proportional to the change:
   `test-sync-codex-skills.sh`,
   `test-wf-check.sh`, `test-wf-status.sh`, and `test-wt-orphan-safety.sh`.
   `test-no-early-exit-pipes.sh` is itself a guard over the others: it fails when
-  a suite pipes into an early-exiting consumer (`grep -q`, `head`, …) under
+  a suite, or a repo-local skill script under `.claude/skills/` that a suite
+  runs, pipes into an early-exiting consumer (`grep -q`, `head`, …) under
   `pipefail`, a check that fails at random when the producer dies of SIGPIPE;
   its header names the in-process replacements and the
   `# early-exit-pipe-ok: <reason>` escape for a deliberate payload.

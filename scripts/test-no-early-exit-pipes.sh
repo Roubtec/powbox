@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Guard: no shell suite feeds a pipe into an early-exiting consumer (task 083).
 #
-# Every scripts/test-*.sh suite runs under `set -o pipefail`. There, a check like
+# Every scripts/test-*.sh suite runs under `set -o pipefail`. So do the
+# repo-local skill scripts under .claude/skills/, which those suites run, so a
+# race in one fails a suite just the same and this guard scans them too. There,
+# a check like
 # `printf '%s' "$text" | grep -q needle` fails at random: `grep -q` exits on its
 # first match and closes the pipe, a producer still writing dies of SIGPIPE, and
 # the pipeline reports failure although the needle was there. A negated check
@@ -198,7 +201,7 @@ else
 fi
 
 echo "Test: no scripts/test-*.sh suite pipes into an early-exiting consumer"
-shopt -s nullglob
+shopt -s nullglob globstar
 suites=()
 for f in "$SCRIPT_DIR"/test-*.sh; do
 	[ "${f##*/}" = "$SELF" ] || suites+=("$f")
@@ -211,6 +214,20 @@ else
 		ok "${#suites[@]} suites scanned, no early-exiting pipe consumer"
 	else
 		ko "pipe into an early-exiting consumer under pipefail; see this suite's header for the fix, or mark a deliberate payload with '# early-exit-pipe-ok: <reason>'" "${hits//"$SCRIPT_DIR/"/scripts/}"
+	fi
+fi
+
+echo "Test: no .claude/skills script pipes into an early-exiting consumer"
+REPO_ROOT="${SCRIPT_DIR%/*}"
+skill_scripts=("$REPO_ROOT"/.claude/skills/**/*.sh)
+if [ "${#skill_scripts[@]}" -eq 0 ]; then
+	ok "no .claude/skills scripts to scan"
+else
+	hits="$(scan "${skill_scripts[@]}")"
+	if [ -z "$hits" ]; then
+		ok "${#skill_scripts[@]} skill scripts scanned, no early-exiting pipe consumer"
+	else
+		ko "pipe into an early-exiting consumer under pipefail; see this suite's header for the fix, or mark a deliberate payload with '# early-exit-pipe-ok: <reason>'" "${hits//"$REPO_ROOT/"/}"
 	fi
 fi
 

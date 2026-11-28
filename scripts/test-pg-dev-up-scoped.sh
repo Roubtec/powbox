@@ -1073,7 +1073,8 @@ try "the scope's own destroy removes it" pg "$REPO_Q" POWBOX_PG_RAM_ROOT="$RAM_R
 try "the unscoped RAM default is gone" test ! -e "$default_ram"
 # A scope whose RAM cluster was stopped and which then came up on an explicit
 # disk PGDATA still leaves that RAM data behind, holding memory: list shows it
-# beside the scope's recorded cluster, and the scoped destroy removes both.
+# beside the scope's recorded cluster, under the same worktree, and the scoped
+# destroy removes both.
 REPO_R="$WORK/wt-r"
 add_worktree "$MAIN_REPO" "$REPO_R" wt-r
 pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" POSTGRES_DB=app_r -- --worktree up >/dev/null 2>&1 || ko "RAM-backed scoped up failed"
@@ -1087,6 +1088,10 @@ rows_r="$(pg "$WORK" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- list --porcelain 2>/dev/n
 try "the RAM cluster is under the scoped RAM base" test "${ram_r#"$RAM_ROOT"/}" != "$ram_r"
 try "list shows the scope's recorded disk cluster" test -n "$(awk -F '\t' -v d="$explicit_r" '$11 == d' <<<"$rows_r")"
 try "and the RAM data it left behind" test "$(awk -F '\t' -v d="$ram_r" '$11 == d { print $6 }' <<<"$rows_r")" = ram
+row_r_ram="$(awk -F '\t' -v d="$ram_r" '$11 == d' <<<"$rows_r")"
+row_r_disk="$(awk -F '\t' -v d="$explicit_r" '$11 == d' <<<"$rows_r")"
+try "the RAM leftover is listed under its scope's worktree" test "$(row_field "$row_r_ram" 1)/$(row_field "$row_r_ram" 7)/$(row_field "$row_r_ram" 8)" = "worktree/present/$(git -C "$REPO_R" rev-parse --show-toplevel)"
+try "under the same key as the scope's recorded cluster" test "$(row_field "$row_r_ram" 2)" = "$(row_field "$row_r_disk" 2)"
 try "the scoped destroy removes both" pg "$REPO_R" POWBOX_PG_RAM_ROOT="$RAM_ROOT" -- --worktree destroy
 try "the explicit disk cluster is gone" test ! -e "$explicit_r"
 try "the RAM leftover is gone" test ! -e "$ram_r"

@@ -114,9 +114,12 @@ $script = @(
   '# of the directory a container was started from (conmon-wrapper.sh).'
   'conmon_path=$(podman info --format "{{.Host.Conmon.Path}}" 2>/dev/null) || fail "podman info (conmon path) failed"'
   '[ "$conmon_path" = /usr/local/libexec/powbox-conmon ] || fail "podman uses conmon [$conmon_path], want the /usr/local/libexec/powbox-conmon wrapper"'
+  '# Unqualified image names resolve against Docker Hub alone (the registries.conf drop-in).'
+  'search=$(podman info --format "{{json .Registries.search}}" 2>/dev/null) || fail "podman info (search registries) failed"'
+  '[ "$search" = "[\"docker.io\"]" ] || fail "unqualified-search registries are $search, want [\"docker.io\"] (registries.conf drop-in missing or another registry added?)"'
   'podman compose version >/dev/null 2>&1 || fail "podman compose subcommand missing (Podman < 4.7?)"'
   'if [ "${SMOKE_HAVE_TUN:-false}" != true ]; then'
-  '  echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port + Compose exec-form health-check checks: /dev/net/tun was not attached on this host."'
+  '  echo "Podman engine wiring OK (static checks). Skipping nested-run + published-port + short-name pull + restart + Compose exec-form health-check checks: /dev/net/tun was not attached on this host."'
   '  exit 0'
   'fi'
   'out=$(podman run --quiet --rm docker.io/library/alpine echo nested_ok 2>&1) || fail "podman run on the default network failed: $out"'
@@ -269,9 +272,27 @@ $script = @(
   '    fail "distroless exec-form health check took an UNEXPECTED form (kind=${dl_kind}, test=${dl_test}); expected EXACTLY the CMD-SHELL wrap ${dl_expected_wrap} (KNOWN-XFAIL) or the preserved exec form ${dl_expected_exec} (provider fixed) -- any other translated array is inconclusive and fails hard"'
   '  fi'
   'fi'
-  'echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, and a Compose exec-form health check reaching healthy (with a negative control driven to unhealthy as expected) all work."'
+  '# 5. Unqualified image names through podman, the docker shim and docker compose (mirror of'
+  '# scripts/smoke-test-podman.sh section 5). The image is not in the alias list and the graphroot'
+  '# starts empty; each pull is checked by the image it left (podman-compose exits 0 on a failed'
+  '# pull) and removed before the next spelling (a short name matching a local image skips the'
+  '# search registries).'
+  'short_image="traefik/whoami:v1.11.0"'
+  'short_ref="docker.io/traefik/whoami:v1.11.0"'
+  'printf "services:\n  short:\n    image: %s\n" "$short_image" >"$compose_dir/short-name.yml"'
+  'for spelling in podman docker compose; do'
+  '  case "$spelling" in'
+  '  podman) pull_out=$(podman pull -q "$short_image" 2>&1) || fail "podman pull $short_image failed: $pull_out" ;;'
+  '  docker) pull_out=$(docker pull -q "$short_image" 2>&1) || fail "docker pull $short_image (shim) failed: $pull_out" ;;'
+  '  compose) pull_out=$(docker compose -f "$compose_dir/short-name.yml" -p "${compose_proj}sn" pull 2>&1) || true ;;'
+  '  esac'
+  '  podman image exists "$short_ref" || fail "$spelling did not resolve the short name $short_image to $short_ref: $pull_out"'
+  '  podman rmi -f "$short_ref" >/dev/null 2>&1 || fail "podman rmi $short_ref failed"'
+  'done'
+  'echo "Podman engine OK: rootless nested run, bridge published port, the compose subcommand, a Compose exec-form health check reaching healthy (with a negative control driven to unhealthy as expected), and short-name pulls through podman, docker and docker compose all work."'
 ) -join "`n"
 
+$baseArgCount = $runArgs.Count
 $runArgs += @(
   "-e", "SMOKE_HAVE_FUSE=$($haveFuse.ToString().ToLower())",
   "-e", "SMOKE_HAVE_TUN=$($haveTun.ToString().ToLower())",
@@ -292,9 +313,78 @@ if ($env:POWBOX_SMOKE_SKIP_MARKER -and (Select-String -LiteralPath $probeLog.Ful
 }
 Remove-Item -LiteralPath $probeLog.FullName -ErrorAction SilentlyContinue
 
-if ($rc -eq 0) {
-  Write-Host "Smoke test (podman) passed."
-}
-else {
+if ($rc -ne 0) {
   throw "Podman smoke test failed (exit $rc). See container output above."
 }
+
+# 6. A start with leftover runtime state (mirror of scripts/smoke-test-podman.sh
+# section 6). Boots the real entrypoint-core.sh the way the launcher's image-store
+# writer does, with --init as compose.shared.yml sets it, runs the shared phases in
+# scripts/smoke-test-podman-restart.bash, and SIGKILLs the outer container between
+# them, like a host crash. Needs /dev/net/tun like the nested half.
+if (-not $haveTun) {
+  Write-Host "Skipping the Podman restart probe: /dev/net/tun was not attached on this host."
+  Write-Host "Smoke test (podman) passed."
+  return
+}
+$restartScriptPath = Join-Path $PSScriptRoot 'smoke-test-podman-restart.bash'
+$restartScript = (Get-Content -Raw -Encoding UTF8 -LiteralPath $restartScriptPath) -replace "`r`n", "`n"
+if ([string]::IsNullOrWhiteSpace($restartScript)) {
+  throw "Podman smoke test failed: $restartScriptPath is empty or unreadable."
+}
+$restartName = "powbox-smoke-podman-restart-$PID-$(Get-Random)"
+$restartArgs = @($runArgs | Select-Object -First $baseArgCount | Where-Object { $_ -ne "run" -and $_ -ne "--rm" })
+
+function Exit-RestartProbe([string]$Reason) {
+  Write-Host "--- logs of $restartName ---"
+  docker logs $restartName 2>&1 | Write-Host
+  throw "Podman smoke test failed (restart probe): $Reason"
+}
+
+# Waits until the container has printed its ready line $Want times, one per start.
+function Wait-RestartReady([int]$Want) {
+  for ($n = 0; $n -lt 120; $n++) {
+    $logs = (docker logs $restartName 2>&1 | Out-String)
+    $count = ([regex]::Matches($logs, '(?m)^powbox-smoke-ready\r?$')).Count
+    if ($count -ge $Want) { return }
+    $running = (docker inspect --format '{{.State.Running}}' $restartName 2>$null | Out-String).Trim()
+    if ($running -ne "true") { Exit-RestartProbe "the container stopped before its entrypoint finished (start $Want)" }
+    Start-Sleep -Seconds 1
+  }
+  Exit-RestartProbe "the entrypoint did not finish within 120s (start $Want)"
+}
+
+try {
+  Write-Host "Podman restart probe: booting entrypoint-core.sh in $restartName."
+  docker run -d --init --name $restartName @restartArgs `
+    --entrypoint /usr/local/bin/entrypoint-core.sh `
+    -e AGENT_CONFIG_DIR=/tmp/powbox-smoke-agent `
+    -e AGENT_SETUP_HOOK= `
+    -e POWBOX_PLUGIN_WAIT=0 `
+    $Image sh -c 'echo powbox-smoke-ready; exec sleep infinity' | Out-Null
+  if ($LASTEXITCODE -ne 0) { Exit-RestartProbe "docker run of the restart container failed" }
+  Wait-RestartReady 1
+  $beforeOut = (docker exec $restartName bash -c $restartScript powbox-podman-restart before 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) { Exit-RestartProbe "phase before: $beforeOut" }
+  $startMatch = [regex]::Match($beforeOut, '(?m)^START=(\S+)')
+  if (-not $startMatch.Success) { Exit-RestartProbe "phase before printed no START= line: $beforeOut" }
+  $startBefore = $startMatch.Groups[1].Value
+  docker kill $restartName | Out-Null
+  if ($LASTEXITCODE -ne 0) { Exit-RestartProbe "docker kill failed" }
+  docker start $restartName | Out-Null
+  if ($LASTEXITCODE -ne 0) { Exit-RestartProbe "docker start after the kill failed" }
+  Wait-RestartReady 2
+  # Without the entrypoint's announcement the phase below could pass on a Podman
+  # that happened to tolerate the stale state, proving nothing about the reset.
+  $restartLogs = (docker logs $restartName 2>&1 | Out-String)
+  if (-not $restartLogs.Contains("Note: cleared the Podman runtime state")) {
+    Exit-RestartProbe "the restarted entrypoint did not report clearing stale Podman runtime state"
+  }
+  $afterOut = (docker exec $restartName bash -c $restartScript powbox-podman-restart after $startBefore 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) { Exit-RestartProbe "phase after: $afterOut" }
+  Write-Host $afterOut.TrimEnd()
+}
+finally {
+  docker rm -f $restartName 2>&1 | Out-Null
+}
+Write-Host "Smoke test (podman) passed."

@@ -355,7 +355,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && { grep -q '^node:' /etc/subuid 2>/dev/null || echo 'node:100000:65536' >> /etc/subuid; } \
     && { grep -q '^node:' /etc/subgid 2>/dev/null || echo 'node:100000:65536' >> /etc/subgid; } \
     && touch /etc/containers/nodocker \
-    && mkdir -p -m 0755 /etc/containers/containers.conf.d
+    && mkdir -p -m 0755 /etc/containers/containers.conf.d /etc/containers/registries.conf.d
 
 # Engine defaults for running Podman inside a container without systemd:
 # cgroupfs (no systemd cgroup delegation available), the file event logger
@@ -366,6 +366,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # new directory too, dropping the search bit and making Podman fail to read its
 # system config ("open .../10-powbox.conf: permission denied").
 COPY --chmod=644 containers.conf /etc/containers/containers.conf.d/10-powbox.conf
+
+# Unqualified image names resolve against Docker Hub alone, as they do for
+# Docker; see registries.conf for why it is exactly one registry. Its directory
+# is pre-created in the RUN above for the same reason as the drop-in dir.
+COPY --chmod=644 registries.conf /etc/containers/registries.conf.d/10-powbox.conf
 
 # The conmon wrapper the drop-in's conmon_path selects. It stays off PATH:
 # nothing but Podman should start conmon.
@@ -378,7 +383,9 @@ COPY --chmod=755 seed-image-store.sh /usr/local/bin/seed-image-store.sh
 
 # Rootless Podman keeps its transient runtime state (sockets, runroot) under
 # XDG_RUNTIME_DIR. A home-dir path avoids depending on systemd-logind to create
-# /run/user/<uid>; entrypoint-core.sh creates it mode 700 at startup.
+# /run/user/<uid>; entrypoint-core.sh creates it mode 700 at startup. Being on
+# the writable layer, it survives a restart, so entrypoint-core.sh also clears
+# the Podman state an earlier container start left there.
 ENV XDG_RUNTIME_DIR=/home/node/.local/run
 
 # Capability flag for the launcher: scripts/launch-agent.{sh,ps1} start the

@@ -10,6 +10,8 @@
 #     sits where nothing sends an agent to read it;
 #   - no reference file uses a template variable, since only the instruction
 #     file is rendered;
+#   - the image's AGENT_KNOWN_LIMITATIONS names a reference file the build
+#     stages, since a report-writing tool finds the document through it;
 #   - the hooks' variable list leaves no ${AGENT_...} placeholder in the
 #     rendered instruction file;
 #   - the hazards the instruction file exists to keep in view are still in it,
@@ -102,6 +104,13 @@ for set_name in "${sets[@]}"; do
 		envsubst '${AGENT_NAME} ${AGENT_AUTONOMY_FLAG} ${AGENT_CONFIG_DIR} ${AGENT_PEERS}' <"$staged")"
 	assert_eq "[$label] the hooks' variable list renders every placeholder" "$(grep -cF '${AGENT_' <<<"$rendered" || true)" 0
 done
+
+echo "Test: the image names its known-limitations document in AGENT_KNOWN_LIMITATIONS"
+# A report-writing tool finds the document through the variable alone
+# (docs/agent-reference.md), so the ENV must name a file the build bakes.
+assert_eq "docker/agent/Dockerfile sets the variable once, to the baked document" \
+	"$(grep -E '^ENV AGENT_KNOWN_LIMITATIONS=' "$ROOT_DIR/docker/agent/Dockerfile" || true)" \
+	"ENV AGENT_KNOWN_LIMITATIONS=${REFERENCE_DIR}/known-limitations.md"
 
 echo "Test: both hooks render the instruction file with the same variable list"
 hook_vars() { grep -oE "envsubst '[^']*'" "$ROOT_DIR/docker/shared/$1"; }

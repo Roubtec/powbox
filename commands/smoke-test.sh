@@ -329,6 +329,9 @@ fi
 # working directory. A bare `typst --version` would
 # not catch the pandoc template incompatibility that motivated the pin. A Typst
 # bump must update the version probe and its PowerShell mirror.
+# The AGENT_KNOWN_LIMITATIONS probe pins the variable the known-limitations
+# convention is read through (docs/agent-reference.md): the image's ENV must
+# name the baked document, and that file must be readable by the image's user.
 # The five sudo probes pin the apt-get grant (task 081): the sudoers command
 # list exactly, that `sudo apt-get` resolves to the wrapper while
 # `sudo /usr/bin/apt-get` is refused and a plain PATH (what a build-time root
@@ -390,6 +393,7 @@ fi
 	"zip -v >/dev/null" \
 	"wget --version >/dev/null" \
 	"htop --version >/dev/null" \
+	'test "$AGENT_KNOWN_LIMITATIONS" = /usr/local/share/agent-reference/known-limitations.md && test -r "$AGENT_KNOWN_LIMITATIONS"' \
 	'sudo -n -l | grep -Eqx "[[:space:]]*\(ALL\) NOPASSWD: /usr/local/bin/init-firewall\.sh, /usr/local/bin/shadow-mounts\.sh, /usr/local/bin/fix-workspace-perms\.sh, /usr/local/libexec/powbox-sudo/apt-get"' \
 	'sudo -n apt-get --help | grep -q "^sudo apt-get is limited" && ! sudo -n /usr/bin/apt-get --version >/dev/null 2>&1 && test "$(command -v apt-get)" = /usr/bin/apt-get' \
 	'rc=0; out="$(sudo -n apt-get -o APT::Update::Pre-Invoke::=id update 2>&1)" || rc=$?; test "$rc" -eq 2 && printf "%s\n" "$out" | grep -q "^apt-get: refused -o: not an allowed flag"' \

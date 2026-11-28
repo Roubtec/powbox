@@ -1652,7 +1652,7 @@ cmd_list() {
 	local fmt="$1" inst key d c mport row
 	# Keyed by resolved path, so one data directory is listed once however its
 	# record spells it.
-	local -A seen_dirs=()
+	local -A seen_dirs=() seen_keys=()
 	local -a f
 	case "$fmt" in
 		'' | --porcelain) : ;;
@@ -1689,18 +1689,25 @@ cmd_list() {
 		[ ! -s "$inst/port" ] || mport="$(cat -- "$inst/port" 2>/dev/null || true)"
 		owner_info "$inst"
 		list_cluster "$O_KIND" "$key" "$d" "$mport" "$O_STATE" "$O_OWNER"
+		seen_keys["$key"]=1
 		[ -z "$d" ] || seen_dirs["$(realpath -m -- "$d")"]=1
 	done
 	# RAM data no listed instance records: an instance made under another
 	# POWBOX_PG_SCOPED_ROOT, one whose markers were removed, or one whose scope
 	# has since recorded another data directory. It still holds memory, so it is
-	# listed, with an unknown owner; `--instance <key> destroy` removes it.
+	# listed, under its scope's owner where that scope is listed (whose own
+	# `destroy` removes it), else with an unknown owner.
 	for d in "$PG_RAM_BASE"/*/pgdata; do
 		[ -e "$d" ] || continue
 		key="${d%/pgdata}"
 		key="${key##*/}"
 		is_scope_key "$key" && [ -z "${seen_dirs["$(realpath -m -- "$d")"]:-}" ] || continue
-		list_cluster scoped "$key" "$d" "" unknown ""
+		if [ -n "${seen_keys["$key"]:-}" ]; then
+			owner_info "$SCOPED_ROOT/$key"
+			list_cluster "$O_KIND" "$key" "$d" "" "$O_STATE" "$O_OWNER"
+		else
+			list_cluster scoped "$key" "$d" "" unknown ""
+		fi
 		seen_dirs["$(realpath -m -- "$d")"]=1
 	done
 	if [ -n "$PGDATA_EXPLICIT" ]; then
